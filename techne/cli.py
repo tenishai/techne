@@ -3116,8 +3116,8 @@ def reflect_emit(ctx, session_id, limit, output):
         )
         click.echo(
             "Fill each item's raw_response, then `techne reflect ingest`. An item left "
-            "blank counts as DECLINED and will not be offered again — retract with "
-            f"`techne reflect undecline --session {session_id[:16]}...`.",
+            "blank counts as DECLINED and is not offered again — retract with "
+            f"`techne reflect undecline --session {session_id[:16]}` (a prefix is fine).",
             err=True,
         )
     else:
@@ -3245,17 +3245,36 @@ def reflect_undecline(ctx, session_id, thread_ids):
     looks exactly like a refusal. This is the way back. The debt was never drained, so
     nothing is being recovered here except the offer.
     """
+    from techne.core.database import connect
     from techne.core.reflect import clear_declines
 
     config = ctx.obj["config"]
-    n = clear_declines(config, session_id, list(thread_ids) or None)
+    # SESSION_ID MAY BE A PREFIX, AND IT HAD BETTER BE (Prudence, #901 r3). `emit` prints
+    # the retraction command with `session_id[:16]` and a trailing "...", and no surface
+    # prints the full id — `reconcile` truncates, `techne history` truncates, and the batch
+    # file is the thing that is LOST in the case this command exists for. Matching the
+    # extension_state key exactly meant the printed command, pasted verbatim, exited 0 and
+    # retracted nothing. Same prefix resolution as `threads redetect`.
+    conn = connect(config.db_path)
+    try:
+        row = conn.execute(
+            "SELECT id FROM sessions WHERE id LIKE ? || '%' ORDER BY started_at DESC LIMIT 1",
+            (session_id.rstrip("."),),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        # DISTINCT FROM "no declines", because they call for opposite actions and used to
+        # print identically — a mistyped id read as "nothing to do".
+        click.echo(f"No session matching: {session_id}", err=True)
+        ctx.exit(1)
+    sid = row["id"]
+
+    n = clear_declines(config, sid, list(thread_ids) or None)
     if not n:
-        click.echo(f"No declines recorded for session {session_id[:16]}.", err=True)
+        click.echo(f"No declines recorded for session {sid[:16]}...", err=True)
         return
-    click.echo(
-        f"Retracted {n} decline(s) for session {session_id[:16]}; "
-        "`emit` will offer them again."
-    )
+    click.echo(f"Retracted {n} decline(s) for session {sid[:16]}...; `emit` will offer them again.")
 
 
 @reflect.command("reconcile")
@@ -3316,7 +3335,7 @@ def reflect_reconcile(ctx, apply_):
             f"{report['declined']} row(s) the agent was offered and left blank. Still "
             "owed, never re-offered, never removed: a decline is a decision, and "
             "re-asking would make `reflect emit` loop forever (tenishai/techne#901). "
-            "`techne reflect undecline --session <id>` offers them again.",
+            "`techne reflect undecline --session <id-or-prefix>` offers them again.",
         )
 
 

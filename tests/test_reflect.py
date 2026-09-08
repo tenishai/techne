@@ -2594,3 +2594,43 @@ def test_a_decline_on_a_retired_row_is_not_reported(tmp_path):
         "a decline whose queue row is gone is not owed debt -- reporting it would be "
         "phantom debt the operator can neither pay nor clear"
     )
+
+
+def test_undecline_retracts_only_the_named_thread(tmp_path):
+    """THE FOURTH SURVIVING MUTATION (Prudence, #901 r3). `drop = current` -- ignoring
+    `--thread` entirely -- left the suite byte-identical at 4083, because every test
+    called `clear_declines` with thread_ids=None. A regression there over-retracts: it
+    costs re-rendered prompts rather than lost debt, but it silently undoes a decision
+    the operator made per-thread."""
+    from techne.core.reflect import (
+        _record_declines,
+        clear_declines,
+        declined_queue_rows,
+        emit_reflection_pass,
+        ingest_reflection_batch,
+    )
+
+    config = _mk_config(tmp_path, enabled=True)
+    session_id = _mk_multi_thread_session(config)
+    batch = emit_reflection_pass(config, session_id)["batch"]
+    assert len(batch) >= 2, "precondition: more than one thread to choose between"
+    for item in batch:
+        item["raw_response"] = ""
+    ingest_reflection_batch(config, batch)
+
+    kept, dropped = batch[0]["thread_id"], batch[1]["thread_id"]
+    declined = set(declined_queue_rows(config, session_id))
+    assert {kept, dropped} <= declined
+
+    assert clear_declines(config, session_id, [dropped]) == 1
+    still = set(declined_queue_rows(config, session_id))
+    assert dropped not in still, "the named thread must be retracted"
+    assert kept in still, (
+        "retracting one thread must not retract the others -- `--thread` exists so the "
+        "operator can undo ONE accidental blank without re-offering deliberate refusals"
+    )
+
+    assert clear_declines(config, session_id, ["t-not-declined"]) == 0, (
+        "retracting a thread that was never declined is a no-op, not a wildcard"
+    )
+    _record_declines(config, session_id, [])  # empty list is a no-op, not a marker write

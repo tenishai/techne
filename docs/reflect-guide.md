@@ -210,8 +210,8 @@ what separates them is what happens on the next `emit`.
 
 - **Declined** — same shape as orphaned, opposite cause and opposite remedy. The prompt
   was offered, the agent came back, and it left `raw_response` blank. Nothing will
-  re-offer it, by design (techne#901): a decline is a decision, and re-asking makes the
-  drain loop spin forever. The row stays owed and visible for as long as it goes
+  re-offer it while the emit cursor claims the thread, by design (techne#901): a decline
+  is a decision, and re-asking makes the drain loop spin forever. The row stays owed and visible for as long as it goes
   unanswered. **If the blank was an accident, retract it** — `emit` pre-fills
   `raw_response: ""` as its placeholder, so a partial fill and a refusal look identical
   in the file:

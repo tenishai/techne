@@ -885,8 +885,9 @@ def declined_queue_rows(config: Config, session_id: str) -> list[str]:
     """Undrained rows whose thread was rendered, returned for, and left unanswered.
 
     Reported separately from `orphaned` because the two make OPPOSITE promises to the
-    operator: an orphan self-heals on the next emit, a decline never will — nothing
-    re-offers it, by design. Both are real owed debt and neither is ever swept (#646).
+    operator: an orphan self-heals on the next emit, a decline is not re-offered while
+    the cursor claims the thread. Both are real owed debt and neither is ever swept
+    (#646).
     """
     owed = _owed_thread_ids(config, session_id)
     return sorted(owed & _declined_keys(config, session_id)) if owed else []
@@ -1041,9 +1042,13 @@ def reconcile_reflection_queue(config: Config, *, apply: bool = False) -> dict:
     difference is the whole reason they are counted apart:
       - `orphaned` — ingest never saw the thread. The next emit re-offers it, so a
         nonzero count that does not clear is a regression signal, not a work list.
-      - `declined` — ingest saw it and the agent left it blank. Nothing will re-offer
-        it; the debt stays owed and visible, which is the only honest answer to a
-        deliberate refusal.
+      - `declined` — ingest saw it and the agent left it blank. NO EMIT RE-OFFERS IT
+        WHILE THE CURSOR CLAIMS IT, which is the only honest answer to a deliberate
+        refusal; the debt stays owed and visible. Read that as scoped, not absolute
+        (Prudence, #901 r3): a decline recorded against a thread the cursor does NOT
+        claim — a marker holding `emitted: []` — is offered normally, because the
+        exclusion it would need never applies. That is the safe direction, and
+        `clear_declines` is the deliberate way back.
 
     Returns {sessions, superseded, below_threshold, orphaned, declined, removed,
     by_session}.
