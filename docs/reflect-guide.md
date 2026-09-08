@@ -134,6 +134,12 @@ then stops offering it — otherwise #900's re-offer and this decline chase each
 "until empty" never arrives. The row stays visible as `declined` in `reconcile`; answer the
 prompt you already hold whenever you want to pay it, and the record retires itself.
 
+**Watch the placeholder, because it is the same literal.** `emit` writes
+`raw_response: ""` into every item, so an item you simply have not filled yet reads as a
+refusal once you run `ingest`. That is survivable — `techne reflect undecline --session
+<id>` puts the thread back in the offer — but if you lose the batch file before noticing,
+the debt is owed with nothing offering it until you retract.
+
 **The one case where "until empty" never arrives.** A single thread whose rendered prompt
 alone exceeds `emit_max_chars` sets `oversized`, and the cursor is deliberately *not*
 advanced — so every further pass returns that same one item and the batch never empties.
@@ -205,8 +211,14 @@ what separates them is what happens on the next `emit`.
 - **Declined** — same shape as orphaned, opposite cause and opposite remedy. The prompt
   was offered, the agent came back, and it left `raw_response` blank. Nothing will
   re-offer it, by design (techne#901): a decline is a decision, and re-asking makes the
-  drain loop spin forever. **Do nothing, and expect nothing.** The row is owed and visible
-  for as long as it goes unanswered.
+  drain loop spin forever. The row stays owed and visible for as long as it goes
+  unanswered. **If the blank was an accident, retract it** — `emit` pre-fills
+  `raw_response: ""` as its placeholder, so a partial fill and a refusal look identical
+  in the file:
+
+  ```sh
+  techne reflect undecline --session <session-id>   # or --thread <id> for just one
+  ```
 
 `techne reflect reconcile` prints the split per session, which is the cheapest way to see
 which kind you have:

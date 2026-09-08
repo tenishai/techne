@@ -801,7 +801,23 @@ def _record_declines(config: Config, session_id: str, thread_ids: list[str]) -> 
         return
     conn = connect(config.db_path)
     try:
-        marker = dict(get_state(conn, f"reflect:emitted:{session_id}") or {})
+        marker = get_state(conn, f"reflect:emitted:{session_id}")
+        # NEVER MINT A MARKER HERE (Prudence, #901 r2). `dict(... or {})` wrote
+        # `{"declined": [...]}` with no `emitted` key, and `_marker_has_unemitted_threads`
+        # reads `emitted is None` as a #268-era marker: NOT PENDING, permanently, ahead of
+        # the observations-growth re-open. That silences the SessionStart nudge AND
+        # `pending_reflection`, which is where emit picks its default target — so the
+        # session becomes unreachable from both hooks and both emit entry points, and only
+        # an explicit id can still get to it. Reachable two ways she measured: an oversized
+        # emit writes no marker, and a batch can name a session that never emitted.
+        #
+        # Skipping is not a compromise, it is the correct answer. With no marker
+        # `_emitted_keys` rebuilds from DRAINED rows, a declined row is not drained, so the
+        # cursor never claims it and the heal cannot re-offer it. There is nothing to
+        # suppress.
+        if not marker:
+            return
+        marker = dict(marker)
         marker["declined"] = sorted(set(marker.get("declined", [])) | set(thread_ids))
         set_state(conn, f"reflect:emitted:{session_id}", marker)
     finally:
@@ -826,6 +842,41 @@ def _clear_decline(config: Config, session_id: str, thread_id: str) -> None:
         marker = dict(marker)
         marker["declined"] = sorted(set(marker["declined"]) - {thread_id})
         set_state(conn, f"reflect:emitted:{session_id}", marker)
+    finally:
+        conn.close()
+
+
+def clear_declines(config: Config, session_id: str, thread_ids: list[str] | None = None) -> int:
+    """Retract declines so `emit` offers those threads again. Returns the count cleared.
+
+    THE WAY BACK, AND WITHOUT IT THE DECLINE IS A TRAP (Prudence, #901 r2). `techne
+    reflect emit` PRE-FILLS `raw_response: ""` as a placeholder, and `ingest` reads that
+    same literal as a refusal — so an ordinary partial fill is indistinguishable from a
+    deliberate one. Before this PR the collision was harmless because #900's heal
+    re-offered the thread; #901 r1 removed that recovery to stop the drain loop spinning,
+    and removing a recovery without adding one leaves a thread owed forever and unpayable
+    if its batch file is lost.
+
+    A decline is still a decision — nothing re-offers it on its own. It is just no longer
+    an irreversible one.
+    """
+    from techne.core.extension_state import get_state, set_state
+
+    if not session_id:
+        return 0
+    conn = connect(config.db_path)
+    try:
+        marker = get_state(conn, f"reflect:emitted:{session_id}")
+        current = set((marker or {}).get("declined", []))
+        if not marker or not current:
+            return 0
+        drop = current if thread_ids is None else current & set(thread_ids)
+        if not drop:
+            return 0
+        marker = dict(marker)
+        marker["declined"] = sorted(current - drop)
+        set_state(conn, f"reflect:emitted:{session_id}", marker)
+        return len(drop)
     finally:
         conn.close()
 

@@ -3101,6 +3101,10 @@ def reflect_emit(ctx, session_id, limit, output):
 
     # Placeholder the agent fills in-place with its JSON candidate array per thread,
     # then feeds the SAME file to `ingest` — no id reconstruction needed.
+    #
+    # THIS LITERAL IS ALSO THE DECLINE SIGNAL, and the collision is deliberate but sharp
+    # (Prudence, #901 r2): an item still blank at ingest is read as "the agent declined",
+    # which stops emit re-offering it. `techne reflect undecline` is the way back.
     for it in batch:
         it["raw_response"] = ""
     payload = json.dumps(batch, indent=2)
@@ -3108,6 +3112,12 @@ def reflect_emit(ctx, session_id, limit, output):
         output.write_text(payload, encoding="utf-8")
         click.echo(
             f"Emitted {len(batch)} thread prompt(s) for session {session_id[:16]} -> {output}",
+            err=True,
+        )
+        click.echo(
+            "Fill each item's raw_response, then `techne reflect ingest`. An item left "
+            "blank counts as DECLINED and will not be offered again — retract with "
+            f"`techne reflect undecline --session {session_id[:16]}...`.",
             err=True,
         )
     else:
@@ -3215,6 +3225,39 @@ def reflect_discard(ctx, candidate_id, decided_by, decision_reason):
     click.echo(f"Discarded candidate #{candidate_id}")
 
 
+@reflect.command("undecline")
+@click.option("--session", "session_id", required=True, help="Session whose declines to retract.")
+@click.option(
+    "--thread",
+    "thread_ids",
+    multiple=True,
+    help="Retract only these thread ids (default: all declines for the session).",
+)
+@click.pass_context
+def reflect_undecline(ctx, session_id, thread_ids):
+    """Offer declined threads again.
+
+    Leaving an item's `raw_response` blank tells `ingest` the thread was declined, and
+    nothing re-offers a declined thread — that is deliberate, or `emit` and the decline
+    chase each other and the drain loop never ends (tenishai/techne#901).
+
+    But `emit` PRE-FILLS that same blank as a placeholder, so an ordinary partial fill
+    looks exactly like a refusal. This is the way back. The debt was never drained, so
+    nothing is being recovered here except the offer.
+    """
+    from techne.core.reflect import clear_declines
+
+    config = ctx.obj["config"]
+    n = clear_declines(config, session_id, list(thread_ids) or None)
+    if not n:
+        click.echo(f"No declines recorded for session {session_id[:16]}.", err=True)
+        return
+    click.echo(
+        f"Retracted {n} decline(s) for session {session_id[:16]}; "
+        "`emit` will offer them again."
+    )
+
+
 @reflect.command("reconcile")
 @click.option(
     "--apply",
@@ -3272,7 +3315,8 @@ def reflect_reconcile(ctx, apply_):
         click.echo(
             f"{report['declined']} row(s) the agent was offered and left blank. Still "
             "owed, never re-offered, never removed: a decline is a decision, and "
-            "re-asking would make `reflect emit` loop forever (tenishai/techne#901).",
+            "re-asking would make `reflect emit` loop forever (tenishai/techne#901). "
+            "`techne reflect undecline --session <id>` offers them again.",
         )
 
 

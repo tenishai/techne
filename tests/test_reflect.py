@@ -2476,3 +2476,121 @@ def test_reconcile_separates_declined_from_orphaned(tmp_path):
         "operator is that it clears on the next emit, and this one will not"
     )
     assert reconcile_reflection_queue(config, apply=True)["removed"] == 0
+
+
+def test_a_decline_never_mints_a_marker(tmp_path):
+    """A DECLINE MUST NOT MAKE A SESSION UNREACHABLE (Prudence, #901 r2).
+
+    `_record_declines` used to build the marker with `dict(get_state(...) or {})`, which
+    on a session that never emitted wrote `{"declined": [...]}` with NO `emitted` key.
+    `_marker_has_unemitted_threads` reads `emitted is None` as a #268-era marker and
+    answers NOT PENDING -- permanently, ahead of the observations-growth re-open. That
+    silences the SessionStart nudge and `pending_reflection`, which is where emit picks
+    its default target, so the session falls out of both hooks and both emit entry points.
+
+    Reachable two ways she measured: an oversized emit writes no marker at all, and a
+    batch file can name a session that never emitted.
+    """
+    from techne.core.database import connect
+    from techne.core.extension_state import get_state
+    from techne.core.reflect import (
+        _marker_has_unemitted_threads,
+        ingest_reflection_batch,
+        pending_reflection,
+    )
+
+    config = _mk_config(tmp_path, enabled=True)
+    session_id = _mk_db_backed_session(config)
+    conn = connect(config.db_path)
+    tid = conn.execute("SELECT id FROM threads WHERE session_id = ?", (session_id,)).fetchone()[0]
+    conn.close()
+
+    # A decline arriving with NO prior emit -- no marker exists.
+    ingest_reflection_batch(
+        config,
+        [{"session_id": session_id, "thread_id": tid, "prompt_hash": "h", "raw_response": ""}],
+    )
+
+    conn = connect(config.db_path)
+    try:
+        marker = get_state(conn, f"reflect:emitted:{session_id}")
+    finally:
+        conn.close()
+    assert marker is None, (
+        f"a decline minted a marker for a session that never emitted: {marker!r}. A marker "
+        "with no `emitted` key reads as fully-emitted forever."
+    )
+    assert _marker_has_unemitted_threads(marker) is True
+    assert session_id in {r["session_id"] for r in pending_reflection(config)}, (
+        "the session must stay reachable from pending_reflection -- that is where "
+        "emit_reflection_pass picks its default target when given no session id"
+    )
+
+
+def test_a_decline_can_be_retracted(tmp_path):
+    """A DECLINE IS A DECISION, NOT A ONE-WAY DOOR (Prudence, #901 r2).
+
+    `techne reflect emit` PRE-FILLS `raw_response: ""` as a placeholder and `ingest` reads
+    that same literal as refusal, so an ordinary partial fill is indistinguishable from a
+    deliberate one. #901 r1 removed the recovery that used to make the collision harmless
+    (#900's heal re-offered) without adding one -- so a declined thread whose batch file
+    was lost was owed forever and unpayable.
+    """
+    from techne.core.reflect import (
+        clear_declines,
+        declined_queue_rows,
+        emit_reflection_pass,
+        ingest_reflection_batch,
+    )
+
+    config = _mk_config(tmp_path, enabled=True)
+    session_id = _mk_db_backed_session(config)
+    batch = emit_reflection_pass(config, session_id)["batch"]
+    tid = batch[0]["thread_id"]
+    for item in batch:
+        item["raw_response"] = ""
+    ingest_reflection_batch(config, batch)
+    assert declined_queue_rows(config, session_id) == [tid]
+    assert emit_reflection_pass(config, session_id)["count"] == 0, "precondition: not offered"
+
+    assert clear_declines(config, session_id) == 1
+    assert declined_queue_rows(config, session_id) == []
+    assert emit_reflection_pass(config, session_id)["count"] == 1, (
+        "after a retraction the thread must be offered again -- otherwise the debt is "
+        "owed forever with no route to pay it"
+    )
+    assert clear_declines(config, session_id) == 0, "retracting twice is a no-op, not an error"
+
+
+def test_a_decline_on_a_retired_row_is_not_reported(tmp_path):
+    """THE UNCOVERED INTERSECTION (Prudence, #901 r2). Dropping `& owed` from
+    `declined_queue_rows` left the suite byte-identical at 4080 passed, because every
+    existing test has declined and owed coinciding. It is load-bearing: a queue row
+    retired by `reconcile --apply` would otherwise keep reporting as phantom debt."""
+    from techne.core.database import connect
+    from techne.core.reflect import (
+        declined_queue_rows,
+        emit_reflection_pass,
+        ingest_reflection_batch,
+    )
+
+    config = _mk_config(tmp_path, enabled=True)
+    session_id = _mk_db_backed_session(config)
+    batch = emit_reflection_pass(config, session_id)["batch"]
+    tid = batch[0]["thread_id"]
+    for item in batch:
+        item["raw_response"] = ""
+    ingest_reflection_batch(config, batch)
+    assert declined_queue_rows(config, session_id) == [tid]
+
+    # The row is retired the way `reconcile --apply` retires a superseded one. The
+    # decline record survives in the marker; the debt does not.
+    conn = connect(config.db_path)
+    conn.execute("DELETE FROM reflection_queue WHERE thread_id = ?", (tid,))
+    conn.commit()
+    conn.close()
+
+    assert declined_queue_rows(config, session_id) == [], (
+        "a decline whose queue row is gone is not owed debt -- reporting it would be "
+        "phantom debt the operator can neither pay nor clear"
+    )

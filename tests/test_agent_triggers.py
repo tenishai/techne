@@ -390,6 +390,9 @@ COMMAND_TREE_AT_LAST_REVIEW = {
     "reflect reconcile",
     "reflect review",
     "reflect stats",
+    # Reviewed for #901: rewrites one extension_state marker's `declined` list. Touches
+    # no transcript and no session row, so deployment.md's migration trigger stands.
+    "reflect undecline",
     "restore",
     "search",
     "serve",
