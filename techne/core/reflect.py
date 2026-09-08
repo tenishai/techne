@@ -1040,8 +1040,13 @@ def _emitted_keys(config: Config, session_id: str, marker: dict | None) -> set[s
 
     `thread_id` is the persisted FK — it is what `reflection_queue` is keyed on and what
     `drain_reflection_queue` stamps, so keying here on the same thing makes the cursor
-    and the ledger agree by construction instead of by coincidence. prompt_hash stays
-    exactly where it belongs: candidate dedup (#236), which WANTS to notice a re-render.
+    and the ledger COMPARABLE instead of incomparable. prompt_hash stays exactly where it
+    belongs: candidate dedup (#236), which WANTS to notice a re-render.
+
+    THIS PARAGRAPH SAID "agree by construction" UNTIL techne#900, AND THAT WAS THE NEXT
+    TWO WEEKS' BUG. A shared key does not make two records agree; it makes disagreement
+    detectable. Nothing detected it, so a cursor advanced on RENDER kept claiming threads
+    whose queue rows were still owed. `emit_reflection_pass` now checks.
 
     A pre-#733 marker is not migrated in place — its contents are unrecoverable — so the
     delivered set is rebuilt from the authoritative record: queue rows already drained.

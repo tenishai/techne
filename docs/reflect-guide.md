@@ -182,8 +182,25 @@ distinction decides what you should do about them, so it is worth keeping straig
   standing.** They are the population techne#646 exists to keep visible, and `reconcile`
   deliberately does not touch them.
 
+There is a **third** population, and it is the opposite shape: its prompt renders perfectly
+well.
+
+- **Orphaned** — the id is current, above threshold, and would render today, but the emit
+  cursor already counts it as delivered. The cursor advances when a batch is *rendered*, so
+  a pass whose answers never came back (the common case: `techne_reflect_emit` exceeded the
+  MCP token cap and spilled to a file) left the row owed and the cursor satisfied. The
+  symptom is `emit` returning `count: 0` for a session the SessionStart banner still calls
+  pending. **Do nothing.** Since techne#900 the next `emit` for that session detects the
+  disagreement and re-offers those threads by itself; `reconcile` reports the count and
+  never removes it. A nonzero `orphaned` that does not clear after an emit is a regression,
+  not a chore.
+
 `techne reflect reconcile` prints the split per session, which is the cheapest way to see
-which kind you have.
+which kind you have:
+
+```
+c7d98cb5-b932-40  superseded=0  below_threshold=1  orphaned=0
+```
 
 **A historical note, because the old explanation is still quoted in places.** techne#646
 originally attributed all of this to the emittability predicate being "evaluated twice
@@ -193,9 +210,10 @@ because `run_session_end` replaced the boundary table but not the thread table. 
 "evidence, not residue" instruction still holds — but only for the below-threshold kind.
 Blanket-draining is still wrong; retiring a provably-superseded row is not draining.
 
-So the headline debt number overstates payable work by however many of both you have. Before
-a drain, run `reconcile` and read the split — otherwise you are measuring against a target
-you cannot reach.
+So the headline debt number overstates payable work by however many superseded and
+below-threshold rows you have. Before a drain, run `reconcile` and read the split —
+otherwise you are measuring against a target you cannot reach. Orphaned rows are the
+exception: they *are* payable, which is why they self-heal rather than being retired.
 
 ---
 

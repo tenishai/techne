@@ -857,6 +857,46 @@ def connect_db(path):
     return connect(path)
 
 
+def test_the_guide_names_all_three_debt_populations(tmp_path):
+    """THE WITNESS THAT DID NOT EXIST, which is why the guide went stale (Constance, #901).
+
+    `reflect-guide.md` documented the debt split as exactly TWO populations. #900 added a
+    third — `orphaned`, whose prompt renders fine and whose cursor already claims it — and
+    the guide was not touched, because nothing here asserted the section against the code.
+    The arch card's own rule ("changing the behaviour behind one fails there, which is the
+    signal to update the guide in the same change") only works if a test fails.
+
+    Pins the guide against `reconcile_reflection_queue`'s ACTUAL keys, so a fourth
+    population, or a rename, breaks here rather than in a reader's hands.
+    """
+    from techne.core.reflect import reconcile_reflection_queue
+
+    report = reconcile_reflection_queue(_reflect_config(tmp_path))
+    populations = {"superseded", "below_threshold", "orphaned"}
+    assert populations <= set(report), (
+        f"reconcile no longer reports {populations - set(report)}. reflect-guide.md's "
+        "'The debt number is more than one population' section enumerates these by name."
+    )
+
+    guide = (Path(__file__).resolve().parents[1] / "docs" / "reflect-guide.md").read_text()
+    section = guide.split("### The debt number is more than one population", 1)
+    assert len(section) == 2, "the guide section this test witnesses was renamed or removed"
+    body = section[1].split("\n---", 1)[0]
+    # THE BOLDED TERM, NOT A BARE SUBSTRING. The first draft asserted `name in body`,
+    # which a mutation renaming "Orphaned" to "Orphanedd" passed — the old name is still a
+    # prefix of the new one. An assertion that survives its own mutation is not a witness.
+    for name in ("Superseded", "Below threshold", "Orphaned"):
+        assert f"- **{name}**" in body, (
+            f"reflect-guide.md's debt-population section does not name {name!r} as one of "
+            "its bulleted populations. The code reports it; an operator reading the guide "
+            "would not know it exists."
+        )
+    assert "techne#900" in body, (
+        "the orphaned population must carry its issue reference — it is the one population "
+        "the operator is told to do NOTHING about, and that advice needs a source"
+    )
+
+
 def test_the_unemittable_reporter_still_refuses_to_drain(tmp_path):
     """`reflect-guide.md` tells the operator NOT to sweep these rows, and tells the agent to
     raise it unprompted — both rest on `unemittable_queue_rows` being a REPORTER. The day it
