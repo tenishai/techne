@@ -769,6 +769,78 @@ def _owed_thread_ids(config: Config, session_id: str) -> set[str]:
         conn.close()
 
 
+def _declined_keys(config: Config, session_id: str) -> set[str]:
+    """Threads the agent RENDERED, came back for, and deliberately left unanswered.
+
+    THE DISTINCTION #900's HEAL TURNS ON (Prudence, #901 r1). A blank `raw_response` is
+    blessed by `ingest_reflection_batch` as a decline: skipped without draining, so the
+    debt stays owed. That leaves exactly the shape the heal fires on — owed row, cursor
+    claims it — so the documented "repeat until the batch comes back empty" loop never
+    terminated. Measured: 6 iterations, the same thread every time.
+
+    An orphan is a thread ingest NEVER SAW. A decline is one it saw and refused. Only the
+    first is a bookkeeping accident, and only the first should be re-offered.
+    """
+    from techne.core.extension_state import get_state
+
+    conn = connect(config.db_path)
+    try:
+        marker = get_state(conn, f"reflect:emitted:{session_id}")
+    finally:
+        conn.close()
+    if not marker:
+        return set()
+    return set(marker.get("declined", []))
+
+
+def _record_declines(config: Config, session_id: str, thread_ids: list[str]) -> None:
+    """Add *thread_ids* to the session's declined set, preserving the rest of the marker."""
+    from techne.core.extension_state import get_state, set_state
+
+    if not session_id or not thread_ids:
+        return
+    conn = connect(config.db_path)
+    try:
+        marker = dict(get_state(conn, f"reflect:emitted:{session_id}") or {})
+        marker["declined"] = sorted(set(marker.get("declined", [])) | set(thread_ids))
+        set_state(conn, f"reflect:emitted:{session_id}", marker)
+    finally:
+        conn.close()
+
+
+def _clear_decline(config: Config, session_id: str, thread_id: str) -> None:
+    """Drop *thread_id* from the declined set — it was answered after all.
+
+    Without this the record would outlive the decision it describes, and a thread the
+    agent came back and answered would still read as refused.
+    """
+    from techne.core.extension_state import get_state, set_state
+
+    if not session_id or not thread_id:
+        return
+    conn = connect(config.db_path)
+    try:
+        marker = get_state(conn, f"reflect:emitted:{session_id}")
+        if not marker or thread_id not in set(marker.get("declined", [])):
+            return
+        marker = dict(marker)
+        marker["declined"] = sorted(set(marker["declined"]) - {thread_id})
+        set_state(conn, f"reflect:emitted:{session_id}", marker)
+    finally:
+        conn.close()
+
+
+def declined_queue_rows(config: Config, session_id: str) -> list[str]:
+    """Undrained rows whose thread was rendered, returned for, and left unanswered.
+
+    Reported separately from `orphaned` because the two make OPPOSITE promises to the
+    operator: an orphan self-heals on the next emit, a decline never will — nothing
+    re-offers it, by design. Both are real owed debt and neither is ever swept (#646).
+    """
+    owed = _owed_thread_ids(config, session_id)
+    return sorted(owed & _declined_keys(config, session_id)) if owed else []
+
+
 def unemittable_queue_rows(config: Config, session_id: str) -> list[str]:
     """Undrained queue rows for *session_id* that no emit can produce a prompt for.
 
@@ -875,7 +947,11 @@ def orphaned_queue_rows(config: Config, session_id: str) -> list[str]:
     owed = _owed_thread_ids(config, session_id)
     if not owed:
         return []
+    # A DECLINE IS NOT AN ORPHAN. Both are owed rows the cursor claims, but only the
+    # orphan self-heals, and `orphaned`'s whole promise to the operator is that it clears
+    # on the next emit. `declined_queue_rows` reports the other half.
     renderable = owed - set(unemittable_queue_rows(config, session_id))
+    renderable -= _declined_keys(config, session_id)
     if not renderable:
         return []
     conn = connect(config.db_path)
@@ -908,12 +984,18 @@ def reconcile_reflection_queue(config: Config, *, apply: bool = False) -> dict:
     links point into that table. Narrowing to undrained queue rows keeps the blast
     radius to exactly the rows that are provably meaningless.
 
-    REPORTS A THIRD POPULATION AND REMOVES NONE OF IT (techne#900). `orphaned` counts
-    undrained rows whose thread renders fine and whose emit cursor already claims it —
-    invisible to the other two, which both classify rows that CANNOT render. These
-    self-heal on the next emit, so a nonzero count is a regression signal.
+    REPORTS TWO MORE POPULATIONS AND REMOVES NEITHER (techne#900, #901 r1). Both hold
+    rows that RENDER FINE, which is what makes them invisible to the first two — those
+    classify rows that cannot render at all. They differ in what happens next, and the
+    difference is the whole reason they are counted apart:
+      - `orphaned` — ingest never saw the thread. The next emit re-offers it, so a
+        nonzero count that does not clear is a regression signal, not a work list.
+      - `declined` — ingest saw it and the agent left it blank. Nothing will re-offer
+        it; the debt stays owed and visible, which is the only honest answer to a
+        deliberate refusal.
 
-    Returns {sessions, superseded, below_threshold, orphaned, removed, by_session}.
+    Returns {sessions, superseded, below_threshold, orphaned, declined, removed,
+    by_session}.
     """
     conn = connect(config.db_path)
     try:
@@ -927,22 +1009,25 @@ def reconcile_reflection_queue(config: Config, *, apply: bool = False) -> dict:
         conn.close()
 
     by_session: dict[str, dict] = {}
-    superseded_total = below_total = orphaned_total = 0
+    superseded_total = below_total = orphaned_total = declined_total = 0
     for sid in sessions:
         stale = superseded_queue_rows(config, sid)
         unemittable = unemittable_queue_rows(config, sid)
         below = [t for t in unemittable if t not in set(stale)]
         orphaned = orphaned_queue_rows(config, sid)
-        if not stale and not below and not orphaned:
+        declined = declined_queue_rows(config, sid)
+        if not stale and not below and not orphaned and not declined:
             continue
         by_session[sid] = {
             "superseded": stale,
             "below_threshold": below,
             "orphaned": orphaned,
+            "declined": declined,
         }
         superseded_total += len(stale)
         below_total += len(below)
         orphaned_total += len(orphaned)
+        declined_total += len(declined)
 
     removed = 0
     if apply and superseded_total:
@@ -965,6 +1050,7 @@ def reconcile_reflection_queue(config: Config, *, apply: bool = False) -> dict:
         "superseded": superseded_total,
         "below_threshold": below_total,
         "orphaned": orphaned_total,
+        "declined": declined_total,
         "removed": removed,
         "by_session": by_session,
     }
@@ -1165,6 +1251,7 @@ def emit_reflection_pass(
     # legitimately renders long before it ingests — behave exactly as before.
     if not batch:
         stale = already & _owed_thread_ids(config, session_id) & current_ids
+        stale -= _declined_keys(config, session_id)
         if stale:
             already = already - stale
             batch = [item for item in rendered if _cursor_key(item) in stale]
@@ -1254,6 +1341,10 @@ def emit_reflection_pass(
                 f"reflect:emitted:{session_id}",
                 {
                     "key": _CURSOR_KEY,
+                    #: CARRIED FORWARD, not recomputed. emit rewrites this marker
+                    #: wholesale, so dropping the field here would erase every decline on
+                    #: the next pass and hand the heal back its infinite loop (#901 r1).
+                    "declined": sorted(_declined_keys(config, session_id)),
                     #: The session's observation count AT WRITE TIME. `total` alone
                     #: cannot re-open a session that was judged empty and later grew,
                     #: because this marker is the only thing the nudge reads (#734 r2).
@@ -1347,6 +1438,7 @@ def ingest_one_and_drain(
     )
     if thread_id and not result.get("parse_failures") and not result.get("errors"):
         result["reflection_debt_drained"] = drain_reflection_queue(config.db_path, [thread_id])
+        _clear_decline(config, session_id, thread_id)
     return result
 
 
@@ -1357,16 +1449,24 @@ def ingest_reflection_batch(config: Config, items: list[dict]) -> dict:
     the agent fills each item's `raw_response`, `techne reflect ingest f`. An item
     whose raw_response is blank is a deliberately unanswered thread, not an error —
     it is skipped WITHOUT draining, so the debt stays owed.
+
+    THE DECLINE IS NOW RECORDED, AND IT HAS TO BE (Prudence, #901 r1). #900's heal
+    re-offers an owed row the cursor claims, which is exactly what a decline leaves
+    behind — so without this the documented drain loop never terminated. Recording it
+    keeps the debt owed and visible (`declined_queue_rows`, `reflect reconcile`) while
+    stopping the re-offer. Answering the thread later retires the record.
     """
     totals = new_ingest_counts()
     totals["skipped"] = 0
     totals["drained"] = 0
+    declined: dict[str, list[str]] = {}
     for it in items:
         raw = it.get("raw_response")
         if not isinstance(raw, str):
             raw = json.dumps(raw) if raw else ""  # tolerate an inlined array
         if not raw.strip():  # noqa: E501 - blank means the agent declined this thread
             totals["skipped"] += 1
+            declined.setdefault(it.get("session_id", ""), []).append(it.get("thread_id") or "")
             continue
         counts = ingest_one_and_drain(
             config,
@@ -1379,6 +1479,8 @@ def ingest_reflection_batch(config: Config, items: list[dict]) -> dict:
         totals["drained"] += counts.pop("reflection_debt_drained", 0)
         for k, v in counts.items():
             totals[k] += v
+    for sid, tids in declined.items():
+        _record_declines(config, sid, [t for t in tids if t])
     return totals
 
 

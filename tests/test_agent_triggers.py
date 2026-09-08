@@ -872,7 +872,7 @@ def test_the_guide_names_all_three_debt_populations(tmp_path):
     from techne.core.reflect import reconcile_reflection_queue
 
     report = reconcile_reflection_queue(_reflect_config(tmp_path))
-    populations = {"superseded", "below_threshold", "orphaned"}
+    populations = {"superseded", "below_threshold", "orphaned", "declined"}
     assert populations <= set(report), (
         f"reconcile no longer reports {populations - set(report)}. reflect-guide.md's "
         "'The debt number is more than one population' section enumerates these by name."
@@ -885,16 +885,18 @@ def test_the_guide_names_all_three_debt_populations(tmp_path):
     # THE BOLDED TERM, NOT A BARE SUBSTRING. The first draft asserted `name in body`,
     # which a mutation renaming "Orphaned" to "Orphanedd" passed — the old name is still a
     # prefix of the new one. An assertion that survives its own mutation is not a witness.
-    for name in ("Superseded", "Below threshold", "Orphaned"):
+    for name in ("Superseded", "Below threshold", "Orphaned", "Declined"):
         assert f"- **{name}**" in body, (
             f"reflect-guide.md's debt-population section does not name {name!r} as one of "
             "its bulleted populations. The code reports it; an operator reading the guide "
             "would not know it exists."
         )
-    assert "techne#900" in body, (
-        "the orphaned population must carry its issue reference — it is the one population "
-        "the operator is told to do NOTHING about, and that advice needs a source"
-    )
+    for issue in ("techne#900", "techne#901"):
+        assert issue in body, (
+            f"the debt-population section must cite {issue} — orphaned and declined are "
+            "the two populations the operator is told to do NOTHING about, and they are "
+            "told so for OPPOSITE reasons. That advice needs its source."
+        )
 
 
 def test_the_unemittable_reporter_still_refuses_to_drain(tmp_path):

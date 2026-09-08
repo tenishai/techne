@@ -3241,7 +3241,8 @@ def reflect_reconcile(ctx, apply_):
         click.echo(
             f"{sid[:16]}  superseded={len(rows['superseded'])}  "
             f"below_threshold={len(rows['below_threshold'])}  "
-            f"orphaned={len(rows['orphaned'])}"
+            f"orphaned={len(rows['orphaned'])}  "
+            f"declined={len(rows['declined'])}"
         )
     click.echo(
         json.dumps(
@@ -3266,6 +3267,12 @@ def reflect_reconcile(ctx, apply_):
             "but never had their answers ingested (tenishai/techne#900). Left in place "
             "and never removed: the next `reflect emit` for those sessions re-offers "
             "them.",
+        )
+    if report["declined"]:
+        click.echo(
+            f"{report['declined']} row(s) the agent was offered and left blank. Still "
+            "owed, never re-offered, never removed: a decline is a decision, and "
+            "re-asking would make `reflect emit` loop forever (tenishai/techne#901).",
         )
 
 

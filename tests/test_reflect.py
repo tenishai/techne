@@ -2318,6 +2318,12 @@ def test_a_partial_pass_still_takes_the_next_slice(tmp_path):
     `techne reflect emit -o file` legitimately renders long before it ingests. If the
     ledger simply overruled the cursor, a second emit before that ingest would re-render
     everything already in the file. A non-empty batch must behave exactly as it did.
+
+    DO NOT DELETE THIS AS A TEST THAT PASSES EITHER WAY (Prudence, #901 r1). It passes
+    with #900's heal disabled, which reads as no teeth -- and it is the ONLY test in this
+    file that catches the rejected design. Prudence implemented the unconditional
+    override and the other 80 tests all passed. It is the sole witness for the central
+    decision in #900, and the scoping is the decision.
     """
     from techne.core.reflect import emit_reflection_pass
 
@@ -2365,3 +2371,108 @@ def test_reconcile_reports_orphans_and_removes_none_of_them(tmp_path):
         "reconcile must never drain or delete an orphan: the row is real debt, and the "
         "next emit is what pays it"
     )
+
+
+def test_the_documented_drain_loop_terminates_on_a_declined_thread(tmp_path):
+    """THE #900 REGRESSION, FOUND BY EXECUTION (Prudence, #901 r1).
+
+    `reflect-guide.md` documents draining as "repeat until the batch comes back empty".
+    A blank raw_response is a DELIBERATE decline that `ingest_reflection_batch` skips
+    without draining, so the debt stays owed -- which is exactly the shape #900's heal
+    fires on. Measured before this fix: 6 iterations, the same thread re-offered every
+    time, no termination. With the heal disabled it stopped at 2.
+
+    An orphan is a thread ingest NEVER SAW; a decline is one it saw and refused. Only
+    the first is a bookkeeping accident.
+    """
+    from techne.core.reflect import (
+        declined_queue_rows,
+        emit_reflection_pass,
+        ingest_reflection_batch,
+        pending_reflection_queue,
+    )
+
+    config = _mk_config(tmp_path, enabled=True)
+    session_id = _mk_db_backed_session(config)
+
+    seen = []
+    for _ in range(8):
+        result = emit_reflection_pass(config, session_id)
+        if not result["count"]:
+            break
+        seen.append(result["batch"][0]["thread_id"])
+        for item in result["batch"]:
+            item["raw_response"] = ""  # the agent declines
+        ingest_reflection_batch(config, result["batch"])
+    else:
+        raise AssertionError(
+            f"the documented drain loop did not terminate: re-offered {len(seen)} times "
+            f"({seen}). A decline that is re-offered forever is techne#901 r1."
+        )
+    assert len(seen) == 1, f"a declined thread must be offered once, not {len(seen)} times"
+
+    owed = [r["thread_id"] for r in pending_reflection_queue(config.db_path)]
+    assert owed == seen, "declining must NOT drain the row -- the debt is still owed"
+    assert declined_queue_rows(config, session_id) == seen, (
+        "and it must stay VISIBLE. A decline that silences the row without recording it "
+        "is techne#900 wearing a different hat"
+    )
+
+
+def test_answering_a_declined_thread_retires_the_decline(tmp_path):
+    """A decline records a decision, not a verdict. Coming back and answering pays the
+    debt and clears the record, so the marker never outlives what it describes."""
+    from techne.core.reflect import (
+        declined_queue_rows,
+        emit_reflection_pass,
+        ingest_reflection_batch,
+        pending_reflection_queue,
+    )
+
+    config = _mk_config(tmp_path, enabled=True)
+    session_id = _mk_db_backed_session(config)
+
+    first = emit_reflection_pass(config, session_id)
+    tid = first["batch"][0]["thread_id"]
+    for item in first["batch"]:
+        item["raw_response"] = ""
+    ingest_reflection_batch(config, first["batch"])
+    assert declined_queue_rows(config, session_id) == [tid]
+
+    # The agent changes its mind. The prompt is still renderable, so it can answer the
+    # item it already holds -- which is the realistic route, since emit will not re-offer.
+    ingest_reflection_batch(config, _fill_raw_responses(first["batch"]))
+    assert not pending_reflection_queue(config.db_path), "answering pays the debt"
+    assert declined_queue_rows(config, session_id) == [], (
+        "the decline record must not outlive the decision -- the thread was answered"
+    )
+
+
+def test_reconcile_separates_declined_from_orphaned(tmp_path):
+    """They are both owed rows the cursor claims, and they make OPPOSITE promises: an
+    orphan self-heals on the next emit, a decline never will. Counting them together
+    would make one of the two promises a lie."""
+    from techne.core.reflect import (
+        emit_reflection_pass,
+        ingest_reflection_batch,
+        reconcile_reflection_queue,
+    )
+
+    config = _mk_config(tmp_path, enabled=True)
+    orphan_sid = _mk_db_backed_session(config)
+    emit_reflection_pass(config, orphan_sid)  # rendered, never ingested
+
+    declined_sid = _mk_db_backed_session(config)
+    batch = emit_reflection_pass(config, declined_sid)["batch"]
+    for item in batch:
+        item["raw_response"] = ""
+    ingest_reflection_batch(config, batch)
+
+    report = reconcile_reflection_queue(config)
+    assert report["orphaned"] == 1 and report["declined"] == 1
+    assert report["by_session"][orphan_sid]["declined"] == []
+    assert report["by_session"][declined_sid]["orphaned"] == [], (
+        "a declined row must not be counted as an orphan -- orphaned's contract with the "
+        "operator is that it clears on the next emit, and this one will not"
+    )
+    assert reconcile_reflection_queue(config, apply=True)["removed"] == 0
