@@ -2634,3 +2634,63 @@ def test_undecline_retracts_only_the_named_thread(tmp_path):
         "retracting a thread that was never declined is a no-op, not a wildcard"
     )
     _record_declines(config, session_id, [])  # empty list is a no-op, not a marker write
+
+
+def test_undecline_cli_resolves_a_prefix_and_refuses_an_empty_one(tmp_path):
+    """THE CLI PATH ITSELF, WHICH WAS UNTESTED (Prudence, #901 r3/r4).
+
+    Deleting the rstrip or the ctx.exit(1) left the suite green at 4084 -- the command
+    was covered only through `clear_declines`, so every bug in the resolution in FRONT of
+    it was invisible. Both bugs she found live there:
+
+    - `emit` prints the retraction command truncated to 16 chars with a trailing '.', so
+      an exact-match lookup made the printed command a no-op.
+    - `--session ""` is `LIKE '' || '%'`, i.e. `LIKE '%'`. It resolved to the newest
+      session and retracted ALL of its declines. `required=True` requires the flag, not a
+      value, so the ordinary `--session "$SID"` with SID unset triggers it.
+    """
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.core.reflect import (
+        declined_queue_rows,
+        emit_reflection_pass,
+        ingest_reflection_batch,
+    )
+
+    config = _mk_config(tmp_path, enabled=True)
+    session_id = _mk_db_backed_session(config)
+    batch = emit_reflection_pass(config, session_id)["batch"]
+    for item in batch:
+        item["raw_response"] = ""
+    ingest_reflection_batch(config, batch)
+    assert declined_queue_rows(config, session_id), "precondition: a decline to retract"
+
+    # SCOPED VIA obj=, NOT A FLAG. There is no --db option, and an unscoped CliRunner
+    # runs against the AMBIENT store -- techne#766 is that exact incident, where a
+    # reviewer believed they were on a temp store and four `backup` runs went against a
+    # live one. This command RETRACTS DECLINES; pointing it at the operator's real store
+    # is precisely the mistake that comment was written to stop.
+    runner = CliRunner()
+
+    def run(*args):
+        return runner.invoke(main, ["reflect", "undecline", *args], obj={"config": config})
+
+    for bad in ("", ".", "zzzz-no-such-session"):
+        result = run("--session", bad)
+        assert result.exit_code == 1, (
+            f"--session {bad!r} must be refused, not resolved. An empty or dot-only "
+            "prefix is a LIKE wildcard that retracts every decline in the newest session."
+        )
+        assert declined_queue_rows(config, session_id), (
+            f"--session {bad!r} retracted declines it should never have matched"
+        )
+
+    # The truncated form `emit` actually prints, trailing dots and all.
+    printed = f"{session_id[:16]}..."
+    result = run("--session", printed)
+    assert result.exit_code == 0, result.output
+    assert declined_queue_rows(config, session_id) == [], (
+        "the command emit PRINTS must work when pasted verbatim -- no surface prints the "
+        "full session id, so a prefix is all the operator has"
+    )

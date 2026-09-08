@@ -3255,14 +3255,23 @@ def reflect_undecline(ctx, session_id, thread_ids):
     # file is the thing that is LOST in the case this command exists for. Matching the
     # extension_state key exactly meant the printed command, pasted verbatim, exited 0 and
     # retracted nothing. Same prefix resolution as `threads redetect`.
-    conn = connect(config.db_path)
-    try:
-        row = conn.execute(
-            "SELECT id FROM sessions WHERE id LIKE ? || '%' ORDER BY started_at DESC LIMIT 1",
-            (session_id.rstrip("."),),
-        ).fetchone()
-    finally:
-        conn.close()
+    #: AN EMPTY PREFIX IS A WILDCARD, AND THE DELTA THAT ADDED RESOLUTION INTRODUCED IT
+    #: (Prudence, #901 r3). `LIKE '' || '%'` is `LIKE '%'`, so `--session ""` resolved to
+    #: the newest session and retracted all six of its declines -- measured. `required=True`
+    #: requires the FLAG, not a value, and the ordinary `--session "$SID"` with SID unset
+    #: is the trigger. `clear_declines` guards the empty id, but resolution now runs in
+    #: FRONT of that guard. `--session "."` reduces to the same wildcard via the rstrip.
+    prefix = session_id.rstrip(".")
+    row = None
+    if prefix:
+        conn = connect(config.db_path)
+        try:
+            row = conn.execute(
+                "SELECT id FROM sessions WHERE id LIKE ? || '%' ORDER BY started_at DESC LIMIT 1",
+                (prefix,),
+            ).fetchone()
+        finally:
+            conn.close()
     if row is None:
         # DISTINCT FROM "no declines", because they call for opposite actions and used to
         # print identically — a mistyped id read as "nothing to do".

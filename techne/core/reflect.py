@@ -1398,8 +1398,12 @@ def emit_reflection_pass(
                 {
                     "key": _CURSOR_KEY,
                     #: CARRIED FORWARD, not recomputed. emit rewrites this marker
-                    #: wholesale, so dropping the field here would erase every decline on
-                    #: the next pass and hand the heal back its infinite loop (#901 r1).
+                    #: wholesale, so dropping the field erases every decline on the next
+                    #: pass. NOT an infinite loop -- this comment said so until #901 r3,
+                    #: and the teeth-check disproves it: the heal reads `declined` BEFORE
+                    #: this write, so the drain loop still terminates and the mutation is
+                    #: caught by a visibility assertion instead. The cost is "re-offered
+                    #: once per drain run", which is milder and still wrong.
                     "declined": sorted(_declined_keys(config, session_id)),
                     #: The session's observation count AT WRITE TIME. `total` alone
                     #: cannot re-open a session that was judged empty and later grew,
