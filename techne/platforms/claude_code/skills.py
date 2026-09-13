@@ -43,30 +43,28 @@ procedure is a document someone may have tuned, and silently reverting that is
 the kind of quiet destruction techne exists to make visible.
 """
 
-import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
 from techne.config import Config
+from techne.skills import SKILL_NAMES as _SKILL_NAMES
+from techne.skills import bundled_skill_text as _bundled_skill_text
+from techne.skills import SkillResult as _SkillResult
+from techne.skills import load_manifest as _neutral_load
+from techne.skills import save_manifest as _neutral_save
+from techne.skills import sha as _neutral_sha
 from techne.platforms.claude_code.paths import claude_config_dir
 
-#: The bundled procedures, by installed filename. Package data — hatchling ships
-#: every file under the package, the same way inference/prototypes.yaml rides along.
-_SKILL_DIR = Path(__file__).parent.parent.parent / "skills"
-SKILL_NAMES = ("self-care", "techne-promote", "investigate-url", "survey-field")
+#: Re-exported from techne.skills so existing importers keep working. The names and
+#: the text live there because they are neutral — see that module's docstring.
+SKILL_NAMES = _SKILL_NAMES
 
 #: extension_state key holding {name: sha256} of what techne last wrote.
 STATE_KEY = "skills:claude-code:installed"
 
 
-@dataclass
-class SkillResult:
-    """One skill's outcome. ``action`` is installed | updated | unchanged | kept-user-copy."""
-
-    name: str
-    action: str
-    path: Path
-    detail: str = ""
+#: Re-exported; the dataclass is neutral and lives in techne.skills.
+SkillResult = _SkillResult
 
 
 def skills_dir() -> Path:
@@ -76,43 +74,23 @@ def skills_dir() -> Path:
 
 
 def bundled_skill_text(name: str) -> str:
-    if name not in SKILL_NAMES:
-        raise ValueError(f"unknown skill {name!r}; known: {', '.join(SKILL_NAMES)}")
-    return (_SKILL_DIR / f"{name}.md").read_text(encoding="utf-8")
+    """Thin alias over the neutral loader, kept because callers and tests import it
+    from here."""
+    return _bundled_skill_text(name)
 
 
 def _sha(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return _neutral_sha(text)
 
 
 def _load_manifest(config: Config, key: str = STATE_KEY) -> dict:
-    """What techne last wrote, by name -> sha. `key` is a parameter so the agent
-    installer (techne#754) reuses this rather than duplicating it: the ownership
-    discipline these two functions encode is security-relevant, and two copies of it
-    is two places to fix the day it is wrong."""
-    from techne.core.database import connect
-    from techne.core.extension_state import get_state
-
-    if not config.db_path.exists():
-        return {}
-    conn = connect(config.db_path)
-    try:
-        return get_state(conn, key) or {}
-    finally:
-        conn.close()
+    """Thin alias over the neutral loader, defaulting to THIS platform's key. Kept
+    because the agent installer (techne#754) imports it from here."""
+    return _neutral_load(config, key)
 
 
 def _save_manifest(config: Config, manifest: dict, key: str = STATE_KEY) -> None:
-    from techne.core.database import connect
-    from techne.core.extension_state import set_state
-
-    if not config.db_path.exists():
-        return
-    conn = connect(config.db_path)
-    try:
-        set_state(conn, key, manifest)
-    finally:
-        conn.close()
+    _neutral_save(config, manifest, key)
 
 
 def register_skills(config: Config, *, force: bool = False) -> list[SkillResult]:

@@ -2908,15 +2908,54 @@ def skills(ctx):
     ctx.invoke(skills_status_cmd)
 
 
+def _skills_backend(platform: str):
+    """Return (module, kwargs) for the chosen renderer. One place, so status/install/
+    remove cannot disagree about what --platform means."""
+    if platform == "agent-skills":
+        from techne.platforms.agent_skills import skills as backend
+
+        return backend
+    from techne.platforms.claude_code import skills as backend
+
+    return backend
+
+
 @skills.command("status")
+@click.option(
+    "--platform",
+    type=click.Choice(["claude-code", "agent-skills"]),
+    default="claude-code",
+    show_default=True,
+    help="Which host layout to render. agent-skills writes <dir>/<name>/SKILL.md for "
+    "opencode, crush, goose and anything else reading the open standard.",
+)
+@click.option(
+    "--host",
+    type=click.Choice(["opencode", "crush", "goose", "generic"]),
+    default="generic",
+    show_default=True,
+    help="With --platform agent-skills: which host's default directory to use.",
+)
+@click.option(
+    "--target",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Write here instead of the host default. Wins over --host.",
+)
 @click.pass_context
-def skills_status_cmd(ctx):
+def skills_status_cmd(ctx, platform, host, target):
     """Report each procedure as current / outdated / user-modified / absent."""
-    from techne.platforms.claude_code.skills import skills_dir, skills_status
+    backend = _skills_backend(platform)
 
     config = ctx.obj["config"]
-    click.echo(f"Skills directory: {skills_dir()}")
-    for r in skills_status(config):
+    if platform == "agent-skills":
+        dest = backend.skills_dir(host, target)
+        click.echo(f"Skills directory: {dest.root}  (host: {dest.host})")
+        rows = backend.skills_status(config, host=host, target=target)
+    else:
+        click.echo(f"Skills directory: {backend.skills_dir()}")
+        rows = backend.skills_status(config)
+    for r in rows:
         line = f"  {r.name}: {r.action}"
         if r.detail:
             line += f" — {r.detail}"
@@ -2930,13 +2969,35 @@ def skills_status_cmd(ctx):
     default=False,
     help="Overwrite a procedure you have edited (default: report it and leave it).",
 )
+@click.option(
+    "--platform",
+    type=click.Choice(["claude-code", "agent-skills"]),
+    default="claude-code",
+    show_default=True,
+    help="Which host layout to render. agent-skills writes <dir>/<name>/SKILL.md for "
+    "opencode, crush, goose and anything else reading the open standard.",
+)
+@click.option(
+    "--host",
+    type=click.Choice(["opencode", "crush", "goose", "generic"]),
+    default="generic",
+    show_default=True,
+    help="With --platform agent-skills: which host's default directory to use.",
+)
+@click.option(
+    "--target",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Write here instead of the host default. Wins over --host.",
+)
 @click.pass_context
-def skills_install(ctx, force):
+def skills_install(ctx, force, platform, host, target):
     """Write the bundled procedures into the platform's command directory."""
-    from techne.platforms.claude_code.skills import register_skills
+    backend = _skills_backend(platform)
 
     config = ctx.obj["config"]
-    for r in register_skills(config, force=force):
+    extra = {"host": host, "target": target} if platform == "agent-skills" else {}
+    for r in backend.register_skills(config, force=force, **extra):
         line = f"{r.name}: {r.action} -> {r.path}"
         if r.detail:
             line += f"\n  {r.detail}"
@@ -2944,13 +3005,35 @@ def skills_install(ctx, force):
 
 
 @skills.command("remove")
+@click.option(
+    "--platform",
+    type=click.Choice(["claude-code", "agent-skills"]),
+    default="claude-code",
+    show_default=True,
+    help="Which host layout to render. agent-skills writes <dir>/<name>/SKILL.md for "
+    "opencode, crush, goose and anything else reading the open standard.",
+)
+@click.option(
+    "--host",
+    type=click.Choice(["opencode", "crush", "goose", "generic"]),
+    default="generic",
+    show_default=True,
+    help="With --platform agent-skills: which host's default directory to use.",
+)
+@click.option(
+    "--target",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Write here instead of the host default. Wins over --host.",
+)
 @click.pass_context
-def skills_remove(ctx):
+def skills_remove(ctx, platform, host, target):
     """Remove only the copies techne wrote and still owns."""
-    from techne.platforms.claude_code.skills import unregister_skills
+    backend = _skills_backend(platform)
 
     config = ctx.obj["config"]
-    results = unregister_skills(config)
+    extra = {"host": host, "target": target} if platform == "agent-skills" else {}
+    results = backend.unregister_skills(config, **extra)
     if not results:
         click.echo("nothing installed by techne")
     for r in results:
