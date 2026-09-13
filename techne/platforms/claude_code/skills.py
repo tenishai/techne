@@ -1,12 +1,29 @@
 """Install techne's OPERATIONAL procedures into Claude Code (techne#641).
 
-WHY THESE SHIP WITH THE TOOL AND THE RESEARCH SKILLS DO NOT. `self-care` and
-`techne-promote` drive techne's own CLI and know this version's store layout —
-`self-care` sweeps the outbox, prunes backups/snapshots and VACUUMs; `promote`
-drives `reflect emit`/`ingest`. A procedure written against 0.12 can be WRONG for
-0.14, so shipping them in a separate marketplace repo guarantees drift from the
-tool they operate. `investigate-url` and `survey-field` have no such coupling and
-correctly live in tenishai/skills.
+WHY THESE SHIP WITH THE TOOL. Every procedure here drives techne's own CLI and
+knows this version's store layout — `self-care` sweeps the outbox, prunes
+backups/snapshots and VACUUMs; `promote` drives `reflect emit`/`ingest`;
+`investigate-url` and `survey-field` drive `architect ingest`/`tag`/`topic`/
+`reverdict`/`dedup` and read architect.db's schema directly. A procedure written
+against 0.12 can be WRONG for 0.14, so shipping any of them in a separate
+marketplace repo guarantees drift from the tool they operate.
+
+THE RESEARCH SKILLS MOVED HERE 2026-09-13, and the reason is worth keeping
+because this docstring previously argued the opposite. It claimed
+`investigate-url` and `survey-field` "have no such coupling and correctly live
+in tenishai/skills". That was true of the version published there, which reaches
+the store through a pluggable `skill-store` CLI and names no backend. It was
+never true of the versions actually in use: measured before the move,
+`investigate-url` carried 13 `techne architect` invocations, 4 hardcoded
+`~/.techne/architect.db` paths and 6 raw `sqlite3` calls; `survey-field` carried
+4 and 4. Both failed this docstring's own test comprehensively.
+
+The abstraction was the thing to drop, not the coupling. These procedures encode
+how we want the architect store to be USED — the dedup query that knows
+`source_url` is not in the FTS index, the verdict tiers, the supersede
+discipline — and a backend-agnostic wrapper cannot express any of it without
+either leaking the schema anyway or flattening it to a lowest common
+denominator. So they belong to the tool whose store they describe.
 
 VENDOR NEUTRALITY IS PRESERVED, not violated (techne#499): techne owns the
 PROCEDURE as a portable ``SKILL.md``-shaped markdown file; this module renders it
@@ -36,7 +53,7 @@ from techne.platforms.claude_code.paths import claude_config_dir
 #: The bundled procedures, by installed filename. Package data — hatchling ships
 #: every file under the package, the same way inference/prototypes.yaml rides along.
 _SKILL_DIR = Path(__file__).parent.parent.parent / "skills"
-SKILL_NAMES = ("self-care", "techne-promote")
+SKILL_NAMES = ("self-care", "techne-promote", "investigate-url", "survey-field")
 
 #: extension_state key holding {name: sha256} of what techne last wrote.
 STATE_KEY = "skills:claude-code:installed"

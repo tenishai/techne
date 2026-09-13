@@ -537,7 +537,7 @@ TRIGGER_WITNESSES = {
     "They are restoring": "test_the_restore_trigger_is_still_all_or_nothing",
     "zero rows": "test_only_the_codex_distinguishes_an_empty_index_from_no_match",
     "rely on `librarian_search` for coverage": "test_nothing_automatically_indexes_transcripts",
-    "why the architect is empty": "test_the_architect_feeder_ships_and_the_research_skills_do_not",
+    "why the architect is empty": "test_the_architect_feeder_and_the_research_skills_all_ship",
     "`reflection_queue`": "test_the_unemittable_reporter_still_refuses_to_drain",
     "reflect.enabled: false": "test_disabling_reflect_silences_the_nudge_but_not_the_debt",
     "whether reflection is running": "test_an_unbound_automatic_pass_is_the_default_posture",
@@ -774,10 +774,14 @@ def test_nothing_automatically_indexes_transcripts(config_free_tmp_home):
     )
 
 
-def test_the_architect_feeder_ships_and_the_research_skills_do_not(config_free_tmp_home):
-    """The architect trigger makes two claims at once: `techne architect add` SHIPS, and the
-    procedures that fill the store in bulk DO NOT. Both are checked, because half of it
-    going stale would make the advice wrong in either direction."""
+def test_the_architect_feeder_and_the_research_skills_all_ship(config_free_tmp_home):
+    """The architect trigger makes two claims at once: `techne architect add` SHIPS, and so
+    do the procedures that fill the store in bulk. Both are checked, because half of it
+    going stale would make the advice wrong in either direction.
+
+    The research procedures MOVED here 2026-09-13 — they drive `architect ingest`/`tag`/
+    `topic`/`reverdict` and read architect.db's schema directly, so a copy shipped apart
+    from the tool drifts from the store it describes."""
     import click
 
     from techne.cli import main
@@ -789,9 +793,10 @@ def test_the_architect_feeder_ships_and_the_research_skills_do_not(config_free_t
 
     bundled = {f.stem for f in (REPO / "techne" / "skills").glob("*.md")}
 
-    assert not bundled & {"investigate-url", "survey-field"}, (
-        f"a research skill now ships with techne ({sorted(bundled)}) — four-functions.md "
-        "tells operators they live in tenishai/skills"
+    missing = {"investigate-url", "survey-field"} - bundled
+    assert not missing, (
+        f"a research procedure stopped shipping with techne ({sorted(missing)}) — "
+        "four-functions.md tells operators `techne init` installs them"
     )
 
 
