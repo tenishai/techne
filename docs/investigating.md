@@ -145,8 +145,13 @@ operator to dismiss exactly that report.
 
 **Discriminator.** Cause 2 names something only your own machine knows *and that the
 fetching agent was never given* — a peer session's branch name, a reminder you wrote, a
-worktree path. Cause 1 echoes the *shape* of a session envelope. If you cannot tell, the
-cheap check is whether the block would still appear with your injection rails disabled.
+worktree path. Cause 1 echoes the *shape* of a session envelope: a system notice, a tool
+listing, the frame rather than today's contents.
+
+If you cannot tell from the content, the thing to check is your own injection path: list
+what your hooks write into a tool result, and ask whether any of it is keyed on something
+a subagent shares with its parent. There is no flag that turns these off for one run, so
+this is a read of your own code, not an experiment you can run in the moment.
 
 **On frequency.** This was previously recorded as firing most often on the first fetch
 inside a freshly spawned subagent, which is this procedure's first action — so operators

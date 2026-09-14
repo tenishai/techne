@@ -98,11 +98,37 @@ def test_agent_id_suppresses_injection(home, monkeypatch, capsys):
     assert _injected(out) is None
 
 
-def test_agent_type_suppresses_injection(home, monkeypatch, capsys):
-    """agent_type alone is enough — the fields are documented as a pair, and
-    relying on both being present would fail open on either arriving alone."""
+def test_agent_type_alone_does_NOT_suppress(home, monkeypatch, capsys):
+    """A top-level `--agent` session must STILL get its coord messages.
+
+    This test asserted the opposite in round 1 of #930, and was wrong. The two
+    fields are not synonyms (code.claude.com/docs/en/hooks):
+
+        agent_id    present ONLY inside a subagent call
+        agent_type  present when the session uses --agent OR inside a subagent
+
+    So `agent_type` alone means "an ordinary session the operator started with
+    --agent" — a real session, with a real person in front of it, which must keep
+    receiving peer messages and due reminders. Suppressing there would turn off the
+    push half of techne#376 for every user of that flag, silently.
+
+    Kept as an inverted test rather than deleted: the tempting simplification is to
+    treat the two fields as a pair, and this is what says no.
+    """
     _seed_coord_message(home)
-    out = _run(monkeypatch, capsys, _payload(agent_type="research-readonly"))
+    ctx = _injected(_run(monkeypatch, capsys, _payload(agent_type="some-agent")))
+    assert ctx is not None, "a top-level --agent session lost its coord message"
+    assert "worktree /tmp/wt-x" in ctx
+
+
+def test_subagent_with_both_fields_suppresses(home, monkeypatch, capsys):
+    """The real subagent shape: both fields present. agent_id is what decides."""
+    _seed_coord_message(home)
+    out = _run(
+        monkeypatch,
+        capsys,
+        _payload(agent_id="a585d495d3728378d", agent_type="research-readonly"),
+    )
     assert _injected(out) is None
 
 

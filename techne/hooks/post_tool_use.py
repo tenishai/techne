@@ -1057,10 +1057,29 @@ def main():
     # 2026-09-14: 8 per_turn_recall injections for a session whose tool calls that
     # day numbered in the dozens, i.e. once per user prompt.
     #
-    # THE SIGNAL IS DOCUMENTED, not inferred: PostToolUse carries `agent_id` and
-    # `agent_type` in its common input fields, present only when the hook fires
-    # inside a subagent (code.claude.com/docs/en/hooks). session_id cannot be used
-    # for this — it is the same value.
+    # THE SIGNAL IS `agent_id`, AND ONLY `agent_id`. Both fields are documented at
+    # code.claude.com/docs/en/hooks, and they do NOT mean the same thing:
+    #
+    #   agent_id    "Present only when the hook fires inside a subagent call."
+    #   agent_type  "Present when the session uses --agent OR the hook fires inside
+    #                a subagent."
+    #
+    # So `agent_type` is ALSO set for an ordinary top-level session started with
+    # `--agent`. Gating on it would silently stop delivering coord messages and due
+    # reminders to a real session the operator is sitting in front of — the push
+    # half of techne#376 turned off for anyone who uses that flag, failing exactly
+    # the way this file is meant to prevent: quietly, with everything still
+    # reporting healthy.
+    #
+    # Round 1 of this PR shipped `agent_id or agent_type` and a test asserting that
+    # agent_type alone suppresses — a test pinning the defect. Caught by Temperance
+    # reading the doc table rather than the prose sentence above it, which says
+    # "when running with --agent OR inside a subagent" and is easy to read as one
+    # condition. The test below now asserts the opposite and is the guard against
+    # re-widening this.
+    #
+    # session_id cannot be used for any of this — it is the same value in a
+    # subagent as in its parent, which is the bug.
     #
     # FAILS OPEN ON A CLIENT OLD ENOUGH NOT TO SEND THOSE FIELDS, and that is
     # stated rather than papered over. A second signal was considered and
@@ -1072,7 +1091,7 @@ def main():
     # stays UNREAD in the ledger, so it still reaches the parent's banner and
     # techne_inbox; a due reminder stays due. Observation capture above is
     # untouched — this gates only what is written back into a context.
-    if data.get("agent_id") or data.get("agent_type"):
+    if data.get("agent_id"):
         # ONE WRITE, AND IT CARRIES WHAT THE CAPTURE WRITE CARRIED. record_hook_run
         # upserts a single key, so a second call here would REPLACE the ok / noop
         # outcome recorded ~60 lines above and drop its detail=tool_name — two
