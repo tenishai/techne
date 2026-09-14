@@ -127,3 +127,37 @@ def test_parent_still_gets_it_after_a_subagent_call(home, monkeypatch, capsys):
     ctx = _injected(_run(monkeypatch, capsys, _payload()))
     assert ctx is not None, "the parent lost the message to the subagent's call"
     assert "worktree /tmp/wt-x" in ctx
+
+
+def test_capture_still_happens_for_a_subagent_call(home, monkeypatch, capsys):
+    """THE PROPERTY THE WHOLE CHANGE RESTS ON, and nothing else pins it.
+
+    The gate suppresses INJECTION, not CAPTURE. It sits below the capture block for
+    that reason, and the comment says so — but a comment does not hold a line in
+    place. The natural future tidy-up is "exit early, exit sooner": hoist the gate
+    above the capture block. Do that and all the tests above stay green while every
+    subagent tool call stops being recorded (Prudence demonstrated it on #930:
+    5 passed, observations 0).
+
+    That is the silent shape this repo is organised around — post_tool_use calls the
+    capture rail "techne is functionally dead without it", and techne#931 presupposes
+    these rows exist in order to argue about their attribution. So the assertion is
+    on the ROW, not on the ordering: a test that pins line numbers would pass on a
+    refactor that broke this.
+    """
+    config = _seed_coord_message(home)
+    from techne.core.database import connect
+
+    _run(monkeypatch, capsys, _payload(agent_id="a585d495d3728378d"))
+
+    conn = connect(config.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT tool_name FROM observations WHERE session_id = ?", (PARENT,)
+        ).fetchall()
+    finally:
+        conn.close()
+    assert [r[0] for r in rows] == ["WebFetch"], (
+        "a subagent's tool call was not captured — the gate suppresses injection "
+        "only, and must sit BELOW the capture block"
+    )

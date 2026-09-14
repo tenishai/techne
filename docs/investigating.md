@@ -117,13 +117,44 @@ curl -fsSL "https://raw.githubusercontent.com/<owner>/<repo>/main/README.md" \
   | grep -icE 'system-reminder|<the exact tokens the subagent named>'
 ```
 
-**0 matches and no corroboration → context bleed; clear the flag and continue.**
 **Any match → real; halt per the injection guard.**
 
-The tell that settles it: if the alleged payload names *your own* private infrastructure,
-or echoes a session notice from your own environment, it is bleed — a third-party page
-cannot contain either. It fires most often on the **first fetch inside a freshly spawned
-subagent**, which is this procedure's first action, so expect it on most investigations.
+**0 matches → the block did not come from the page. That is where the reasoning starts, not
+where it ends**, because two different mechanisms produce a clean `curl`:
+
+1. **Fetch-tool context bleed.** The summarizer inherits the caller's session context and
+   emits it verbatim, appended to whatever it fetched. Leakage, not invention.
+2. **Your own tooling injecting into the subagent.** A hook that writes
+   `additionalContext` on a tool call reaches a subagent too, because a subagent presents
+   the *parent's* session id — so anything keyed on that id resolves to the parent's
+   state and is handed to the subagent. In techne this was coordination messages, due
+   reminders and the code-graph rail (techne#929, gated as of 0.16.x).
+
+Neither is a payload in the page, and neither is a reason to halt. But only the first is
+nothing to do; **the second is a defect in your own stack, and the subagent reporting it is
+the only way you will hear about it.** So: clear the flag and continue the investigation
+either way, and then ask which of the two it was.
+
+The old "tell that settles it" — *it names your own private infrastructure or echoes a
+session notice from your environment, therefore bleed* — is **wrong, and was wrong in the
+direction that hides the worse cause.** A third-party page cannot contain your internal
+names; your own injection rail is made of them. That test selects cause 2 and files it
+under cause 1. techne#929 was found only because a subagent volunteered having been handed
+a peer's coordination message, and this procedure as previously written instructed the
+operator to dismiss exactly that report.
+
+**Discriminator.** Cause 2 names something only your own machine knows *and that the
+fetching agent was never given* — a peer session's branch name, a reminder you wrote, a
+worktree path. Cause 1 echoes the *shape* of a session envelope. If you cannot tell, the
+cheap check is whether the block would still appear with your injection rails disabled.
+
+**On frequency.** This was previously recorded as firing most often on the first fetch
+inside a freshly spawned subagent, which is this procedure's first action — so operators
+were told to expect it on most investigations. That signature is also exactly what cause 2
+produces: a fresh unread message surfaces on the subagent's *next* tool call, which is its
+first fetch. How much of the observed rate was cause 2 is **unmeasured** — see techne#932.
+Do not treat "it happens all the time" as settled. If the rate drops now that the rail is
+gated, the remainder is rare, and rare is when it deserves a look rather than a dismissal.
 
 ## Skeptic posture
 

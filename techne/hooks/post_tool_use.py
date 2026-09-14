@@ -1073,13 +1073,26 @@ def main():
     # techne_inbox; a due reminder stays due. Observation capture above is
     # untouched — this gates only what is written back into a context.
     if data.get("agent_id") or data.get("agent_type"):
+        # ONE WRITE, AND IT CARRIES WHAT THE CAPTURE WRITE CARRIED. record_hook_run
+        # upserts a single key, so a second call here would REPLACE the ok / noop
+        # outcome recorded ~60 lines above and drop its detail=tool_name — two
+        # connections and two writes per subagent tool call, on a hot path _liveness
+        # is explicit about keeping to one, with the second discarding what the first
+        # held. Liveness itself was never at risk (check_hooks reads only `ts`), so
+        # this is presentation; it is still a regression in what the marker says.
+        #
         # `config.db_path`, not the local `db` — that name is bound only inside the
         # early-exit exception branches above and is UNBOUND on this path. Caught by
         # reading the binding sites rather than by running it, because a NameError
         # here would surface to the user as a failed tool call, which is exactly what
         # a memory hook must never do (techne#166).
         try:
-            record_hook_run(config.db_path, HOOK_NAME, outcome="ok:no-inject-subagent")
+            record_hook_run(
+                config.db_path,
+                HOOK_NAME,
+                outcome="ok:no-inject-subagent",
+                detail=tool_name,
+            )
         except Exception:  # noqa: BLE001 — bookkeeping must never break the host
             pass
         sys.exit(0)
