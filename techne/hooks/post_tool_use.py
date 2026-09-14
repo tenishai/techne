@@ -1032,6 +1032,58 @@ def main():
     # the edit rail so the blast-radius query sees the just-edited symbol.
     _maybe_reindex_codex(config, tool_name, tool_input)
 
+    # NOTHING IS INJECTED INTO A SUBAGENT (techne#929).
+    #
+    # A subagent presents the PARENT'S session_id, so every lookup below keyed on
+    # session_id resolves to the parent's state: _inject_coord_messages reads the
+    # PARENT'S inbox and hands a peer's message to the subagent. Measured — 15
+    # WebFetch calls made by `research-readonly` subagents on 2026-09-14 are
+    # recorded in the observation ledger under the parent session id.
+    #
+    # WHY THAT IS NOT MERELY UNTIDY. `research-readonly` exists to read untrusted
+    # third-party pages, and its sandbox is built by REMOVING tools: no Bash, no
+    # store access, no MCP, and no `Read` specifically to close the local-read ->
+    # WebFetch exfiltration path. It keeps WebFetch. These rails put our internal
+    # state into that agent's context by a route none of those removals touch, so
+    # the sandbox's own premise does not hold while they fire. It was found
+    # because a subagent volunteered that it had been handed a peer coordination
+    # message and had declined to act on it; behaving well is not a control.
+    #
+    # Coord traffic is the CHEAP version of this. Due reminders carry project
+    # plans and standing intentions, and the blast-radius rail carries our code
+    # graph. Per-turn recall — which reads the knowledge store, and is the
+    # expensive version — is NOT affected and does not need this guard: it rides
+    # UserPromptSubmit, and a subagent never submits a user prompt. Measured on
+    # 2026-09-14: 8 per_turn_recall injections for a session whose tool calls that
+    # day numbered in the dozens, i.e. once per user prompt.
+    #
+    # THE SIGNAL IS DOCUMENTED, not inferred: PostToolUse carries `agent_id` and
+    # `agent_type` in its common input fields, present only when the hook fires
+    # inside a subagent (code.claude.com/docs/en/hooks). session_id cannot be used
+    # for this — it is the same value.
+    #
+    # FAILS OPEN ON A CLIENT OLD ENOUGH NOT TO SEND THOSE FIELDS, and that is
+    # stated rather than papered over. A second signal was considered and
+    # rejected: comparing transcript_path's stem to session_id would catch it
+    # without the documented fields, but a subagent's transcript_path was never
+    # measured to differ, and a guard nobody has watched fire is not a guard.
+    #
+    # Suppression costs nothing that is not recovered elsewhere. A coord message
+    # stays UNREAD in the ledger, so it still reaches the parent's banner and
+    # techne_inbox; a due reminder stays due. Observation capture above is
+    # untouched — this gates only what is written back into a context.
+    if data.get("agent_id") or data.get("agent_type"):
+        # `config.db_path`, not the local `db` — that name is bound only inside the
+        # early-exit exception branches above and is UNBOUND on this path. Caught by
+        # reading the binding sites rather than by running it, because a NameError
+        # here would surface to the user as a failed tool call, which is exactly what
+        # a memory hook must never do (techne#166).
+        try:
+            record_hook_run(config.db_path, HOOK_NAME, outcome="ok:no-inject-subagent")
+        except Exception:  # noqa: BLE001 — bookkeeping must never break the host
+            pass
+        sys.exit(0)
+
     # Assemble additionalContext from every contributor, then emit at most once
     # (a hook can carry only one additionalContext). Each contributor is
     # best-effort and returns None to add nothing. (#207, #335)
