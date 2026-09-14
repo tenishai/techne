@@ -192,3 +192,57 @@ def test_capture_still_happens_for_a_subagent_call(home, monkeypatch, capsys):
         "a subagent's tool call was not captured — the gate suppresses injection "
         "only, and must sit BELOW the capture block"
     )
+
+
+def test_subagent_path_writes_exactly_one_liveness_marker(home, monkeypatch, capsys):
+    """The write-fold, pinned — the regression most likely to return quietly.
+
+    record_hook_run upserts ONE key per hook, so a marker written from the gate
+    would replace the one the capture block already wrote and drop its
+    detail=tool_name: two connections and two writes per subagent tool call, on a
+    path _liveness is explicit about keeping to one.
+
+    This is pinned rather than trusted because it has already been claimed-and-not-
+    done once on this branch: an earlier commit said "folded into one write" having
+    only stopped the second write from losing `detail`. There were still two.
+
+    Asserted on the OBSERVABLE RESULT — the marker carries both the subagent fact
+    and the tool name — rather than by counting calls, so it survives refactoring
+    and still fails if the fold is undone (the gate's own write would overwrite
+    `detail`).
+    """
+    config = _seed_coord_message(home)
+    from techne.core.database import connect
+    from techne.core.extension_state import get_state
+
+    _run(monkeypatch, capsys, _payload(agent_id="a585d495d3728378d"))
+
+    conn = connect(config.db_path)
+    try:
+        marker = (get_state(conn, "hook:post_tool_use:last_run") or {})
+    finally:
+        conn.close()
+
+    assert marker.get("outcome") == "ok:no-inject-subagent"
+    assert marker.get("detail") == "WebFetch", (
+        "the subagent fact was written by a SECOND record_hook_run call, which "
+        "overwrote the capture site's marker and lost detail=tool_name"
+    )
+
+
+def test_parent_marker_is_unaffected(home, monkeypatch, capsys):
+    """The fold must not relabel a normal call. `and outcome == "ok"` at the capture
+    site is what keeps a filtered or capture-disabled call carrying its own outcome."""
+    config = _seed_coord_message(home)
+    from techne.core.database import connect
+    from techne.core.extension_state import get_state
+
+    _run(monkeypatch, capsys, _payload())
+
+    conn = connect(config.db_path)
+    try:
+        marker = (get_state(conn, "hook:post_tool_use:last_run") or {})
+    finally:
+        conn.close()
+    assert marker.get("outcome") == "ok"
+    assert marker.get("detail") == "WebFetch"
