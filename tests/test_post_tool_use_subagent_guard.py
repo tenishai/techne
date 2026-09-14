@@ -1,0 +1,306 @@
+"""PostToolUse must inject nothing when it fires inside a subagent (techne#929).
+
+A subagent presents the PARENT'S session_id, so every session-keyed lookup in the
+hook resolves to the parent's state — `_inject_coord_messages` reads the parent's
+inbox and hands a peer's message to the subagent. The sandbox around
+`research-readonly` is built by REMOVING tools (no Bash, no store, no MCP, no
+Read); this rail writes into that agent's context by a route none of those
+removals touch, and the agent keeps WebFetch.
+
+The discriminator is `agent_id` and ONLY `agent_id`. It is documented as present
+only inside a subagent call, whereas `agent_type` is ALSO set for a top-level
+session started with `--agent` — so gating on `agent_type` would silently stop
+delivering to a real session with a person in front of it. An earlier revision of
+this file asserted the opposite; see test_agent_type_alone_does_NOT_suppress.
+
+It cannot be session_id — that is the same value in a subagent as in its parent,
+which is the whole bug.
+
+The first test here is the control: without those fields the message IS injected.
+Without it the rest would pass against a hook that had simply stopped working.
+"""
+
+from __future__ import annotations
+
+import io
+import json
+
+import pytest
+
+from techne.hooks import post_tool_use
+
+PARENT = "sess-parent"
+PEER = "sess-peer"
+
+
+@pytest.fixture()
+def home(tmp_path, monkeypatch):
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+    monkeypatch.setenv("TECHNE_HOOK_TIMEOUT", "0")
+    return tmp_path
+
+
+def _seed_coord_message(home):
+    """A peer message waiting in PARENT's inbox, as on any live session."""
+    import yaml
+
+    (home / "config.yaml").write_text(yaml.safe_dump({"hooks": {}}))
+
+    from techne.config import Config
+    from techne.core import coord
+    from techne.core.database import init_db
+    from techne.core.state import ensure_session
+
+    config = Config.load()
+    init_db(config.db_path)
+    ensure_session(config.db_path, PARENT)
+    coord.send(config.db_path, PEER, "worktree /tmp/wt-x, branch fix/x", to="coord",
+               from_name="peer")
+    return config
+
+
+def _payload(**extra):
+    p = {
+        "session_id": PARENT,
+        "tool_name": "WebFetch",
+        "tool_input": {"url": "https://example.org"},
+        "tool_response": "ok",
+        "cwd": "/tmp",
+    }
+    p.update(extra)
+    return p
+
+
+def _run(monkeypatch, capsys, payload):
+    """Returns stdout. The guard exits via sys.exit(0), like main()'s other early
+    exits, so SystemExit is an expected outcome here rather than a failure."""
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
+    try:
+        post_tool_use.main()
+    except SystemExit as exc:
+        assert exc.code in (0, None), f"hook exited {exc.code}"
+    return capsys.readouterr().out
+
+
+def _injected(out):
+    if not out.strip():
+        return None
+    return json.loads(out).get("hookSpecificOutput", {}).get("additionalContext")
+
+
+def test_control_main_session_does_receive_the_coord_message(home, monkeypatch, capsys):
+    """CONTROL. Without agent_id/agent_type the message is injected — so the
+    suppression tests below are testing suppression, not a dead rail."""
+    _seed_coord_message(home)
+    ctx = _injected(_run(monkeypatch, capsys, _payload()))
+    assert ctx is not None, "coord rail injected nothing for a main session"
+    assert "worktree /tmp/wt-x" in ctx
+
+
+def test_agent_id_suppresses_injection(home, monkeypatch, capsys):
+    _seed_coord_message(home)
+    out = _run(monkeypatch, capsys, _payload(agent_id="a585d495d3728378d"))
+    assert _injected(out) is None
+
+
+def test_agent_type_alone_does_NOT_suppress(home, monkeypatch, capsys):
+    """A top-level `--agent` session must STILL get its coord messages.
+
+    This test asserted the opposite in round 1 of #930, and was wrong. The two
+    fields are not synonyms (code.claude.com/docs/en/hooks):
+
+        agent_id    present ONLY inside a subagent call
+        agent_type  present when the session uses --agent OR inside a subagent
+
+    So `agent_type` alone means "an ordinary session the operator started with
+    --agent" — a real session, with a real person in front of it, which must keep
+    receiving peer messages and due reminders. Suppressing there would turn off the
+    push half of techne#376 for every user of that flag, silently.
+
+    Kept as an inverted test rather than deleted: the tempting simplification is to
+    treat the two fields as a pair, and this is what says no.
+    """
+    _seed_coord_message(home)
+    ctx = _injected(_run(monkeypatch, capsys, _payload(agent_type="some-agent")))
+    assert ctx is not None, "a top-level --agent session lost its coord message"
+    assert "worktree /tmp/wt-x" in ctx
+
+
+def test_subagent_with_both_fields_suppresses(home, monkeypatch, capsys):
+    """The real subagent shape: both fields present. agent_id is what decides."""
+    _seed_coord_message(home)
+    out = _run(
+        monkeypatch,
+        capsys,
+        _payload(agent_id="a585d495d3728378d", agent_type="research-readonly"),
+    )
+    assert _injected(out) is None
+
+
+def test_suppressed_message_is_still_unread_for_the_parent(home, monkeypatch, capsys):
+    """Suppression must LOSE NOTHING. The message stays unread in the ledger, so
+    the parent still gets it via the session-start banner and techne_inbox — the
+    subagent simply is not handed a copy."""
+    config = _seed_coord_message(home)
+    from techne.core import coord
+
+    _run(monkeypatch, capsys, _payload(agent_id="a585d495d3728378d"))
+    still = [m["body"] for m in coord.inbox(config.db_path, PARENT)]
+    assert still == ["worktree /tmp/wt-x, branch fix/x"]
+
+
+def test_parent_still_gets_it_after_a_subagent_call(home, monkeypatch, capsys):
+    """The real sequence: a subagent makes a tool call (suppressed), then the
+    parent makes one. The parent must still receive the message — a naive fix that
+    marked it surfaced during the subagent call would silently eat it."""
+    _seed_coord_message(home)
+    _run(monkeypatch, capsys, _payload(agent_id="a585d495d3728378d"))
+    ctx = _injected(_run(monkeypatch, capsys, _payload()))
+    assert ctx is not None, "the parent lost the message to the subagent's call"
+    assert "worktree /tmp/wt-x" in ctx
+
+
+def test_capture_still_happens_for_a_subagent_call(home, monkeypatch, capsys):
+    """THE PROPERTY THE WHOLE CHANGE RESTS ON, and nothing else pins it.
+
+    The gate suppresses INJECTION, not CAPTURE. It sits below the capture block for
+    that reason, and the comment says so — but a comment does not hold a line in
+    place. The natural future tidy-up is "exit early, exit sooner": hoist the gate
+    above the capture block. Do that and all the tests above stay green while every
+    subagent tool call stops being recorded (Prudence demonstrated it on #930:
+    5 passed, observations 0).
+
+    That is the silent shape this repo is organised around — post_tool_use calls the
+    capture rail "techne is functionally dead without it", and techne#931 presupposes
+    these rows exist in order to argue about their attribution. So the assertion is
+    on the ROW, not on the ordering: a test that pins line numbers would pass on a
+    refactor that broke this.
+    """
+    config = _seed_coord_message(home)
+    from techne.core.database import connect
+
+    _run(monkeypatch, capsys, _payload(agent_id="a585d495d3728378d"))
+
+    conn = connect(config.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT tool_name FROM observations WHERE session_id = ?", (PARENT,)
+        ).fetchall()
+    finally:
+        conn.close()
+    assert [r[0] for r in rows] == ["WebFetch"], (
+        "a subagent's tool call was not captured — the gate suppresses injection "
+        "only, and must sit BELOW the capture block"
+    )
+
+
+def test_subagent_marker_carries_the_capture_sites_detail(home, monkeypatch, capsys):
+    """The write-fold, pinned — the regression most likely to return quietly.
+
+    record_hook_run upserts ONE key per hook, so a marker written from the gate
+    would replace the one the capture block already wrote and drop its
+    detail=tool_name: two connections and two writes per subagent tool call, on a
+    path _liveness is explicit about keeping to one.
+
+    This is pinned rather than trusted because it has already been claimed-and-not-
+    done once on this branch: an earlier commit said "folded into one write" having
+    only stopped the second write from losing `detail`. There were still two.
+
+    WHAT THIS DOES AND DOES NOT CATCH, stated precisely because the first version of
+    this docstring overstated it. It asserts the marker's CONTENT, not the number of
+    writes — nothing here can count connections. So:
+
+      caught      a gate-side write that omits detail=tool_name (the shape this
+                  path actually had before the fold), because it overwrites the
+                  capture site's marker and `detail` goes missing.
+      NOT caught  a gate-side write that duplicates the capture payload exactly.
+                  set_state replaces rather than merges, so an identical second
+                  write is invisible in the result. That costs a second connection
+                  and a second upsert and this test would pass.
+
+    The uncaught case is the cheaper half of the defect and the one a reader can see
+    by looking at the file; the expensive half — losing what the first write carried
+    — is the one that needs pinning, and is pinned.
+    """
+    config = _seed_coord_message(home)
+    from techne.core.database import connect
+    from techne.core.extension_state import get_state
+
+    _run(monkeypatch, capsys, _payload(agent_id="a585d495d3728378d"))
+
+    conn = connect(config.db_path)
+    try:
+        marker = (get_state(conn, "hook:post_tool_use:last_run") or {})
+    finally:
+        conn.close()
+
+    assert marker.get("outcome") == "ok:no-inject-subagent"
+    assert marker.get("detail") == "WebFetch", (
+        "the subagent fact was written by a SECOND record_hook_run call, which "
+        "overwrote the capture site's marker and lost detail=tool_name"
+    )
+
+
+def test_parent_marker_is_unaffected(home, monkeypatch, capsys):
+    """The fold must not relabel an ordinary parent call.
+
+    This exercises the PARENT path only — `agent_id` is falsy, so the capture
+    site's `and outcome == "ok"` clause is never reached here. That clause is
+    pinned by test_capture_disabled_subagent_call_keeps_its_own_outcome below,
+    not by this test; an earlier docstring claimed otherwise.
+    """
+    config = _seed_coord_message(home)
+    from techne.core.database import connect
+    from techne.core.extension_state import get_state
+
+    _run(monkeypatch, capsys, _payload())
+
+    conn = connect(config.db_path)
+    try:
+        marker = (get_state(conn, "hook:post_tool_use:last_run") or {})
+    finally:
+        conn.close()
+    assert marker.get("outcome") == "ok"
+    assert marker.get("detail") == "WebFetch"
+
+
+def test_capture_disabled_subagent_call_keeps_its_own_outcome(home, monkeypatch, capsys):
+    """`and outcome == "ok"` at the capture site, pinned.
+
+    Without that clause a subagent call relabels the marker `ok:no-inject-subagent`
+    even when the capture rail is switched OFF — an `ok:` marker standing over a
+    dead rail, which is the green-marker-over-a-disabled-thing shape AGENTS.md
+    opens with. Measured both ways on a capture-disabled subagent call:
+
+        clause present: {'outcome': 'noop:capture-disabled', 'detail': 'WebFetch'}
+        clause removed: {'outcome': 'ok:no-inject-subagent',  'detail': 'WebFetch'}
+
+    The sibling test above named this clause in its docstring while exercising a
+    PARENT call, where `agent_id` is falsy and the clause is never reached — so
+    nothing held it: deleting it passed 405 tests. Same defect class as the
+    overstated mutation claim this file has already produced once, one test down.
+    """
+    import yaml
+
+    (home / "config.yaml").write_text(yaml.safe_dump({"hooks": {"post_tool_use": False}}))
+
+    from techne.config import Config
+    from techne.core.database import connect, init_db
+    from techne.core.extension_state import get_state
+    from techne.core.state import ensure_session
+
+    config = Config.load()
+    init_db(config.db_path)
+    ensure_session(config.db_path, PARENT)
+
+    _run(monkeypatch, capsys, _payload(agent_id="a585d495d3728378d"))
+
+    conn = connect(config.db_path)
+    try:
+        marker = get_state(conn, "hook:post_tool_use:last_run") or {}
+    finally:
+        conn.close()
+    assert marker.get("outcome") == "noop:capture-disabled", (
+        "a subagent call relabelled the marker ok: while the capture rail was "
+        "disabled — the `and outcome == \"ok\"` guard is gone"
+    )
