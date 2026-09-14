@@ -1015,6 +1015,13 @@ def main():
             outcome = "ok"
         else:
             outcome = "noop:filtered"
+        # A subagent call is recorded HERE, in the write that already happens, rather
+        # than by a second write from the gate below (techne#930 review, nit 3). The
+        # gate exits before the rails, so this is the only marker that path writes —
+        # one connection, one upsert, and it still carries detail=tool_name. Capture
+        # is unaffected either way: this names the call, it does not decide it.
+        if data.get("agent_id") and outcome == "ok":
+            outcome = "ok:no-inject-subagent"
         record_hook_run(config.db_path, HOOK_NAME, outcome=outcome, detail=tool_name)
     except Exception as e:
         # Catches HookTimeout too: a capture that ran out of budget is a DROPPED
@@ -1031,6 +1038,77 @@ def main():
     # Mid-session codex freshness (techne#301) — best-effort, opt-in. Runs BEFORE
     # the edit rail so the blast-radius query sees the just-edited symbol.
     _maybe_reindex_codex(config, tool_name, tool_input)
+
+    # NOTHING IS INJECTED INTO A SUBAGENT (techne#929).
+    #
+    # A subagent presents the PARENT'S session_id, so every lookup below keyed on
+    # session_id resolves to the parent's state: _inject_coord_messages reads the
+    # PARENT'S inbox and hands a peer's message to the subagent. Measured — 15
+    # WebFetch calls made by `research-readonly` subagents on 2026-09-14 are
+    # recorded in the observation ledger under the parent session id.
+    #
+    # WHY THAT IS NOT MERELY UNTIDY. `research-readonly` exists to read untrusted
+    # third-party pages, and its sandbox is built by REMOVING tools: no Bash, no
+    # store access, no MCP, and no `Read` specifically to close the local-read ->
+    # WebFetch exfiltration path. It keeps WebFetch. These rails put our internal
+    # state into that agent's context by a route none of those removals touch, so
+    # the sandbox's own premise does not hold while they fire. It was found
+    # because a subagent volunteered that it had been handed a peer coordination
+    # message and had declined to act on it; behaving well is not a control.
+    #
+    # Coord traffic is the CHEAP version of this. Due reminders carry project
+    # plans and standing intentions, and the blast-radius rail carries our code
+    # graph. Per-turn recall — which reads the knowledge store, and is the
+    # expensive version — is NOT affected and does not need this guard: it rides
+    # UserPromptSubmit, and a subagent never submits a user prompt. Measured on
+    # 2026-09-14: 8 per_turn_recall injections for a session whose tool calls that
+    # day numbered in the dozens, i.e. once per user prompt.
+    #
+    # THE SIGNAL IS `agent_id`, AND ONLY `agent_id`. Both fields are documented at
+    # code.claude.com/docs/en/hooks, and they do NOT mean the same thing:
+    #
+    #   agent_id    "Present only when the hook fires inside a subagent call."
+    #   agent_type  "Present when the session uses --agent OR the hook fires inside
+    #                a subagent."
+    #
+    # So `agent_type` is ALSO set for an ordinary top-level session started with
+    # `--agent`. Gating on it would silently stop delivering coord messages and due
+    # reminders to a real session the operator is sitting in front of — the push
+    # half of techne#376 turned off for anyone who uses that flag, failing exactly
+    # the way this file is meant to prevent: quietly, with everything still
+    # reporting healthy.
+    #
+    # Round 1 of this PR shipped `agent_id or agent_type` and a test asserting that
+    # agent_type alone suppresses — a test pinning the defect. Caught by Temperance
+    # reading the doc table rather than the prose sentence above it, which says
+    # "when running with --agent OR inside a subagent" and is easy to read as one
+    # condition. The test below now asserts the opposite and is the guard against
+    # re-widening this.
+    #
+    # session_id cannot be used for any of this — it is the same value in a
+    # subagent as in its parent, which is the bug.
+    #
+    # FAILS OPEN ON A CLIENT OLD ENOUGH NOT TO SEND THOSE FIELDS, and that is
+    # stated rather than papered over. A second signal was considered and
+    # rejected: comparing transcript_path's stem to session_id would catch it
+    # without the documented fields, but a subagent's transcript_path was never
+    # measured to differ, and a guard nobody has watched fire is not a guard.
+    #
+    # Suppression costs nothing that is not recovered elsewhere. A coord message
+    # stays UNREAD in the ledger, so it still reaches the parent's banner and
+    # techne_inbox; a due reminder stays due. Observation capture above is
+    # untouched — this gates only what is written back into a context.
+    if data.get("agent_id"):
+        # NO WRITE HERE. record_hook_run upserts one key per hook, so a marker
+        # written at this point would REPLACE the one the capture block wrote ~75
+        # lines above and drop its detail=tool_name — two connections and two writes
+        # per subagent tool call, on a path _liveness is explicit about keeping to
+        # one, the second discarding what the first held. Round 1 of this PR claimed
+        # to have "folded into one write" and had in fact only stopped the second
+        # write from losing `detail`; there were still two. The fold is real now: the
+        # subagent fact is set on `outcome` at the capture site, which was always
+        # going to write anyway.
+        sys.exit(0)
 
     # Assemble additionalContext from every contributor, then emit at most once
     # (a hook can carry only one additionalContext). Each contributor is
