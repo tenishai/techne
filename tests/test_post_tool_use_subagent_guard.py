@@ -7,9 +7,14 @@ inbox and hands a peer's message to the subagent. The sandbox around
 Read); this rail writes into that agent's context by a route none of those
 removals touch, and the agent keeps WebFetch.
 
-The discriminator is `agent_id` / `agent_type`, documented as present only inside
-a subagent. It cannot be session_id — that is the same value, which is the whole
-bug.
+The discriminator is `agent_id` and ONLY `agent_id`. It is documented as present
+only inside a subagent call, whereas `agent_type` is ALSO set for a top-level
+session started with `--agent` — so gating on `agent_type` would silently stop
+delivering to a real session with a person in front of it. An earlier revision of
+this file asserted the opposite; see test_agent_type_alone_does_NOT_suppress.
+
+It cannot be session_id — that is the same value in a subagent as in its parent,
+which is the whole bug.
 
 The first test here is the control: without those fields the message IS injected.
 Without it the rest would pass against a hook that had simply stopped working.

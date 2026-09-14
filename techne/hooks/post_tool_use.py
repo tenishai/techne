@@ -1015,6 +1015,13 @@ def main():
             outcome = "ok"
         else:
             outcome = "noop:filtered"
+        # A subagent call is recorded HERE, in the write that already happens, rather
+        # than by a second write from the gate below (techne#930 review, nit 3). The
+        # gate exits before the rails, so this is the only marker that path writes —
+        # one connection, one upsert, and it still carries detail=tool_name. Capture
+        # is unaffected either way: this names the call, it does not decide it.
+        if data.get("agent_id") and outcome == "ok":
+            outcome = "ok:no-inject-subagent"
         record_hook_run(config.db_path, HOOK_NAME, outcome=outcome, detail=tool_name)
     except Exception as e:
         # Catches HookTimeout too: a capture that ran out of budget is a DROPPED
@@ -1092,28 +1099,15 @@ def main():
     # techne_inbox; a due reminder stays due. Observation capture above is
     # untouched — this gates only what is written back into a context.
     if data.get("agent_id"):
-        # ONE WRITE, AND IT CARRIES WHAT THE CAPTURE WRITE CARRIED. record_hook_run
-        # upserts a single key, so a second call here would REPLACE the ok / noop
-        # outcome recorded ~60 lines above and drop its detail=tool_name — two
-        # connections and two writes per subagent tool call, on a hot path _liveness
-        # is explicit about keeping to one, with the second discarding what the first
-        # held. Liveness itself was never at risk (check_hooks reads only `ts`), so
-        # this is presentation; it is still a regression in what the marker says.
-        #
-        # `config.db_path`, not the local `db` — that name is bound only inside the
-        # early-exit exception branches above and is UNBOUND on this path. Caught by
-        # reading the binding sites rather than by running it, because a NameError
-        # here would surface to the user as a failed tool call, which is exactly what
-        # a memory hook must never do (techne#166).
-        try:
-            record_hook_run(
-                config.db_path,
-                HOOK_NAME,
-                outcome="ok:no-inject-subagent",
-                detail=tool_name,
-            )
-        except Exception:  # noqa: BLE001 — bookkeeping must never break the host
-            pass
+        # NO WRITE HERE. record_hook_run upserts one key per hook, so a marker
+        # written at this point would REPLACE the one the capture block wrote ~75
+        # lines above and drop its detail=tool_name — two connections and two writes
+        # per subagent tool call, on a path _liveness is explicit about keeping to
+        # one, the second discarding what the first held. Round 1 of this PR claimed
+        # to have "folded into one write" and had in fact only stopped the second
+        # write from losing `detail`; there were still two. The fold is real now: the
+        # subagent fact is set on `outcome` at the capture site, which was always
+        # going to write anyway.
         sys.exit(0)
 
     # Assemble additionalContext from every contributor, then emit at most once
