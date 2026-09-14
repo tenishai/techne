@@ -149,7 +149,8 @@ never given"*. Cause 2 names something only your own machine knows and that this
 particular agent was never handed — a peer session's branch name, a reminder you wrote, a
 worktree path. Cause 1 can also carry your private names (that is what makes it look
 alarming), so "it mentions our infrastructure" separates nothing; what separates them is
-whether the content was ever routed *to this agent*.
+whether the content was in *this agent's own context before the fetch* — a summarizer can
+only re-emit what was already there.
 
 If you cannot tell from the content, the thing to check is your own injection path: list
 what your hooks write into a tool result, and ask whether any of it is keyed on something

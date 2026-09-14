@@ -242,8 +242,13 @@ def test_subagent_marker_carries_the_capture_sites_detail(home, monkeypatch, cap
 
 
 def test_parent_marker_is_unaffected(home, monkeypatch, capsys):
-    """The fold must not relabel a normal call. `and outcome == "ok"` at the capture
-    site is what keeps a filtered or capture-disabled call carrying its own outcome."""
+    """The fold must not relabel an ordinary parent call.
+
+    This exercises the PARENT path only — `agent_id` is falsy, so the capture
+    site's `and outcome == "ok"` clause is never reached here. That clause is
+    pinned by test_capture_disabled_subagent_call_keeps_its_own_outcome below,
+    not by this test; an earlier docstring claimed otherwise.
+    """
     config = _seed_coord_message(home)
     from techne.core.database import connect
     from techne.core.extension_state import get_state
@@ -257,3 +262,45 @@ def test_parent_marker_is_unaffected(home, monkeypatch, capsys):
         conn.close()
     assert marker.get("outcome") == "ok"
     assert marker.get("detail") == "WebFetch"
+
+
+def test_capture_disabled_subagent_call_keeps_its_own_outcome(home, monkeypatch, capsys):
+    """`and outcome == "ok"` at the capture site, pinned.
+
+    Without that clause a subagent call relabels the marker `ok:no-inject-subagent`
+    even when the capture rail is switched OFF — an `ok:` marker standing over a
+    dead rail, which is the green-marker-over-a-disabled-thing shape AGENTS.md
+    opens with. Measured both ways on a capture-disabled subagent call:
+
+        clause present: {'outcome': 'noop:capture-disabled', 'detail': 'WebFetch'}
+        clause removed: {'outcome': 'ok:no-inject-subagent',  'detail': 'WebFetch'}
+
+    The sibling test above named this clause in its docstring while exercising a
+    PARENT call, where `agent_id` is falsy and the clause is never reached — so
+    nothing held it: deleting it passed 405 tests. Same defect class as the
+    overstated mutation claim this file has already produced once, one test down.
+    """
+    import yaml
+
+    (home / "config.yaml").write_text(yaml.safe_dump({"hooks": {"post_tool_use": False}}))
+
+    from techne.config import Config
+    from techne.core.database import connect, init_db
+    from techne.core.extension_state import get_state
+    from techne.core.state import ensure_session
+
+    config = Config.load()
+    init_db(config.db_path)
+    ensure_session(config.db_path, PARENT)
+
+    _run(monkeypatch, capsys, _payload(agent_id="a585d495d3728378d"))
+
+    conn = connect(config.db_path)
+    try:
+        marker = get_state(conn, "hook:post_tool_use:last_run") or {}
+    finally:
+        conn.close()
+    assert marker.get("outcome") == "noop:capture-disabled", (
+        "a subagent call relabelled the marker ok: while the capture rail was "
+        "disabled — the `and outcome == \"ok\"` guard is gone"
+    )
