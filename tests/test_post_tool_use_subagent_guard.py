@@ -194,7 +194,7 @@ def test_capture_still_happens_for_a_subagent_call(home, monkeypatch, capsys):
     )
 
 
-def test_subagent_path_writes_exactly_one_liveness_marker(home, monkeypatch, capsys):
+def test_subagent_marker_carries_the_capture_sites_detail(home, monkeypatch, capsys):
     """The write-fold, pinned — the regression most likely to return quietly.
 
     record_hook_run upserts ONE key per hook, so a marker written from the gate
@@ -206,10 +206,21 @@ def test_subagent_path_writes_exactly_one_liveness_marker(home, monkeypatch, cap
     done once on this branch: an earlier commit said "folded into one write" having
     only stopped the second write from losing `detail`. There were still two.
 
-    Asserted on the OBSERVABLE RESULT — the marker carries both the subagent fact
-    and the tool name — rather than by counting calls, so it survives refactoring
-    and still fails if the fold is undone (the gate's own write would overwrite
-    `detail`).
+    WHAT THIS DOES AND DOES NOT CATCH, stated precisely because the first version of
+    this docstring overstated it. It asserts the marker's CONTENT, not the number of
+    writes — nothing here can count connections. So:
+
+      caught      a gate-side write that omits detail=tool_name (the shape this
+                  path actually had before the fold), because it overwrites the
+                  capture site's marker and `detail` goes missing.
+      NOT caught  a gate-side write that duplicates the capture payload exactly.
+                  set_state replaces rather than merges, so an identical second
+                  write is invisible in the result. That costs a second connection
+                  and a second upsert and this test would pass.
+
+    The uncaught case is the cheaper half of the defect and the one a reader can see
+    by looking at the file; the expensive half — losing what the first write carried
+    — is the one that needs pinning, and is pinned.
     """
     config = _seed_coord_message(home)
     from techne.core.database import connect
