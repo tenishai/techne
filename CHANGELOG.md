@@ -111,15 +111,34 @@ All notable changes to techne are documented here. Format loosely follows
   vector channel is thin. The floor stays at 1 — widening it to buy this was
   measured and rejected in #829 (paraphrase recall@10 1.0 -> 0.833).
 
-  WHAT THE GATE CAN AND CANNOT SEE, stated because "the gate is unchanged" reads
-  as stronger evidence than it is (Temperance, pre-pass on 6769d73): 18 of the
-  24 `retrieval_gold.yaml` tasks pin a SINGLE-table `table:` value, so
-  `_curated_first`'s partition is all-curated or all-raw for them and the
-  function is a structural no-op — "identical" there is vacuous, not reassuring.
-  Only the 6 `negative` tasks use `table: all`. Those are the real arm, and they
-  do exercise it: instrumented, all 6 saw a mixed tail and all 6 reordered,
-  with `fpr` flat at 0.0 and recall@10 at 1.0. So the gate holds at paraphrase
-  recall@10 1.0 / MRR 0.546, and the load-bearing part of that is six tasks.
+  THE eval_vec GATE CANNOT SEE THIS CHANGE'S SCORED BEHAVIOUR, AND SAYING SO IS
+  THE POINT (Temperance, pre-passes on 6769d73 and c185975). Two independent
+  reasons, both measured rather than argued:
+
+  1. 18 of the 24 `retrieval_gold.yaml` tasks pin a SINGLE-table `table:` value
+     (`exact` knowledge x6, `paraphrase` knowledge x6, `filter`
+     knowledge/observations/threads x2 each). For those, `_curated_first`
+     partitions all-curated or all-raw and is a structural no-op, so "identical"
+     is vacuous there — including for the paraphrase 1.0 / 0.546 figure, which
+     rests on its OWN six untouched tasks and is not protected by anything here.
+  2. Only the 6 `negative` tasks use `table: all`, and they do invoke the
+     function — instrumented, 6/6 saw a mixed tail and 6/6 reordered. But the
+     three that carry `expected_keys` return their gold at RANK 1 with
+     `match_source: fts+vec`, i.e. from the vector channel. `search()` builds
+     `head` from `vec_results` first and `fts_only` excludes every key already
+     there, so `_curated_first` never touches a scored row. Their recall@10=1.0
+     would hold with or without this fix.
+
+  So the gate is evidence of NO REGRESSION and nothing more; it is not evidence
+  the change works. That evidence is the four unit tests (teeth-checked by
+  neutering the helper) and the live-store 1/6 -> 6/6 measurement, neither of
+  which is CI-gated. A gold task exercising the lexical tail at `table: all`
+  is what would close the hole, and none exists — worth its own issue.
+
+  Related, found the same way: the `negative` kill-gate asserts `fpr` only.
+  `tests/eval/test_retrieval_gate_vec.py` runs recall/MRR floors for `exact`,
+  `filter` and `paraphrase` alone, so a recall regression in those three
+  `expected_keys`-carrying negative tasks would print but not fail CI.
 
 - Thread detection no longer depends on `PYTHONHASHSEED` (#871).
   `_segment_dominant_repo` built its counts by iterating `ObsFeatures.repos` — a
