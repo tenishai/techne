@@ -18,7 +18,13 @@ from pathlib import Path
 import pytest
 
 from techne.core.database import init_db
-from techne.core.search import RRF_K, _fts_floor, _rrf_fuse, search
+from techne.core.search import (
+    RRF_K,
+    _curated_first,
+    _fts_floor,
+    _rrf_fuse,
+    search,
+)
 
 # ---- _rrf_fuse unit tests --------------------------------------------------
 
@@ -106,9 +112,7 @@ def test_search_use_vectors_false_returns_no_rrf_score(db_path, monkeypatch) -> 
     fake_fts = [
         {"source_table": "knowledge", "id": 1, "content": "hello", "rank": -1.0},
     ]
-    monkeypatch.setattr(
-        "techne.core.search.search_fts", lambda *a, **kw: fake_fts
-    )
+    monkeypatch.setattr("techne.core.search.search_fts", lambda *a, **kw: fake_fts)
     results = search(db_path, "hello", use_vectors=False)
     assert results == fake_fts
     assert "rrf_score" not in results[0]
@@ -243,18 +247,18 @@ def test_search_hybrid_respects_limit(db_path, monkeypatch) -> None:
 @pytest.mark.parametrize(
     "limit,n_fts_only,expected",
     [
-        (20, 50, 1),   # DOES NOT SCALE with the page — see the ablation below
-        (10, 50, 1),   # techne_recall / techne_search
-        (5, 50, 1),    # smallest page the floor must survive rounding on. NOT
-                       # "the per-turn rail's page" — the rail calls search() at
-                       # k * _RESEND_OVERFETCH = 15 (#829 r3).
+        (20, 50, 1),  # DOES NOT SCALE with the page — see the ablation below
+        (10, 50, 1),  # techne_recall / techne_search
+        (5, 50, 1),  # smallest page the floor must survive rounding on. NOT
+        # "the per-turn rail's page" — the rail calls search() at
+        # k * _RESEND_OVERFETCH = 15 (#829 r3).
         (3, 50, 1),
         (2, 50, 1),
-        (1, 50, 0),    # no room to reserve: the one slot stays with vec (#401)
-        (10, 1, 1),    # never reserve more than there is to place — UNFALSIFIABLE
-                       # at floor 1 (any positive count gives 1); kept for the
-                       # day the floor widens. See _fts_floor (#829 r2).
-        (10, 0, 0),    # nothing lexical-only -> page identical to pre-#827
+        (1, 50, 0),  # no room to reserve: the one slot stays with vec (#401)
+        (10, 1, 1),  # never reserve more than there is to place — UNFALSIFIABLE
+        # at floor 1 (any positive count gives 1); kept for the
+        # day the floor widens. See _fts_floor (#829 r2).
+        (10, 0, 0),  # nothing lexical-only -> page identical to pre-#827
         (0, 5, 0),
     ],
 )
@@ -448,7 +452,13 @@ def test_vec_channel_preserves_knowledge_type_through_fusion(db_path, monkeypatc
     from techne.hooks.user_prompt_submit import _build_context
 
     fake_fts = [
-        {"source_table": "knowledge", "id": 1, "knowledge_type": "fact", "content": "a", "rank": -1.0}
+        {
+            "source_table": "knowledge",
+            "id": 1,
+            "knowledge_type": "fact",
+            "content": "a",
+            "rank": -1.0,
+        }
     ]
     fake_vec = [
         {
@@ -471,3 +481,97 @@ def test_vec_channel_preserves_knowledge_type_through_fusion(db_path, monkeypatc
     assert "[decision]" in rendered, "the vec-first row rendered as something other than its kind"
     assert "[fact]" in rendered
     assert "[knowledge]" not in rendered
+
+
+def _mixed_lexical_channel():
+    """A lexical channel shaped like the live store: raw rows outrank curated.
+
+    BM25 order here is deliberately hostile — observations at ranks 1-2 and a
+    thread at rank 3, with the only knowledge row LAST. That is not contrived:
+    an identifier appears verbatim in the short shell command that produced it
+    while the knowledge entry discussing it is thousands of characters of prose,
+    and BM25 rewards the shorter document for the same term (#831).
+    """
+    fts = [
+        {"source_table": "observation", "id": 1, "content": "raw", "rank": -9.0},
+        {"source_table": "observation", "id": 2, "content": "raw", "rank": -8.0},
+        {"source_table": "thread", "id": "t-abc", "content": "thr", "rank": -7.0},
+        {"source_table": "knowledge", "id": 3, "content": "curated", "rank": -1.0},
+    ]
+    vec = [
+        {"source_table": "knowledge", "id": i + 100, "content": str(i + 100), "distance": 0.1 * i}
+        for i in range(1, 11)
+    ]
+    return fts, vec
+
+
+def test_reserved_lexical_slot_goes_to_the_curated_row(db_path, monkeypatch) -> None:
+    """THE techne#831 REGRESSION.
+
+    #827 made the lexical channel reachable; the single reserved slot still went
+    to whatever BM25 ranked first, which on the live store is a raw command echo
+    ~16:1 of the time (46,489 observations vs 2,904 live knowledge rows,
+    measured 2026-09-15). Before this fix, 1 of 6 identifier-shaped queries put a
+    curated row in the reserved slot; after, 6 of 6 — and `ae219b5` and
+    `issue 814` both reach knowledge #1810 again, the entry #831 names as the
+    one floor=1 put out of reach.
+
+    The floor stays at 1: widening it to buy this was measured and rejected in
+    #829 (paraphrase recall@10 1.0 -> 0.833).
+    """
+    fake_fts, fake_vec = _mixed_lexical_channel()
+    monkeypatch.setattr("techne.core.search.search_fts", lambda *a, **kw: fake_fts)
+    monkeypatch.setattr("techne.core.search.search_vec", lambda *a, **kw: fake_vec)
+
+    results = search(db_path, "anything", limit=10, use_vectors=True)
+
+    lexical = [r for r in results if r["match_source"] == "fts"]
+    assert len(lexical) == 1, "the floor is 1 — see _fts_floor (#829)"
+    assert lexical[0]["source_table"] == "knowledge", (
+        "the reserved lexical slot went to a raw row — #831 is back"
+    )
+    assert lexical[0]["id"] == 3
+
+
+def test_lexical_tail_keeps_raw_rows_when_nothing_curated_matched(db_path, monkeypatch) -> None:
+    """A curated-first ORDER must not become a curated-only FILTER.
+
+    An identifier that exists only in the raw trace — a one-off sha nobody ever
+    wrote a knowledge entry about — must still reach the caller. Reordering an
+    empty curated partition is a no-op, which is the property that keeps this
+    from silently deleting the only answer.
+    """
+    fake_fts, fake_vec = _mixed_lexical_channel()
+    fake_fts = [r for r in fake_fts if r["source_table"] != "knowledge"]
+    monkeypatch.setattr("techne.core.search.search_fts", lambda *a, **kw: fake_fts)
+    monkeypatch.setattr("techne.core.search.search_vec", lambda *a, **kw: fake_vec)
+
+    results = search(db_path, "anything", limit=10, use_vectors=True)
+
+    lexical = [r for r in results if r["match_source"] == "fts"]
+    assert len(lexical) == 1
+    assert lexical[0]["source_table"] == "observation"
+
+
+def test_curated_first_preserves_bm25_order_within_each_partition() -> None:
+    """The partition is STABLE — this reorders the tail, it never reranks.
+
+    Two curated rows in BM25 order must come back in BM25 order, and the raw
+    rows must keep theirs behind them. A sort that lost relative order would
+    still satisfy the placement tests above.
+    """
+    rows = [
+        {"source_table": "observation", "id": 1, "rank": -9.0},
+        {"source_table": "knowledge", "id": 2, "rank": -8.0},
+        {"source_table": "observation", "id": 3, "rank": -7.0},
+        {"source_table": "knowledge", "id": 4, "rank": -6.0},
+    ]
+    assert [r["id"] for r in _curated_first(rows)] == [2, 4, 1, 3]
+
+
+def test_curated_first_is_identity_when_nothing_curated() -> None:
+    rows = [
+        {"source_table": "observation", "id": 1, "rank": -9.0},
+        {"source_table": "thread", "id": "t-a", "rank": -8.0},
+    ]
+    assert _curated_first(rows) == rows
