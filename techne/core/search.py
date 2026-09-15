@@ -1116,6 +1116,47 @@ def _fts_floor(limit: int, n_fts_only: int) -> int:
     return min(n_fts_only, 1)
 
 
+#: Tables whose rows are the distilled answer rather than the raw trace of one.
+#: `_curated_first` promotes these ahead of the rest of the lexical tail.
+_CURATED_TABLES = frozenset({"knowledge"})
+
+
+def _curated_first(fts_only: list[dict]) -> list[dict]:
+    """Order the lexical tail so a curated row wins the reserved slot (#831).
+
+    #827 made the lexical channel reachable; it did not make it USEFUL, because
+    `search_fts` ranks all three tables in one BM25 pool and the pool is ~16:1
+    against the curated layer (measured 2026-09-15 on the live store: 46,489
+    observations, 2,904 live knowledge, 2,458 threads). Raw rows also match
+    identifiers BETTER on BM25 terms — a sha or a config key appears verbatim in
+    the short shell command that produced it, while the knowledge entry
+    discussing it is thousands of characters of surrounding prose, and BM25
+    rewards the shorter document for the same term. So with `_fts_floor` pinned
+    at 1, the single reserved slot lands on a command echo and the curated entry
+    behind it never reaches the caller. Measured on six identifier queries the
+    day this shipped: rank 1 was a non-knowledge row in 4 of 6.
+
+    WHY REORDER AND NOT FILTER. Dropping non-curated rows would also take them
+    out of the SLACK the caller gets when the vector channel is thin — the
+    `head + tail` composition deliberately lets the tail spend unused head
+    budget. Reordering changes only who wins the SCARCE reserved slots and
+    leaves the abundant case exactly as it was.
+
+    WHY NOT WIDEN THE FLOOR INSTEAD. That trade was measured and rejected in
+    #829: a floor of 2+ costs the #399/#401 paraphrase arm a gold (recall@10
+    1.0 -> 0.833). This buys lexical precision without spending a head slot,
+    which is why it can be done at all.
+
+    The partition is STABLE on both sides, so BM25 order is preserved within
+    curated rows and within the rest; this reorders the tail and never reranks.
+    """
+    curated = [r for r in fts_only if r.get("source_table") in _CURATED_TABLES]
+    if not curated:
+        return fts_only
+    rest = [r for r in fts_only if r.get("source_table") not in _CURATED_TABLES]
+    return curated + rest
+
+
 def search(
     db_path: Path,
     query: str,
@@ -1269,7 +1310,7 @@ def search(
         head.append(row)
 
     tail: list[dict] = []
-    for r in fts_only:
+    for r in _curated_first(fts_only):
         key = (r["source_table"], r["id"])
         if key in seen:
             continue

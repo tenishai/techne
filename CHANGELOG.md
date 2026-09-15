@@ -88,6 +88,30 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- **The reserved lexical slot now goes to the curated row** (#831). #827 made the
+  lexical channel reachable by reserving one tail slot; it did not make it useful.
+  `search_fts` ranks observations, knowledge and threads in one BM25 pool, and the
+  pool is ~16:1 against the curated layer (measured 2026-09-15 on the live store:
+  46,489 observations vs 2,904 live knowledge rows). Raw rows also match
+  identifiers *better* — a sha appears verbatim in the short shell command that
+  produced it, while the knowledge entry discussing it is thousands of characters
+  of prose, and BM25 rewards the shorter document for the same term. So the one
+  reserved slot landed on a command echo and the entry that answered the question
+  never reached the caller.
+
+  `_curated_first` in `core/search.py` orders the lexical tail so a knowledge row
+  takes the reserved slot when one matched at all. Measured on six
+  identifier-shaped queries against the live store: a curated row held the
+  reserved slot in **1 of 6** before, **6 of 6** after — and `ae219b5` and
+  `issue 814` both reach knowledge #1810 again, the entry #831 names as the one
+  the shipped floor put out of reach.
+
+  It **reorders, never filters**: an identifier that exists only in the raw trace
+  still reaches the caller, and non-curated rows still spend the slack when the
+  vector channel is thin. The floor stays at 1 — widening it to buy this was
+  measured and rejected in #829 (paraphrase recall@10 1.0 -> 0.833). The
+  `pytest -m eval_vec` gate is unchanged at paraphrase recall@10 1.0 / MRR 0.546.
+
 - Thread detection no longer depends on `PYTHONHASHSEED` (#871).
   `_segment_dominant_repo` built its counts by iterating `ObsFeatures.repos` — a
   **set** — so the dict's insertion order was hash-seeded and `max()` returned the
