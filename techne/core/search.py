@@ -1125,17 +1125,25 @@ def _curated_first(fts_only: list[dict]) -> list[dict]:
     """Order the lexical tail so a curated row wins the reserved slot (#831).
 
     #827 made the lexical channel reachable; it did not make it USEFUL, because
-    `search_fts` ranks all three tables in one BM25 pool and the pool is ~16:1
-    against the curated layer (measured 2026-09-15 on the live store: 46,489
-    observations, 2,904 live knowledge, 2,458 threads). Raw rows also match
-    identifiers BETTER on BM25 terms — a sha or a config key appears verbatim in
-    the short shell command that produced it, while the knowledge entry
-    discussing it is thousands of characters of surrounding prose, and BM25
-    rewards the shorter document for the same term. So with `_fts_floor` pinned
-    at 1, the single reserved slot lands on a command echo and the curated entry
-    behind it never reaches the caller. Measured on six identifier-shaped queries
-    through `search(table="all", limit=10)` the day this shipped: a curated row
-    held the reserved slot in 1 of 6 before and 6 of 6 after.
+    the curated row loses the slot on the CONFIDENCE-DECAY TIEBREAK. An earlier
+    draft of this docstring blamed one shared BM25 pool and BM25's preference for
+    the shorter document; Prudence measured both dead (#934 r1). There is no
+    shared pool — `_fts_match_rows` queries each table separately under its own
+    `LIMIT candidate_limit` — and `_rerank` min-max normalises `rank` within each
+    `source_table`, so each table's best row reaches `_combined` at
+    `_norm_bm25 = 1.0` and the shorter-document advantage is cancelled before the
+    tables compete. The tiebreak then decides it: `_knowledge_decay_score`
+    returns a flat 1.0 for a row carrying no `confidence_numeric`, so an
+    observation collects the whole `confidence_decay_weight` and a
+    `medium`-confidence knowledge row collects 0.6 of it — 1.1000 against 1.0600
+    at equal recency. The ~16:1 corpus ratio (measured 2026-09-15 on the live
+    store: 46,489 observations, 2,904 live knowledge, 2,458 threads) acts through
+    order statistics on top of that, not through a shared pool. So with
+    `_fts_floor` pinned at 1, the single reserved slot lands on a command echo
+    and the curated entry behind it never reaches the caller. Measured on six
+    identifier-shaped queries through `search(table="all", limit=10)` the day
+    this shipped: a curated row held the reserved slot in 1 of 6 before and 6 of
+    6 after.
 
     THAT IS ONE MEASUREMENT AND AN EARLIER DRAFT CITED A DIFFERENT ONE HERE
     (Temperance, pre-pass on 6769d73). The draft said "rank 1 was a non-knowledge

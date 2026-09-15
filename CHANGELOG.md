@@ -90,14 +90,26 @@ All notable changes to techne are documented here. Format loosely follows
 
 - **The reserved lexical slot now goes to the curated row** (#831). #827 made the
   lexical channel reachable by reserving one tail slot; it did not make it useful.
-  `search_fts` ranks observations, knowledge and threads in one BM25 pool, and the
-  pool is ~16:1 against the curated layer (measured 2026-09-15 on the live store:
-  46,489 observations vs 2,904 live knowledge rows). Raw rows also match
-  identifiers *better* — a sha appears verbatim in the short shell command that
-  produced it, while the knowledge entry discussing it is thousands of characters
-  of prose, and BM25 rewards the shorter document for the same term. So the one
-  reserved slot landed on a command echo and the entry that answered the question
-  never reached the caller.
+  The curated row loses the slot on the CONFIDENCE-DECAY TIEBREAK. The two
+  explanations this entry gave before — one shared BM25 pool, and BM25 favouring
+  the shorter document — are both wrong; Prudence measured them dead (#934 r1).
+  There is no shared pool: `_fts_match_rows` issues a separate query per table,
+  each under its own `LIMIT candidate_limit` (`search.py:336`/`:363`/`:412`), so
+  the curated layer has its own quota and the corpus ratio cannot starve it out
+  of the candidate set. Raw BM25 magnitude is normalised away before the tables
+  compete: `_rerank` min–max normalises `rank` WITHIN each `source_table`
+  (`:252-272`, added by techne#56 for exactly this reason), so each table's best
+  row arrives at `_combined` with `_norm_bm25 = 1.0`. What decides it is
+  `:285-286`, where `_knowledge_decay_score` returns a flat `1.0` for any row
+  carrying no `confidence_numeric` — so an observation collects the whole
+  `confidence_decay_weight` (0.1) while a `medium`-confidence knowledge row
+  collects 0.6 of it, and at equal recency and equal normalised BM25 the
+  observation scores 1.1000 against the knowledge row's 1.0600. The ~16:1 corpus
+  ratio (measured 2026-09-15 on the live store: 46,489 observations vs 2,904 live
+  knowledge rows) still pushes the same way, but as ORDER STATISTICS rather than
+  as a shared pool — the best of 20 drawn from 46k is better-selected than the
+  best of 20 drawn from 2.9k. So the one reserved slot landed on a command echo
+  and the entry that answered the question never reached the caller.
 
   `_curated_first` in `core/search.py` orders the lexical tail so a knowledge row
   takes the reserved slot when one matched at all. Measured on six
@@ -138,8 +150,9 @@ All notable changes to techne are documented here. Format loosely follows
 
   So the gate is evidence of NO REGRESSION and nothing more; it is not evidence
   the change works. That evidence is the four unit tests (teeth-checked by
-  neutering the helper) and the live-store 1/6 -> 6/6 measurement, neither of
-  which is CI-gated. A gold task exercising the lexical tail at `table: all`
+  neutering the helper), which carry no marker and DO run in CI's default
+  `pytest -q -rs -n 4` step, plus the live-store 1/6 -> 6/6 measurement, which
+  does not. A gold task exercising the lexical tail at `table: all`
   is what would close the hole, and none exists — worth its own issue.
 
   Related, found the same way: the `negative` kill-gate asserts `fpr` only.
