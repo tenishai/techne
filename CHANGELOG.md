@@ -121,13 +121,20 @@ All notable changes to techne are documented here. Format loosely follows
      partitions all-curated or all-raw and is a structural no-op, so "identical"
      is vacuous there — including for the paraphrase 1.0 / 0.546 figure, which
      rests on its OWN six untouched tasks and is not protected by anything here.
-  2. Only the 6 `negative` tasks use `table: all`, and they do invoke the
-     function — instrumented, 6/6 saw a mixed tail and 6/6 reordered. But the
-     three that carry `expected_keys` return their gold at RANK 1 with
-     `match_source: fts+vec`, i.e. from the vector channel. `search()` builds
-     `head` from `vec_results` first and `fts_only` excludes every key already
-     there, so `_curated_first` never touches a scored row. Their recall@10=1.0
-     would hold with or without this fix.
+  2. Only the 6 `negative` tasks use `table: all`, and on the SEEDED GOLD DB the
+     gate actually runs, `_curated_first` never reorders anything: 6 calls, 4
+     with an empty lexical tail, **0 mixed tails, 0 reorders**. The three tasks
+     carrying `expected_keys` return their gold at rank 1 with
+     `match_source: fts+vec` — both channels, so it is served from `head`, and
+     `fts_only` excludes every key already there. Their recall@10=1.0 holds with
+     or without this fix.
+
+     AN EARLIER DRAFT OF THIS ENTRY CLAIMED "6/6 saw a mixed tail and 6/6
+     reordered", AND THAT WAS MEASURED AGAINST THE WRONG DATABASE — the live
+     `~/.techne` store, using the gold set's *queries*. Different corpus,
+     opposite answer. Temperance flagged the number RISKY on two passes for
+     precisely the reason that it was not reproducible by reading code; running
+     her command is what caught it.
 
   So the gate is evidence of NO REGRESSION and nothing more; it is not evidence
   the change works. That evidence is the four unit tests (teeth-checked by
