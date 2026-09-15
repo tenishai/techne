@@ -1063,12 +1063,29 @@ def _fts_floor(limit: int, n_fts_only: int) -> int:
     observation instead. So the choice here is not "1 is free and 3 is costly",
     it is "3 costs a gold on the paraphrase arm to buy a store-dependent
     lexical hit". The reason to refuse that trade is that the shortfall has a
-    DIFFERENT cause and therefore a different fix: `search_fts` orders by
-    `recency_weight=0.3 x recency + 0.7 x BM25`, and the live pool is 36.7k
-    observations against 2.6k knowledge rows, so which fts-only row wins rank 1
-    is decided by the reranker, not by how many slots it is handed. A wider
-    floor buys more lottery tickets without changing the draw. That is techne#831,
-    and it is where a fix for identifier recall belongs.
+    DIFFERENT cause and therefore a different fix. `_rerank` orders by
+    `0.3 x recency + 0.7 x norm_bm25 + 0.1 x decay` — :279 PLUS :286 — and it is
+    the third term, absent from the formula this docstring used to state, that
+    decides the case. Each table is queried under its own `LIMIT
+    candidate_limit` and `norm_bm25` is min-max normalised WITHIN each
+    `source_table`, so on an identifier query the best observation and the best
+    knowledge row commonly arrive tied at 1.0 on both of the first two terms;
+    `_knowledge_decay_score` then hands the observation a flat 1.0 (it carries no
+    `confidence_numeric`) against AT MOST 0.9 for a `high`-confidence knowledge
+    row, and that margin is the whole story. THE TERM IS CONFIDENCE TIMES AGE,
+    not confidence alone: `decay_score` is `confidence_numeric * 0.5 **
+    (days_since_confirmed / half_life_days)` at a 30-day half-life, so a
+    `high` row long unconfirmed decays toward 0 and the margin widens toward the
+    full 0.1000 — a FRESH `medium` (0.0400) beats a 30-day-old `high` (0.0550),
+    which is the point of the term. On THIS store the margin is 0.0100 and
+    stable, because 2,823 of 2,914 live knowledge rows carry a NULL
+    `last_confirmed_at` and take `decay_score`'s no-timestamp branch; see the
+    schema note below. Measured on the live store over six identifier-shaped
+    queries (Prudence, #934 r2): on four of six the BM25 and recency deltas are
+    both exactly 0.0000. So which fts-only row wins rank 1 is
+    decided by the reranker, not by how many slots it is handed. A wider floor
+    buys more lottery tickets without changing the draw. That is techne#831, and
+    it is where a fix for identifier recall belongs.
 
     At ``limit=1`` there is no room to reserve and the single slot goes to the
     vector channel, preserving #401's behaviour on a one-row page. At
@@ -1114,6 +1131,72 @@ def _fts_floor(limit: int, n_fts_only: int) -> int:
     if limit <= 1 or n_fts_only <= 0:
         return 0
     return min(n_fts_only, 1)
+
+
+#: Tables whose rows are the distilled answer rather than the raw trace of one.
+#: `_curated_first` promotes these ahead of the rest of the lexical tail.
+_CURATED_TABLES = frozenset({"knowledge"})
+
+
+def _curated_first(fts_only: list[dict]) -> list[dict]:
+    """Order the lexical tail so a curated row wins the reserved slot (#831).
+
+    #827 made the lexical channel reachable; it did not make it USEFUL, because
+    the curated row loses the slot on the CONFIDENCE-DECAY TIEBREAK. An earlier
+    draft of this docstring blamed one shared BM25 pool and BM25's preference for
+    the shorter document; Prudence measured both dead (#934 r1). There is no
+    shared pool — `_fts_match_rows` queries each table separately under its own
+    `LIMIT candidate_limit` — and `_rerank` min-max normalises `rank` within each
+    `source_table`, so each table's best row reaches `_combined` at
+    `_norm_bm25 = 1.0` and the shorter-document advantage is cancelled before the
+    tables compete. The tiebreak then decides it: `_knowledge_decay_score`
+    returns a flat 1.0 for a row carrying no `confidence_numeric`, so an
+    observation collects the whole `confidence_decay_weight` and a
+    `medium`-confidence knowledge row collects 0.6 of it — 1.1000 against 1.0600
+    at equal recency, FRESHLY CONFIRMED. `medium` is only the default, and a
+    `high`/0.9 row such as #1810 collects 0.9 of the weight, narrowing the margin
+    to 0.0100 — but only while the row is fresh: the term is
+    `confidence_numeric * 0.5 ** (days_since_confirmed / half_life_days)`, so age
+    widens the margin back toward 0.1000 and a stale `high` sits WIDER than a
+    fresh `medium`. On this store the 0.0100 holds rather than drifting, because
+    2,823 of 2,914 live knowledge rows have a NULL `last_confirmed_at` and never
+    reach the decay branch at all. The ~16:1 corpus ratio (measured 2026-09-15 on the live
+    store: 46,489 observations, 2,904 live knowledge, 2,458 threads) acts through
+    order statistics on top of that, not through a shared pool. So with
+    `_fts_floor` pinned at 1, the single reserved slot lands on a command echo
+    and the curated entry behind it never reaches the caller. Measured on six
+    identifier-shaped queries through `search(table="all", limit=10)` the day
+    this shipped: a curated row held the reserved slot in 1 of 6 before and 6 of
+    6 after.
+
+    THAT IS ONE MEASUREMENT AND AN EARLIER DRAFT CITED A DIFFERENT ONE HERE
+    (Temperance, pre-pass on 6769d73). The draft said "rank 1 was a non-knowledge
+    row in 4 of 6", which came from a separate probe — `search_fts` directly at
+    limit=5, over a query set differing in one entry — and disagreed with the
+    1/6 figure in the CHANGELOG, the arch card, the PR body and the regression
+    test. Two probes of the same defect are fine; quoting one number in the
+    docstring and another everywhere else is not. The `search()` probe is the
+    one cited throughout, because it is the before/after that motivates the fix.
+
+    WHY REORDER AND NOT FILTER. Dropping non-curated rows would also take them
+    out of the SLACK the caller gets when the vector channel is thin — the
+    `head + tail` composition deliberately lets the tail spend unused head
+    budget. Reordering changes only who wins the SCARCE reserved slots and
+    leaves the abundant case exactly as it was.
+
+    WHY NOT WIDEN THE FLOOR INSTEAD. That trade was measured and rejected in
+    #829: a floor of 2+ costs the #399/#401 paraphrase arm a gold (recall@10
+    1.0 -> 0.833). This buys lexical precision without spending a head slot,
+    which is why it can be done at all.
+
+    The partition is STABLE on both sides, so BM25 order is preserved within
+    curated rows and within the rest; this reorders the tail and never reranks.
+    """
+    curated = [r for r in fts_only if r.get("source_table") in _CURATED_TABLES]
+    if not curated:
+        return fts_only
+    rest = [r for r in fts_only if r.get("source_table") not in _CURATED_TABLES]
+    return curated + rest
 
 
 def search(
@@ -1269,7 +1352,7 @@ def search(
         head.append(row)
 
     tail: list[dict] = []
-    for r in fts_only:
+    for r in _curated_first(fts_only):
         key = (r["source_table"], r["id"])
         if key in seen:
             continue

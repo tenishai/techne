@@ -88,6 +88,103 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- **The reserved lexical slot now goes to the curated row** (#831). #827 made the
+  lexical channel reachable by reserving one tail slot; it did not make it useful.
+  The curated row loses the slot on the CONFIDENCE-DECAY TIEBREAK. The two
+  explanations this entry gave before — one shared BM25 pool, and BM25 favouring
+  the shorter document — are both wrong; Prudence measured them dead (#934 r1).
+  There is no shared pool: `_fts_match_rows` issues a separate query per table,
+  each under its own `LIMIT candidate_limit` (`search.py:336`/`:363`/`:412`), so
+  the curated layer has its own quota and the corpus ratio cannot starve it out
+  of the candidate set. Raw BM25 magnitude is normalised away before the tables
+  compete: `_rerank` min–max normalises `rank` WITHIN each `source_table`
+  (`:252-272`, added by techne#56 for exactly this reason), so each table's best
+  row arrives at `_combined` with `_norm_bm25 = 1.0`. What decides it is
+  `:285-286`, where `_knowledge_decay_score` returns a flat `1.0` for any row
+  carrying no `confidence_numeric` — so an observation collects the whole
+  `confidence_decay_weight` (0.1) while a `medium`-confidence knowledge row
+  collects 0.6 of it, and at equal recency and equal normalised BM25 the
+  observation scores 1.1000 against the knowledge row's 1.0600, BOTH FRESHLY
+  CONFIRMED. That qualifier is load-bearing and an earlier draft of this entry
+  dropped it (Prudence, #934 r3): the decay term is
+  `confidence_numeric * 0.5 ** (days_since_confirmed / half_life_days)` at a
+  30-day half-life (`knowledge.py:652`, `config.py:616`), so it is confidence
+  TIMES age, and age widens the margin rather than narrowing it — a `high` row
+  30 days unconfirmed sits at 0.0550, WIDER than a fresh `medium`'s 0.0400. So
+  `high` is not intrinsically finer than `medium`; a fresh `medium` outranks a
+  stale `high`, which is exactly what the term is for.
+
+  ON THIS STORE THE DECAY HALF IS DORMANT, which is why the 0.0100 figure below
+  is stable rather than a day-zero snapshot. `last_confirmed_at` is declared
+  `NOT NULL DEFAULT CURRENT_TIMESTAMP` in the CREATE TABLE
+  (`database.py:303`), but the live column — added by ALTER on a migrated store
+  — is a plain nullable `TIMESTAMP`, and 2,823 of 2,914 live knowledge rows have
+  it NULL. Those rows take `decay_score`'s no-timestamp branch ("treat as
+  fresh") and never decay. So a FRESH install and a MIGRATED store rank
+  differently on this term; only 91 rows here decay at all. Filed separately.
+
+  With that established: `medium` is merely the default (`knowledge.py:63`), and
+  knowledge #1810 — the entry "issue 814" and "ae219b5" should reach — is
+  `high`/0.9, collecting +0.090 against an observation's +0.100, a margin of
+  0.0100. Measured on "issue 814": observation #35460 at 0.9988 against #1810 at
+  0.9888, the whole delta in the decay term (Prudence, #934 r2). #1810's
+  `last_confirmed_at` is NULL, so that figure does not drift. The fix works at
+  any margin — `_curated_first` reorders unconditionally. The ~16:1 corpus
+  ratio (measured 2026-09-15 on the live store: 46,489 observations vs 2,904 live
+  knowledge rows) still pushes the same way, but as ORDER STATISTICS rather than
+  as a shared pool — the best of 20 drawn from 46k is better-selected than the
+  best of 20 drawn from 2.9k. So the one reserved slot landed on a command echo
+  and the entry that answered the question never reached the caller.
+
+  `_curated_first` in `core/search.py` orders the lexical tail so a knowledge row
+  takes the reserved slot when one matched at all. Measured on six
+  identifier-shaped queries against the live store: a curated row held the
+  reserved slot in **1 of 6** before, **6 of 6** after — and `ae219b5` and
+  `issue 814` both reach knowledge #1810 again, the entry #831 names as the one
+  the shipped floor put out of reach.
+
+  It **reorders, never filters**: an identifier that exists only in the raw trace
+  still reaches the caller, and non-curated rows still spend the slack when the
+  vector channel is thin. The floor stays at 1 — widening it to buy this was
+  measured and rejected in #829 (paraphrase recall@10 1.0 -> 0.833).
+
+  THE eval_vec GATE CANNOT SEE THIS CHANGE'S SCORED BEHAVIOUR, AND SAYING SO IS
+  THE POINT (Temperance, pre-passes on 6769d73 and c185975). Two independent
+  reasons, both measured rather than argued:
+
+  1. 18 of the 24 `retrieval_gold.yaml` tasks pin a SINGLE-table `table:` value
+     (`exact` knowledge x6, `paraphrase` knowledge x6, `filter`
+     knowledge/observations/threads x2 each). For those, `_curated_first`
+     partitions all-curated or all-raw and is a structural no-op, so "identical"
+     is vacuous there — including for the paraphrase 1.0 / 0.546 figure, which
+     rests on its OWN six untouched tasks and is not protected by anything here.
+  2. Only the 6 `negative` tasks use `table: all`, and on the SEEDED GOLD DB the
+     gate actually runs, `_curated_first` never reorders anything: 6 calls, 4
+     with an empty lexical tail, **0 mixed tails, 0 reorders**. The three tasks
+     carrying `expected_keys` return their gold at rank 1 with
+     `match_source: fts+vec` — both channels, so it is served from `head`, and
+     `fts_only` excludes every key already there. Their recall@10=1.0 holds with
+     or without this fix.
+
+     AN EARLIER DRAFT OF THIS ENTRY CLAIMED "6/6 saw a mixed tail and 6/6
+     reordered", AND THAT WAS MEASURED AGAINST THE WRONG DATABASE — the live
+     `~/.techne` store, using the gold set's *queries*. Different corpus,
+     opposite answer. Temperance flagged the number RISKY on two passes for
+     precisely the reason that it was not reproducible by reading code; running
+     her command is what caught it.
+
+  So the gate is evidence of NO REGRESSION and nothing more; it is not evidence
+  the change works. That evidence is the four unit tests (teeth-checked by
+  neutering the helper), which carry no marker and DO run in CI's default
+  `pytest -q -rs -n 4` step, plus the live-store 1/6 -> 6/6 measurement, which
+  does not. A gold task exercising the lexical tail at `table: all`
+  is what would close the hole, and none exists — worth its own issue.
+
+  Related, found the same way: the `negative` kill-gate asserts `fpr` only.
+  `tests/eval/test_retrieval_gate_vec.py` runs recall/MRR floors for `exact`,
+  `filter` and `paraphrase` alone, so a recall regression in those three
+  `expected_keys`-carrying negative tasks would print but not fail CI.
+
 - Thread detection no longer depends on `PYTHONHASHSEED` (#871).
   `_segment_dominant_repo` built its counts by iterating `ObsFeatures.repos` — a
   **set** — so the dict's insertion order was hash-seeded and `max()` returned the
