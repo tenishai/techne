@@ -109,8 +109,17 @@ All notable changes to techne are documented here. Format loosely follows
   It **reorders, never filters**: an identifier that exists only in the raw trace
   still reaches the caller, and non-curated rows still spend the slack when the
   vector channel is thin. The floor stays at 1 — widening it to buy this was
-  measured and rejected in #829 (paraphrase recall@10 1.0 -> 0.833). The
-  `pytest -m eval_vec` gate is unchanged at paraphrase recall@10 1.0 / MRR 0.546.
+  measured and rejected in #829 (paraphrase recall@10 1.0 -> 0.833).
+
+  WHAT THE GATE CAN AND CANNOT SEE, stated because "the gate is unchanged" reads
+  as stronger evidence than it is (Temperance, pre-pass on 6769d73): 18 of the
+  24 `retrieval_gold.yaml` tasks pin a SINGLE-table `table:` value, so
+  `_curated_first`'s partition is all-curated or all-raw for them and the
+  function is a structural no-op — "identical" there is vacuous, not reassuring.
+  Only the 6 `negative` tasks use `table: all`. Those are the real arm, and they
+  do exercise it: instrumented, all 6 saw a mixed tail and all 6 reordered,
+  with `fpr` flat at 0.0 and recall@10 at 1.0. So the gate holds at paraphrase
+  recall@10 1.0 / MRR 0.546, and the load-bearing part of that is six tasks.
 
 - Thread detection no longer depends on `PYTHONHASHSEED` (#871).
   `_segment_dominant_repo` built its counts by iterating `ObsFeatures.repos` — a

@@ -1133,8 +1133,18 @@ def _curated_first(fts_only: list[dict]) -> list[dict]:
     discussing it is thousands of characters of surrounding prose, and BM25
     rewards the shorter document for the same term. So with `_fts_floor` pinned
     at 1, the single reserved slot lands on a command echo and the curated entry
-    behind it never reaches the caller. Measured on six identifier queries the
-    day this shipped: rank 1 was a non-knowledge row in 4 of 6.
+    behind it never reaches the caller. Measured on six identifier-shaped queries
+    through `search(table="all", limit=10)` the day this shipped: a curated row
+    held the reserved slot in 1 of 6 before and 6 of 6 after.
+
+    THAT IS ONE MEASUREMENT AND AN EARLIER DRAFT CITED A DIFFERENT ONE HERE
+    (Temperance, pre-pass on 6769d73). The draft said "rank 1 was a non-knowledge
+    row in 4 of 6", which came from a separate probe — `search_fts` directly at
+    limit=5, over a query set differing in one entry — and disagreed with the
+    1/6 figure in the CHANGELOG, the arch card, the PR body and the regression
+    test. Two probes of the same defect are fine; quoting one number in the
+    docstring and another everywhere else is not. The `search()` probe is the
+    one cited throughout, because it is the before/after that motivates the fix.
 
     WHY REORDER AND NOT FILTER. Dropping non-curated rows would also take them
     out of the SLACK the caller gets when the vector channel is thin — the
