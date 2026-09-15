@@ -104,15 +104,32 @@ All notable changes to techne are documented here. Format loosely follows
   carrying no `confidence_numeric` — so an observation collects the whole
   `confidence_decay_weight` (0.1) while a `medium`-confidence knowledge row
   collects 0.6 of it, and at equal recency and equal normalised BM25 the
-  observation scores 1.1000 against the knowledge row's 1.0600. THAT EXAMPLE IS
-  THE WIDE CASE: `medium` is merely the default (`knowledge.py:63`), and the rows
-  this is actually about are finer — knowledge #1810, the entry "issue 814" and
-  "ae219b5" should reach, is `high`/0.9 and collects +0.090 against an
-  observation's +0.100, a margin of 0.0100. Measured on "issue 814": observation
-  #35460 at 0.9988 against #1810 at 0.9888, the whole delta in the decay term
-  (Prudence, #934 r2). The fix works at any margin — `_curated_first` reorders
-  unconditionally — but the tiebreak is four times finer than the worked example
-  suggests. The ~16:1 corpus
+  observation scores 1.1000 against the knowledge row's 1.0600, BOTH FRESHLY
+  CONFIRMED. That qualifier is load-bearing and an earlier draft of this entry
+  dropped it (Prudence, #934 r3): the decay term is
+  `confidence_numeric * 0.5 ** (days_since_confirmed / half_life_days)` at a
+  30-day half-life (`knowledge.py:652`, `config.py:616`), so it is confidence
+  TIMES age, and age widens the margin rather than narrowing it — a `high` row
+  30 days unconfirmed sits at 0.0550, WIDER than a fresh `medium`'s 0.0400. So
+  `high` is not intrinsically finer than `medium`; a fresh `medium` outranks a
+  stale `high`, which is exactly what the term is for.
+
+  ON THIS STORE THE DECAY HALF IS DORMANT, which is why the 0.0100 figure below
+  is stable rather than a day-zero snapshot. `last_confirmed_at` is declared
+  `NOT NULL DEFAULT CURRENT_TIMESTAMP` in the CREATE TABLE
+  (`database.py:303`), but the live column — added by ALTER on a migrated store
+  — is a plain nullable `TIMESTAMP`, and 2,823 of 2,914 live knowledge rows have
+  it NULL. Those rows take `decay_score`'s no-timestamp branch ("treat as
+  fresh") and never decay. So a FRESH install and a MIGRATED store rank
+  differently on this term; only 91 rows here decay at all. Filed separately.
+
+  With that established: `medium` is merely the default (`knowledge.py:63`), and
+  knowledge #1810 — the entry "issue 814" and "ae219b5" should reach — is
+  `high`/0.9, collecting +0.090 against an observation's +0.100, a margin of
+  0.0100. Measured on "issue 814": observation #35460 at 0.9988 against #1810 at
+  0.9888, the whole delta in the decay term (Prudence, #934 r2). #1810's
+  `last_confirmed_at` is NULL, so that figure does not drift. The fix works at
+  any margin — `_curated_first` reorders unconditionally. The ~16:1 corpus
   ratio (measured 2026-09-15 on the live store: 46,489 observations vs 2,904 live
   knowledge rows) still pushes the same way, but as ORDER STATISTICS rather than
   as a shared pool — the best of 20 drawn from 46k is better-selected than the

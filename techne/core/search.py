@@ -1071,10 +1071,18 @@ def _fts_floor(limit: int, n_fts_only: int) -> int:
     `source_table`, so on an identifier query the best observation and the best
     knowledge row commonly arrive tied at 1.0 on both of the first two terms;
     `_knowledge_decay_score` then hands the observation a flat 1.0 (it carries no
-    `confidence_numeric`) against 0.9 for a `high`-confidence knowledge row, and
-    that 0.0100 is the entire margin. Measured on the live store over six
-    identifier-shaped queries (Prudence, #934 r2): on four of six the BM25 and
-    recency deltas are both exactly 0.0000. So which fts-only row wins rank 1 is
+    `confidence_numeric`) against AT MOST 0.9 for a `high`-confidence knowledge
+    row, and that margin is the whole story. THE TERM IS CONFIDENCE TIMES AGE,
+    not confidence alone: `decay_score` is `confidence_numeric * 0.5 **
+    (days_since_confirmed / half_life_days)` at a 30-day half-life, so a
+    `high` row long unconfirmed decays toward 0 and the margin widens toward the
+    full 0.1000 — a FRESH `medium` (0.0400) beats a 30-day-old `high` (0.0550),
+    which is the point of the term. On THIS store the margin is 0.0100 and
+    stable, because 2,823 of 2,914 live knowledge rows carry a NULL
+    `last_confirmed_at` and take `decay_score`'s no-timestamp branch; see the
+    schema note below. Measured on the live store over six identifier-shaped
+    queries (Prudence, #934 r2): on four of six the BM25 and recency deltas are
+    both exactly 0.0000. So which fts-only row wins rank 1 is
     decided by the reranker, not by how many slots it is handed. A wider floor
     buys more lottery tickets without changing the draw. That is techne#831, and
     it is where a fix for identifier recall belongs.
@@ -1145,9 +1153,14 @@ def _curated_first(fts_only: list[dict]) -> list[dict]:
     returns a flat 1.0 for a row carrying no `confidence_numeric`, so an
     observation collects the whole `confidence_decay_weight` and a
     `medium`-confidence knowledge row collects 0.6 of it — 1.1000 against 1.0600
-    at equal recency. That is the WIDE case: `medium` is only the default, and a
+    at equal recency, FRESHLY CONFIRMED. `medium` is only the default, and a
     `high`/0.9 row such as #1810 collects 0.9 of the weight, narrowing the margin
-    to 0.0100. The ~16:1 corpus ratio (measured 2026-09-15 on the live
+    to 0.0100 — but only while the row is fresh: the term is
+    `confidence_numeric * 0.5 ** (days_since_confirmed / half_life_days)`, so age
+    widens the margin back toward 0.1000 and a stale `high` sits WIDER than a
+    fresh `medium`. On this store the 0.0100 holds rather than drifting, because
+    2,823 of 2,914 live knowledge rows have a NULL `last_confirmed_at` and never
+    reach the decay branch at all. The ~16:1 corpus ratio (measured 2026-09-15 on the live
     store: 46,489 observations, 2,904 live knowledge, 2,458 threads) acts through
     order statistics on top of that, not through a shared pool. So with
     `_fts_floor` pinned at 1, the single reserved slot lands on a command echo
