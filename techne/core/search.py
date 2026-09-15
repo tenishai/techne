@@ -1063,12 +1063,21 @@ def _fts_floor(limit: int, n_fts_only: int) -> int:
     observation instead. So the choice here is not "1 is free and 3 is costly",
     it is "3 costs a gold on the paraphrase arm to buy a store-dependent
     lexical hit". The reason to refuse that trade is that the shortfall has a
-    DIFFERENT cause and therefore a different fix: `search_fts` orders by
-    `recency_weight=0.3 x recency + 0.7 x BM25`, and the live pool is 36.7k
-    observations against 2.6k knowledge rows, so which fts-only row wins rank 1
-    is decided by the reranker, not by how many slots it is handed. A wider
-    floor buys more lottery tickets without changing the draw. That is techne#831,
-    and it is where a fix for identifier recall belongs.
+    DIFFERENT cause and therefore a different fix. `_rerank` orders by
+    `0.3 x recency + 0.7 x norm_bm25 + 0.1 x decay` — :279 PLUS :286 — and it is
+    the third term, absent from the formula this docstring used to state, that
+    decides the case. Each table is queried under its own `LIMIT
+    candidate_limit` and `norm_bm25` is min-max normalised WITHIN each
+    `source_table`, so on an identifier query the best observation and the best
+    knowledge row commonly arrive tied at 1.0 on both of the first two terms;
+    `_knowledge_decay_score` then hands the observation a flat 1.0 (it carries no
+    `confidence_numeric`) against 0.9 for a `high`-confidence knowledge row, and
+    that 0.0100 is the entire margin. Measured on the live store over six
+    identifier-shaped queries (Prudence, #934 r2): on four of six the BM25 and
+    recency deltas are both exactly 0.0000. So which fts-only row wins rank 1 is
+    decided by the reranker, not by how many slots it is handed. A wider floor
+    buys more lottery tickets without changing the draw. That is techne#831, and
+    it is where a fix for identifier recall belongs.
 
     At ``limit=1`` there is no room to reserve and the single slot goes to the
     vector channel, preserving #401's behaviour on a one-row page. At
@@ -1136,7 +1145,9 @@ def _curated_first(fts_only: list[dict]) -> list[dict]:
     returns a flat 1.0 for a row carrying no `confidence_numeric`, so an
     observation collects the whole `confidence_decay_weight` and a
     `medium`-confidence knowledge row collects 0.6 of it — 1.1000 against 1.0600
-    at equal recency. The ~16:1 corpus ratio (measured 2026-09-15 on the live
+    at equal recency. That is the WIDE case: `medium` is only the default, and a
+    `high`/0.9 row such as #1810 collects 0.9 of the weight, narrowing the margin
+    to 0.0100. The ~16:1 corpus ratio (measured 2026-09-15 on the live
     store: 46,489 observations, 2,904 live knowledge, 2,458 threads) acts through
     order statistics on top of that, not through a shared pool. So with
     `_fts_floor` pinned at 1, the single reserved slot lands on a command echo

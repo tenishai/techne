@@ -104,7 +104,15 @@ All notable changes to techne are documented here. Format loosely follows
   carrying no `confidence_numeric` — so an observation collects the whole
   `confidence_decay_weight` (0.1) while a `medium`-confidence knowledge row
   collects 0.6 of it, and at equal recency and equal normalised BM25 the
-  observation scores 1.1000 against the knowledge row's 1.0600. The ~16:1 corpus
+  observation scores 1.1000 against the knowledge row's 1.0600. THAT EXAMPLE IS
+  THE WIDE CASE: `medium` is merely the default (`knowledge.py:63`), and the rows
+  this is actually about are finer — knowledge #1810, the entry "issue 814" and
+  "ae219b5" should reach, is `high`/0.9 and collects +0.090 against an
+  observation's +0.100, a margin of 0.0100. Measured on "issue 814": observation
+  #35460 at 0.9988 against #1810 at 0.9888, the whole delta in the decay term
+  (Prudence, #934 r2). The fix works at any margin — `_curated_first` reorders
+  unconditionally — but the tiebreak is four times finer than the worked example
+  suggests. The ~16:1 corpus
   ratio (measured 2026-09-15 on the live store: 46,489 observations vs 2,904 live
   knowledge rows) still pushes the same way, but as ORDER STATISTICS rather than
   as a shared pool — the best of 20 drawn from 46k is better-selected than the
