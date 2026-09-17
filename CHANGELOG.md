@@ -38,6 +38,32 @@ All notable changes to techne are documented here. Format loosely follows
   so a merge cannot be blocked by embedding wobble. `probe`, the other marker #895
   names, is untouched and still has no home.
 
+- **A `table="all"` page reserves head slots for curated rows** (#946). The vec-first
+  union ordered the page by cosine distance across every table, so a knowledge row
+  competed with the whole observation ledger for a slot. #827's floor and #831's
+  ordering could not help: both act on the lexical tail, and a curated row the VECTOR
+  channel found was never in it. An external evaluator measured three gold queries
+  ranking their curated answer at 1, 2 and 7 in `table="knowledge"` and losing it
+  entirely at `table="all"` (35,096 observations against 25 curated rows).
+
+  `search()` now holds `search.curated_head_slots` head positions (default 3) for the
+  best curated rows, filled from a scoped knowledge query and displacing the weakest
+  non-curated head rows one for one — the page does not grow and the tail floor is
+  untouched. An unfilled reservation costs nothing; `0` restores the previous page
+  exactly. Applies to `table="all"` only: a caller that narrowed the query gets its
+  table and nothing else.
+
+  Rows now carry `reserved_slot` (`"curated_head"` or `"lexical_tail"`) when a
+  reservation seated them, and nothing when they placed on rank — so "why is this row
+  here" is answerable without re-deriving a score. That decomposability is why this is
+  a reservation rather than a distance handicap.
+
+  Measured on the operator's live store, 12 real queries at limit 10: mean curated rows
+  per page 4.00 → 5.00, per-page minimum 1 → 3. The default of 3 comes from the
+  evaluator's k=10 sweep on their corpus, where 2 bought no recall over the status quo
+  and 5 was no better than 3; it is capped at a third of the head so a narrow page is
+  not swamped.
+
 - **`techne reflect promote --content` promotes a reviewer's edit** (#952). Review had only
   promote and discard, so a candidate stating a durable claim inside counts, ids or
   versions that go stale forced a choice between losing the claim and storing the
