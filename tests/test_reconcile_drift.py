@@ -65,7 +65,9 @@ def test_fresh_db_is_current_version(db):
         # unnoticed. It did exactly that job on #514 — this test is one of the two
         # that caught that bump, and updating it is the acknowledgement, not a
         # formality.
-        assert v == SCHEMA_VERSION == 25
+        # Bumped 25 -> 26 for techne#949: the v26 step backfills
+        # knowledge.origin_session on promoted rows from their candidates.
+        assert v == SCHEMA_VERSION == 26
         # Fresh DB already has the correct (tags/kind) triggers.
         sql = conn.execute(
             "SELECT sql FROM sqlite_master WHERE name='observations_ai'"
