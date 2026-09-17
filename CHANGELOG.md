@@ -208,7 +208,10 @@ All notable changes to techne are documented here. Format loosely follows
 
   Unpersisted threads (detection failed, or not yet repaired) are recorded as answered
   by `obs_key` at ingest and re-offered by the next empty emit if rendered and never
-  answered, as #900 does for persisted threads. The MCP ingest tool takes `obs_key`.
+  answered, as #900 does for persisted threads. `techne_reflect_ingest` takes `obs_key`,
+  names it in the tool description, and warns in its result when an answer arrives with
+  neither `thread_id` nor `obs_key` — without the key the thread stays unclaimed and emit
+  offers it again.
 
   Not fixed here: an external evaluator reported that a resumed session replays its
   parent's turns and imports them under both session ids (not reproduced here), which

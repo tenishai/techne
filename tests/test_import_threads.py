@@ -291,6 +291,40 @@ def test_mcp_ingest_claims_an_unpersisted_thread(cfg):
     assert item["obs_key"] not in offered
 
 
+def test_mcp_ingest_without_obs_key_warns(cfg):
+    """Prudence #955 r2: `obs_key` is optional over MCP, so an agent that follows the
+    tool description can answer an unpersisted thread and have it offered again. The
+    answer is still stored; the result says what happened."""
+    from techne.core.reflect import emit_reflection_pass
+    from techne.mcp_server import _techne_reflect_ingest
+
+    sid = _unpersisted_session(cfg)
+    item = emit_reflection_pass(cfg, sid)["batch"][0]
+    result = _techne_reflect_ingest(
+        {
+            "session_id": sid,
+            "thread_id": "",
+            "prompt_hash": item["prompt_hash"],
+            "response": _answer([dict(item)])[0]["raw_response"],
+        },
+        cfg,
+    )
+    assert result["candidates_written"] >= 1, "the answer must still be stored"
+    assert "obs_key" in result.get("warning", ""), (
+        "ingesting an unpersisted thread without obs_key must say the thread stays unclaimed"
+    )
+    assert item["obs_key"] in [i["obs_key"] for i in emit_reflection_pass(cfg, sid)["batch"]]
+
+
+def test_the_mcp_tool_description_names_obs_key():
+    """The sentence an agent reads to decide what to send (Prudence #955 r2)."""
+    from techne.mcp_server import TOOLS
+
+    (tool,) = [t for t in TOOLS if t["name"] == "techne_reflect_ingest"]
+    assert "obs_key" in tool["description"]
+    assert "obs_key" in tool["inputSchema"]["properties"]
+
+
 def test_observations_key_needs_every_id():
     from techne.core.reflect import _observations_key
 
