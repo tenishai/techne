@@ -1,7 +1,7 @@
 ---
 card: arch-card:techne-reflect-pipeline
 updated: 2026-09-17
-anchor: techne/core/reflect.py sha=7c52287e1bf7852ed71585191d635ca6b6d5f587
+anchor: techne/core/reflect.py sha=22edd03721b395b588844bfa5dc6d36561d30b3f
 anchor: techne/core/sleepdream.py sha=fa629d589f34d30f5edb51fb7682b897bc3ead04
 anchor: techne/lifecycle.py sha=011a4284a930a7df2d4b95f685e3d924ac92d3d3
 ---

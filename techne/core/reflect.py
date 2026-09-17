@@ -1192,8 +1192,11 @@ def _cursor_key(item: dict) -> str:
 
 #: Cursor format flag: "thread_id" marks a post-#733 marker. Absent = a pre-#733 marker
 #: whose entries are prompt_hashes and cannot be compared against anything stable.
-#: Despite the name, `emitted` is not only thread ids: since techne#954 it also holds
-#: `obs-` keys (`_observations_key`) for answered threads that have no persisted row.
+#: Despite the name, `emitted` is not only thread ids: since techne#954 it also holds an
+#: `obs-` key (`_observations_key`) for every RENDERED thread with no persisted row,
+#: answered or not — it is written at render time. `answered` is the separate ledger of
+#: the ones that came back, and the empty-batch heal is only meaningful because the two
+#: differ: it re-offers `obs-` keys in `emitted` that `answered` does not carry.
 _CURSOR_KEY = "thread_id"
 
 
