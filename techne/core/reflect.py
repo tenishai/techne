@@ -1190,8 +1190,10 @@ def _cursor_key(item: dict) -> str:
     return item.get("thread_id") or item.get("obs_key") or item["prompt_hash"]
 
 
-#: Marker field naming the key `emitted` holds. Absent = a pre-#733 marker whose
-#: entries are prompt_hashes and cannot be compared against anything stable.
+#: Cursor format flag: "thread_id" marks a post-#733 marker. Absent = a pre-#733 marker
+#: whose entries are prompt_hashes and cannot be compared against anything stable.
+#: Despite the name, `emitted` is not only thread ids: since techne#954 it also holds
+#: `obs-` keys (`_observations_key`) for answered threads that have no persisted row.
 _CURSOR_KEY = "thread_id"
 
 
@@ -1338,6 +1340,14 @@ def emit_reflection_pass(
     # legitimately renders long before it ingests — behave exactly as before.
     if not batch:
         stale = already & _owed_thread_ids(config, session_id) & current_ids
+        # AN UNPERSISTED THREAD HAS NO QUEUE ROW, so the line above can never see it
+        # (techne#954, Prudence #955 r1). Its ledger is the marker's `answered` list,
+        # written at ingest by `_claim_answered`. Without this a thread rendered and
+        # never answered was dropped with every counter reading zero. Same scope as
+        # the #900 heal: only on an empty batch, so paged `emit -o` drains still work.
+        stale |= {
+            k for k in already & current_ids if k.startswith("obs-")
+        } - _answered_keys(marker)
         stale -= _declined_keys(config, session_id)
         if stale:
             already = already - stale
@@ -1436,6 +1446,9 @@ def emit_reflection_pass(
                     #: caught by a visibility assertion instead. The cost is "re-offered
                     #: once per drain run", which is milder and still wrong.
                     "declined": sorted(_declined_keys(config, session_id)),
+                    #: CARRIED FORWARD for the same reason (techne#954): the ledger of
+                    #: answered unpersisted threads, which the heal reads.
+                    "answered": sorted(_answered_keys(_read_marker(config, session_id))),
                     #: The session's observation count AT WRITE TIME. `total` alone
                     #: cannot re-open a session that was judged empty and later grew,
                     #: because this marker is the only thing the nudge reads (#734 r2).
@@ -1499,8 +1512,12 @@ def ingest_one_and_drain(
     raw_response: str,
     *,
     model_used: str = "agent-assisted",
+    obs_key: str | None = None,
 ) -> dict:
     """Ingest one answered prompt AND mark its reflection debt paid.
+
+    A thread with no persisted row has no queue row to drain; its emit-batch `obs_key`
+    is claimed in the cursor instead, so emit stops offering it (techne#954).
 
     THE ONE INGEST-PLUS-BOOKKEEPING PATH (#644). The drain half lived only in the
     MCP tool, so `techne reflect ingest` — the path the documented /techne-promote
@@ -1527,10 +1544,60 @@ def ingest_one_and_drain(
         raw_response,
         model_used=model_used,
     )
-    if thread_id and not result.get("parse_failures") and not result.get("errors"):
-        result["reflection_debt_drained"] = drain_reflection_queue(config.db_path, [thread_id])
-        _clear_decline(config, session_id, thread_id)
+    if not result.get("parse_failures") and not result.get("errors"):
+        if thread_id:
+            result["reflection_debt_drained"] = drain_reflection_queue(
+                config.db_path, [thread_id]
+            )
+            _clear_decline(config, session_id, thread_id)
+        elif obs_key:
+            _claim_answered(config, session_id, obs_key)
     return result
+
+
+def _claim_answered(config: Config, session_id: str, obs_key: str) -> None:
+    """Record an answered UNPERSISTED thread in the emit cursor's `answered` ledger
+    (techne#954).
+
+    The persisted-thread equivalent is draining its queue row: emit claims a thread on
+    render, and the empty-batch heal re-offers rendered threads that were never paid.
+    For an unpersisted thread "paid" means listed here. Writes into an existing
+    marker only, for the reason `_record_declines` gives (#901 r2): minting one here
+    would read as a #268-era marker and hide the session. Emit writes the marker when
+    it delivers, so a thread that was emitted has one.
+    """
+    from techne.core.extension_state import get_state, set_state
+
+    if not session_id or not obs_key:
+        return
+    conn = connect(config.db_path)
+    try:
+        marker = get_state(conn, f"reflect:emitted:{session_id}")
+        if not marker:
+            log.debug("_claim_answered: no marker for %s, nothing to claim", session_id)
+            return
+        marker = dict(marker)
+        marker["emitted"] = sorted(set(marker.get("emitted", [])) | {obs_key})
+        marker["answered"] = sorted(set(marker.get("answered", [])) | {obs_key})
+        marker["declined"] = [k for k in marker.get("declined", []) if k != obs_key]
+        set_state(conn, f"reflect:emitted:{session_id}", marker)
+    finally:
+        conn.close()
+
+
+def _answered_keys(marker: dict | None) -> set[str]:
+    """`obs-` keys of answered unpersisted threads (techne#954). See `_claim_answered`."""
+    return set((marker or {}).get("answered", []))
+
+
+def _read_marker(config: Config, session_id: str) -> dict | None:
+    from techne.core.extension_state import get_state
+
+    conn = connect(config.db_path)
+    try:
+        return get_state(conn, f"reflect:emitted:{session_id}")
+    finally:
+        conn.close()
 
 
 def ingest_reflection_batch(config: Config, items: list[dict]) -> dict:
@@ -1557,7 +1624,11 @@ def ingest_reflection_batch(config: Config, items: list[dict]) -> dict:
             raw = json.dumps(raw) if raw else ""  # tolerate an inlined array
         if not raw.strip():  # noqa: E501 - blank means the agent declined this thread
             totals["skipped"] += 1
-            declined.setdefault(it.get("session_id", ""), []).append(it.get("thread_id") or "")
+            # An unpersisted thread's decline is recorded by its obs_key (techne#954),
+            # so emit excludes it and `undecline` can reach it.
+            declined.setdefault(it.get("session_id", ""), []).append(
+                it.get("thread_id") or it.get("obs_key") or ""
+            )
             continue
         counts = ingest_one_and_drain(
             config,
@@ -1566,6 +1637,7 @@ def ingest_reflection_batch(config: Config, items: list[dict]) -> dict:
             it.get("prompt_hash", ""),
             raw,
             model_used=it.get("model_used", "agent-assisted"),
+            obs_key=it.get("obs_key"),
         )
         totals["drained"] += counts.pop("reflection_debt_drained", 0)
         for k, v in counts.items():

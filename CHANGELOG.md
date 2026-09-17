@@ -200,10 +200,19 @@ All notable changes to techne are documented here. Format loosely follows
 
   **Upgrading a store you already imported:** re-run `techne import` over the same
   transcripts. Sessions skipped as "already has N observations" get threads if they
-  have none; sessions the live hooks already detected are left alone.
+  have none; sessions the live hooks already detected are left alone (a `--force`
+  import re-detects, because it appends observations). **The repair re-offers, once,
+  every thread answered before it**: those answers carry no thread id, so nothing links
+  them to the newly persisted threads. `techne consolidate` catches the duplicate
+  candidates.
 
-  Not fixed here: a resumed session that replays its parent's turns still imports
-  them under both session ids, so those threads are offered once per id.
+  Unpersisted threads (detection failed, or not yet repaired) are recorded as answered
+  by `obs_key` at ingest and re-offered by the next empty emit if rendered and never
+  answered, as #900 does for persisted threads. The MCP ingest tool takes `obs_key`.
+
+  Not fixed here: an external evaluator reported that a resumed session replays its
+  parent's turns and imports them under both session ids (not reproduced here), which
+  would offer those threads once per id.
 
 - **The reserved lexical slot now goes to the curated row** (#831). #827 made the
   lexical channel reachable by reserving one tail slot; it did not make it useful.

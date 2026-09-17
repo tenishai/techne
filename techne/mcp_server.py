@@ -1209,6 +1209,11 @@ TOOLS = [
                 "session_id": {"type": "string", "description": "From the emit batch item."},
                 "thread_id": {"type": "string", "description": "From the emit batch item."},
                 "prompt_hash": {"type": "string", "description": "From the emit batch item."},
+                "obs_key": {
+                    "type": "string",
+                    "description": "From the emit batch item, when present (a thread "
+                    "with no persisted row). Pass it so emit stops offering the thread.",
+                },
                 "response": {
                     "type": "string",
                     "description": "Your JSON candidate array (string) answering the prompt.",
@@ -2242,6 +2247,7 @@ def _techne_reflect_ingest(args: dict, config: Config) -> dict:
         args.get("prompt_hash", ""),
         response,
         model_used=args.get("model_used", "agent-assisted"),
+        obs_key=args.get("obs_key") or None,
     )
 
 

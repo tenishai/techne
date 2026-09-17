@@ -187,29 +187,108 @@ def test_ensure_threads_skips_a_session_with_no_observations(cfg):
     assert ensure_threads(cfg, sid, replace=True) is None
 
 
-def test_an_unpersisted_thread_keeps_its_cursor_across_a_knowledge_write(cfg):
-    """The fallback half. A thread that still arrives with no persisted row keys on its
-    observation ids, not prompt_hash, so a knowledge write does not re-offer it."""
-    from techne.core.knowledge import store
-    from techne.core.reflect import emit_reflection_pass
+def _unpersisted_session(cfg):
     from techne.core.state import add_observation, start_session
 
-    cfg.reflect.include_existing_knowledge = True
     sid = start_session(cfg.db_path, project_path="/tmp/p")
     for i in range(14):
         add_observation(cfg.db_path, sid, "Edit", f"edit app.py value {i}")
     assert _count(cfg, "threads", sid) == 0, "precondition: no persisted threads"
+    return sid
+
+
+def test_an_answered_unpersisted_thread_stays_claimed_across_a_knowledge_write(cfg):
+    """The fallback half. A thread with no persisted row is claimed by its obs_key when
+    answered, so a knowledge write does not re-offer it."""
+    from techne.core.knowledge import store
+    from techne.core.reflect import emit_reflection_pass, ingest_reflection_batch
+
+    cfg.reflect.include_existing_knowledge = True
+    sid = _unpersisted_session(cfg)
 
     first = emit_reflection_pass(cfg, sid)
     assert first["count"] >= 1
     assert all(item["thread_id"] is None and item.get("obs_key") for item in first["batch"])
+    ingest_reflection_batch(cfg, _answer(first["batch"]))
 
     store(cfg.db_path, "edit app.py value observations Edit", type="fact")
 
     second = emit_reflection_pass(cfg, sid)
     assert second["count"] == 0, (
-        "a delivered unpersisted thread was re-offered after a knowledge write"
+        "an answered unpersisted thread was re-offered after a knowledge write"
     )
+
+
+def test_a_rendered_but_unanswered_unpersisted_thread_is_re_offered(cfg):
+    """Prudence #955 r1: claiming an unpersisted thread on RENDER dropped it silently.
+    It has no queue row, so the #900 heal cannot re-offer it. It must stay offered
+    until answered."""
+    from techne.core.knowledge import store
+    from techne.core.reflect import emit_reflection_pass
+
+    cfg.reflect.include_existing_knowledge = True
+    sid = _unpersisted_session(cfg)
+
+    first = emit_reflection_pass(cfg, sid)
+    assert first["count"] >= 1
+    store(cfg.db_path, "edit app.py value observations Edit", type="fact")
+
+    second = emit_reflection_pass(cfg, sid)
+    assert second["count"] == first["count"], (
+        "a rendered, never-answered unpersisted thread was dropped"
+    )
+
+
+def test_an_unpersisted_decline_is_excluded_and_undecline_reaches_it(cfg):
+    from techne.core.reflect import clear_declines, emit_reflection_pass, ingest_reflection_batch
+
+    sid = _unpersisted_session(cfg)
+    first = emit_reflection_pass(cfg, sid)
+    assert first["count"] >= 1
+    for item in first["batch"]:
+        item["raw_response"] = ""  # declined
+    ingest_reflection_batch(cfg, first["batch"])
+
+    assert emit_reflection_pass(cfg, sid)["count"] == 0, "a declined thread was re-offered"
+    assert clear_declines(cfg, sid) == first["count"], "undecline could not reach the decline"
+    assert emit_reflection_pass(cfg, sid)["count"] == first["count"]
+
+
+def test_the_drain_loop_terminates_for_unpersisted_threads(cfg):
+    """The guide's loop: emit, answer, ingest, until emit returns 0."""
+    from techne.core.knowledge import store
+    from techne.core.reflect import emit_reflection_pass, ingest_reflection_batch
+
+    cfg.reflect.include_existing_knowledge = True
+    sid = _unpersisted_session(cfg)
+    for n in range(10):
+        r = emit_reflection_pass(cfg, sid)
+        if r["count"] == 0:
+            break
+        ingest_reflection_batch(cfg, _answer(r["batch"]))
+        store(cfg.db_path, f"edit app.py value observations Edit pass {n}", type="fact")
+    else:
+        pytest.fail("the emit/ingest loop did not terminate in 10 passes")
+
+
+def test_mcp_ingest_claims_an_unpersisted_thread(cfg):
+    from techne.core.reflect import emit_reflection_pass
+    from techne.mcp_server import _techne_reflect_ingest
+
+    sid = _unpersisted_session(cfg)
+    item = emit_reflection_pass(cfg, sid)["batch"][0]
+    _techne_reflect_ingest(
+        {
+            "session_id": sid,
+            "thread_id": "",
+            "prompt_hash": item["prompt_hash"],
+            "obs_key": item["obs_key"],
+            "response": _answer([dict(item)])[0]["raw_response"],
+        },
+        cfg,
+    )
+    offered = [i["obs_key"] for i in emit_reflection_pass(cfg, sid)["batch"]]
+    assert item["obs_key"] not in offered
 
 
 def test_observations_key_needs_every_id():
