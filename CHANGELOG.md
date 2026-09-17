@@ -116,6 +116,22 @@ All notable changes to techne are documented here. Format loosely follows
   v4). Under `--only-proven` the CLI and the MCP tool now say how many
   name-matched dependents they hid.
 
+- **`techne vectors status` now says when a backfill is needed, and `capabilities`
+  no longer calls an empty knowledge table 100% embedded** (#948, #942).
+
+  `vectors status` printed `re-embed needed: False` with 25 promoted knowledge rows
+  and no vectors. That line only means "the embedding backend changed". The command
+  now shows how many rows in each vec table are not embedded (the same population
+  `vectors backfill` acts on: live knowledge missing or `vec_stale`, and every
+  observation and thread without a vector) and a separate `backfill needed:` line.
+  `vector_channel_status()` returns the new `unembedded` and `backfill_needed` fields.
+
+  `vectors:coverage` printed `0/0 live knowledge embedded and current (100%)` on a
+  store with 35,096 embedded observations and no knowledge. With no live knowledge it
+  now says `no live knowledge yet` and reports observation and thread coverage
+  (`observations 35096/35096 embedded`), or `nothing to embed yet`. The verdict is
+  unchanged: it still depends only on whether anything is unembedded.
+
 - **The reserved lexical slot now goes to the curated row** (#831). #827 made the
   lexical channel reachable by reserving one tail slot; it did not make it useful.
   The curated row loses the slot on the CONFIDENCE-DECAY TIEBREAK. The two

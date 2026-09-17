@@ -4642,8 +4642,10 @@ def vectors_status(ctx):
     """Report the vector channel's health without mutating anything.
 
     Shows the active embedding backend, the stored backend-identity stamp
-    (if any), per-table vec0 row counts, and whether a re-embed is needed
-    (a backend/model swap happened since the vec tables were last built).
+    (if any), per-table vec0 row counts with how many rows are not embedded,
+    whether a re-embed is needed (a backend/model swap happened since the vec
+    tables were last built), and whether a backfill is needed (rows missing
+    vectors, e.g. knowledge just promoted — techne#948).
     Never calls _ensure_vec_backend_identity — that function DROPs the vec
     tables on a mismatch, which is exactly the mutation a read-only status
     check must not risk triggering as a side effect of merely looking.
@@ -4675,17 +4677,25 @@ def vectors_status(ctx):
     click.echo("vec table rows:")
     for table_name in ("threads_vec", "observations_vec", "knowledge_vec"):
         info = status["tables"][table_name]
+        gap = status["unembedded"][table_name]
+        suffix = f", {gap} not embedded" if gap else ""
         if not info["exists"]:
-            click.echo(f"  {table_name}: absent")
+            click.echo(f"  {table_name}: absent{suffix}")
         else:
-            click.echo(f"  {table_name}: {info['rows']} row(s) (dim={info['dim']})")
+            click.echo(f"  {table_name}: {info['rows']} row(s) (dim={info['dim']}){suffix}")
 
+    # Two questions, two lines (techne#948). `re-embed needed` is only "did the
+    # embedding backend change?"; an operator read its False as "everything is
+    # embedded" while 25 promoted knowledge rows had no vectors.
     click.echo(f"re-embed needed: {status['reembed_needed']}")
+    click.echo(f"backfill needed: {status['backfill_needed']}")
     if status["reembed_needed"]:
         click.echo(
             "vector channel is stale after a backend change — "
             "run `techne vectors backfill` to restore it."
         )
+    elif status["backfill_needed"]:
+        click.echo("rows are missing vectors — run `techne vectors backfill` to embed them.")
 
 
 def _active_codex_db(config, repo, *, require_indexed: bool = True):
