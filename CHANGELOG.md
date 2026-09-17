@@ -101,6 +101,21 @@ All notable changes to techne are documented here. Format loosely follows
   as a person. The default is now `unspecified`. Existing rows recorded as `human`
   cannot be told apart after the fact.
 
+- **`codex blast-radius --only-proven` now proves same-file callers, and never
+  prints a bare empty result** (#940). The resolver bound calls only through
+  imports, so a function called from its own file had no proven callers and
+  `--only-proven` printed `(nothing reachable)` — the answer that reads as "safe to
+  change". A new same-file pass (`scope_resolved`) binds a bare call to the file's
+  single module-level function or class of that name, refusing when an import,
+  a nested definition or a second definition could shadow it. On this repo,
+  proven call edges went from 6,120 to 9,482.
+
+  Codex schema v5 adds `edges.bare_call`, because `f()` and `x.f()` share one edge
+  row and `requests.get()` must not prove a dependency on a local `get`. The next
+  `techne codex index` re-parses existing repos to fill it (reparse debt, as for
+  v4). Under `--only-proven` the CLI and the MCP tool now say how many
+  name-matched dependents they hid.
+
 - **The reserved lexical slot now goes to the curated row** (#831). #827 made the
   lexical channel reachable by reserving one tail slot; it did not make it useful.
   The curated row loses the slot on the CONFIDENCE-DECAY TIEBREAK. The two
