@@ -170,6 +170,57 @@ def test_a_partial_deficit_still_fills_the_reservation(db, monkeypatch):
     )
 
 
+def test_promoting_the_tail_floors_only_candidate_does_not_shorten_the_page(db, monkeypatch):
+    """Prudence #966 r1: the promotion pool is not deduped against `fts_only`.
+
+    A curated row the vector channel never fetched but FTS matched can be promoted
+    into the head AND be the tail floor's only candidate. `seen` then empties the
+    tail, so a page that surrendered a head slot came back one row short — for
+    nothing, since `_curated_first` would have seated that same row in the floor
+    slot anyway. The displaced row is carried as overflow instead.
+    """
+    vec = [_row("observations", i, 0.10 + i / 100) for i in range(12)]
+    vec.append(_row("knowledge", 99, 0.90))
+    fts = [_row("knowledge", 99, 0.0)]
+    _patch_channels(monkeypatch, vec, fts)
+
+    page = search(db, "q", table="all", limit=10)
+    baseline = search(db, "q", table="all", limit=10, curated_head_slots=0)
+
+    assert len(baseline) == 10, "precondition: the page is full without the reservation"
+    assert len(page) == 10, (
+        "the reservation consumed the tail floor's only candidate and returned a short page"
+    )
+    assert (("knowledge", 99)) in [(r["source_table"], r["id"]) for r in page]
+    assert [
+        (r["source_table"], r["id"]) for r in baseline if r["source_table"] == "observations"
+    ] == [
+        (r["source_table"], r["id"])
+        for r in sorted(
+            [r for r in page if r["source_table"] == "observations"], key=lambda r: r["id"]
+        )
+    ], "every observation on the baseline page is still on the page"
+
+
+def test_a_thin_vec_channel_does_not_mark_a_tail_row_reserved(db, monkeypatch):
+    """Prudence #966 r1 (nit): `reserved_slot` carries the decomposability argument
+    this mechanism was chosen for, so it must not claim a reservation that did
+    nothing. With a thin vector channel the first tail row is on the page whether or
+    not the floor exists — the head never spent its budget — so marking it reserved
+    answers "why is this row here" with a reservation that never acted.
+    """
+    vec = [_row("observations", i, 0.10 + i / 100) for i in range(2)]
+    fts = [_row("threads", 500 + j, 0.0) for j in range(3)]
+    _patch_channels(monkeypatch, vec, fts)
+
+    page = search(db, "q", table="all", limit=10)
+
+    assert len(page) < 10, "precondition: both channels are thin, so the page is short"
+    assert [r.get("reserved_slot") for r in page] == [None] * len(page), (
+        "nothing was reserved: the head never reached its budget"
+    )
+
+
 def test_a_page_already_carrying_its_quota_is_untouched(db, monkeypatch):
     """Curated rows that won on distance are not re-promoted, and nothing is marked
     reserved — the reservation only ever acts on a deficit."""

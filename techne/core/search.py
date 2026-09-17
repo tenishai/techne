@@ -1456,6 +1456,9 @@ def search(
         return row
 
     head_budget = limit - floor
+    #: Rows the head reservation displaced. Appended after the tail so a page that
+    #: gave up a head slot cannot come back short (Prudence, #966 r1).
+    overflow: list[dict] = []
     for r in vec_results:
         if len(head) >= head_budget:
             break
@@ -1526,14 +1529,29 @@ def search(
                 # would be a no-op that silently costs a result. The promoted rows
                 # land at the end of the head: they are on the page by reservation,
                 # not by distance, and the order says so.
-                keep, dropped = [], 0
+                keep, dropped, displaced = [], 0, []
                 for row in reversed(head):
                     if dropped < len(promoted) and row.get("source_table") not in _CURATED_TABLES:
                         dropped += 1
+                        # KEEP THE DISPLACED ROW AS OVERFLOW, do not drop it
+                        # (Prudence, #966 r1). The promotion pool is not deduped
+                        # against `fts_only`, so a curated row the vector channel
+                        # never fetched but FTS matched can be promoted here AND be
+                        # the tail floor's only candidate — `seen` then empties the
+                        # tail, and a page that surrendered a head slot comes back
+                        # one row SHORT for nothing, since `_curated_first` would
+                        # have seated that same row in the floor slot anyway.
+                        # Measured: 12 observations + 1 lexical-only curated row,
+                        # limit 10 -> 9 rows. Appending after the tail lets the
+                        # closing `[:limit]` decide: in the ordinary case the row
+                        # falls off the end exactly as before, and in this case it
+                        # refills the slot the empty tail left.
+                        displaced.append(row)
                         seen.discard((row["source_table"], row["id"]))
                         continue
                     keep.append(row)
                 head = list(reversed(keep)) + promoted[:dropped]
+                overflow = list(reversed(displaced))
                 for row in promoted[dropped:]:
                     # Nothing was displaceable (an all-curated head): put the key back
                     # so the tail may still reach it through the lexical channel.
@@ -1551,13 +1569,19 @@ def search(
         # The first `floor` tail rows are the ones #827 reserved; anything after them
         # is slack the thin-vec case handed back. Marking only the reserved ones keeps
         # `reserved_slot` an honest answer to "why is this row here".
-        if len(tail) < floor:
+        # GATED ON THE HEAD ACTUALLY HAVING SPENT ITS BUDGET (Prudence, #966 r1):
+        # with a thin vec channel the first tail row is on the page regardless, so
+        # marking it reserved answers "why is this row here" with a reservation that
+        # did nothing.
+        if len(tail) < floor and len(head) >= head_budget:
             row["reserved_slot"] = "lexical_tail"
         tail.append(row)
 
     # `head` may be shorter than its budget (a thin vec channel); the tail is
-    # allowed to spend the slack rather than returning a short page.
-    return (head + tail)[:limit]
+    # allowed to spend the slack rather than returning a short page. `overflow`
+    # holds rows the head reservation displaced: last in line, so they refill a
+    # short page rather than shrinking it (#966 r1).
+    return (head + tail + overflow)[:limit]
 
 
 def backfill_vectors(
