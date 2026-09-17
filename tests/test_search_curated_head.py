@@ -145,6 +145,31 @@ def test_a_partly_filled_reservation_spends_the_rest_on_other_rows(db, monkeypat
     assert _tables(page).count("knowledge") == 1
 
 
+def test_a_partial_deficit_still_fills_the_reservation(db, monkeypatch):
+    """in_head > 0 AND deficit > 0 — the case the scoped pool is sized for.
+
+    The pool asks for `deficit + in_head`, not `deficit`, because it is deduped
+    against the curated rows already seated in the head. Sized to the deficit alone
+    it would come back short by exactly `in_head` (Temperance, #966). Two curated
+    rows win on distance, one more must be seated, and the page must end with three.
+    """
+    vec = [_row("knowledge", 90, 0.10), _row("knowledge", 91, 0.11)]
+    vec += [_row("observations", i, 0.20 + i / 100) for i in range(12)]
+    vec.append(_row("knowledge", 92, 0.90))
+    _patch_channels(monkeypatch, vec)
+
+    page = search(db, "q", table="all", limit=10)
+
+    assert len(page) == 10
+    assert _tables(page).count("knowledge") == 3, (
+        "a partly-filled reservation must still reach its quota"
+    )
+    seated = [r for r in page if r.get("reserved_slot") == "curated_head"]
+    assert [r["id"] for r in seated] == [92], (
+        "only the promoted row is marked reserved; the two that won on distance are not"
+    )
+
+
 def test_a_page_already_carrying_its_quota_is_untouched(db, monkeypatch):
     """Curated rows that won on distance are not re-promoted, and nothing is marked
     reserved — the reservation only ever acts on a deficit."""

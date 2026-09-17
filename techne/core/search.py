@@ -1495,8 +1495,11 @@ def search(
             # `vec_results` would find nothing to seat. Measured on the live store
             # before this: 12 real queries, mean curated rows per page 4.00 -> 4.08,
             # i.e. one extra row in twelve pages — a reservation in name only.
-            # One extra ANN query against the knowledge table, bounded by `deficit`,
-            # is what makes the slots real.
+            # One extra ANN query against the knowledge table is what makes the slots
+            # real. IT FETCHES `deficit + in_head`, NOT `deficit` (Temperance, #966):
+            # the pool is deduped against rows already seated in the head, so a pool
+            # sized to the deficit alone can come back short by exactly the number of
+            # curated rows that won on distance. The surplus is the dedup buffer.
             curated_pool = search_vec(
                 db_path,
                 query,
