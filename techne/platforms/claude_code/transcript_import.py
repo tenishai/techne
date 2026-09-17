@@ -27,6 +27,10 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+#: Skip reason for a transcript with no user/assistant records (techne#941). The CLI
+#: matches on it to treat the skip as benign, so change both together.
+NO_EVENTS_REASON = "no events (metadata-only transcript)"
+
 # Import-time snapshot; honors CLAUDE_CONFIG_DIR set before launch (techne#113).
 PROJECTS_DIR = claude_projects_dir()
 
@@ -138,6 +142,18 @@ def import_transcript(
         # .stem leaves the ".jsonl" on and the same session lands twice in
         # `sessions.id` and every `observations.session_id`.
         session_id = session_id_for(jsonl_path)
+
+    # A TRANSCRIPT WITH NO CONVERSATION IS NOT A SESSION TO IMPORT (techne#941).
+    # Claude Code writes a metadata-only file when a session is titled and never
+    # takes a turn: measured, one line, `{"type":"custom-title",...}`, no timestamp
+    # anywhere. `first_ts` stays None, the INSERT below passes an explicit NULL,
+    # which skips `sessions.started_at`'s DEFAULT, and the import failed with
+    # `NOT NULL constraint failed`. Defaulting the timestamp would record a session
+    # that never happened at a time nobody observed; there is nothing to keep, so
+    # skip it and say why. The CLI treats this reason as benign.
+    if not any(rec.get("type") in ("user", "assistant") for rec in records):
+        log.debug("transcript_import: %s has no user/assistant records, skipping", jsonl_path)
+        return {"session_id": session_id, "skipped": True, "reason": NO_EVENTS_REASON}
 
     conn = connect(db_path)
     try:

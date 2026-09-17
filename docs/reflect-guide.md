@@ -98,11 +98,11 @@ answers the prompts, and you review what lands.
 techne reflect stats                  # candidates pending/promoted/discarded, plus debt
 techne reflect review --status pending
 techne reflect promote <id> --by "<who>" --reason "<why>"
-techne reflect discard <id>
+techne reflect discard <id> --by "<who>" --reason "<why>"
 ```
 
-`--by` and `--reason` are provenance. Leaving them off makes an agent's bulk drain
-indistinguishable from something a human actually read.
+`--by` and `--reason` are provenance. Leaving `--by` off records `unspecified`, so nobody can
+tell afterwards whether a person or an agent's bulk drain made the call.
 
 ---
 
