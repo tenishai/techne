@@ -186,6 +186,37 @@ All notable changes to techne are documented here. Format loosely follows
   dream adds and conflict supersedes, whose candidates carry the `system:sleep`
   placeholder rather than a session.
 
+- **`techne import` now persists threads, so a reflect backfill stops re-offering
+  answered threads** (#954). Import wrote observations and stopped. With no
+  `threads` rows, reflect's emit cursor keyed every imported thread on `prompt_hash`,
+  which covers the existing-knowledge block and so changes on any knowledge write:
+  promote one candidate and the next emit served threads already ingested. Measured
+  on an external store: 35,096 imported observations, 0 threads, `thread_id` null on
+  18/18 emitted items.
+
+  Import now runs thread detection for each imported session (and so enqueues its
+  reflection debt). A thread that still arrives without a persisted row is tracked
+  by a hash of its observation ids instead of `prompt_hash`.
+
+  **Upgrading a store you already imported:** re-run `techne import` over the same
+  transcripts. Sessions skipped as "already has N observations" get threads if they
+  have none; sessions the live hooks already detected are left alone (a `--force`
+  import re-detects, because it appends observations). **The repair re-offers, once,
+  every thread answered before it**: those answers carry no thread id, so nothing links
+  them to the newly persisted threads. `techne consolidate` catches the duplicate
+  candidates.
+
+  Unpersisted threads (detection failed, or not yet repaired) are recorded as answered
+  by `obs_key` at ingest and re-offered by the next empty emit if rendered and never
+  answered, as #900 does for persisted threads. `techne_reflect_ingest` takes `obs_key`,
+  names it in the tool description, and warns in its result when an answer arrives with
+  neither `thread_id` nor `obs_key` — without the key the thread stays unclaimed and emit
+  offers it again.
+
+  Not fixed here: an external evaluator reported that a resumed session replays its
+  parent's turns and imports them under both session ids (not reproduced here), which
+  would offer those threads once per id.
+
 - **The reserved lexical slot now goes to the curated row** (#831). #827 made the
   lexical channel reachable by reserving one tail slot; it did not make it useful.
   The curated row loses the slot on the CONFIDENCE-DECAY TIEBREAK. The two

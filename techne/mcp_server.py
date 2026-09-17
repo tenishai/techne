@@ -1199,9 +1199,10 @@ TOOLS = [
         "description": (
             "Feed back one thread's reflection answer produced by techne_reflect_emit. "
             "`response` is the JSON candidate array (as a string) you wrote for that thread's "
-            "`prompt`; `thread_id` and `prompt_hash` come from the emit batch item. Proposals "
-            "land in knowledge_candidates for review (techne reflect review). Call once per "
-            "answered thread."
+            "`prompt`; `thread_id`, `prompt_hash` and `obs_key` come from the emit batch item — "
+            "PASS `obs_key` WHENEVER THE ITEM HAS ONE (a thread with no persisted row), or emit "
+            "keeps offering the thread you just answered. Proposals land in knowledge_candidates "
+            "for review (techne reflect review). Call once per answered thread."
         ),
         "inputSchema": {
             "type": "object",
@@ -1209,6 +1210,11 @@ TOOLS = [
                 "session_id": {"type": "string", "description": "From the emit batch item."},
                 "thread_id": {"type": "string", "description": "From the emit batch item."},
                 "prompt_hash": {"type": "string", "description": "From the emit batch item."},
+                "obs_key": {
+                    "type": "string",
+                    "description": "From the emit batch item, when present (a thread "
+                    "with no persisted row). Pass it so emit stops offering the thread.",
+                },
                 "response": {
                     "type": "string",
                     "description": "Your JSON candidate array (string) answering the prompt.",
@@ -2235,14 +2241,25 @@ def _techne_reflect_ingest(args: dict, config: Config) -> dict:
     #
     # The drain half now lives in ingest_one_and_drain, shared with `techne reflect
     # ingest` — it was inlined here, so the CLI path never marked debt paid (#644).
-    return ingest_one_and_drain(
+    result = ingest_one_and_drain(
         config,
         args.get("session_id", ""),
         args.get("thread_id", ""),
         args.get("prompt_hash", ""),
         response,
         model_used=args.get("model_used", "agent-assisted"),
+        obs_key=args.get("obs_key") or None,
     )
+    # SAY SO IN THE RESULT, NOT ONLY IN THE SCHEMA (Prudence, #955 r2). An emit item
+    # with no `thread_id` is claimed by its `obs_key`; without it nothing records the
+    # answer and the documented drain loop re-offers the same thread forever. The
+    # agent reads the result, so the warning goes where it will be seen.
+    if not args.get("thread_id") and not args.get("obs_key"):
+        result["warning"] = (
+            "no thread_id and no obs_key: this answer was stored, but the thread stays "
+            "unclaimed and emit will offer it again. Pass the emit item's obs_key."
+        )
+    return result
 
 
 def _techne_consolidate_emit(args: dict, config: Config) -> dict:

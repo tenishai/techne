@@ -5,9 +5,12 @@ directly when embedding techne in a runtime that isn't Claude Code (e.g., a
 custom agent process or notebook).
 """
 
+import logging
 import sys
 
 from techne.config import Config
+
+log = logging.getLogger(__name__)
 
 # Thread-summary outbox lanes. HISTORICALLY selected by topology (techne#224); since
 # techne#552 raw summaries always take the sync lane, because the Archivist federates
@@ -682,6 +685,51 @@ def redetect_threads(
         "observations": len(observations),
         "queued": queued,
     }
+
+
+def ensure_threads(config: Config, session_id: str, *, replace: bool = False) -> dict | None:
+    """Persist a thread detection for an imported session (techne#954).
+
+    `techne import` wrote observations and never ran detection, so an imported
+    session had no `threads` rows. Everything keyed on a persisted thread then fell
+    back: reflect's emit cursor keyed on `prompt_hash`, which moves on any knowledge
+    write, so a backfill re-offered threads it had already ingested; and candidates
+    stored a NULL `source_thread_id` (#949). Measured on an external store: 35,096
+    imported observations, 0 threads.
+
+    `replace=False` detects only when the session has no thread rows, so re-running
+    `techne import` repairs a store imported before this fix without touching
+    sessions the live hooks already detected. `replace=True` is for observations
+    just appended (a fresh or `--force` import), where any prior detection is stale.
+
+    Goes through `redetect_threads`, so it also enqueues reflection debt for the
+    session — an imported session is unreflected work, and the queue is how emit
+    knows a delivered-but-unanswered thread is still owed (#900).
+
+    Returns redetect_threads' dict, or None when nothing was done.
+    """
+    from techne.core.database import connect
+
+    conn = connect(config.db_path)
+    try:
+        n_obs = conn.execute(
+            "SELECT COUNT(*) FROM observations WHERE session_id = ?", (session_id,)
+        ).fetchone()[0]
+        n_threads = conn.execute(
+            "SELECT COUNT(*) FROM threads WHERE session_id = ?", (session_id,)
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    if n_obs == 0 or (n_threads and not replace):
+        log.debug(
+            "ensure_threads: skip %s (observations=%d threads=%d replace=%s)",
+            session_id,
+            n_obs,
+            n_threads,
+            replace,
+        )
+        return None
+    return redetect_threads(config, session_id)
 
 
 def capture_tool_use(

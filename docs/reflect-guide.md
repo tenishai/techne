@@ -139,6 +139,21 @@ techne reflect ingest /tmp/batch.json
 Run it once against a 31-thread backlog and you drain at most 25, with nothing in the
 procedure telling you to go again. The CLI does echo `note` to stderr — read it.
 
+**Backfilling an import: run `techne import` first, and re-run it on an old store.** Emit tracks
+what it has delivered by persisted thread id. Before techne#954, `techne import` wrote
+observations but no threads, so every imported thread fell back to a key that changes whenever
+knowledge changes: promote anything and the next emit re-offers threads you already answered.
+`import` now persists threads. A store imported earlier has observations and no threads;
+re-running `techne import` over the same transcripts fills them in without re-importing
+anything.
+
+**That repair re-offers, once, every thread you answered before it.** Those answers were stored
+with no thread id, so nothing links them to the threads the repair persists, and the new ids read
+as unpaid. Answer them again or decline them; `techne consolidate` catches duplicate candidates.
+Upgrading before you backfill avoids it. (`--force` is different: it appends observations, so it
+re-detects even a session that already has threads. That is correct, and already-paid threads
+keep their payment.)
+
 **Declining a thread is allowed, and it ends the loop rather than spinning it.** Leave an
 item's `raw_response` blank and `ingest` skips it without draining: the debt stays owed, on
 purpose. Since techne#901 that refusal is *recorded*, so `emit` offers the thread once and
@@ -231,6 +246,16 @@ what separates them is what happens on the next `emit`.
   ```sh
   techne reflect undecline --session <session-id>   # or --thread <id> for just one
   ```
+
+- **Unpersisted** — a thread with no row in `threads`, so no queue row either: a session
+  whose thread detection never ran (an import from before techne#954, or one where
+  detection failed and `import` printed `thread detection failed`). Its emit items carry
+  `thread_id: null` and an `obs_key`, and nothing about it shows up in `reconcile`, the debt
+  counters or `declined`. Orphaned and declined work the same way anyway: the cursor
+  records its answers under `obs_key`, the next empty `emit` re-offers one that was rendered
+  and never answered, and `undecline` reaches its declines. **The fix is to give it
+  threads** — `techne threads redetect <session>` — after which it is an ordinary session.
+  Pass `obs_key` back when ingesting through the MCP tool, or its answer is not recorded.
 
 `techne reflect reconcile` prints the split per session, which is the cheapest way to see
 which kind you have:
