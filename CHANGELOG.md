@@ -88,6 +88,19 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- **A metadata-only transcript no longer fails import** (#941). Claude Code writes a
+  one-line transcript (`{"type":"custom-title",...}`) when a session is titled and never
+  takes a turn. It has no timestamp, so the session insert passed NULL for
+  `started_at` and failed with `NOT NULL constraint failed`. Import now skips a
+  transcript with no user or assistant records, reason "no events (metadata-only
+  transcript)", and `techne import` treats that skip as benign (exit 0). No session row
+  is written: a defaulted timestamp would record a session nobody observed.
+
+- **`reflect promote` / `reflect discard` no longer record an unnamed decision as
+  `human`** (#953). `--by` defaulted to `human`, so an agent that left it off was audited
+  as a person. The default is now `unspecified`. Existing rows recorded as `human`
+  cannot be told apart after the fact.
+
 - **The reserved lexical slot now goes to the curated row** (#831). #827 made the
   lexical channel reachable by reserving one tail slot; it did not make it useful.
   The curated row loses the slot on the CONFIDENCE-DECAY TIEBREAK. The two
