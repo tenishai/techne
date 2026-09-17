@@ -46,8 +46,10 @@ DEFAULT_DB = DEFAULT_DIR / "techne.db"
 DEFAULT_CONFIG = DEFAULT_DIR / "config.yaml"
 
 
-#: (key, path, home) triples already warned about in this process, so a hook that
-#: loads config on every tool call does not repeat the same warning.
+#: (key, path, home) triples already warned about in this process. Hooks are a fresh
+#: process per event and load config once, so this does nothing for them; it is for
+#: CLI commands that load config twice in one run (the group callback, then `init`
+#: or `watch` again), which would otherwise print the same warning twice.
 _WARNED_OUTSIDE_HOME: set[tuple[str, str, str]] = set()
 
 
@@ -1179,7 +1181,8 @@ class Config:
 
         MANY KEYS ARE CONDITIONAL — `llm_api_base`, `llm_api_key`, `identity_dir`,
         `stores`, `connections`, `sources` and the `sync.*` extras are emitted only
-        when set — so a DEFAULT Config does not contain every governed key. A caller
+        when set, and `db_path`/`data_dir` only when they differ from the TECHNE_HOME
+        default (techne#947) — so a DEFAULT Config does not contain every governed key. A caller
         checking coverage has to populate them first, or it will read "absent
         because unset" as "absent because renamed".
         """
