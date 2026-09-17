@@ -504,3 +504,96 @@ def resolve_edges_by_import(conn) -> dict:
     }
     log.debug("codex_import_resolve %s", report)
     return report
+
+
+def resolve_edges_by_scope(conn) -> dict:
+    """Resolve bare calls to a module-level symbol defined in the SAME file (techne#940).
+
+    `resolve_edges_by_import` answers "which module did this file import `f` from?",
+    and a call to a function defined in the caller's own file has no import to
+    answer it with. So every intra-file call stayed `unresolved`, and
+    `blast-radius --only-proven` printed "(nothing reachable)" for a function whose
+    only callers sat next to it — the empty answer that reads as "safe to change".
+
+    Binds `f` to the file's module-level `f` only when all of these hold, and leaves
+    the edge `unresolved` otherwise:
+
+      - at least one call site behind the edge is a BARE call (`bare_call = 1`).
+        `f()` and `x.f()` share one edge row, and `x.f()` is not a call to the
+        local `f`. Rows indexed before schema v5 are NULL and are not touched.
+      - no import edge in the file binds the name. An import shadows or rebinds
+        it, and `resolve_edges_by_import` owns those rows.
+      - exactly ONE non-nested function or class of that name in the file. Two is
+        a conditional or repeated definition this cannot rank.
+      - no NESTED function or class of that name in the file. A nested `def f`
+        can shadow the module-level one inside its enclosing scope, and spans
+        alone do not say which caller sits inside it. Methods do not block: a
+        bare call cannot reach a method in Python or TypeScript.
+
+    NOT PROVEN, AND NOT ATTEMPTED — the same lexical scope as the import pass: a
+    parameter, local variable or module-level assignment of the same name, `global`
+    rebinding, and `import a.b` binding `a` (the edge records `b`). Those shadow
+    the function at runtime and are invisible to this table.
+
+    Writes `resolution_status = 'scope_resolved'`. Anything with `to_symbol` set is
+    proven to `reachable(include_inferred=False)`, so no reader needs to know the
+    new status. Only `_OVERWRITABLE` rows are touched, so `lsp` and
+    `import_resolved` rows survive, and a re-run on an unchanged index is a no-op.
+    """
+    nested_ids = _nested_symbol_ids(conn)
+
+    by_file_name: dict[tuple[str, str], list[tuple[str, str]]] = {}
+    for sid, file, name, kind in conn.execute(
+        "SELECT id, file, name, kind FROM symbols WHERE kind IN ('function', 'class', 'method')"
+    ):
+        by_file_name.setdefault((file, name), []).append((sid, kind))
+
+    imported = {
+        (file, to_name)
+        for file, to_name in conn.execute(
+            """SELECT s.file, e.to_name
+                 FROM edges e JOIN symbols s ON s.id = e.from_symbol
+                WHERE e.kind = 'import'"""
+        )
+    }
+
+    rows = conn.execute(
+        f"""SELECT e.rowid, s.file, e.to_name
+              FROM edges e JOIN symbols s ON s.id = e.from_symbol
+             WHERE e.kind = 'call'
+               AND e.to_symbol IS NULL
+               AND e.bare_call = 1
+               AND e.resolution_status IN ({",".join("?" * len(_OVERWRITABLE))})""",
+        _OVERWRITABLE,
+    ).fetchall()
+
+    resolved = no_local = imported_name = ambiguous = 0
+    for rowid, file, to_name in rows:
+        local = by_file_name.get((file, to_name), [])
+        if not local:
+            no_local += 1
+            continue
+        if (file, to_name) in imported:
+            imported_name += 1
+            continue
+        top = [sid for sid, kind in local if kind != "method" and sid not in nested_ids]
+        shadows = [sid for sid, kind in local if kind != "method" and sid in nested_ids]
+        if len(top) != 1 or shadows:
+            ambiguous += 1
+            continue
+        conn.execute(
+            "UPDATE edges SET to_symbol = ?, resolution_status = 'scope_resolved' WHERE rowid = ?",
+            (top[0], rowid),
+        )
+        resolved += 1
+
+    conn.commit()
+    report = {
+        "bare_call_edges_examined": len(rows),
+        "resolved": resolved,
+        "no_local_symbol": no_local,
+        "name_imported": imported_name,
+        "ambiguous": ambiguous,
+    }
+    log.debug("codex_scope_resolve %s", report)
+    return report

@@ -20,6 +20,10 @@ Schema versions (PRAGMA user_version on codex.db):
       it an import edge records a bare name with no binding, so a call to that
       name cannot be tied to the module it came from — which is why 33,081 call
       edges carried 1 resolved target on 2026-08-31.
+  5 — edges.bare_call: whether at least one call site behind a call edge is a bare
+      identifier (`f()`) rather than an attribute (`x.f()`) (techne#940). The two
+      forms share one edge row, so without it a same-file `def f` cannot be told
+      apart from `requests.f()`, and same-file callers were never proven.
 """
 
 from __future__ import annotations
@@ -43,7 +47,7 @@ from techne.core.stores import (
 
 log = logging.getLogger(__name__)
 
-CODEX_VERSION = 4
+CODEX_VERSION = 5
 
 # v1 shape — the authoritative schema for fresh databases.
 # Incremental: CREATE TABLE IF NOT EXISTS + CREATE INDEX IF NOT EXISTS are
@@ -85,6 +89,11 @@ CREATE TABLE IF NOT EXISTS edges (
     -- shape and 890 distinct to_name values mixed modules with imported names
     -- indistinguishably. NULL on every non-import edge.
     to_module         TEXT,
+    -- techne#940. For kind='call' ONLY: 1 when at least one call site collapsed
+    -- into this row is a bare identifier (`f()`), 0 when every one is an
+    -- attribute call (`x.f()`), NULL on non-call edges and on rows indexed
+    -- before v5. Scope resolution binds a same-file callee only on 1.
+    bare_call         INTEGER,
     PRIMARY KEY (from_symbol, to_name, kind)
 );
 CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_symbol);
@@ -402,6 +411,30 @@ def _codex_v3_to_v4(conn) -> None:
         )
 
 
+def _codex_v4_to_v5(conn) -> None:
+    """Add edges.bare_call (techne#940). Structurally guarded, so re-entrant.
+
+    Nullable ADD COLUMN, like v4: an existing call row cannot say whether its call
+    sites were bare without re-parsing, so it stays NULL and scope resolution
+    leaves it unresolved, which is its pre-v5 behaviour. The reparse debt is
+    recorded the same way v4 records it (techne#864), so the next `codex index`
+    re-parses unchanged files instead of skipping them on their hash.
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(edges)").fetchall()}
+    if "bare_call" not in cols:
+        conn.execute("ALTER TABLE edges ADD COLUMN bare_call INTEGER")
+    try:
+        has_rows = conn.execute("SELECT 1 FROM symbols LIMIT 1").fetchone() is not None
+    except Exception:  # noqa: BLE001 — no symbols table yet: nothing owed
+        has_rows = False
+    if has_rows:
+        conn.execute("CREATE TABLE IF NOT EXISTS codex_meta (key TEXT PRIMARY KEY, value TEXT)")
+        conn.execute(
+            "INSERT INTO codex_meta (key, value) VALUES ('reparse_owed_since', '5') "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+        )
+
+
 def _run_codex_steps(conn, current: int, target: int) -> None:
     """Chain all codex migration steps from *current* to *target*.
 
@@ -417,6 +450,8 @@ def _run_codex_steps(conn, current: int, target: int) -> None:
         _codex_v2_to_v3(conn)
     if current < 4:
         _codex_v3_to_v4(conn)
+    if current < 5:
+        _codex_v4_to_v5(conn)
     migrator.user_version_io.write(conn, target)
     conn.commit()
 

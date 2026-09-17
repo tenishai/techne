@@ -4758,13 +4758,20 @@ def _import_resolve_pass(db_path: Path) -> dict:
     updates by (from_symbol, to_name) with no `to_symbol IS NULL` guard, so it
     still upgrades a row this pass resolved. Reversing the two would leave the
     cheap pass unable to fill anything the expensive one missed.
+
+    SAME-FILE CALLS RIDE THE SAME PASS (techne#940). `resolve_edges_by_scope` runs
+    second and only on rows the import pass left `unresolved` with no import
+    binding, so the two cannot disagree about a row. Its count is reported as
+    `scope_resolved`, apart from `resolved`, so the import figure keeps its meaning.
     """
-    from techne.codex.import_resolve import resolve_edges_by_import
+    from techne.codex.import_resolve import resolve_edges_by_import, resolve_edges_by_scope
     from techne.core.stores import plain_connect
 
     conn = plain_connect(db_path)
     try:
-        return resolve_edges_by_import(conn)
+        report = resolve_edges_by_import(conn)
+        report["scope_resolved"] = resolve_edges_by_scope(conn)["resolved"]
+        return report
     finally:
         conn.close()
 
@@ -4838,6 +4845,7 @@ def codex_index(ctx, repo, languages, lsp, rebuild):
     rep = _import_resolve_pass(db_path)
     click.echo(
         f"Resolved: {rep['resolved']} call edges by import binding, "
+        f"{rep['scope_resolved']} by same-file scope, "
         f"{rep['external']} ruled external (no toolchain, techne#679)"
     )
     if src.last_failed:
@@ -4917,7 +4925,8 @@ def codex_index_all(ctx, languages, rebuild):
         rep = _import_resolve_pass(db_path)
         click.echo(
             f"reindexed {root}: {count} symbols{forced}{swept}{failed}"
-            f"; resolved {rep['resolved']} calls, {rep['external']} external"
+            f"; resolved {rep['resolved']} calls, {rep['scope_resolved']} same-file, "
+            f"{rep['external']} external"
         )
 
     if total_failed:
@@ -5087,8 +5096,31 @@ def codex_blast(ctx, symbol_id, repo, direction, depth, include_fixtures, only_p
         )
     }
     rows = annotate_freshness(db_path, raw)
+    # AN EMPTY PROVEN RADIUS IS NOT "NOTHING DEPENDS ON THIS" (techne#940). Under
+    # --only-proven the name-matched dependents were filtered out, and a bare
+    # "(nothing reachable)" read as permission to change the symbol while the
+    # permissive walk still found callers. Count what was hidden and say so.
+    hidden = 0
+    if only_proven:
+        hidden = sum(
+            1
+            for r in reachable(
+                db_path,
+                symbol_id,
+                direction=direction,
+                max_depth=depth,
+                exclude_fixtures=not include_fixtures,
+            )
+            if r["id"] not in proven_ids
+        )
     if not rows:
-        click.echo("(nothing reachable)")
+        if hidden:
+            click.echo(
+                f"(no resolved dependents; {hidden} reached only by a bare-name match "
+                "hidden — re-run without --only-proven to see them)"
+            )
+        else:
+            click.echo("(nothing reachable)")
         return
     for s in rows:
         freshness = s.get("freshness", "unknown")
@@ -5096,6 +5128,8 @@ def codex_blast(ctx, symbol_id, repo, direction, depth, include_fixtures, only_p
         guess = "" if s["id"] in proven_ids else " ?"
         click.echo(f"  d{s['depth']}  {s['name']}  [{s['kind']}]  ({s['file']}){marker}{guess}")
     inferred = sum(1 for s in rows if s["id"] not in proven_ids)
+    if hidden:
+        click.echo(f"  ({hidden} more reached only by a bare-name match hidden by --only-proven)")
     if inferred:
         click.echo(
             f"  ({inferred} of {len(rows)} marked ? — reached only by matching a bare call "

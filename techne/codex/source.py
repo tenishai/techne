@@ -530,6 +530,7 @@ def _parse_file(
 
     # Emit call edges.
     seen_edges: set[tuple[str, str, str]] = set()
+    call_edges: dict[tuple[str, str, str], dict] = {}
     for caps in call_matches:
         callee_nodes = caps.get("call.callee", [])
         range_nodes = caps.get("call.range", [])
@@ -538,16 +539,27 @@ def _parse_file(
             enclosing = _find_enclosing_symbol(call_node.start_byte, spans)
             from_sym = enclosing or module_sym_id
             key = (from_sym, callee_name, "call")
+            # BARE vs ATTRIBUTE (techne#940). Both query patterns capture the callee
+            # as `@call.callee`, and the edge key has no room for the difference, so
+            # `f()` and `x.f()` from one caller land on ONE row. A bare identifier's
+            # parent is the call node itself; an attribute's parent is the
+            # attribute / member_expression. Recorded as "at least one bare site",
+            # because that is what makes a same-file `def f` a real dependency.
+            parent = callee_node.parent
+            bare = int(parent is not None and parent.type in ("call", "call_expression"))
             if key not in seen_edges:
                 seen_edges.add(key)
-                edges.append(
-                    {
-                        "from_symbol": from_sym,
-                        "to_name": callee_name,
-                        "kind": "call",
-                        "src_file_hash": file_hash,
-                    }
-                )
+                edge = {
+                    "from_symbol": from_sym,
+                    "to_name": callee_name,
+                    "kind": "call",
+                    "src_file_hash": file_hash,
+                    "bare_call": bare,
+                }
+                call_edges[key] = edge
+                edges.append(edge)
+            elif bare:
+                call_edges[key]["bare_call"] = 1
 
     # Emit import edges (from the module symbol).
     for caps in import_matches:
@@ -697,11 +709,13 @@ def _index_file(
             # insert by forgetting a field that does not apply to it.
             for e in edges:
                 e.setdefault("to_module", None)
+                e.setdefault("bare_call", None)
             conn.executemany(
                 """INSERT OR IGNORE INTO edges
-                   (from_symbol, to_name, kind, src_file_hash, resolution_status, to_module)
+                   (from_symbol, to_name, kind, src_file_hash, resolution_status, to_module,
+                    bare_call)
                    VALUES (:from_symbol, :to_name, :kind, :src_file_hash, 'unresolved',
-                           :to_module)""",
+                           :to_module, :bare_call)""",
                 edges,
             )
         conn.commit()
