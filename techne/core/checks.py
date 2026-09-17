@@ -2479,13 +2479,21 @@ def check_vector_coverage(config) -> CheckResult:
     # dangling rows cannot enter it at all — they are counted explicitly instead.
     covered = embedded - stale
     missing = total - embedded
-    pct = (covered / total * 100) if total else 100.0
     # "and current" is load-bearing: this numerator is `covered` (embedded AND not
     # vec_stale), while `evidence` reports the raw `embedded`. Without the phrase a
     # reader comparing the two lines sees 1/6 against embedded=3 and reads a
     # contradiction — and evidence exists precisely so a finding can be re-derived
     # (#497 review, nit 1).
-    detail = f"{covered}/{total} live knowledge embedded and current ({pct:.0f}%)"
+    # NO PERCENTAGE FOR AN EMPTY KNOWLEDGE TABLE (techne#942). This printed
+    # "0/0 live knowledge embedded and current (100%)" on a store holding 35,096
+    # fully embedded observations and no knowledge: true, and it told the operator
+    # nothing about either. The empty case names what IS there instead, below,
+    # once the sibling counts exist.
+    if total:
+        pct = covered / total * 100
+        detail = f"{covered}/{total} live knowledge embedded and current ({pct:.0f}%)"
+    else:
+        detail = "no live knowledge yet"
     if missing:
         detail += f", {missing} missing"
     if stale:
@@ -2526,6 +2534,7 @@ def check_vector_coverage(config) -> CheckResult:
     # "present or not" IS the whole question for them, and inventing a richer
     # predicate here would be a second definition of coverage.
     sibling_gaps: dict[str, int] = {}
+    sibling_counts: dict[str, tuple[int, int]] = {}
     conn = connect(config.db_path)
     try:
         for tbl, id_col in (("observations", "id"), ("threads", "rowid")):
@@ -2537,12 +2546,21 @@ def check_vector_coverage(config) -> CheckResult:
                 ).fetchone()[0]
             except Exception:  # noqa: BLE001 — that table's vec channel is absent
                 continue
+            sibling_counts[tbl] = (emb, tot)
             if tot - emb > 0:
                 sibling_gaps[tbl] = tot - emb
     finally:
         conn.close()
-    for tbl, gap in sibling_gaps.items():
-        detail += f", {gap} {tbl} unembedded"
+    if total:
+        for tbl, gap in sibling_gaps.items():
+            detail += f", {gap} {tbl} unembedded"
+    else:
+        # With no knowledge, the siblings ARE the vector channel, so report their
+        # coverage outright rather than only their gaps (techne#942).
+        present = [
+            f"{tbl} {emb}/{tot} embedded" for tbl, (emb, tot) in sibling_counts.items() if tot
+        ]
+        detail += f"; {', '.join(present)}" if present else "; nothing to embed yet"
 
     healthy = missing == 0 and stale == 0 and orphans == 0 and not sibling_gaps
     return CheckResult(

@@ -18,6 +18,7 @@ drifting search.py's DROP-capable code.
 
 from __future__ import annotations
 
+import logging
 import re
 import sqlite3
 from pathlib import Path
@@ -32,6 +33,8 @@ from techne.core.extension_state import get_state
 # coupling to search.py's migration internals; the string itself is a stable
 # storage key, not migration logic.
 _VEC_BACKEND_STATE_NAME = "embedding_backend"
+
+log = logging.getLogger(__name__)
 
 _VEC_TABLE_NAMES = ("threads_vec", "observations_vec", "knowledge_vec")
 
@@ -54,6 +57,39 @@ class VectorChannelStatus(TypedDict):
     stamp: dict | None  # stored extension_state identity, or None
     tables: dict[str, _TableStatus]
     reembed_needed: bool
+    # Rows `techne vectors backfill` would embed, per vec table (techne#948).
+    unembedded: dict[str, int]
+    backfill_needed: bool
+
+
+#: vec table -> (base table, id column, extra predicate). MIRRORS the population
+#: `search.backfill_vectors` selects: live knowledge that is missing OR vec_stale,
+#: and every observation / thread row missing from its vec table. If backfill's
+#: predicate changes, change this with it, or `backfill needed` lies again.
+_BACKFILL_POPULATION = {
+    "threads_vec": ("threads", "rowid", ""),
+    "observations_vec": ("observations", "id", ""),
+    "knowledge_vec": ("knowledge", "id", "superseded_by IS NULL"),
+}
+
+
+def _unembedded_count(conn: sqlite3.Connection, vec_table: str) -> int:
+    """Rows backfill would embed for one vec table (techne#948).
+
+    Reads the plain `<vec>_rowids` shadow table, so no sqlite-vec extension is
+    needed. A vec table that does not exist yet counts every eligible row: nothing
+    of that table is embedded, and backfill creates the table and fills it.
+    """
+    base, id_col, live = _BACKFILL_POPULATION[vec_table]
+    where = [live] if live else []
+    try:
+        conn.execute(f"SELECT 1 FROM {vec_table}_rowids LIMIT 1")
+        missing = f"{id_col} NOT IN (SELECT rowid FROM {vec_table}_rowids)"
+        where.append(f"({missing} OR vec_stale = 1)" if base == "knowledge" else missing)
+    except sqlite3.OperationalError:
+        pass  # no vec table yet: every eligible row is unembedded
+    clause = f" WHERE {' AND '.join(where)}" if where else ""
+    return conn.execute(f"SELECT COUNT(*) FROM {base}{clause}").fetchone()[0]
 
 
 def _table_dim(conn: sqlite3.Connection, name: str) -> int | None:
@@ -177,11 +213,20 @@ def vector_channel_status(
                 reembed_needed = existing_dims != {active_backend["dim"]}
             # else: unstamped AND no tables — fresh DB, nothing to re-embed.
 
+        # "re-embed needed" answers ONE question — did the backend change? — and
+        # was read as "is everything embedded?" (techne#948: 25 knowledge rows
+        # promoted, knowledge_vec empty, "re-embed needed: False"). The second
+        # question gets its own field rather than a wider meaning for the first.
+        unembedded = {name: _unembedded_count(conn, name) for name in _VEC_TABLE_NAMES}
+        log.debug("vector_channel_status: unembedded=%s", unembedded)
+
         return {
             "active_backend": active_backend,
             "stamp": stamp,
             "tables": tables,
             "reembed_needed": reembed_needed,
+            "unembedded": unembedded,
+            "backfill_needed": any(unembedded.values()),
         }
     finally:
         conn.close()
