@@ -2175,6 +2175,47 @@ def prompts_path(ctx):
     click.echo(str(prompts_dir(ctx.obj["config"])))
 
 
+def _vector_next_steps(db_path: Path) -> list[str]:
+    """What `init` should say about semantic recall (techne#944).
+
+    A fresh install has no embedding backend unless `[vectors]` (or `[recommended]`)
+    was installed, and a mistyped extra such as `[vec]` is only a pip WARNING, so
+    the install "succeeds" and every search runs FTS-only. `capabilities` reports
+    that plainly, but nothing sent a new user there. Uses the import probe and the
+    non-mutating channel status only — no model load, no download.
+    """
+    import re
+
+    from techne.core.embeddings import backend_available
+
+    if not backend_available():
+        tag = f"v{__version__}" if re.fullmatch(r"\d+\.\d+\.\d+", __version__) else "<tag>"
+        return [
+            "  Semantic recall is OFF: no embedding backend is installed, so search is",
+            "  keyword-only (FTS). Install the extra, then embed what is stored:",
+            f'    pipx install --force "techne[recommended] @ '
+            f'git+https://github.com/tenishai/techne.git@{tag}"',
+            "    techne vectors backfill",
+        ]
+
+    from techne.core.vector_status import vector_channel_status
+
+    try:
+        status = vector_channel_status(db_path, probe_backend_when_empty=False)
+        rows = sum((t.get("rows") or 0) for t in status["tables"].values())
+    except Exception:
+        # Reporting only; a status failure must not fail init. `rows=0` still
+        # prints the backfill hint, which is harmless if vectors do exist.
+        rows = 0
+    if rows == 0:
+        return [
+            "  Semantic recall: backend installed, nothing embedded yet. Once there is",
+            "  something stored (e.g. after `techne import`), run:",
+            "    techne vectors backfill",
+        ]
+    return []
+
+
 @main.command("init")
 @click.option("--platform", type=click.Choice(list(PLATFORMS)), default="claude-code")
 @click.option(
@@ -2327,9 +2368,18 @@ def init(ctx, platform, identity_dir, posture, install_skills, force_skills):
         click.echo("  Inspect what's been captured:")
         click.echo("    techne status")
         click.echo("    techne search '<query>'")
+        vector_steps = _vector_next_steps(config.db_path)
+        if vector_steps:
+            click.echo("")
+            for line in vector_steps:
+                click.echo(line)
+        click.echo("")
+        click.echo("  See which features are on: techne capabilities")
         return
 
     click.echo("\ntechne initialized. Run 'techne status' to verify.")
+    for line in _vector_next_steps(config.db_path):
+        click.echo(line)
 
 
 @main.command("watch")

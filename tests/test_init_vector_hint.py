@@ -1,0 +1,75 @@
+"""techne#944 — `init` never told a new user that search was keyword-only.
+
+A missing or mistyped extra (`techne[vec]` instead of `[vectors]`) is only a pip
+warning, so the install succeeds with no embedding backend and every search runs
+FTS-only. `capabilities` says so, but init's next steps never pointed there.
+"""
+
+from __future__ import annotations
+
+import pytest
+from click.testing import CliRunner
+
+from techne.cli import main
+
+
+@pytest.fixture
+def isolated(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / ".config"))
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path / ".techne"))
+    return tmp_path
+
+
+def _init(*args):
+    result = CliRunner().invoke(main, ["init", *args])
+    assert result.exit_code == 0, result.output
+    return result.output
+
+
+def test_standalone_init_says_search_is_keyword_only_without_a_backend(isolated, monkeypatch):
+    monkeypatch.setattr("techne.core.embeddings.backend_available", lambda: False)
+    out = _init("--platform", "standalone")
+    assert "keyword-only" in out, out
+    assert "techne[recommended] @ git+https://github.com/tenishai/techne.git@" in out, (
+        "the hint must give the git install form: PyPI `techne` is an unrelated package"
+    )
+    assert "techne vectors backfill" in out
+
+
+def test_standalone_init_points_at_backfill_when_nothing_is_embedded(isolated, monkeypatch):
+    monkeypatch.setattr("techne.core.embeddings.backend_available", lambda: True)
+    out = _init("--platform", "standalone")
+    assert "keyword-only" not in out
+    assert "nothing embedded yet" in out, out
+    assert "techne vectors backfill" in out
+
+
+def test_no_hint_when_vectors_exist(isolated, monkeypatch):
+    monkeypatch.setattr("techne.core.embeddings.backend_available", lambda: True)
+    monkeypatch.setattr(
+        "techne.core.vector_status.vector_channel_status",
+        lambda db, **kw: {"tables": {"knowledge_vec": {"rows": 12}}},
+    )
+    out = _init("--platform", "standalone")
+    assert "nothing embedded yet" not in out
+    assert "keyword-only" not in out
+
+
+def test_standalone_init_names_capabilities(isolated):
+    assert "techne capabilities" in _init("--platform", "standalone")
+
+
+def test_claude_code_init_also_warns_without_a_backend(isolated, monkeypatch):
+    monkeypatch.setattr("techne.core.embeddings.backend_available", lambda: False)
+    out = _init("--platform", "claude-code")
+    assert "techne initialized" in out
+    assert "keyword-only" in out, out
+
+
+def test_the_install_hint_never_prints_a_non_release_tag(isolated, monkeypatch):
+    monkeypatch.setattr("techne.core.embeddings.backend_available", lambda: False)
+    monkeypatch.setattr("techne.cli.__version__", "0.0.0+unknown")
+    out = _init("--platform", "standalone")
+    assert "techne.git@<tag>" in out
+    assert "0.0.0+unknown" not in out

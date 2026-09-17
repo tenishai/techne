@@ -150,6 +150,23 @@ All notable changes to techne are documented here. Format loosely follows
   techne does not re-root a persisted path on its own: the file cannot tell a
   copied default from a store kept on another volume on purpose.
 
+- **`techne init` now says when search is keyword-only** (#944). A missing or
+  mistyped extra (`techne[vec]` instead of `[vectors]`) is only a pip warning, so an
+  install could succeed with no embedding backend and every search ran FTS-only,
+  with nothing pointing at `techne capabilities`, which reports it. Both init paths
+  now check the backend (import probe only, no model load): with none installed they
+  say so and print the git install command for `[recommended]`; with a backend and
+  nothing embedded they print `techne vectors backfill`. Standalone next steps also
+  name `techne capabilities`. No warning was added to `search` itself.
+
+- **Install docs no longer send people to the wrong PyPI package** (#943). PyPI
+  `techne` is an unrelated 0.0.2 package, and `ARCHITECTURE.md` said "pip/pipx pkg
+  `techne`" while naming capabilities ("vec search", "codegraph", "headless") instead
+  of extras. It now gives the git install form and the real extra names; README
+  says the PyPI name is a different project; `docs/modules.md`,
+  `docs/four-functions.md` and README's codex lines no longer show bare
+  `pip install "techne[...]"`.
+
 - **The reserved lexical slot now goes to the curated row** (#831). #827 made the
   lexical channel reachable by reserving one tail slot; it did not make it useful.
   The curated row loses the slot on the CONFIDENCE-DECAY TIEBREAK. The two
