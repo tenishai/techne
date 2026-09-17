@@ -1508,6 +1508,13 @@ END;
         # row's local source was discarded at write time. A promoted row's source
         # session is recorded on the candidate that produced it.
         #
+        # NOT THE SLEEP SENTINEL (Prudence #961 r1). Consolidate merges, dream adds and
+        # conflict supersedes are filed under `sleepdream.SYSTEM_SLEEP_SESSION`
+        # ('system:sleep'), a placeholder for the FK, not a session. Those rows stay
+        # NULL. The literal is pinned to the constant by
+        # test_the_migration_sentinel_matches_sleepdream (no import: database.py sits
+        # below sleepdream).
+        #
         # ONLY ACTIONS THAT MINT A ROW. `retire` points promoted_to_id at an existing
         # survivor, which did not originate in the retiring session, so stamping it
         # would write a wrong session into the provenance column. A NULL action is a
@@ -1534,6 +1541,7 @@ END;
                           SELECT c.source_session_id FROM knowledge_candidates c
                            WHERE c.promoted_to_id = knowledge.id
                              AND c.status = 'promoted'
+                             AND c.source_session_id != 'system:sleep'
                              AND COALESCE(c.action, 'add') IN ('add', 'supersede', 'merge')
                              AND c.scope = 'knowledge'
                            ORDER BY c.id LIMIT 1)
@@ -1541,6 +1549,7 @@ END;
                       AND id IN (
                           SELECT promoted_to_id FROM knowledge_candidates
                            WHERE status = 'promoted'
+                             AND source_session_id != 'system:sleep'
                              AND COALESCE(action, 'add') IN ('add', 'supersede', 'merge')
                              AND scope = 'knowledge'
                              AND promoted_to_id IS NOT NULL)"""

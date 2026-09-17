@@ -180,9 +180,11 @@ All notable changes to techne are documented here. Format loosely follows
 - **Promoted knowledge now records the session it came from** (#949). Promotion left
   `knowledge.origin_session` NULL on every row, so the session was reachable only by
   joining `knowledge_candidates.promoted_to_id` or parsing `source`. Promote (reviewed
-  and `write_to: live`) now stamps it for rows it creates. Schema v26 backfills existing
-  promoted rows from their candidates. Rows a `retire` pointed at are left alone: the
-  survivor did not originate in that session.
+  and `write_to: live`) now stamps it for rows it creates from a real session. Schema v26
+  backfills existing promoted rows from their candidates by the same rule. Left NULL: rows
+  a `retire` pointed at (the survivor did not originate in that session), and merges,
+  dream adds and conflict supersedes, whose candidates carry the `system:sleep`
+  placeholder rather than a session.
 
 - **The reserved lexical slot now goes to the curated row** (#831). #827 made the
   lexical channel reachable by reserving one tail slot; it did not make it useful.

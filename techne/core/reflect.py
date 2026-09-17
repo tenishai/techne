@@ -1858,6 +1858,20 @@ def _record_reflect_marker(config, *, outcome: str, detail: str = "") -> None:
         log.warning("reflect: could not record liveness marker", exc_info=True)
 
 
+def _is_real_session(session_id: str | None) -> bool:
+    """False for the placeholder the session-less passes file candidates under.
+
+    Consolidate merges, dream adds and every conflict supersede are written with
+    `SYSTEM_SLEEP_SESSION`, a sentinel that satisfies the candidates FK. Stamping it
+    into `knowledge.origin_session` would record a merged fact, or a team store's
+    fact, as originating in a local session (Prudence #961 r1). Those rows stay NULL:
+    unattributed rather than guessed.
+    """
+    from techne.core.sleepdream import SYSTEM_SLEEP_SESSION
+
+    return bool(session_id) and session_id != SYSTEM_SLEEP_SESSION
+
+
 def _stamp_origin_session(conn, knowledge_id: int, session_id: str) -> None:
     """Record which session a promoted knowledge row came from (techne#949).
 
@@ -2187,7 +2201,14 @@ def promote_candidate(
                   SET status = 'promoted', reviewed_at = CURRENT_TIMESTAMP,
                       decided_by = ?, decision_reason = ?, revised_content = ?
                 WHERE id = ? AND status = 'pending'""",
-            (decided_by, decision_reason, revised_content, candidate_id),
+            (
+                decided_by,
+                decision_reason,
+                # Redacted like every other text written to this table (Prudence #961
+                # r1); `reflect review` echoes it back.
+                redact_credentials(revised_content) if revised_content is not None else None,
+                candidate_id,
+            ),
         )
         if cur.rowcount == 0:
             raise ValueError(
@@ -2213,6 +2234,7 @@ def promote_candidate(
             promoted_to_id is not None
             and row["scope"] == "knowledge"
             and action in _ROW_MINTING_ACTIONS
+            and _is_real_session(row["source_session_id"])
         ):
             _stamp_origin_session(conn, promoted_to_id, row["source_session_id"])
         conn.commit()

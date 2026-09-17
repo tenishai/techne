@@ -296,3 +296,74 @@ def test_migration_backfills_promoted_rows_and_skips_retire_survivors(cfg):
     assert got[kid] == sid
     assert got[survivor] is None
     assert got[old] is None
+
+
+# --- Prudence #961 r1 -----------------------------------------------------------
+
+
+def _sleep_session(cfg):
+    from techne.core.sleepdream import SYSTEM_SLEEP_SESSION, _ensure_system_session
+
+    _ensure_system_session(cfg.db_path)
+    return SYSTEM_SLEEP_SESSION
+
+
+def test_a_sentinel_session_merge_is_not_stamped(cfg):
+    """Consolidate merges carry the sleep sentinel, not a session. Stamping it would
+    record a merged fact as originating in a local session."""
+    from techne.core.knowledge import store
+    from techne.core.reflect import promote_candidate
+
+    a = store(cfg.db_path, "first overlapping claim about merges", type="fact")
+    b = store(cfg.db_path, "second overlapping claim about merges", type="fact")
+    cid, _ = _candidate(
+        cfg, "merged claim about merges", action="merge", target_ids=[a, b], sid=_sleep_session(cfg)
+    )
+    kid = promote_candidate(cfg.db_path, cid, decided_by="t")
+    assert (
+        _one(cfg, "SELECT origin_session FROM knowledge WHERE id = ?", kid)["origin_session"]
+        is None
+    )
+
+
+def test_migration_does_not_backfill_the_sentinel(cfg):
+    from techne.core.database import _migrate, connect
+    from techne.core.knowledge import store
+    from techne.core.reflect import promote_candidate
+
+    a = store(cfg.db_path, "first claim for backfill", type="fact")
+    b = store(cfg.db_path, "second claim for backfill", type="fact")
+    cid, _ = _candidate(
+        cfg, "merged claim for backfill", action="merge", target_ids=[a, b], sid=_sleep_session(cfg)
+    )
+    kid = promote_candidate(cfg.db_path, cid, decided_by="t")
+
+    conn = connect(cfg.db_path)
+    try:
+        conn.execute("DELETE FROM schema_version WHERE version = 26")
+        conn.commit()
+        _migrate(conn, 25, 26)
+        got = conn.execute("SELECT origin_session FROM knowledge WHERE id = ?", (kid,)).fetchone()
+    finally:
+        conn.close()
+    assert got["origin_session"] is None
+
+
+def test_the_migration_sentinel_matches_sleepdream():
+    """database.py hard-codes the sentinel (it cannot import sleepdream); pin it."""
+    import inspect
+
+    from techne.core import database
+    from techne.core.sleepdream import SYSTEM_SLEEP_SESSION
+
+    assert f"source_session_id != '{SYSTEM_SLEEP_SESSION}'" in inspect.getsource(database._migrate)
+
+
+def test_a_stored_revision_is_redacted(cfg):
+    from techne.core.reflect import promote_candidate
+
+    secret = "AKIAIOSFODNN7EXAMPLE"
+    cid, _ = _candidate(cfg, WRAPPED)
+    promote_candidate(cfg.db_path, cid, decision_reason="x", revised_content=f"key {secret}")
+    stored = _one(cfg, "SELECT revised_content FROM knowledge_candidates WHERE id = ?", cid)
+    assert secret not in stored["revised_content"]
