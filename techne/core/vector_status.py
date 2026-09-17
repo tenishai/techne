@@ -117,6 +117,38 @@ def _table_row_count(conn: sqlite3.Connection, name: str) -> int | None:
         return None
 
 
+def vector_row_counts(db_path: Path) -> dict[str, int | None]:
+    """Row count per vec table, WITHOUT building the embedding backend (techne#944).
+
+    `vector_channel_status` builds the active backend (a model load from the local
+    cache) whenever a stamp or a vec table exists, and `probe_backend_when_empty`
+    only suppresses that on a fully empty channel. A caller that needs counts alone
+    — `techne init`'s next steps — must not pay a model load for them. Value is None
+    when the table is absent or sqlite-vec cannot be loaded ("unknown", not zero).
+    """
+    conn = connect(db_path)
+    try:
+        try:
+            import sqlite_vec
+
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+            conn.enable_load_extension(False)
+            vec_loadable = True
+        except (ImportError, AttributeError, sqlite3.OperationalError, sqlite3.NotSupportedError):
+            vec_loadable = False
+        return {
+            name: (
+                _table_row_count(conn, name)
+                if vec_loadable and _table_dim(conn, name) is not None
+                else None
+            )
+            for name in _VEC_TABLE_NAMES
+        }
+    finally:
+        conn.close()
+
+
 def vector_channel_status(
     db_path: Path, *, probe_backend_when_empty: bool = True
 ) -> VectorChannelStatus:

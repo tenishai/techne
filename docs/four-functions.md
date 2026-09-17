@@ -329,10 +329,10 @@ populate command, and where the filler lives when it is not in this repo.
 
 | domain | enable | populate | filler ships with techne? |
 |---|---|---|---|
-| **archivist** | on by default (`local`); `pip install "techne[vectors]"` adds vector search, then `techne vectors backfill` for rows already stored | `techne_store` from your agent, or `techne knowledge add` | **yes** — it is your own memory |
+| **archivist** | on by default (`local`); the `[vectors]` extra adds vector search, then `techne vectors backfill` for rows already stored | `techne_store` from your agent, or `techne knowledge add` | **yes** — it is your own memory |
 | **librarian** | on by default — **FTS only, by construction** | `techne librarian index-transcripts` · `techne librarian index-markdown DIR` | **yes**, but nothing runs it for you — see below |
 | **architect** | on by default | `techne architect add` for one pattern · `techne architect ingest FILE.md` for a corpus | **yes** (`add` ships); the richer research procedures live in [`tenishai/skills`](https://github.com/tenishai/skills) |
-| **codex** | `pip install "techne[codex]"` | `techne codex index .` · `codex index-all` · `codex watch` | **yes** |
+| **codex** | the `[codex]` extra | `techne codex index .` · `codex index-all` · `codex watch` | **yes** |
 
 ### Installing `[vectors]` does not backfill what you already stored
 
