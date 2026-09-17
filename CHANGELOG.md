@@ -7,6 +7,16 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Added
 
+- **`techne reflect promote --content` promotes a reviewer's edit** (#952). Review had only
+  promote and discard, so a candidate stating a durable claim inside counts, ids or
+  versions that go stale forced a choice between losing the claim and storing the
+  wrapper. `--content` (or `--content-file`) applies the edited text; the proposal stays
+  on the candidate in `content`, and the edit is stored in the new
+  `knowledge_candidates.revised_content`. `reflect review` shows both, and `reflect
+  stats` reports a `revised` count. Only `add` candidates can be revised (a merge or
+  supersede was faithfulness-checked against its original text), and a revision
+  requires `--reason`.
+
 - The evidence gate now covers **state claims**, not just deeds (#584). `evidence.py`
   verifies what an agent *did* against the observation ledger; assertions about
   *project state* — who owns an issue, whether a PR is merged, whether we already
@@ -166,6 +176,15 @@ All notable changes to techne are documented here. Format loosely follows
   says the PyPI name is a different project; `docs/modules.md`,
   `docs/four-functions.md` and README's codex lines no longer show bare
   `pip install "techne[...]"`.
+
+- **Promoted knowledge now records the session it came from** (#949). Promotion left
+  `knowledge.origin_session` NULL on every row, so the session was reachable only by
+  joining `knowledge_candidates.promoted_to_id` or parsing `source`. Promote (reviewed
+  and `write_to: live`) now stamps it for rows it creates from a real session. Schema v26
+  backfills existing promoted rows from their candidates by the same rule. Left NULL: rows
+  a `retire` pointed at (the survivor did not originate in that session), and merges,
+  dream adds and conflict supersedes, whose candidates carry the `system:sleep`
+  placeholder rather than a session.
 
 - **The reserved lexical slot now goes to the curated row** (#831). #827 made the
   lexical channel reachable by reserving one tail slot; it did not make it useful.

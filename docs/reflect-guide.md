@@ -101,6 +101,18 @@ techne reflect promote <id> --by "<who>" --reason "<why>"
 techne reflect discard <id> --by "<who>" --reason "<why>"
 ```
 
+**Keeping the claim, not the wrapper.** A candidate that states something durable but
+carries counts, ids or versions that will go stale doesn't have to be discarded:
+
+```sh
+techne reflect promote <id> --content "<the durable version>" --by "<who>" --reason "<what you cut>"
+```
+
+The edited text is what lands in knowledge; the original proposal stays on the candidate, and
+`techne reflect review` shows both. Only plain `add` candidates can be revised: a merge or
+supersede was checked for faithfulness against its original text. `--content-file` reads the
+text from a file. `techne reflect stats` counts revisions separately (`revised`).
+
 `--by` and `--reason` are provenance. Leaving `--by` off records `unspecified`, so nobody can
 tell afterwards whether a person or an agent's bulk drain made the call.
 

@@ -349,9 +349,14 @@ def _insert_candidate(
         conn.close()
 
 
-def _write_live(db_path: Path, candidate: Candidate, source: str) -> int | None:
+def _write_live(
+    db_path: Path, candidate: Candidate, source: str, session_id: str | None = None
+) -> int | None:
     """Write straight to the live knowledge / identity tables. Used only when
-    config.reflect.write_to='live' — intended for after the test concludes."""
+    config.reflect.write_to='live' — intended for after the test concludes.
+
+    `session_id` goes into `origin_session` in the same INSERT (techne#949), the way
+    reviewed promotion stamps it."""
     if candidate.scope == "knowledge":
         from techne.core.knowledge import store
 
@@ -362,6 +367,7 @@ def _write_live(db_path: Path, candidate: Candidate, source: str) -> int | None:
             tags=candidate.tags,
             confidence=candidate.confidence,
             source=source,
+            provenance={"origin_session": session_id} if session_id else None,
         )
     if candidate.scope == "identity":
         from techne.core.identity import set_value
@@ -1649,7 +1655,10 @@ def ingest_reflection_response(
             counts["candidates_written"] += 1
             if effective_write_to(config) == "live":
                 promoted_id = _write_live(
-                    config.db_path, c, source=f"reflect:{thread_id or 'unknown'}"
+                    config.db_path,
+                    c,
+                    source=f"reflect:{thread_id or 'unknown'}",
+                    session_id=session_id,
                 )
                 _mark_promoted(config.db_path, cand_id, promoted_id)
                 counts["candidates_promoted"] += 1
@@ -1847,6 +1856,34 @@ def _record_reflect_marker(config, *, outcome: str, detail: str = "") -> None:
         record_rail_marker(config, "reflect", outcome=outcome, detail=detail)
     except Exception:  # noqa: BLE001
         log.warning("reflect: could not record liveness marker", exc_info=True)
+
+
+def _is_real_session(session_id: str | None) -> bool:
+    """False for the placeholder the session-less passes file candidates under.
+
+    Consolidate merges, dream adds and every conflict supersede are written with
+    `SYSTEM_SLEEP_SESSION`, a sentinel that satisfies the candidates FK. Stamping it
+    into `knowledge.origin_session` would record a merged fact, or a team store's
+    fact, as originating in a local session (Prudence #961 r1). Those rows stay NULL:
+    unattributed rather than guessed.
+    """
+    from techne.core.sleepdream import SYSTEM_SLEEP_SESSION
+
+    return bool(session_id) and session_id != SYSTEM_SLEEP_SESSION
+
+
+def _stamp_origin_session(conn, knowledge_id: int, session_id: str) -> None:
+    """Record which session a promoted knowledge row came from (techne#949).
+
+    Before this, promotion left `knowledge.origin_session` NULL and the session was
+    reachable only through `knowledge_candidates.promoted_to_id` or by parsing
+    `source`. Never overwrites a value already set. Runs on the caller's connection,
+    inside promote's transaction, so the row cannot commit without it.
+    """
+    conn.execute(
+        "UPDATE knowledge SET origin_session = ? WHERE id = ? AND origin_session IS NULL",
+        (session_id, knowledge_id),
+    )
 
 
 def _mark_promoted(db_path: Path, candidate_id: int, promoted_to_id: int | None) -> None:
@@ -2066,6 +2103,18 @@ _APPLIERS = {
 }
 
 
+#: Actions whose applier mints a NEW knowledge row, so the row originated in the
+#: candidate's session (techne#949). `retire` returns an existing survivor, which did
+#: not, and must not be stamped.
+_ROW_MINTING_ACTIONS = frozenset({"add", "supersede", "merge"})
+
+#: Actions a reviewer may revise with `--content` (techne#952). Add-only: a merge or
+#: supersede carries a faithfulness verdict computed on its original content, and
+#: revising it would leave that verdict describing text that is no longer applied.
+#: Resetting the verdict instead would make revision a way around the gate.
+_REVISABLE_ACTIONS = frozenset({"add"})
+
+
 def promote_candidate(
     db_path: Path,
     candidate_id: int,
@@ -2073,6 +2122,7 @@ def promote_candidate(
     decided_by: str | None = None,
     decision_reason: str | None = None,
     force: bool = False,
+    revised_content: str | None = None,
 ) -> int | None:
     """Promote a candidate to live knowledge / identity. Returns the new
     knowledge.id (or None for identity entries). Raises if already reviewed.
@@ -2094,6 +2144,15 @@ def promote_candidate(
     warning.  Unchecked (faithfulness_ok IS NULL) and faithful (== 1) candidates
     always promote normally; the gate only blocks explicitly-flagged-unfaithful
     merge/supersede candidates.
+
+    `revised_content` (techne#952) promotes a reviewer's edit instead of the proposed
+    text: for a durable claim wrapped in details that will go stale, where discard
+    loses the claim and promote keeps the wrapper. Stored on the candidate's
+    `revised_content`; `content` is left as proposed. Add-only, and requires a
+    `decision_reason` — an unexplained edit to memory cannot be audited.
+
+    Row-minting actions stamp `knowledge.origin_session` with the candidate's
+    session in the same transaction (techne#949).
     """
     conn = connect(db_path)
     try:
@@ -2109,6 +2168,20 @@ def promote_candidate(
         applier = _APPLIERS.get(action)
         if applier is None:
             raise ValueError(f"Candidate {candidate_id} has unknown action {action!r}")
+
+        if revised_content is not None:
+            if action not in _REVISABLE_ACTIONS:
+                raise ValueError(
+                    f"Candidate {candidate_id} is a {action!r}; only 'add' candidates can "
+                    "be revised (techne#952). Promote or discard it as proposed."
+                )
+            if not revised_content.strip():
+                raise ValueError(f"Candidate {candidate_id}: revised content is empty")
+            if not (decision_reason or "").strip():
+                raise ValueError(
+                    f"Candidate {candidate_id}: a revision needs a decision_reason "
+                    "saying what was changed and why"
+                )
 
         # Faithfulness soft gate (techne#252): refuse explicitly-unfaithful
         # merge/supersede candidates before touching status. The check fires only when
@@ -2126,22 +2199,44 @@ def promote_candidate(
         cur = conn.execute(
             """UPDATE knowledge_candidates
                   SET status = 'promoted', reviewed_at = CURRENT_TIMESTAMP,
-                      decided_by = ?, decision_reason = ?
+                      decided_by = ?, decision_reason = ?, revised_content = ?
                 WHERE id = ? AND status = 'pending'""",
-            (decided_by, decision_reason, candidate_id),
+            (
+                decided_by,
+                decision_reason,
+                # Redacted like every other text written to this table (Prudence #961
+                # r1); `reflect review` echoes it back.
+                redact_credentials(revised_content) if revised_content is not None else None,
+                candidate_id,
+            ),
         )
         if cur.rowcount == 0:
             raise ValueError(
                 f"Candidate {candidate_id} already {row['status']} — cannot re-promote"
             )
 
+        # Appliers read row["content"]; hand them the revision in its place so no
+        # applier needs to know revision exists.
+        applied = row
+        if revised_content is not None:
+            applied = dict(row)
+            applied["content"] = revised_content
+            log.debug("promote_candidate: candidate %s promoted with a revision", candidate_id)
+
         # Apply on the SAME connection so a failure here rolls back the status flip.
-        promoted_to_id = applier(conn, row, db_path)
+        promoted_to_id = applier(conn, applied, db_path)
 
         conn.execute(
             "UPDATE knowledge_candidates SET promoted_to_id = ? WHERE id = ?",
             (promoted_to_id, candidate_id),
         )
+        if (
+            promoted_to_id is not None
+            and row["scope"] == "knowledge"
+            and action in _ROW_MINTING_ACTIONS
+            and _is_real_session(row["source_session_id"])
+        ):
+            _stamp_origin_session(conn, promoted_to_id, row["source_session_id"])
         conn.commit()
         return promoted_to_id
     except Exception:
@@ -2187,9 +2282,17 @@ def candidate_stats(db_path: Path) -> dict:
                  FROM knowledge_candidates GROUP BY scope, status"""
         ).fetchall()
         by_scope = {(r["scope"], r["status"]): r["n"] for r in scope_rows}
+        # Promoted with a reviewer's edit (techne#952). The revise rate is the
+        # measure for prompt changes like #950: fewer revisions means fewer
+        # candidates arriving with details that go stale.
+        revised = conn.execute(
+            "SELECT COUNT(*) FROM knowledge_candidates "
+            "WHERE status = 'promoted' AND revised_content IS NOT NULL"
+        ).fetchone()[0]
         return {
             "pending": counts.get("pending", 0),
             "promoted": counts.get("promoted", 0),
+            "revised": revised,
             "discarded": counts.get("discarded", 0),
             "by_scope": {f"{s[0]}.{s[1]}": n for s, n in by_scope.items()},
         }

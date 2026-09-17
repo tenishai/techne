@@ -3091,6 +3091,11 @@ def reflect_review(ctx, status, limit, show_raw):
     for r in rows:
         click.echo(f"#{r['id']}  [{r['status']}]  {r['scope']}/{r['type']}  conf={r['confidence']}")
         click.echo(f"  {r['content']}")
+        if r.get("revised_content"):
+            # The proposal stays above; this is what was applied (techne#952).
+            click.echo(f"  revised to: {r['revised_content']}")
+            if r.get("decision_reason"):
+                click.echo(f"  reason: {r['decision_reason']}")
         if r["tags"]:
             click.echo(f"  tags: {r['tags']}")
         click.echo(
@@ -3249,15 +3254,39 @@ UNSPECIFIED_DECIDER = "unspecified"
     help="Override the faithfulness gate for a merge/supersede candidate that was "
     "flagged unfaithful. Review the FAITHFULNESS WARNING first.",
 )
+@click.option(
+    "--content",
+    "revised_content",
+    default=None,
+    help="Promote this text instead of the proposed content (add candidates only; "
+    "requires --reason). The proposal is kept on the candidate for audit.",
+)
+@click.option(
+    "--content-file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Like --content, read from a file.",
+)
 @click.pass_context
-def reflect_promote(ctx, candidate_id, decided_by, decision_reason, force):
+def reflect_promote(
+    ctx, candidate_id, decided_by, decision_reason, force, revised_content, content_file
+):
     """Promote a pending candidate to the live knowledge or identity store.
 
     Unfaithful merge/supersede candidates (those flagged by the faithfulness check)
     are refused by default — use --force after reviewing the warning to override.
+
+    --content promotes an edited version (techne#952): for a claim worth keeping that
+    arrived wrapped in counts, ids or versions that will go stale.
     """
     config = ctx.obj["config"]
     from techne.core.reflect import promote_candidate
+
+    if revised_content is not None and content_file is not None:
+        click.echo("Error: use --content or --content-file, not both.", err=True)
+        ctx.exit(1)
+    if content_file is not None:
+        revised_content = content_file.read_text(encoding="utf-8").strip()
 
     try:
         new_id = promote_candidate(
@@ -3266,14 +3295,16 @@ def reflect_promote(ctx, candidate_id, decided_by, decision_reason, force):
             decided_by=decided_by,
             decision_reason=decision_reason,
             force=force,
+            revised_content=revised_content,
         )
     except ValueError as e:
         click.echo(f"Error: {e}", err=True)
         ctx.exit(1)
+    revised = " (revised)" if revised_content is not None else ""
     if new_id is not None:
-        click.echo(f"Promoted candidate #{candidate_id} → knowledge.id={new_id}")
+        click.echo(f"Promoted candidate #{candidate_id}{revised} → knowledge.id={new_id}")
     else:
-        click.echo(f"Promoted candidate #{candidate_id} → identity")
+        click.echo(f"Promoted candidate #{candidate_id}{revised} → identity")
 
 
 @reflect.command("discard")
