@@ -74,7 +74,7 @@ Consolidate a finished session into durable memory using YOUR OWN model (no API 
 
 ### `techne_reflect_ingest`
 
-Feed back one thread's reflection answer produced by techne_reflect_emit. `response` is the JSON candidate array (as a string) you wrote for that thread's `prompt`; `thread_id` and `prompt_hash` come from the emit batch item. Proposals land in knowledge_candidates for review (techne reflect review). Call once per answered thread.
+Feed back one thread's reflection answer produced by techne_reflect_emit. `response` is the JSON candidate array (as a string) you wrote for that thread's `prompt`; `thread_id`, `prompt_hash` and `obs_key` come from the emit batch item — PASS `obs_key` WHENEVER THE ITEM HAS ONE (a thread with no persisted row), or emit keeps offering the thread you just answered. Proposals land in knowledge_candidates for review (techne reflect review). Call once per answered thread.
 
 ### `techne_consolidate_emit`
 
