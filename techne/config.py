@@ -1,6 +1,8 @@
 """Configuration management for techne."""
 
+import logging
 import os
+import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -10,6 +12,8 @@ import yaml
 
 from techne.security import config_trust
 from techne.security.config_trust import TrustVerdict
+
+log = logging.getLogger(__name__)
 
 Platform = Literal["claude-code", "codex", "standalone", "cabal", "opencode"]
 
@@ -40,6 +44,39 @@ def techne_home() -> Path:
 DEFAULT_DIR = techne_home()
 DEFAULT_DB = DEFAULT_DIR / "techne.db"
 DEFAULT_CONFIG = DEFAULT_DIR / "config.yaml"
+
+
+#: (key, path, home) triples already warned about in this process, so a hook that
+#: loads config on every tool call does not repeat the same warning.
+_WARNED_OUTSIDE_HOME: set[tuple[str, str, str]] = set()
+
+
+def _warn_if_outside_home(key: str, value: Path, home: Path) -> None:
+    """Warn on stderr when an explicit TECHNE_HOME is overridden by config.yaml (#947).
+
+    Only when TECHNE_HOME is set in the environment: without it there is no
+    relocation for a persisted path to defeat. Warns and does not re-root, because
+    the file cannot tell a copied default from a store deliberately kept elsewhere.
+    Goes to stderr and the log, never stdout, which hooks and the MCP server use.
+    """
+    if not os.environ.get("TECHNE_HOME"):
+        return
+    try:
+        value.expanduser().resolve().relative_to(home.expanduser().resolve())
+        return
+    except ValueError:
+        pass
+    sig = (key, str(value), str(home))
+    if sig in _WARNED_OUTSIDE_HOME:
+        return
+    _WARNED_OUTSIDE_HOME.add(sig)
+    msg = (
+        f"techne: config.yaml sets {key}: {value}, which is outside TECHNE_HOME={home}. "
+        f"techne is using {value}. If this config was copied from another home, delete "
+        f"the {key} line so it follows TECHNE_HOME (techne#947)."
+    )
+    log.warning(msg)
+    print(msg, file=sys.stderr)
 
 
 @dataclass
@@ -766,6 +803,13 @@ class Config:
         # root rather than the import-time snapshot, so the env knob takes effect.
         cfg.db_path = Path(raw["db_path"]).expanduser() if "db_path" in raw else home / "techne.db"
         cfg.data_dir = Path(raw["data_dir"]).expanduser() if "data_dir" in raw else home
+        # A persisted path wins over TECHNE_HOME, and must — an operator may keep the
+        # store on another volume. What must not happen is that it wins SILENTLY
+        # (techne#947): copy a home, export TECHNE_HOME at the copy, and every write
+        # lands in the original because the copied config.yaml names it absolutely.
+        for key in ("db_path", "data_dir"):
+            if key in raw:
+                _warn_if_outside_home(key, getattr(cfg, key), home)
         if "identity_dir" in raw:
             cfg.identity_dir = Path(raw["identity_dir"]).expanduser()
         if "platform" in raw:
@@ -1321,6 +1365,16 @@ class Config:
             for k, v in self.sync.extra.items():
                 if k not in data["sync"]:
                     data["sync"][k] = v
+        # DEFAULT PATHS ARE NOT WRITTEN (techne#947). `techne init` is a load->save
+        # round-trip, and writing the resolved default pinned this home's absolute
+        # path into the file: a copied home kept pointing at the original store.
+        # Omitted, both keys re-derive from TECHNE_HOME at load, which is what the
+        # default always meant. A path the operator set elsewhere is still written.
+        home = techne_home()
+        if Path(self.db_path).expanduser() == home / "techne.db":
+            data.pop("db_path", None)
+        if Path(self.data_dir).expanduser() == home:
+            data.pop("data_dir", None)
         return data
 
     def save(self, path: Path | None = None):

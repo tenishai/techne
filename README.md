@@ -526,8 +526,10 @@ Lives at `~/.techne/config.yaml`. Example:
 > authority.
 
 ```yaml
-db_path: ~/.techne/techne.db
-data_dir: ~/.techne
+# db_path / data_dir: omit to follow TECHNE_HOME (the default, ~/.techne).
+# Set them only to keep the store somewhere else; an absolute path here wins
+# over TECHNE_HOME, and techne warns on stderr when it does (techne#947).
+# db_path: /Volumes/data/techne.db
 platform: claude-code
 model: claude-haiku-4-5-20251001   # only used if threads.summarizer is "llm"
 
