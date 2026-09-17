@@ -20,8 +20,20 @@ from techne.config import Config
 #: Keys `to_yaml_dict` emits ONLY when populated, deliberately — "avoid polluting
 #: a minimal config with empty stubs". They are exercised by the populated
 #: round-trip below rather than the default-Config one.
+#: `db_path` and `data_dir` are omitted when they equal the TECHNE_HOME default
+#: (techne#947): persisting the resolved default pinned a copied home to the
+#: original store.
 CONDITIONAL_KEYS = frozenset(
-    {"identity_dir", "llm_api_base", "llm_api_key", "sources", "stores", "connections"}
+    {
+        "identity_dir",
+        "llm_api_base",
+        "llm_api_key",
+        "sources",
+        "stores",
+        "connections",
+        "db_path",
+        "data_dir",
+    }
 )
 
 
@@ -74,6 +86,8 @@ def test_a_populated_config_loses_no_top_level_key():
     from pathlib import Path
 
     raw = {
+        "db_path": "/srv/techne/mem.db",
+        "data_dir": "/srv/techne",
         "identity_dir": "/tmp/identity",
         "llm_api_base": "http://localhost:11434",
         "llm_api_key": "sk-test",
