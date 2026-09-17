@@ -651,7 +651,10 @@ def test_pad_vocabularies_differ_in_overlap():
     `test_vocabulary_confound` is only meaningful if `far` really is disjoint from
     the gold. That is a property of two word lists, and word lists get edited, so
     it is asserted rather than described. Content-word overlap against the gold
-    documents and their queries, measured at the time of writing: near 17, far 0.
+    QUERIES — the corpus measured below, and what a distractor competes against —
+    at the time of writing: near 24, far 0. The assertions do not hardcode 24:
+    they pin `far == 0` and `near > far`, so re-measuring is the way to refresh
+    the number rather than editing it to match.
 
     Needs no database, no model and no store.
     """

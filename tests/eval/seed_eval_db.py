@@ -502,9 +502,10 @@ def seed(db_path: Path) -> dict[str, str]:
 #: `far` exists to separate those two (techne#945). Same SHAPE — same four
 #: positions, same list lengths, same index arithmetic, so the only variable is
 #: the words — over a domain with no software vocabulary at all. Measured token
-#: overlap against the gold docs + their queries, content words only:
-#: `near` shares 17 (including `connection`, `rate`, `closed`, `hold`, `test`,
-#: `five`, `thirty`), `far` shares 0. `test_pad_vocabularies_differ_in_overlap`
+#: overlap against the gold QUERIES, content words only (the corpus the pinning
+#: test uses, and what a distractor actually competes against): `near` shares 24
+#: (including `connection`, `cache`, `closed`, `hold`, `retry`, `session`),
+#: `far` shares 0. `test_pad_vocabularies_differ_in_overlap`
 #: pins that gap so "disjoint" cannot silently rot into "mildly different".
 #:
 #: Read the two arms together: `far` is the closer estimate of SCALE ALONE, the
