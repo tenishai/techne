@@ -61,7 +61,8 @@ techne init
 > ```
 >
 > **Install from git, not PyPI.** The PyPI package named `techne` is a different project;
-> `pip install techne` gets you that one, and it rejects every extra below.
+> `pip install techne` gets you that one. It declares none of the extras below, so pip only
+> warns about them and installs nothing extra.
 >
 > `[recommended]` pulls semantic recall + the CVE pre-install audit (`vectors` + `security`).
 > Drop it for a **core-only** install, or swap in any other set — see the

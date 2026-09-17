@@ -2181,8 +2181,10 @@ def _vector_next_steps(db_path: Path) -> list[str]:
     A fresh install has no embedding backend unless `[vectors]` (or `[recommended]`)
     was installed, and a mistyped extra such as `[vec]` is only a pip WARNING, so
     the install "succeeds" and every search runs FTS-only. `capabilities` reports
-    that plainly, but nothing sent a new user there. Uses the import probe and the
-    non-mutating channel status only — no model load, no download.
+    that plainly, but nothing sent a new user there. Uses the import probe and
+    `vector_row_counts`, which never builds the backend — no model load, no
+    download. (`vector_channel_status` is NOT usable here: it loads the model
+    whenever a backend stamp exists, e.g. on a second `init`.)
     """
     import re
 
@@ -2198,11 +2200,10 @@ def _vector_next_steps(db_path: Path) -> list[str]:
             "    techne vectors backfill",
         ]
 
-    from techne.core.vector_status import vector_channel_status
+    from techne.core.vector_status import vector_row_counts
 
     try:
-        status = vector_channel_status(db_path, probe_backend_when_empty=False)
-        rows = sum((t.get("rows") or 0) for t in status["tables"].values())
+        rows = sum((n or 0) for n in vector_row_counts(db_path).values())
     except Exception:
         # Reporting only; a status failure must not fail init. `rows=0` still
         # prints the backfill hint, which is harmless if vectors do exist.

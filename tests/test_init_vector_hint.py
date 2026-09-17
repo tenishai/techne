@@ -48,8 +48,8 @@ def test_standalone_init_points_at_backfill_when_nothing_is_embedded(isolated, m
 def test_no_hint_when_vectors_exist(isolated, monkeypatch):
     monkeypatch.setattr("techne.core.embeddings.backend_available", lambda: True)
     monkeypatch.setattr(
-        "techne.core.vector_status.vector_channel_status",
-        lambda db, **kw: {"tables": {"knowledge_vec": {"rows": 12}}},
+        "techne.core.vector_status.vector_row_counts",
+        lambda db: {"threads_vec": None, "observations_vec": 0, "knowledge_vec": 12},
     )
     out = _init("--platform", "standalone")
     assert "nothing embedded yet" not in out
@@ -73,3 +73,34 @@ def test_the_install_hint_never_prints_a_non_release_tag(isolated, monkeypatch):
     out = _init("--platform", "standalone")
     assert "techne.git@<tag>" in out
     assert "0.0.0+unknown" not in out
+
+
+def test_init_never_loads_the_model_even_with_a_backend_stamp(isolated, monkeypatch):
+    """A second `init` on a store that was backfilled has an identity stamp, and
+    vector_channel_status builds the backend (a model load) whenever one exists.
+    The next-steps check must not."""
+    from techne.core.database import connect, init_db
+    from techne.core.extension_state import set_state
+
+    _init("--platform", "standalone")  # creates the store
+    from techne.config import Config
+
+    db = Config.load().db_path
+    init_db(db).close()
+    conn = connect(db)
+    try:
+        set_state(conn, "embedding_backend", {"name": "fastembed", "dim": 384})
+    finally:
+        conn.close()
+
+    calls = []
+
+    def spy(*a, **kw):
+        calls.append(1)
+        raise AssertionError("init must not build the embedding backend")
+
+    monkeypatch.setattr("techne.core.embeddings.backend_available", lambda: True)
+    monkeypatch.setattr("techne.core.embeddings._get_embedding_model", spy)
+    out = _init("--platform", "standalone")
+    assert not calls, "init built the embedding backend (a model load)"
+    assert "nothing embedded yet" in out
