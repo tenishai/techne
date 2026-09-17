@@ -11,6 +11,7 @@ The hook contract still applies: any failure here exits 0 with stderr noise;
 thread detection and session teardown must complete regardless.
 """
 
+import hashlib
 import json
 import logging
 from dataclasses import dataclass
@@ -739,19 +740,38 @@ def emit_reflection_batch(
             t_obs = [observations[i] for i in merged[tid]]
         prompt = _build_prompt(t, t_obs, config.db_path, config)
         prompt_hash = _prompt_hash(prompt)
-        batch.append(
-            {
-                # The real persisted FK id — resolved against the threads table, not
-                # recomputed (techne#106: a re-detected thread hashes differently than
-                # the saved row on legacy sessions). None → candidate gets a NULL FK.
-                "thread_id": tid,
-                "session_id": session_id,
-                "thread_num": t.thread_num,
-                "prompt_hash": prompt_hash,
-                "prompt": prompt,
-            }
-        )
+        item = {
+            # The real persisted FK id — resolved against the threads table, not
+            # recomputed (techne#106: a re-detected thread hashes differently than
+            # the saved row on legacy sessions). None → candidate gets a NULL FK.
+            "thread_id": tid,
+            "session_id": session_id,
+            "thread_num": t.thread_num,
+            "prompt_hash": prompt_hash,
+            "prompt": prompt,
+        }
+        if tid is None:
+            obs_key = _observations_key(t_obs)
+            if obs_key:
+                item["obs_key"] = obs_key
+        batch.append(item)
     return batch
+
+
+def _observations_key(observations: list[dict]) -> str | None:
+    """A cursor key for an UNPERSISTED thread that does not move with knowledge (#954).
+
+    Hashes the thread's observation ids and nothing else. `prompt_hash` covers the
+    rendered prompt, which carries the existing-knowledge block, so it changes on any
+    knowledge write; observation ids change only if the thread's own membership does.
+    None when any observation has no id (in-memory threads), leaving the caller on
+    prompt_hash.
+    """
+    ids = [o.get("id") for o in observations]
+    if not ids or any(i is None for i in ids):
+        return None
+    digest = hashlib.sha256(",".join(str(i) for i in sorted(ids)).encode()).hexdigest()
+    return f"obs-{digest[:16]}"
 
 
 def _owed_thread_ids(config: Config, session_id: str) -> set[str]:
@@ -1156,13 +1176,18 @@ def reflection_debt_stats(config: Config) -> dict:
 def _cursor_key(item: dict) -> str:
     """The emit cursor's key for one batch item: the persisted thread id.
 
-    Falls back to `prompt_hash` ONLY for a thread with no persisted row (`thread_id` is
-    None — an unsaved/legacy thread). That fallback keeps the pre-#733 behaviour for the
-    one case it was actually chosen for, and inherits its instability for that case
-    alone: an unpersisted thread has no stable identity to key on, so re-offering it is
-    the only safe answer.
+    A thread with no persisted row (`thread_id` is None) keys on `obs_key`, a hash of
+    its observation ids (techne#954). This used to fall back straight to `prompt_hash`
+    on the reasoning that such threads were rare "unsaved/legacy" cases. They were
+    not: `techne import` persisted no threads at all, so an imported corpus was 100%
+    fallback, and prompt_hash moves on every knowledge write — a backfill that
+    promoted as it went was re-offered every thread it had already ingested. Import
+    now persists threads; this key covers whatever still arrives unpersisted.
+
+    `prompt_hash` remains the last resort, for an item with neither (in-memory
+    observations without ids).
     """
-    return item.get("thread_id") or item["prompt_hash"]
+    return item.get("thread_id") or item.get("obs_key") or item["prompt_hash"]
 
 
 #: Marker field naming the key `emitted` holds. Absent = a pre-#733 marker whose

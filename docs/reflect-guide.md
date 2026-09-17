@@ -139,6 +139,14 @@ techne reflect ingest /tmp/batch.json
 Run it once against a 31-thread backlog and you drain at most 25, with nothing in the
 procedure telling you to go again. The CLI does echo `note` to stderr — read it.
 
+**Backfilling an import: run `techne import` first, and re-run it on an old store.** Emit tracks
+what it has delivered by persisted thread id. Before techne#954, `techne import` wrote
+observations but no threads, so every imported thread fell back to a key that changes whenever
+knowledge changes: promote anything and the next emit re-offers threads you already answered.
+`import` now persists threads. A store imported earlier has observations and no threads;
+re-running `techne import` over the same transcripts fills them in without re-importing
+anything.
+
 **Declining a thread is allowed, and it ends the loop rather than spinning it.** Leave an
 item's `raw_response` blank and `ingest` skips it without draining: the debt stays owed, on
 purpose. Since techne#901 that refusal is *recorded*, so `emit` offers the thread once and

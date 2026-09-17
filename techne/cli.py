@@ -1847,6 +1847,31 @@ def import_cmd(ctx, path: "Path | None", no_prompts: bool, force: bool):
         )
     )
 
+    # PERSIST THREADS FOR WHAT WAS IMPORTED (techne#954). Import used to stop at
+    # observations, so every imported thread was unpersisted: reflect's emit cursor
+    # fell back to prompt_hash and re-offered ingested threads after any knowledge
+    # write. A benign skip ("already has N observations") is included, with
+    # replace=False, so re-running `techne import` repairs a store imported before
+    # this fix and leaves hook-detected sessions alone.
+    from techne.lifecycle import ensure_threads
+
+    threads_total = 0
+    threaded_sessions = 0
+    thread_errors: list[str] = []
+    for r in results:
+        sid = r.get("session_id")
+        if not sid or (r.get("skipped") and not _import_skip_is_benign(r)):
+            continue
+        try:
+            detected = ensure_threads(config, sid, replace=not r.get("skipped"))
+        except Exception as e:
+            thread_errors.append(sid)
+            click.echo(f"  threads {sid[:8]}  — detection failed: {e}", err=True)
+            continue
+        if detected:
+            threads_total += detected["threads"]
+            threaded_sessions += 1
+
     imported = sum(1 for r in results if not r.get("skipped"))
     skipped = sum(1 for r in results if r.get("skipped"))
     tool_total = sum(r.get("tool_obs", 0) for r in results)
@@ -1866,8 +1891,15 @@ def import_cmd(ctx, path: "Path | None", no_prompts: bool, force: bool):
     click.echo(
         f"\n{imported} imported, {skipped} skipped — "
         f"{tool_total} tool obs + {prompt_total} prompts added, "
-        f"{summaries_set} session summaries set"
+        f"{summaries_set} session summaries set, "
+        f"{threads_total} threads detected in {threaded_sessions} sessions"
     )
+    if thread_errors:
+        click.echo(
+            f"thread detection failed for {len(thread_errors)} session(s); retry one with "
+            "`techne threads redetect <session>`",
+            err=True,
+        )
     # A SINGLE FILE THAT FAILED EXITS NON-ZERO (techne#630, Richard: "we should fix").
     #
     # The partial-success argument that justifies exit 0 for a DIRECTORY — some
@@ -1903,6 +1935,10 @@ def import_cmd(ctx, path: "Path | None", no_prompts: bool, force: bool):
     # made the original claim worth making.
     if path.is_file() and skipped and not _import_skip_is_benign(results[0]):
         raise click.ClickException(f"{path.name}: {results[0].get('reason', 'import failed')}")
+    # Same single-file rule for detection: the observations landed, but a session
+    # with no threads is the #954 state, and that is the whole outcome for one file.
+    if path.is_file() and thread_errors:
+        raise click.ClickException(f"{path.name}: imported, but thread detection failed")
 
 
 @main.command("migrate-summaries")
