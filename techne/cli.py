@@ -1796,8 +1796,14 @@ def import_cmd(ctx, path: "Path | None", no_prompts: bool, force: bool):
         observations is skipped with reason "already has N observations". That is
         the feature working, and it must not become a non-zero exit — otherwise
         re-running an import, the safest possible habit, starts reporting failure.
+
+        A metadata-only transcript (techne#941) is benign for the same reason: the
+        file is valid, there was simply no conversation in it to import.
         """
-        return "already has" in (result.get("reason") or "")
+        from techne.platforms.claude_code.transcript_import import NO_EVENTS_REASON
+
+        reason = result.get("reason") or ""
+        return "already has" in reason or reason == NO_EVENTS_REASON
 
     def _import_one(p):
         """Single-file import with the SAME net as import_directory's per-file handler.
@@ -1870,18 +1876,21 @@ def import_cmd(ctx, path: "Path | None", no_prompts: bool, force: bool):
     # "no silent failures" rule broken at the exit code while the stdout is honest.
     #
     # GATED ON FAILURE, NOT ON `imported == 0`, and the distinction is the reason
-    # this is not a one-line change. `skipped` covers three different outcomes:
+    # this is not a one-line change. `skipped` covers four different outcomes:
     #
     #   "already has N observations"  -> IDEMPOTENT SUCCESS. Re-importing a file
     #                                    techne already holds is the designed
     #                                    behaviour; failing here would break every
     #                                    re-run and punish the safe habit.
+    #   NO_EVENTS_REASON              -> SUCCESS (techne#941). A valid metadata-only
+    #                                    transcript: a titled session that never
+    #                                    took a turn. Nothing to import is correct.
     #   "empty"                       -> failure: nothing to import from a file the
     #                                    caller explicitly named.
     #   "error: ..." / "error reading" -> failure.
     #
-    # A flat `not imported` test would have turned the first of those into an
-    # error. Measured before changing anything: `import_transcript`/
+    # A flat `not imported` test would have turned the first two of those into
+    # errors. Measured before changing anything: `import_transcript`/
     # `import_directory` are called from cli.py ONLY (the automatic capture path
     # uses backfill_uncaptured from session_end), and nothing on this machine
     # consumes the exit code — no scripts, no cron, no hooks, and zero invocations
@@ -3164,9 +3173,23 @@ def reflect_ingest(ctx, responses_file):
         click.echo("write_to=candidates — review with: techne reflect review")
 
 
+#: Recorded when `reflect promote`/`discard` is run without `--by` (techne#953). This
+#: was "human", so an agent that omitted the flag had its decision audited as a
+#: person's: one external store showed an agent's promotes as its own name and the
+#: same agent's discards as "human". An audit field should say "unknown" rather
+#: than name the wrong actor. Rows already written as "human" cannot be told apart.
+UNSPECIFIED_DECIDER = "unspecified"
+
+
 @reflect.command("promote")
 @click.argument("candidate_id", type=int)
-@click.option("--by", "decided_by", default="human", help="Who/what decided (audit trail).")
+@click.option(
+    "--by",
+    "decided_by",
+    default=UNSPECIFIED_DECIDER,
+    show_default=True,
+    help="Who/what decided (audit trail). Pass it: the default records that nobody said.",
+)
 @click.option("--reason", "decision_reason", default=None, help="Why (audit trail).")
 @click.option(
     "--force",
@@ -3204,7 +3227,13 @@ def reflect_promote(ctx, candidate_id, decided_by, decision_reason, force):
 
 @reflect.command("discard")
 @click.argument("candidate_id", type=int)
-@click.option("--by", "decided_by", default="human", help="Who/what decided (audit trail).")
+@click.option(
+    "--by",
+    "decided_by",
+    default=UNSPECIFIED_DECIDER,
+    show_default=True,
+    help="Who/what decided (audit trail). Pass it: the default records that nobody said.",
+)
 @click.option("--reason", "decision_reason", default=None, help="Why (audit trail).")
 @click.pass_context
 def reflect_discard(ctx, candidate_id, decided_by, decision_reason):

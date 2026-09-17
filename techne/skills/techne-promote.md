@@ -38,7 +38,7 @@ Run from the techne repo. Use `techne` on PATH, or `.venv/bin/python -m techne.c
    `techne reflect ingest /tmp/techne-promote-<SID>.json`
    Reports candidates written + threads skipped. Candidates land in `knowledge_candidates` (pending) unless `reflect.write_to=live`.
 
-6. **Review and promote the keepers.** `techne reflect review --status pending` lists them. Promote the ones that survive a second look: `techne reflect promote <candidate_id>` (→ live knowledge/identity). Discard noise: `techne reflect discard <candidate_id>`.
+6. **Review and promote the keepers.** `techne reflect review --status pending` lists them. Promote the ones that survive a second look: `techne reflect promote <candidate_id> --by <who> --reason "<why>"` (→ live knowledge/identity). Discard noise: `techne reflect discard <candidate_id> --by <who> --reason "<why>"`. Always pass `--by`: without it the audit trail records `unspecified`.
 
 7. **Report** to the operator: session, threads answered/skipped, candidates written, and which you promoted — in plain finding→decision form. Note any thread you skipped wholesale so coverage isn't silently truncated.
 
