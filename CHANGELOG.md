@@ -132,6 +132,24 @@ All notable changes to techne are documented here. Format loosely follows
   (`observations 35096/35096 embedded`), or `nothing to embed yet`. The verdict is
   unchanged: it still depends only on whether anything is unembedded.
 
+- **A copied `TECHNE_HOME` no longer writes to the original store** (#947).
+  `techne init` saved the resolved default `db_path` and `data_dir` into
+  `config.yaml` as absolute paths, and a persisted path wins over `TECHNE_HOME`.
+  Copy a home, export `TECHNE_HOME` at the copy, and every write still landed in
+  the original, with no message. Found following a "work on a copy" instruction.
+
+  `config.yaml` no longer records `db_path` or `data_dir` when they equal the
+  `TECHNE_HOME` default, so they follow `TECHNE_HOME` at load. A path set
+  elsewhere is still saved and still honoured. When `TECHNE_HOME` is set and a
+  persisted path resolves outside it, loading warns once per process on stderr
+  and in the log, never on stdout.
+
+  **Upgrading:** existing config files still carry the absolute paths `init`
+  wrote. If yours point at the default home, delete the `db_path` and
+  `data_dir` lines, or re-run `techne init`, which now saves without them.
+  techne does not re-root a persisted path on its own: the file cannot tell a
+  copied default from a store kept on another volume on purpose.
+
 - **The reserved lexical slot now goes to the curated row** (#831). #827 made the
   lexical channel reachable by reserving one tail slot; it did not make it useful.
   The curated row loses the slot on the CONFIDENCE-DECAY TIEBREAK. The two
