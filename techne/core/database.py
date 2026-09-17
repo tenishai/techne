@@ -6,7 +6,7 @@ from pathlib import Path
 
 from techne.core import migrator
 
-SCHEMA_VERSION = 25
+SCHEMA_VERSION = 26
 
 # THE ONE ON-DISK TIMESTAMP SHAPE (#515). Every TEXT timestamp column is compared
 # LEXICALLY by SQLite, so the storage format IS the ordering primitive — a second
@@ -470,7 +470,12 @@ CREATE TABLE IF NOT EXISTS knowledge_candidates (
     -- human-readable reason when unfaithful. The gate is ADVISORY — a flagged
     -- candidate still goes to the operator for decision; it is never auto-blocked.
     faithfulness_ok INTEGER,          -- NULL|1|0
-    faithfulness_warning TEXT         -- NULL when ok or unchecked
+    faithfulness_warning TEXT,        -- NULL when ok or unchecked
+    -- Reviewer's edit (techne#952). NULL unless promoted with `--content`; promote
+    -- then applies this instead of `content`. `content` is never edited: it is half
+    -- of idx_kc_reflect_dedup, so rewriting it would let a re-ingest insert a fresh
+    -- pending duplicate, and it is the record of what the model proposed.
+    revised_content TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_kc_status ON knowledge_candidates(status);
@@ -1492,4 +1497,53 @@ END;
                 "CREATE INDEX IF NOT EXISTS idx_knowledge_written_by ON knowledge(written_by)"
             )
             conn.execute("INSERT INTO schema_version (version) VALUES (25)")
+    if from_version < 26 and to_version >= 26:
+        # techne#949: promotion wrote knowledge rows with origin_session NULL, so
+        # the session a promoted fact came from was reachable only by joining
+        # knowledge_candidates.promoted_to_id or by parsing the `source` string.
+        # Promote now stamps it; this fills the rows written before that.
+        #
+        # UNLIKE v25's columns, THESE ROWS ARE ATTRIBUTABLE, which is why this
+        # backfills where v25 deliberately did not. v25 refused because a federated
+        # row's local source was discarded at write time. A promoted row's source
+        # session is recorded on the candidate that produced it.
+        #
+        # ONLY ACTIONS THAT MINT A ROW. `retire` points promoted_to_id at an existing
+        # survivor, which did not originate in the retiring session, so stamping it
+        # would write a wrong session into the provenance column. A NULL action is a
+        # legacy `add`.
+        #
+        # Both tables must exist; old fixtures reach this step before the reconciler
+        # creates them (the guard v24 and v25 each needed).
+        have = {
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name IN ('knowledge', 'knowledge_candidates')"
+            )
+        }
+        if have == {"knowledge", "knowledge_candidates"}:
+            _add_column_if_missing(conn, "knowledge", "origin_session", "TEXT")
+            # `action` is reconciler-added (#108), so a pre-#108 fixture lacks it here.
+            _add_column_if_missing(
+                conn, "knowledge_candidates", "action", "TEXT NOT NULL DEFAULT 'add'"
+            )
+            conn.execute(
+                """UPDATE knowledge
+                      SET origin_session = (
+                          SELECT c.source_session_id FROM knowledge_candidates c
+                           WHERE c.promoted_to_id = knowledge.id
+                             AND c.status = 'promoted'
+                             AND COALESCE(c.action, 'add') IN ('add', 'supersede', 'merge')
+                             AND c.scope = 'knowledge'
+                           ORDER BY c.id LIMIT 1)
+                    WHERE origin_session IS NULL
+                      AND id IN (
+                          SELECT promoted_to_id FROM knowledge_candidates
+                           WHERE status = 'promoted'
+                             AND COALESCE(action, 'add') IN ('add', 'supersede', 'merge')
+                             AND scope = 'knowledge'
+                             AND promoted_to_id IS NOT NULL)"""
+            )
+        conn.execute("INSERT INTO schema_version (version) VALUES (26)")
     conn.commit()
