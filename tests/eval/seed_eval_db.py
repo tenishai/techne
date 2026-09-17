@@ -18,13 +18,20 @@ from techne.core.knowledge import _add_dep_in_conn, delete, store, supersede
 _SESSION = "eval-sess"
 
 
-def _add_observation_raw(conn, content: str, tool_name: str = "Edit") -> int:
+def _add_observation_raw(conn, content: str, tool_name: str = "Edit", tags: str = "") -> int:
     """Insert an observation via direct SQL (bypasses embedding inference in
     add_observation) so the corpus is deterministic and dependency-free. The
-    observations_fts index is populated by the table's INSERT trigger."""
+    observations_fts index is populated by the table's INSERT trigger.
+
+    `tags` exists so scale padding can be counted by a marker of its own
+    (techne#945). Counting it by `tool_name` instead looked fine and was wrong:
+    `seed()` writes a genuine `Read` observation, so a `tool_name='Read'` count
+    returned 2001 for 2000 pad rows — caught by this arm's own instrument
+    assertion, which is what those assertions are for.
+    """
     cur = conn.execute(
-        "INSERT INTO observations (session_id, content, tool_name) VALUES (?, ?, ?)",
-        (_SESSION, content, tool_name),
+        "INSERT INTO observations (session_id, content, tool_name, tags) VALUES (?, ?, ?, ?)",
+        (_SESSION, content, tool_name, tags),
     )
     return cur.lastrowid
 
@@ -483,11 +490,26 @@ def seed(db_path: Path) -> dict[str, str]:
 # SCALE PADDING (techne#883)
 # --------------------------------------------------------------------------
 
-#: Combinatorial parts for synthetic distractors. Deliberately drawn from THIS
-#: project's own vocabulary — a corpus of lorem ipsum would not crowd the
-#: embedding space the way real neighbours do, and crowding is the whole
-#: variable under test. See `pad_corpus` for what that choice costs in
-#: interpretation: it is a confound, not just a realism win.
+#: Combinatorial parts for synthetic distractors, in TWO vocabularies.
+#:
+#: `near` is drawn from THIS project's own vocabulary — a corpus of lorem ipsum
+#: would not crowd the embedding space the way real neighbours do, and crowding
+#: is the whole variable under test. That realism is also a CONFOUND: these rows
+#: are lexically and semantically adjacent to the gold docs (which are generic
+#: backend-infrastructure decisions), so a score drop under `near` padding mixes
+#: "more neighbours" with "neighbours that look like the answer".
+#:
+#: `far` exists to separate those two (techne#945). Same SHAPE — same four
+#: positions, same list lengths, same index arithmetic, so the only variable is
+#: the words — over a domain with no software vocabulary at all. Measured token
+#: overlap against the gold docs + their queries, content words only:
+#: `near` shares 17 (including `connection`, `rate`, `closed`, `hold`, `test`,
+#: `five`, `thirty`), `far` shares 0. `test_pad_vocabularies_differ_in_overlap`
+#: pins that gap so "disjoint" cannot silently rot into "mildly different".
+#:
+#: Read the two arms together: `far` is the closer estimate of SCALE ALONE, the
+#: near/far gap is the vocabulary contribution, and neither is a substitute for
+#: real content (see `pad_from_store`).
 #:
 #: 12 x 11 x 11 x 11 = 15,972 combinations, and reaching that number requires
 #: all FOUR indices to be independent digits. An earlier version indexed `tail`
@@ -530,9 +552,74 @@ _PAD_TAIL = (
     "No behavioural change — the label was what misled.",
 )
 
+#: The DISJOINT vocabulary (techne#945). Same four positions and the same list
+#: lengths as the `near` block above (12/11/11/11), so `_pad_text` produces the
+#: same 15,972-combination period and the same distinctness guarantees; only the
+#: words change. Domain chosen to share no software/infrastructure vocabulary
+#: with the gold corpus — smallholding and beekeeping.
+_FAR_SUBJECT = (
+    "the queen bee", "the north orchard", "the pollen store", "the grafted rootstock",
+    "the cider press", "the winter hive", "the hedgerow margin", "the seed drill",
+    "the milking parlour", "the hay meadow", "the drainage ditch", "the lambing pen",
+)
+_FAR_VERB = (
+    "was moved to", "has ceased to favour", "quietly shed", "was weighed against",
+    "stopped yielding", "was grafted onto", "began attracting", "was pruned clear of",
+    "was sown across", "was fenced away from", "was found sheltering",
+)
+_FAR_OBJECT = (
+    "a shaded frame before the rain returned", "the lower terrace beside the stream",
+    "bracken cleared in early spring", "two rows of blossom left unharvested",
+    "the clay soil where nothing rooted", "a windbreak of hawthorn and elder",
+    "the straw bedding laid down at dusk", "an unfenced verge grazed by deer",
+    "sacks of chaff left from the threshing", "the coldest corner of the paddock",
+    "wild thyme spreading past the wall",
+)
+_FAR_TAIL = (
+    "The yield was noted in the ledger by lantern.",
+    "Frost arrived early and the blossom did not set.",
+    "Neighbouring farms reported the same pattern that season.",
+    "The older hands had warned about the slope.",
+    "It was left fallow and the ground recovered.",
+    "Rain stayed away while the cut dried.",
+    "The wind turned and the swarm settled elsewhere.",
+    "Nothing was recorded until the following autumn.",
+    "Roughly a sixth of the hives did not overwinter.",
+    "The hedge was laid afresh and held.",
+    "No remedy was tried; the weather simply changed.",
+)
 
-def pad_corpus(db_path: Path, n: int) -> int:
-    """Insert `n` deterministic synthetic knowledge rows as retrieval distractors.
+#: Vocabulary name -> the four positional lists. `pad_corpus`/`pad_observations`
+#: take the NAME, so a caller cannot half-swap one position.
+_PAD_VOCABULARIES = {
+    "near": (_PAD_SUBJECT, _PAD_VERB, _PAD_OBJECT, _PAD_TAIL),
+    "far": (_FAR_SUBJECT, _FAR_VERB, _FAR_OBJECT, _FAR_TAIL),
+}
+
+
+def _pad_text(i: int, vocabulary: str = "near") -> str:
+    """Row `i` of the padding corpus, as a pure function of `i` and the vocabulary.
+
+    Shared by `pad_corpus` (knowledge) and `pad_observations` (observations) so
+    the two channels crowd with IDENTICAL text at the same index — the channel is
+    then the only variable between those two arms, which is the whole point of
+    having both (techne#945).
+    """
+    try:
+        subjects, verbs, objects, tails = _PAD_VOCABULARIES[vocabulary]
+    except KeyError:
+        raise ValueError(
+            f"unknown pad vocabulary {vocabulary!r}; have {sorted(_PAD_VOCABULARIES)}"
+        ) from None
+    subject = subjects[i % len(subjects)]
+    verb = verbs[(i // len(subjects)) % len(verbs)]
+    obj = objects[(i // (len(subjects) * len(verbs))) % len(objects)]
+    tail = tails[(i // (len(subjects) * len(verbs) * len(objects))) % len(tails)]
+    return f"{subject.capitalize()} {verb} {obj}. {tail}"
+
+
+def pad_corpus(db_path: Path, n: int, vocabulary: str = "near") -> int:
+    """Insert `n` deterministic synthetic KNOWLEDGE rows as retrieval distractors.
 
     WHY THIS EXISTS (techne#883). The #385/#399 gates score retrieval against
     `seed()`'s 36-row corpus. Discrimination is trivial at that size — the
@@ -541,6 +628,12 @@ def pad_corpus(db_path: Path, n: int) -> int:
     2,740-row store measured 0.2. The gate was blind to the one variable that
     actually breaks retrieval in production: how many plausible neighbours the
     gold document has to outrank.
+
+    `vocabulary` selects WHICH neighbours (techne#945). `near` is this project's
+    own vocabulary — realistic crowding, and a confound, because those rows look
+    like the answers. `far` is the same shape over a disjoint domain, so the pair
+    separates "more neighbours" from "neighbours that resemble the gold". Neither
+    is real content; `pad_from_store` is.
 
     Determinism is by INDEX ARITHMETIC, not a seeded RNG: `random.Random` makes
     guarantees about its own stream, not about how a future refactor consumes it,
@@ -555,18 +648,131 @@ def pad_corpus(db_path: Path, n: int) -> int:
     Returns the number of rows inserted.
     """
     for i in range(n):
-        subject = _PAD_SUBJECT[i % len(_PAD_SUBJECT)]
-        verb = _PAD_VERB[(i // len(_PAD_SUBJECT)) % len(_PAD_VERB)]
-        obj = _PAD_OBJECT[(i // (len(_PAD_SUBJECT) * len(_PAD_VERB))) % len(_PAD_OBJECT)]
-        tail = _PAD_TAIL[
-            (i // (len(_PAD_SUBJECT) * len(_PAD_VERB) * len(_PAD_OBJECT)))
-            % len(_PAD_TAIL)
-        ]
         store(
             db_path,
-            f"{subject.capitalize()} {verb} {obj}. {tail}",
+            _pad_text(i, vocabulary),
             type="fact",
             tags="pad,synthetic",
             source="eval-pad",
         )
     return n
+
+
+def pad_observations(db_path: Path, n: int, vocabulary: str = "near") -> int:
+    """Insert `n` deterministic synthetic OBSERVATION rows as distractors (techne#945).
+
+    THE CHANNEL IS THE POINT. `pad_corpus` writes knowledge rows only, so the
+    #883 curve exercises the knowledge channel and nothing else — and the gold
+    set's `filter` tasks that query observations/threads were scored while never
+    having been crowded at all (the caveat `test_retrieval_gate_scale` already
+    carries). An external evaluation of a 35,096-observation store measured 50%
+    paraphrase recall with ZERO knowledge rows, i.e. entirely on the observations
+    channel, which the synthetic arm had no way to compare against.
+
+    Same text as `pad_corpus` at the same index (both call `_pad_text`), so the
+    two arms differ only in which table the crowd lives in.
+
+    Written by direct SQL for the reason `_add_observation_raw` gives: it keeps
+    the corpus deterministic and skips embedding inference at write time. The
+    observations_fts trigger fires on INSERT, and `backfill_vectors` embeds the
+    rows afterwards exactly as it does for knowledge.
+
+    Returns the number of rows inserted.
+    """
+    conn = connect(db_path)
+    try:
+        for i in range(n):
+            _add_observation_raw(conn, _pad_text(i, vocabulary), tool_name="Read", tags=PAD_OBS_TAG)
+        conn.commit()
+    finally:
+        conn.close()
+    return n
+
+
+#: Marks observation rows written as scale padding (techne#945) — knowledge padding
+#: is identifiable by `source='eval-pad'`, but observations have no source column,
+#: so the tag is the equivalent marker. Must not collide with a tag `seed()` writes.
+PAD_OBS_TAG = "pad,synthetic"
+
+#: Where the real-content arm reads from (techne#945). Overridable so the arm can
+#: be pointed at a copy or a colleague's export instead of the live store.
+REAL_STORE_ENV = "TECHNE_EVAL_REAL_STORE"
+
+
+def real_store_path() -> Path | None:
+    """The live store to borrow distractors from, or None when unavailable.
+
+    None is the CI answer and the answer on any machine without a techne store,
+    which is why every caller must skip rather than fail.
+    """
+    import os
+
+    override = os.environ.get(REAL_STORE_ENV)
+    candidate = Path(override).expanduser() if override else Path.home() / ".techne" / "techne.db"
+    return candidate if candidate.exists() else None
+
+
+def pad_from_store(db_path: Path, n: int, source_db: Path, table: str = "knowledge") -> int:
+    """Pad the eval corpus with `n` rows of REAL content borrowed from `source_db`.
+
+    WHY (techne#945). Both synthetic vocabularies are templates: twelve subjects
+    crossed with eleven verbs, which crowds an embedding space far more politely
+    than real prose does. The evidence that this UNDERSTATES production is the
+    whole reason #883 refused to set a floor — the live store measured paraphrase
+    recall@10 = 0.200 where the synthetic arm at n=4,000 measured 0.500. This
+    function closes that gap by using the real rows as the crowd, while the
+    queries and the gold stay the committed set.
+
+    THE CONTENT NEVER LEAVES THE MACHINE. Rows are read from the operator's store
+    into a `tmp_path` database that pytest deletes, and nothing derived from them
+    is committed, printed in full, or used as a query. The gold documents and the
+    queries remain `seed()` + `retrieval_gold.yaml`; real rows appear ONLY as
+    distractors to be outranked. That is what keeps this arm publishable while
+    the store is not.
+
+    READ-ONLY BY CONSTRUCTION, and deliberately not via `connect()`: `connect()`
+    runs the migration ladder and the schema reconciler, so pointing it at the
+    operator's live store would MUTATE the thing this arm is only supposed to
+    read. Raw sqlite3 with a `mode=ro` URI cannot.
+
+    Deterministic by `ORDER BY id LIMIT n` — the same store yields the same
+    crowd, so a re-run compares like with like.
+
+    Returns the number of rows actually inserted, which may be FEWER than `n`
+    when the source holds fewer rows. Callers report the real number rather than
+    the requested one (the #884 lesson: never print a size you did not observe).
+    """
+    import sqlite3
+
+    if table not in ("knowledge", "observations"):
+        raise ValueError(f"pad_from_store: unsupported table {table!r}")
+
+    uri = f"file:{source_db}?mode=ro"
+    src = sqlite3.connect(uri, uri=True)
+    try:
+        if table == "knowledge":
+            rows = src.execute(
+                "SELECT content FROM knowledge WHERE superseded_by IS NULL "
+                "AND content IS NOT NULL ORDER BY id LIMIT ?",
+                (n,),
+            ).fetchall()
+        else:
+            rows = src.execute(
+                "SELECT content FROM observations WHERE content IS NOT NULL ORDER BY id LIMIT ?",
+                (n,),
+            ).fetchall()
+    finally:
+        src.close()
+
+    if table == "knowledge":
+        for (content,) in rows:
+            store(db_path, content, type="fact", tags="pad,real", source="eval-pad")
+    else:
+        conn = connect(db_path)
+        try:
+            for (content,) in rows:
+                _add_observation_raw(conn, content, tool_name="Read", tags=PAD_OBS_TAG)
+            conn.commit()
+        finally:
+            conn.close()
+    return len(rows)

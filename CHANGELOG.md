@@ -7,6 +7,37 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Added
 
+- **Four new retrieval-at-scale arms, and the #883 vocabulary confound is settled**
+  (#945). `pytest -m eval_scale` now varies one thing at a time against the same gold
+  set: corpus size (the original #883 curve), lexical vs hybrid (`use_vectors`), the
+  padding *vocabulary*, which table the crowd lives in, and synthetic vs real
+  distractors.
+
+  **The finding: the #883 curve was measuring vocabulary, not scale.** Padding drawn
+  from a disjoint domain — same shape, same sizes, same index arithmetic, only the
+  words differ — does not degrade paraphrase recall at all: 1.000 at both n=2,036 and
+  n=4,036, where this project's own vocabulary scores 0.667 and 0.500. Both corpora
+  embed the same number of rows, so the difference is semantic adjacency between the
+  distractors and the gold, not how many of them there are.
+
+  **So no paraphrase floor is set, and now there is a measurement saying why.** A floor
+  from the near arm would encode this project's vocabulary as a property of the
+  retriever; one from the far arm would be 1.000. The only arm resembling production —
+  real rows borrowed read-only from the local store — scores 0.167 against the
+  synthetic 0.667, and cannot be committed because it differs per machine.
+
+  The real-content arm never copies store content anywhere durable: rows are read
+  through a `mode=ro` URI (never `connect()`, which would run migrations against the
+  operator's live store), used only as distractors in a temporary database, and the
+  queries and gold stay the committed set. It skips cleanly where there is no store.
+
+- **`eval_scale` has a CI home** (#895, partial). It runs in the existing `eval-vec`
+  job, which already installs its dependencies — 38.8s for all five arms against that
+  job's own ~30s gate. Reporting only: the arms assert their own instruments (padding
+  present, distinct, embedded; the two channels genuinely differing) and never a score,
+  so a merge cannot be blocked by embedding wobble. `probe`, the other marker #895
+  names, is untouched and still has no home.
+
 - **`techne reflect promote --content` promotes a reviewer's edit** (#952). Review had only
   promote and discard, so a candidate stating a durable claim inside counts, ids or
   versions that go stale forced a choice between losing the claim and storing the
