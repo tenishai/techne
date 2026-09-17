@@ -2054,8 +2054,11 @@ def _codex_blast_radius(args: dict, config: Config) -> dict:
             limit=_BLAST_WALK_CAP,
         )
     }
+    hidden_inferred = 0
     if only_proven:
-        raw = [r for r in raw if r["id"] in proven_ids]
+        filtered = [r for r in raw if r["id"] in proven_ids]
+        hidden_inferred = len(raw) - len(filtered)
+        raw = filtered
     for r in raw:
         r["proven"] = r["id"] in proven_ids
     rows = annotate_freshness(db_path, raw)
@@ -2083,6 +2086,15 @@ def _codex_blast_radius(args: dict, config: Config) -> dict:
         "truncated": walked > limit,
     }
     notices = []
+    # AN EMPTY PROVEN RADIUS IS NOT "NOTHING DEPENDS ON THIS" (techne#940). Say how
+    # many name-matched dependents only_proven removed, so an empty `nodes` cannot
+    # be read as a clean bill.
+    if hidden_inferred:
+        result["hidden_inferred"] = hidden_inferred
+        notices.append(
+            f"only_proven hid {hidden_inferred} node(s) reached only by a bare-name match; "
+            "they may be real dependents the resolver could not prove."
+        )
     # NO SILENT CAPS — state every bound, including one that predates this change.
     if walked > limit:
         # NAME THE DEPTH OF WHAT WAS CUT. "The head is the closest dependents" is not
