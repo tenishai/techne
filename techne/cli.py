@@ -1876,18 +1876,21 @@ def import_cmd(ctx, path: "Path | None", no_prompts: bool, force: bool):
     # "no silent failures" rule broken at the exit code while the stdout is honest.
     #
     # GATED ON FAILURE, NOT ON `imported == 0`, and the distinction is the reason
-    # this is not a one-line change. `skipped` covers three different outcomes:
+    # this is not a one-line change. `skipped` covers four different outcomes:
     #
     #   "already has N observations"  -> IDEMPOTENT SUCCESS. Re-importing a file
     #                                    techne already holds is the designed
     #                                    behaviour; failing here would break every
     #                                    re-run and punish the safe habit.
+    #   NO_EVENTS_REASON              -> SUCCESS (techne#941). A valid metadata-only
+    #                                    transcript: a titled session that never
+    #                                    took a turn. Nothing to import is correct.
     #   "empty"                       -> failure: nothing to import from a file the
     #                                    caller explicitly named.
     #   "error: ..." / "error reading" -> failure.
     #
-    # A flat `not imported` test would have turned the first of those into an
-    # error. Measured before changing anything: `import_transcript`/
+    # A flat `not imported` test would have turned the first two of those into
+    # errors. Measured before changing anything: `import_transcript`/
     # `import_directory` are called from cli.py ONLY (the automatic capture path
     # uses backfill_uncaptured from session_end), and nothing on this machine
     # consumes the exit code — no scripts, no cron, no hooks, and zero invocations
