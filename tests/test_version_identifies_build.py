@@ -142,3 +142,74 @@ def test_version_string_survives_an_unresolvable_build(monkeypatch):
 
     monkeypatch.setattr("techne.core.health._revision_info", _boom)
     assert _version_string()
+
+
+def test_the_banner_names_the_commit_for_an_installed_build():
+    """THE PRE-PASS FINDING: the PR claimed the banner gained this and it had not.
+
+    `format_banner`'s installed branch built its note from a literal, so a sha
+    install's banner read exactly as before. The banner is the surface an external
+    consumer actually reads, which is the whole point of techne#965.
+    """
+    from techne.core.health import format_banner
+
+    payload = {
+        "build": "installed",
+        "revision": "abc1234",
+        "version": "0.16.1",
+        "drifted": None,
+        "remote_revision": None,
+        "branch": None,
+        "remote_ref_age_days": None,
+        "db_path": "/tmp/x.db",
+        "db_ok": True,
+        "observations": 0,
+        "threads": 0,
+        "knowledge": 0,
+        "sessions": 0,
+        "identity": 0,
+        "outbox_pending": 0,
+        "active_threads": 0,
+    }
+    assert "abc1234" in format_banner(payload)
+    assert "abc1234" not in format_banner({**payload, "revision": None})
+
+
+def test_a_degraded_version_does_not_grow_a_second_local_label():
+    """`0.0.0+unknown` already carries a local label; appending another is illegal.
+
+    packaging.version rejects `0.0.0+unknown+21813c1`.
+    """
+    import techne.cli as cli_mod
+
+    original = cli_mod.__version__
+    try:
+        cli_mod.__version__ = "0.0.0+unknown"
+        cli_mod.__dict__["__version__"] = "0.0.0+unknown"
+        out = cli_mod._version_string()
+    finally:
+        cli_mod.__dict__["__version__"] = original
+    assert "+unknown+" not in out, f"two local labels concatenated: {out!r}"
+
+
+@pytest.mark.parametrize(
+    "commit,expected",
+    [
+        ("21813c16ed8be444dd85814de77a785db62f911a", "21813c1"),
+        ("main", None),
+        ("v0.16.1", None),
+        ("abc", None),
+        (12345678, None),
+        (None, None),
+    ],
+)
+def test_a_non_sha_commit_id_is_not_dressed_up_as_one(monkeypatch, commit, expected):
+    """`str(commit)[:7]` printed "main" and "1234567" as if they were shas.
+
+    pip writes a hash per PEP 610, so a non-hex value means the metadata is not
+    what we think it is. Report unknown rather than something that reads like a
+    commit.
+    """
+    payload = json.dumps({"url": "x", "vcs_info": {"commit_id": commit}})
+    _patch_dist(monkeypatch, payload)
+    assert _installed_revision() == expected

@@ -119,7 +119,9 @@ def _installed_revision() -> str | None:
     reading git in the runtime checkout; a consumer who installed from a sha --
     which is what we tell external consumers to do -- has no equivalent, and Grip
     had to identify their build by probing for features instead. That is the same
-    complaint as techne#1100/#825 seen from outside.
+    complaint as techne#825 seen from outside. (An earlier draft also cited
+    techne#1100, copied from issue #965's body; that issue number does not exist
+    in this repo and the intended one was not guessed at.)
 
     Returns None for a wheel/sdist/PyPI install (no vcs_info), for an editable
     install (dir_info instead), and when the metadata is absent or malformed --
@@ -133,7 +135,17 @@ def _installed_revision() -> str | None:
         if not raw:
             return None
         commit = (json.loads(raw).get("vcs_info") or {}).get("commit_id")
-        return str(commit)[:7] if commit else None
+        # VALIDATED, NOT JUST TRUNCATED. `str(commit)[:7]` printed whatever was
+        # there: a `commit_id` of "main" came back as "main" and an integer as
+        # "1234567", either of which reads like a sha at `--version`. pip writes a
+        # hash here per PEP 610, so a non-hex value means the metadata is not what
+        # we think it is -- report unknown rather than dress it up.
+        if not isinstance(commit, str):
+            return None
+        commit = commit.strip()
+        if len(commit) < 7 or any(c not in "0123456789abcdefABCDEF" for c in commit):
+            return None
+        return commit[:7]
     except (PackageNotFoundError, OSError, ValueError, KeyError, TypeError):
         return None
     except Exception:  # noqa: BLE001 — metadata probing must never break a health read
@@ -523,9 +535,20 @@ def format_banner(health: dict) -> str:
         # consumer may conclude "level"). What changes is only that we stop
         # crying wolf about it.
         healthy = True
+        # NAME THE COMMIT WHEN WE KNOW IT (techne#965). A PEP 610 VCS install
+        # records the sha it was built from, and the banner is the surface an
+        # external consumer actually reads -- the first cut of #965 claimed the
+        # banner gained this identity and it had NOT, because this branch built
+        # its note from a literal. Currency is still unchecked and the text still
+        # says so; what changes is that "which build" is answerable.
         build_note = (
-            "installed build — currency not checked (techne does not phone home); "
-            "compare against github.com/tenishai/techne/releases"
+            f"installed build {rev} — currency not checked (techne does not phone "
+            "home); compare against github.com/tenishai/techne/releases"
+            if rev
+            else (
+                "installed build — currency not checked (techne does not phone "
+                "home); compare against github.com/tenishai/techne/releases"
+            )
         )
     elif branch and branch != "refs/heads/main":
         # Deliberately off main — a feature branch, worktree or CI checkout, which

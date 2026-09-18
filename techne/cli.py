@@ -70,10 +70,23 @@ def _version_string() -> str:
     consumers to install from a sha, so this is the one surface that has to
     answer "which build am I on" for them, and it could not.
 
-    A PEP 440 local label (`0.16.1+21813c1`) is the right shape: sortable,
-    legal, and unmistakably not a release. `build` disambiguates the two ways a
-    revision can be absent -- an editable checkout whose version came from
-    pyproject, versus a wheel with no VCS provenance at all.
+    `0.16.1+21813c1` borrows PEP 440's LOCAL LABEL shape -- sortable and
+    unmistakably not a release -- but THE RETURNED STRING IS NOT A PEP 440
+    VERSION and must not be fed to a parser. It carries a ` (checkout)` /
+    ` (installed)` suffix, which `packaging.version.Version` rejects. That is a
+    deliberate trade: this is a human-facing line, and the build word is worth
+    more here than machine-parseability. Nothing in this repo parses it.
+
+    THE DEGRADED VERSION IS GUARDED, because it already contains a local label:
+    `_resolve_version` returns `0.0.0+unknown` when it cannot read a version, and
+    appending a second `+` produces `0.0.0+unknown+21813c1`, which is illegal
+    even as a local label. When the version already carries one, the revision is
+    shown separately rather than concatenated.
+
+    `build` disambiguates the two ways a revision can be absent: a source tree
+    that is NOT a checkout (vendored, extracted sdist -- no readable .git or
+    HEAD), versus a wheel with no VCS provenance. An editable checkout is not one
+    of them; it reads HEAD like any other checkout and prints its sha.
     """
     from techne.core.health import _revision_info
 
@@ -84,7 +97,9 @@ def _version_string() -> str:
         revision, build = None, None
 
     if revision:
-        return f"{__version__}+{revision} ({build})"
+        # A version that already carries a local label cannot take another `+`.
+        sep = " " if "+" in __version__ else "+"
+        return f"{__version__}{sep}{revision} ({build})"
     return f"{__version__} ({build})" if build else __version__
 
 
