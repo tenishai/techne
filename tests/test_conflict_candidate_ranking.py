@@ -241,3 +241,57 @@ def test_the_operator_facing_default_is_what_the_counterexample_pins(config):
     assert any("postgres" in c["content"] for c in picked), (
         "at the OPERATOR-facing default, a one-token real contradiction is dropped"
     )
+
+
+def test_a_floor_below_one_is_refused_not_coerced():
+    """IMPORTANT 1 (Prudence). 0 removes the predicate; it does not lower it.
+
+    `len(shared) >= min_shared_keywords` at 0 or below admits every live row of
+    the same type WITH ZERO SHARED TOKENS. Measured: at 1 a focus got 0
+    candidates; at 0 and -1 it got 6, none sharing a single token.
+
+    That is a different MODE, not a laxer setting, and the loader accepted both
+    silently -- against this module's own rule that a config which turns off a
+    protection must say so. The sibling `custodian` block raises for exactly this
+    shape. `0` is also the natural thing to write for "no floor".
+    """
+    from techne.config import Config
+
+    for bad in (0, -1, -5):
+        with pytest.raises(ValueError, match="must be >= 1"):
+            Config._from_dict({"conflict": {"min_shared_keywords": bad}})
+
+    assert (
+        Config._from_dict({"conflict": {"min_shared_keywords": 2}}).conflict.min_shared_keywords
+        == 2
+    )
+
+
+def test_the_floor_never_applies_to_the_tag_path(config):
+    """IMPORTANT 2 (Prudence). The content-only scoping was prose with no test.
+
+    The docstrings argue it three times -- tags are curated, one shared tag is
+    evidence in a way one shared word is not, the same floor would drop a row
+    whose single tag IS the subject. But every tag-path test called with the
+    default, so nothing pinned it. Prudence applied the floor to the tag path:
+
+        -  if row_tags & candidate_tags:
+        +  if len(row_tags & candidate_tags) >= min_shared_keywords:
+
+    and 88 tests passed. That is the exact "simplification" a future author makes
+    on the grounds that two paths should treat a knob alike.
+
+    By this PR's own standard -- a number in prose is only a guard if something
+    recomputes it -- a design decision in prose is only a decision if something
+    enforces it.
+    """
+    db = config.db_path
+    one_shared_tag = store(db, "a row with one shared tag", type="fact", tags="deploy,unrelated")
+    focus_id = store(db, "the focus row", type="fact", tags="deploy,canary")
+
+    picked = select_conflict_candidates(db, _row(db, focus_id), min_shared_keywords=2)
+
+    assert one_shared_tag in {c["id"] for c in picked}, (
+        "a single shared CURATED tag was dropped by the content-path floor; the "
+        "floor must never reach the tag path"
+    )

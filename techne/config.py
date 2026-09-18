@@ -510,6 +510,37 @@ class CustodianConfig:
     timeout_seconds: int = 120
 
 
+def _positive_floor(value: object) -> int:
+    """Validate ``conflict.min_shared_keywords``: >= 1, or raise.
+
+    BOUNDS VALIDATED, NOT MERELY COERCED -- the rule this module already states
+    for techne#709, and which the sibling `custodian` block enforces. The
+    predicate is `len(shared) >= min_shared_keywords`, so 0 or a negative does not
+    LOWER the floor, it removes the topical filter entirely and every live row of
+    the same type becomes a conflict candidate. Measured: at 1 a focus got 0
+    candidates; at 0 and at -1 it got 6, none sharing a single token with it.
+
+    That is a different MODE, not a laxer setting, and it fails the way this
+    project's failures overwhelmingly do -- the rail keeps running, burns model
+    calls and stages junk. `0` is also the natural thing an operator writes for
+    "no floor", and nothing in the docs said 1 was the minimum.
+    """
+    try:
+        floor = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"conflict.min_shared_keywords must be an integer >= 1, got {value!r}."
+        ) from exc
+    if floor < 1:
+        raise ValueError(
+            f"conflict.min_shared_keywords must be >= 1, got {floor}. Values below 1 "
+            "remove the topical filter entirely rather than loosening it: every live "
+            "row of the same type would become a conflict candidate. There is no "
+            "'no floor' setting."
+        )
+    return floor
+
+
 @dataclass
 class ConflictConfig:
     """Configuration for contradiction detection → supersession (techne#213, D1).
@@ -538,8 +569,11 @@ class ConflictConfig:
         closed by ORDERING instead (see select_conflict_candidates), which ranks on
         the number of shared tokens and uses the overlap coefficient only as a
         tiebreak -- ranking on the coefficient alone scored a one-token row 1.0 and
-        put it ABOVE a four-token match, which is the opposite of the intent. Raise this to 2 if a corpus shows incidental single-token
-        matches surviving the sort.
+        put it ABOVE a four-token match, the opposite of the intent. Raise this to
+        2 if a corpus shows incidental single-token matches surviving the sort.
+
+        THE MINIMUM IS 1, ENFORCED. 0 or a negative does not loosen the floor, it
+        removes the topical filter entirely; the loader raises rather than coerce.
     max_items_per_emit: cap on groups returned by conflict_check_emit per run.
     log_raw_response: whether to persist the agent's raw response in the candidate row.
     """
@@ -1184,7 +1218,9 @@ class Config:
                 max_comparison_candidates=int(
                     c.get("max_comparison_candidates", _cd.max_comparison_candidates)
                 ),
-                min_shared_keywords=int(c.get("min_shared_keywords", _cd.min_shared_keywords)),
+                min_shared_keywords=_positive_floor(
+                    c.get("min_shared_keywords", _cd.min_shared_keywords)
+                ),
                 max_items_per_emit=int(c.get("max_items_per_emit", _cd.max_items_per_emit)),
                 log_raw_response=bool(c.get("log_raw_response", _cd.log_raw_response)),
             )
