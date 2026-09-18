@@ -78,8 +78,20 @@ techne init
 >                          #   leaves whatever chain was written last. Also refreshes
 >                          #   the bundled skills, so the next line is belt-and-braces.
 > techne skills install    # for anyone who skipped init (or passed `--no-skills`)
+> techne agents install    # SAME flag, separate command — `--no-skills` skips the research
+>                          #   sandbox too, and `skills install` does not bring it back
 > techne vectors backfill  # ONCE, from the CLI — nothing else embeds
 > ```
+>
+> The third line is not belt-and-braces the way the second is. `techne guide investigating`
+> tells an agent to do its web research inside the `research-readonly` sandbox — a
+> definition with WebFetch and WebSearch and nothing else. Without the file that
+> instruction is unenforceable: the agent reaches for a general research agent, which has a
+> shell, and one that can both read attacker-controlled pages and write to the pattern
+> store is one injection away from writing whatever a page tells it to. `techne agents
+> status` reports each definition as unchanged / edited / **widened** / absent, and
+> `widened` is called out separately from `edited` because a sandbox that gained tools is
+> the failure that matters.
 >
 > Step three worked only if it printed a JSON counts block. A `vector search unavailable`
 > line means it embedded nothing and exited 0 — run `techne vectors status` to see whether
@@ -205,6 +217,23 @@ From there, every Claude Code session is captured, thread-summarized at session 
 
 `techne status` also **self-checks hook registration** — if a hook is enabled in config but not actually wired into Claude Code's `settings.json`, it prints a `⚠ Hook registration drift` warning; `techne init` reconciles it. (Claude Code loads hooks at session *start*, so a newly-registered hook — e.g. opt-in [grep-assist](docs/welcome.md) — fires from the *next* session, not the current one.)
 
+`techne doctor` goes further and asks whether each subsystem is actually **working**, which
+includes two freshness checks added in 0.17.0 (#937). `codex:freshness` compares the repo's
+recorded `indexed_head` against the current HEAD — a stale code index answers "not found" with
+the same confidence as a correct miss, so it now says so on the way in:
+
+```
+! codex:freshness   stale   techne was indexed at 21813c1, HEAD is now d0a42a5 — codex
+                            may answer 'not found' for code that exists
+                              remedy: techne codex index /path/to/repo
+✓ cards:freshness   live    20 anchor(s) match the card vouching for them
+```
+
+`cards:freshness` does the same for architecture cards: every `anchor: <file> sha=<blob>` line
+in `ARCHITECTURE.md` and `docs/arch/*.md` is compared against the seam it vouches for, using the
+same globs as the pre-push gate so the banner and the gate cannot disagree. Both are cheap by
+construction rather than deferred — 32 checks in 0.149s against the hook's 5s budget.
+
 Inspect what's been captured:
 
 ```bash
@@ -308,6 +337,11 @@ pinned by a test so a new tool cannot ship undocumented.
 ```
 techne init [--platform claude-code|codex|standalone] [--identity-dir DIR]
 techne status                              # session and storage stats
+techne --version                           # the installed version, and — on a build installed
+                                           #   from a git ref — the commit it was built from,
+                                           #   read from PEP 610 direct_url.json (#965). A build
+                                           #   carrying unreleased merges no longer reports the
+                                           #   last tag as if that were what is running.
 techne capabilities [--json]               # what techne can do on THIS install and what is
                                            # switched off, grounded in your own store — the
                                            # operator twin of the techne_capabilities MCP tool
@@ -556,6 +590,24 @@ threads:
     - "service:([a-z0-9-]+)"   # Datadog services
     - "C[A-Z0-9]{8,12}"        # Slack channel IDs
 
+search:
+  recency_weight: 0.3         # how much a recent row is favoured in the fused rank
+  bm25_weight: 0.7            # ...against lexical relevance
+  expansion_ratio: 2          # over-fetch factor before fusion trims to `limit`
+  embedding_backend: ""       # "" means AUTO-SELECT, not disabled — read the live backend
+                              #   from `techne vectors status`, not from this being empty.
+  embedding_model: ""         # "" = the backend's default
+  recall_documents_limit: 3   # librarian document cards allowed into a recall
+  curated_head_slots: 3       # head positions a table="all" page reserves for the best
+                              #   CURATED rows (#946). Without it a knowledge row competed
+                              #   with the whole observation ledger for a slot, and an
+                              #   evaluator measured gold answers ranking 1/2/7 in
+                              #   table="knowledge" and dropping off the page entirely at
+                              #   table="all". The page does not grow — reserved rows
+                              #   displace the weakest non-curated head rows one for one,
+                              #   and the tail floor is untouched. 0 restores the previous
+                              #   page exactly; capped at a third of the head.
+
 hooks:
   post_tool_use: true         # capture tool use as observations
   capture_bash: false         # include Bash tool calls
@@ -586,9 +638,26 @@ hooks:
                               #   only the default when nothing is asked for.
   timeout_s: 5.0              # wall-clock budget for a hook (grep-assist / per-turn recall degrade to no-op if slow)
 
+conflict:                     # the contradiction rail — which candidate rows reach your model
+  model: ""                   # "" = answered by the resident agent, no API key. Egress-selecting;
+                              #   see Operator-owned config below.
+  max_comparison_candidates: 20  # how many matched rows are compared per check
+  min_shared_keywords: 1      # floor on shared content tokens for the no-tags fallback path
+                              #   (#933). 1 is the implicit floor it replaces, so leaving it
+                              #   alone changes nothing. Below 1 is REFUSED rather than coerced:
+                              #   it does not loosen the filter, it removes it. Raising it makes
+                              #   the fallback stricter — fewer, more topical candidates.
+  max_items_per_emit: 20      # cap on items in one emit payload
+  log_raw_response: true      # keep the model's unparsed reply for debugging
+
 sync:
   adapter: noop               # or 'filesystem'; custom adapters via entry points
 ```
+
+Candidates are **ranked before truncation** as of 0.17.0 (#933) — by shared-token count, with an
+overlap-coefficient tiebreak and an id tiebreak for determinism. Previously the SQL carried no
+`ORDER BY`, so `max_comparison_candidates` kept whichever rows SQLite happened to return. This
+changes the order reaching the model on every conflict check, not only when truncation bites.
 
 ---
 

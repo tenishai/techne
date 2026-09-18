@@ -89,6 +89,12 @@ trap `stack-graphs` fell into. Two rules if we ever build it:
 | Automated PR-time check (e.g. blast-radius comment on API-changing PRs) | **CI on the PR branch** |
 | Human/agent doing local brownfield / planning work | local `codex index` / `codex watch` |
 
+For the second row, 0.17.0 closes the loop that made local refresh a thing you had to
+remember: `codex:freshness` on the SessionStart banner compares the index's recorded
+`indexed_head` against the repo's current HEAD and names the commit it is stuck at (#937).
+That does not refresh anything — it converts a silent "not found" into a visible "the index
+is behind, here is the command", which is the failure this whole section is about.
+
 ## Build-vs-adopt: keep SQLite
 
 SQLite was the right call. **Kuzu** — the obvious embedded graph DB to adopt instead — was

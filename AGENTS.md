@@ -105,6 +105,14 @@ recorded sha together.
 python scripts/check_arch_cards.py
 ```
 
+**You will also see drift on the way IN, not only on the way out.** The SessionStart
+banner's `cards:freshness` check recomputes the same anchors against the same globs the
+gate uses (`ARCHITECTURE.md`, `docs/arch/*.md`) and reports `N of M seam(s) have drifted
+from their card`, naming them (#937). It computes the blob sha in-process rather than
+shelling out — 0.006s for 19 anchors against 0.50s for 21 subprocesses — so it is cheap
+enough to run every session. A seam a card points at that can no longer be READ (renamed,
+deleted) is reported as drift too, matching the gate's hard failure, rather than skipped.
+
 Cards are the **source of truth**. On merge they are mirrored into techne
 (`document_card`, org-wide recall) — so keeping them current *here* keeps the
 org-at-a-glance view current *everywhere*.
