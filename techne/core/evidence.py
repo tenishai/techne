@@ -1173,9 +1173,13 @@ def query_turn_evidence(
             #    reported errors is not redeemed by another reporting none.
             #    NOTE this is per-RESULT, not per-tool: the list cannot tell a
             #    second tool from a RERUN of the same one, so `ruff` failing then
-            #    passing after a fix still reports not-clean for the window. That
-            #    is the safe direction, and it is why the gate is scoped to a
-            #    session window rather than to a single command.
+            #    passing after a fix still reports not-clean for the window.
+            #    THAT IS NOT "the safe direction", as an earlier comment called it.
+            #    This file's own rule is that a FALSE ACCUSATION is the one
+            #    direction the gate must never take, and calling a fixed-then-clean
+            #    window unbacked is exactly that. It is a KNOWN LIMIT of scoping the
+            #    gate to a session window rather than a single command, not a
+            #    virtue -- an agent that fixes its lint mid-turn is accused.
             #
             # 2. AN UNREADABLE TOOL BLOCKS GREEN. `green` ignored `unreadable`
             #    entirely, so `ruff check` + `tsc --noEmit` gave
@@ -1186,10 +1190,11 @@ def query_turn_evidence(
             #    claim type exists to remove, asserted in the ledger's own voice.
             #    A success can only speak for the tools that stated one.
             #
-            # NOT "mirrors _row_totals_unreliable", which an earlier comment
-            # claimed: that guard is PER-ROW and its own docstring says asking the
-            # question of the union "lets an intact row vouch for a bounded one" --
-            # the opposite of rule 2. Only rule 1 resembles the suite_green block.
+            # NOT "mirrors _row_totals_unreliable": that guard is PER-ROW and its own
+            # docstring says asking the question of the union "lets an intact row
+            # vouch for a bounded one", the opposite of rule 2. The ORDERING here
+            # does now match the suite_green block, which also tests failure first,
+            # then unreliable -> None, then green.
             #
             # PRECEDENCE MATTERS, AND THE FIRST CUT OF RULE 2 GOT IT WRONG. Gating
             # green on `not check_unreadable` BEFORE testing for failure swallowed
@@ -1364,12 +1369,25 @@ def check_claims(claims: list[dict], evidence: Evidence) -> list[dict]:
 
         elif claim_type == "checks_green":
             c = evidence.checks
+            # NAME ONLY THE TOOLS THAT SPOKE. `c.tools` is every RECOGNISED tool,
+            # read or not, so building either sentence from it makes the ledger
+            # speak for a tool it never heard -- "ruff, tsc reported problems"
+            # when tsc printed nothing. That is the same defect as rule 2 above in
+            # the opposite polarity, and the failure branch only became reachable
+            # with an unread tool present once a stated failure started
+            # outranking one.
+            heard = [t for t in c.tools if t not in c.unreadable] or list(c.tools)
             if c.green is True:
                 status = "backed"
-                detail = f"Verification clean: {', '.join(c.tools)} reported no problems."
+                detail = f"Verification clean: {', '.join(heard)} reported no problems."
             elif c.green is False:
                 status = "unbacked"
-                detail = f"Verification NOT clean: {', '.join(c.tools)} reported problems."
+                detail = f"Verification NOT clean: {', '.join(heard)} reported problems."
+                if c.unreadable:
+                    detail += (
+                        f" ({', '.join(c.unreadable)} also ran but said nothing readable;"
+                        " the failure above stands on its own.)"
+                    )
             elif not evidence.bash_captured:
                 status = "unverifiable"
                 detail = _BASH_OFF_DETAIL

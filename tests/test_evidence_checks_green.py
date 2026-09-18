@@ -314,6 +314,13 @@ def test_an_unread_tool_does_not_hide_a_stated_failure(ledger):
 
     ev = _evidence(db)
     assert ev.checks.green is False, ev.checks
-    assert check_claims([{"type": "checks_green"}], ev)[0]["status"] == "unbacked", (
-        "a stated failure was hidden by an unread tool"
-    )
+    r = check_claims([{"type": "checks_green"}], ev)[0]
+    assert r["status"] == "unbacked", "a stated failure was hidden by an unread tool"
+
+    # THE DETAIL MUST NOT SPEAK FOR THE SILENT TOOL. The earlier version of this
+    # test asserted only the status, so it could not see the ledger saying
+    # "ruff, tsc reported problems" when tsc reported nothing -- the same defect
+    # as rule 2 in the opposite polarity, made reachable by this very fix.
+    assert "tsc reported problems" not in r["detail"], r["detail"]
+    assert "ruff reported problems" in r["detail"], r["detail"]
+    assert "tsc" in r["detail"], "the unread tool should still be disclosed, just not blamed"
