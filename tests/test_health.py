@@ -637,7 +637,16 @@ class TestRevisionInfo:
     def test_site_packages_is_installed_and_reads_no_refs(self, tmp_path):
         from techne.core.health import _revision_info
 
-        info = _revision_info(tmp_path / "lib" / "site-packages" / "techne")
+        # THE SEAM IS INJECTED, NOT AMBIENT (techne#971). `_installed_revision`
+        # ignores package_path and reads the REAL installed distribution, so
+        # without this the assertion below is a statement about THIS venv rather
+        # than about the code -- it passed only because this is an editable
+        # install, and would fail in the VCS-installed environment the change
+        # exists to serve.
+        info = _revision_info(
+            tmp_path / "lib" / "site-packages" / "techne",
+            installed_revision=lambda: None,
+        )
         assert info["build"] == "installed"
         assert info["drifted"] is None, "installed currency is unknown, not verified-level"
         assert info["revision"] is None

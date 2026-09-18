@@ -7,6 +7,7 @@ they report. :func:`format_banner` renders the terse operator-facing banner.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -103,7 +104,59 @@ def _read_ref(git_dir: Path, common_dir: Path, rel: str, _depth: int = 0) -> str
     return None
 
 
-def _revision_info(package_path: Path) -> dict:
+def _installed_revision() -> str | None:
+    """The commit an INSTALLED build was built from, via PEP 610 (techne#965).
+
+    `pip install "techne @ git+https://...@<sha>"` writes `direct_url.json` into
+    the dist-info with `vcs_info.commit_id` -- the resolved sha, not merely the
+    ref that was asked for. Verified against a real install:
+
+        {"url": "...", "vcs_info": {"commit_id": "21813c16ed8be...",
+         "requested_revision": "21813c1...", "vcs": "git"}}
+
+    WHY THIS MATTERS AND WHY THE GIT PATH CANNOT COVER IT. An installed build has
+    no checkout to read, so `_revision_info` reported `revision: None` and
+    `--version` named the last RELEASE. Inside the team we work around that by
+    reading git in the runtime checkout; a consumer who installed from a sha --
+    which is what we tell external consumers to do -- has no equivalent, and Grip
+    had to identify their build by probing for features instead. That is the same
+    complaint as techne#825 seen from outside. (An earlier draft also cited
+    techne#1100, copied from issue #965's body; that issue number does not exist
+    in this repo and the intended one was not guessed at.)
+
+    Returns None for a wheel/sdist/PyPI install (no vcs_info), for an editable
+    install (dir_info instead), and when the metadata is absent or malformed --
+    all of which are "genuinely unknowable", not failures.
+    """
+    try:
+        import json
+        from importlib.metadata import PackageNotFoundError, distribution
+
+        raw = distribution("techne").read_text("direct_url.json")
+        if not raw:
+            return None
+        commit = (json.loads(raw).get("vcs_info") or {}).get("commit_id")
+        # VALIDATED, NOT JUST TRUNCATED. `str(commit)[:7]` printed whatever was
+        # there: a `commit_id` of "main" came back as "main" and an integer as
+        # "1234567", either of which reads like a sha at `--version`. pip writes a
+        # hash here per PEP 610, so a non-hex value means the metadata is not what
+        # we think it is -- report unknown rather than dress it up.
+        if not isinstance(commit, str):
+            return None
+        commit = commit.strip()
+        if len(commit) < 7 or any(c not in "0123456789abcdefABCDEF" for c in commit):
+            return None
+        return commit[:7]
+    except (PackageNotFoundError, OSError, ValueError, KeyError, TypeError):
+        return None
+    except Exception:  # noqa: BLE001 — metadata probing must never break a health read
+        return None
+
+
+def _revision_info(
+    package_path: Path,
+    installed_revision: "Callable[[], str | None] | None" = None,
+) -> dict:
     """Identify the code that is actually imported, not the version it claims.
 
     ``__version__`` comes from ``importlib.metadata`` FOR AN INSTALLED BUILD
@@ -153,6 +206,24 @@ def _revision_info(package_path: Path) -> dict:
         # checked and it is level, which is the opposite of what the banner says
         # and would let a consumer of the payload draw the reassuring conclusion
         # the banner refuses to draw.
+        #
+        # THE REVISION, HOWEVER, IS KNOWABLE FOR A VCS INSTALL (techne#965), and
+        # supplying it does NOT weaken the paragraph above. `drifted` stays None:
+        # naming the commit you were built from says nothing about whether a newer
+        # one exists, which is exactly the distinction this branch already draws.
+        # INJECTABLE, TO KEEP THIS A PURE FUNCTION OF ITS ARGUMENTS (Prudence, #971).
+        # `_installed_revision()` ignores package_path and reads the REAL installed
+        # distribution, so the moment this branch started calling it, a caller that
+        # constructs a synthetic path no longer controlled the answer. That seam was
+        # crossed quietly and exactly one test witnessed it --
+        # test_site_packages_is_installed_and_reads_no_refs passed only because this
+        # venv is an EDITABLE install; against a VCS-installed environment (the one
+        # this change exists to serve) it returns a real sha and the test fails.
+        #
+        # Mocking it at each call site would have worked; restoring the purity is
+        # better, because the next caller gets it for free.
+        resolve = _installed_revision if installed_revision is None else installed_revision
+        info["revision"] = resolve()
         return info
 
     root = package_path.parent
@@ -480,9 +551,20 @@ def format_banner(health: dict) -> str:
         # consumer may conclude "level"). What changes is only that we stop
         # crying wolf about it.
         healthy = True
+        # NAME THE COMMIT WHEN WE KNOW IT (techne#965). A PEP 610 VCS install
+        # records the sha it was built from, and the banner is the surface an
+        # external consumer actually reads -- the first cut of #965 claimed the
+        # banner gained this identity and it had NOT, because this branch built
+        # its note from a literal. Currency is still unchecked and the text still
+        # says so; what changes is that "which build" is answerable.
         build_note = (
-            "installed build — currency not checked (techne does not phone home); "
-            "compare against github.com/tenishai/techne/releases"
+            f"installed build {rev} — currency not checked (techne does not phone "
+            "home); compare against github.com/tenishai/techne/releases"
+            if rev
+            else (
+                "installed build — currency not checked (techne does not phone "
+                "home); compare against github.com/tenishai/techne/releases"
+            )
         )
     elif branch and branch != "refs/heads/main":
         # Deliberately off main — a feature branch, worktree or CI checkout, which

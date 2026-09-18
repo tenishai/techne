@@ -61,8 +61,50 @@ class _AliasedGroup(click.Group):
         return name, cmd, rest
 
 
+def _version_string() -> str:
+    """Version, plus the build identity when there is one (techne#965).
+
+    `techne --version` printed `0.16.1` on a build installed from a sha carrying
+    seven merged PRs, two schema migrations and new CLI surface -- because
+    `__version__` names the last RELEASE, not the code. We tell external
+    consumers to install from a sha, so this is the one surface that has to
+    answer "which build am I on" for them, and it could not.
+
+    `0.16.1+21813c1` borrows PEP 440's LOCAL LABEL shape -- sortable and
+    unmistakably not a release -- but THE RETURNED STRING IS NOT A PEP 440
+    VERSION and must not be fed to a parser. It carries a ` (checkout)` /
+    ` (installed)` suffix, which `packaging.version.Version` rejects. That is a
+    deliberate trade: this is a human-facing line, and the build word is worth
+    more here than machine-parseability. Nothing in this repo parses it.
+
+    THE DEGRADED VERSION IS GUARDED, because it already contains a local label:
+    `_resolve_version` returns `0.0.0+unknown` when it cannot read a version, and
+    appending a second `+` produces `0.0.0+unknown+21813c1`, which is illegal
+    even as a local label. When the version already carries one, the revision is
+    shown separately rather than concatenated.
+
+    `build` disambiguates the two ways a revision can be absent: a source tree
+    that is NOT a checkout (vendored, extracted sdist -- no readable .git or
+    HEAD), versus a wheel with no VCS provenance. An editable checkout is not one
+    of them; it reads HEAD like any other checkout and prints its sha.
+    """
+    from techne.core.health import _revision_info
+
+    try:
+        info = _revision_info(Path(__file__).parent)  # cli.py lives IN the package
+        revision, build = info.get("revision"), info.get("build")
+    except Exception:  # noqa: BLE001 — --version must never fail
+        revision, build = None, None
+
+    if revision:
+        # A version that already carries a local label cannot take another `+`.
+        sep = " " if "+" in __version__ else "+"
+        return f"{__version__}{sep}{revision} ({build})"
+    return f"{__version__} ({build})" if build else __version__
+
+
 @click.group(cls=_AliasedGroup)
-@click.version_option(version=__version__)
+@click.version_option(version=_version_string())
 @click.pass_context
 def main(ctx):
     """techne — agentic memory and knowledge system."""
@@ -5020,8 +5062,7 @@ def codex_index(ctx, repo, languages, lsp, rebuild):
     "--rebuild",
     is_flag=True,
     default=False,
-    help="Re-parse every file in every repo, ignoring the unchanged-file skip "
-    "(techne#864).",
+    help="Re-parse every file in every repo, ignoring the unchanged-file skip (techne#864).",
 )
 @click.pass_context
 def codex_index_all(ctx, languages, rebuild):
