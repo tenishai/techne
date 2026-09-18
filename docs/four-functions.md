@@ -202,6 +202,14 @@ will confidently tell you about code you deleted last week if you have not re-in
 Two different axes: the wrong repo above, a stale snapshot here. See
 [codex usage](codex-usage.md) for when to reach for it and when not to.
 
+Since 0.17.0 you are told rather than left to remember (#937). The SessionStart banner's
+`codex:freshness` check compares the `indexed_head` recorded at index time against the
+repo's current HEAD and names both commits — *"techne was indexed at 21813c1, HEAD is now
+d0a42a5 — codex may answer 'not found' for code that exists"* — with the `techne codex
+index` command to fix it. The predicate is the recorded head, not an age threshold: a repo
+nobody has touched for a month is not stale, and one touched twice this morning may be. It
+is per-repo, taken from your cwd, for the same reason `target` matters above.
+
 ---
 
 ## Reading the answer

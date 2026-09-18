@@ -38,6 +38,35 @@ All notable changes to techne are documented here. Format loosely follows
   so a merge cannot be blocked by embedding wobble. `probe`, the other marker #895
   names, is untouched and still has no home.
 
+- **The suite refuses to run under an interpreter that has no techne** (#893). `python3 -m
+  pytest` from the repo root resolves to the system interpreter and reported **36 failures**
+  — `StopIteration` and `PackageNotFoundError` raised deep inside `importlib.metadata`, in
+  tests named `test_litellm_not_in_core_deps` and `test_an_installed_build_still_trusts_dist_info`.
+  That reads as a packaging regression, and nothing in the output said "wrong interpreter".
+
+  **A hard exit rather than a warning, because the natural sanity check certifies the
+  mistake.** *Does this fail on main too?* comes back **yes** — the interpreter is wrong on
+  both sides. On 2026-09-06, while verifying #892, exactly that happened: 36 failures,
+  reproduced on `main`, concluded to be pre-existing breakage. They were not. A warning line
+  would have scrolled past above 36 red tests; an exit that replaces them cannot. It runs in
+  `pytest_sessionstart` rather than a fixture because it must fire before collection, which
+  is where the misleading errors are raised.
+
+- **`eval-vec`'s base leg survives a PR that adds a module** (#857). The leg is built as
+  "BASE's library, HEAD's tests", so any PR landing a module and its test module together
+  made that file unimportable there — and collection runs **before** marker selection, so
+  one file killed the whole leg over tests `-m eval_vec` would have deselected anyway. Main
+  had been green throughout, so this was latent rather than a regression; #856 was the first
+  PR to hit it.
+
+  **The `--continue-on-collection-errors` flag alone would have been worse than the bug.**
+  Tolerating collection errors lets a *short* base run reach the comparer, and
+  `compare_retrieval_metrics.py` read `per_class[...]["n"]` without ever comparing it
+  between the legs — a base measuring 4 cases against a head measuring 6 printed "No
+  regression against the base commit." So the comparer now refuses unequal case sets
+  **before** printing any table, rather than printing a `base -> head` row that invites the
+  comparison the refusal exists to prevent.
+
 - **A `table="all"` page reserves head slots for curated rows** (#946). The vec-first
   union ordered the page by cosine distance across every table, so a knowledge row
   competed with the whole observation ledger for a slot. #827's floor and #831's
@@ -126,6 +155,69 @@ All notable changes to techne are documented here. Format loosely follows
   characters and forty cut by four hundred are different worlds, and a count alone
   cannot tell them apart.
 
+- **`checks_green` — a lint or type-check claim now has a checkable shape** (#939).
+  The evidence gate could confirm a linter RAN and not that it PASSED: `ran_action`
+  matches a command substring and answers "did this appear", never "what did it
+  return", so an agent that ran `ruff check`, got 14 errors and wrote "lint is clean"
+  produced a BACKED verdict.
+
+  **Outcome is read from each tool's own summary line, because there is nothing else
+  to read.** The ledger carries no exit code — surveyed across 52 live-captured Bash
+  responses, the harness supplies `stdout`, `stderr`, `interrupted`, `isImage`,
+  `noOutputExpected` and two background keys, and nothing resembling a return status.
+
+  So the vocabulary splits. `ruff`, `mypy` and `pyright` print an explicit summary and
+  green is provable. `tsc`, `eslint`, `biome`, `prettier`, `go vet` and `cargo clippy`
+  are SILENT on success: they are recognised, so the gate knows a check ran, and their
+  outcome is `unverifiable` — never `backed`. A readable tool may not vouch for an
+  unread one.
+
+  **A known limit, stated here because you will meet it:** the gate is scoped to a
+  session WINDOW, so a run where a linter fails, is fixed, and passes reports
+  `unbacked`. That is the modal agent workflow. The verdict text says so, naming the
+  later success, but it is a false accusation and it is deliberate rather than
+  overlooked.
+
+- **The SessionStart banner reports codex and arch-card freshness** (#937). A stale
+  code index does not degrade gracefully — it answers "we don't have that" with the
+  same confidence as a correct miss, and nothing on the way in said so. `codex:freshness`
+  compares a newly recorded `indexed_head` against the current HEAD; `cards:freshness`
+  compares each card's anchor against an in-process git blob sha.
+
+  Both are cheap by construction rather than deferred: 32 checks in 0.149s against a
+  5s fail-open hook budget. The card check computes `sha1(b"blob %d\0" % len(data) + data)`
+  in-process — byte-identical to `git hash-object` wherever no eol filter applies — at
+  0.006s for 19 anchors, against 21 subprocesses and 0.50s for shelling out.
+
+- **`techne --version` identifies a build installed from a sha** (#965). It reported
+  the last RELEASE on a build carrying seven merged PRs and two migrations, because
+  `__version__` resolves through installed distribution metadata. PEP 610's
+  `direct_url.json` carries the resolved commit for a VCS install, so `--version`,
+  `techne_status` and the banner can all name it.
+
+- **`conflict.min_shared_keywords`** (#933), a floor on shared content tokens for the
+  no-tags fallback path. Defaults to **1**, which is the implicit floor it replaces —
+  no behaviour change on an existing config. Values below 1 are refused rather than
+  coerced: they do not loosen the floor, they remove the topical filter entirely.
+
+- **pi is a first-class client** (#57) — the same three-lane memory bridge the opencode
+  plugin has. It needed **no new capture surface**: pi's in-process TypeScript lifecycle
+  events map straight onto the existing one, so there is still one `techne observe` path
+  and now three clients. `tool_execution_end` and a user-role `message_end` become
+  observations, `agent_settled` is the Stop-hook analogue that ends the session, and
+  `before_agent_start` appends `techne context` to the system prompt.
+
+  Sessions are stamped `platform: pi` and keyed by the **session-file UUID**, so a resumed
+  pi session keeps its techne session across a restart. Content goes over stdin rather than
+  argv — no size limit, no shell-quoting hazard, multi-line safe. A missing `TECHNE_BIN` or
+  a stale install warns **once** instead of silently dropping every observation. Only
+  techne's own plumbing is skipped from capture; calls to other MCP servers are real work
+  and get captured.
+
+  **One lane pi still lacks, as opencode does:** no compaction checkpoint/restore. Claude
+  Code's `PreCompact`/`PostCompact` hooks have no pi equivalent, so a compaction there
+  loses the checkpoint that a Claude Code session keeps.
+
 ### Changed
 
 - `hooks.per_turn_recall_chars` now defaults to **450**, was 200 (#826). Of the 2,468
@@ -153,7 +245,67 @@ All notable changes to techne are documented here. Format loosely follows
   when this entry was first written `search()` still pre-truncated at 500, so no
   default above 499 could take effect.
 
+- **Conflict candidates are ranked before truncation, and the order reaching the model
+  changes** (#933). The SQL carried no `ORDER BY` and nothing sorted the matches, so
+  `max_comparison_candidates` kept whichever rows SQLite happened to return. Candidates
+  are now ranked by shared-token COUNT, with an overlap-coefficient tiebreak and an id
+  tiebreak for determinism.
+
+  **This reaches the LLM prompt on every conflict check, not only when truncation
+  bites.** A second-order effect worth knowing on upgrade: `check_hash` is keyed on the
+  candidate id set, so a group already marked proposed re-emits ONCE wherever the match
+  count exceeds `max_comparison_candidates`.
+
+  The count is primary for a measured reason. Ranking on the coefficient alone favours
+  SHORT rows, because `shared/min(len)` scores a one-token row 1.0 against anything:
+  against a focus of `{canary, deploy, five, minutes, window}`, the row `"canary"`
+  outranked `"the deploy canary window is thirty minutes"`.
+
+- **The reflect proposing prompt names two failure modes** (#950). It pushed one way
+  only — toward specifics — and specifics are what go stale. A blind-judged run ranked
+  the opposite failure LARGER: `obvious` was 4 of 9 discards against decaying specifics
+  at 2. The prompt now names TOO OBVIOUS and TOO SPECIFIC with an example of each and
+  describes the band between them. **Not yet measured** against a before/after run on
+  the same threads, which #950 asks for and which needs a bound model.
+
+- **`knowledge.last_confirmed_at` is guaranteed by the write path, not a schema default**
+  (#938). It was `NOT NULL DEFAULT CURRENT_TIMESTAMP` on a fresh install and plain
+  nullable on a migrated one AT THE SAME `schema_version`, so a store's provenance
+  changed its retrieval order. The declaration now matches what the v5 ALTER can
+  produce and all five `INSERT INTO knowledge` paths set the value.
+
+  **The existing NULLs are deliberately NOT backfilled** — that re-ranks every install
+  and #938 says it must be measured against the eval gate first. See the Upgrading
+  section and #979.
+
 ### Fixed
+
+- **Nothing is injected into a subagent's context** (#929). A subagent presents the
+  **parent's `session_id`**, so every session-keyed lookup in `post_tool_use` resolved to
+  the parent's state and `_inject_coord_messages` handed a peer's message to the subagent.
+  Due reminders and the codex blast-radius rail rode the same `additionalContext` path.
+  Measured: 15 WebFetch calls made by `research-readonly` subagents on 2026-09-14 are
+  recorded in the ledger under the parent session id.
+
+  **This matters more than untidiness because of which subagent it is.**
+  `research-readonly` reads untrusted third-party pages, and its sandbox is built by
+  *removing* tools — no Bash, no store access, no MCP, and no `Read` specifically to close
+  the local-read → WebFetch exfiltration path. These rails put internal state into that
+  context by a route none of those removals touch. It was found because the subagent
+  volunteered that it had been handed a peer coordination message and had declined to act
+  on it; behaving well is not a control.
+
+  The gate is `agent_id` and **only** `agent_id`. It is the one field present *only* inside
+  a subagent call — `agent_type` is also set for an ordinary top-level `--agent` session, so
+  gating on it would silently stop delivering coord messages and due reminders to a real
+  session with a person in front of it. It **fails open** on a client old enough not to send
+  `agent_id`, which is stated in the code rather than papered over.
+
+  **A second bug fell out, and it defeated the push half of techne#376.** The coord rail is
+  surface-once-per-session and a subagent shares the session id, so a subagent's tool call
+  consumed the parent's message and the parent never received the injected copy — for any
+  session using subagents. It stayed invisible because the message remained unread and the
+  banner recovered it. Found by mutation-testing the fix.
 
 - **A metadata-only transcript no longer fails import** (#941). Claude Code writes a
   one-line transcript (`{"type":"custom-title",...}`) when a session is titled and never
@@ -431,6 +583,84 @@ All notable changes to techne are documented here. Format loosely follows
   The knob moves **knowledge only** — observation and thread rows stay on the fixed
   default, because those are the tool ledger and raising a recall cap should not grow the
   payload by transcript.
+
+- **A resumed session no longer re-imports its parent's turns** (#962). Resuming writes
+  a new transcript that REPLAYS the parent's messages: they carry the new `sessionId`
+  but keep their ORIGINAL `uuid`, and import idempotency is per session. Measured across
+  373 transcripts: 52 file pairs share message uuids, and of the 2 pairs where both
+  halves had been imported, 44 observation rows were duplicated.
+
+  Schema **v26 → v27** adds `observations.source_uuid`. Both importers — `techne import`
+  and the sync adapter — stamp it and consult the guard. Keyed on uuid rather than a
+  content hash deliberately: two concurrent sessions describing one event from different
+  vantage points have different uuids, so a content key would discard a real second
+  observation.
+
+  **Known limit:** every pre-v27 row has `source_uuid` NULL, and NULL never matches, so
+  a resume whose PARENT was imported before the upgrade still duplicates it. Tracked as
+  #978.
+
+- **Thread detection no longer loses a whole session to an unreadable path** (#963).
+  Detection walks up from the cwd RECORDED IN THE TRANSCRIPT, which on a historical
+  corpus may be gone or readable only by root. `find_repo` is the only filesystem call
+  on that path, and it relied on `Path.exists()` swallowing the error — a guarantee that
+  holds on 3.14 and NOT on 3.11, 3.12 or 3.13. One report lost detection for all 201
+  observations of a session.
+
+- **`techne doctor` no longer names commands that do not exist** (#936). Two of three
+  rail remedies were built as `f"techne {rail} --help"`, and `techne consolidate` and
+  `techne dream` are not CLI verbs. The remedy line is the one part of a check an
+  operator acts on without reading the code.
+
+- **The `TECHNE_HOME` mismatch warning prints once per key** (#964), not twice. Both
+  emitters landed on the same stream.
+
+- **The eval_vec gate can observe the fusion tail** (#935). 18 of 24 gold tasks pinned a
+  single table and the rest returned gold through both channels, so `_curated_first`
+  reordered nothing across the whole gate. A positive `table: all` task whose gold the
+  vector channel does not return now exercises the reserved lexical slot.
+
+### Upgrading
+
+**Run `techne codex index <repo>` for each repo you query.** An index built before this
+release carries no `indexed_head`, so the new `codex:freshness` check reports
+UNOBSERVABLE — a mark on every session start until you re-index. It clears on the first
+index; nothing is broken in the meantime.
+
+**Have free disk space equal to your store.** Opening the store migrates it v26 → v27
+and writes a byte-for-byte backup first. Measured on a 223 MB store with 48,396
+observations: 0.9s including the backup.
+
+**Nothing else is required.** No `techne init`, no `techne vectors backfill` for this
+release.
+
+### Things that change under you
+
+**`techne --version` gained a suffix.** `0.16.1` becomes `0.17.0+<sha> (installed)`.
+If you parse it, this will break you — and if you were identifying builds by probing
+for features, that is what this change exists to replace.
+
+**Conflict candidate ORDER changed** (see Changed). Groups already marked proposed
+re-emit once where the match count exceeds `max_comparison_candidates`.
+
+**`checks_green` reports `unbacked` if you fix your lint mid-session.** The gate is
+scoped to a session window, not to the last run.
+
+**A migrated store carries a decay inversion, and a fresh one may not.** Where
+`knowledge.last_confirmed_at` is NULL, the row never decays while newly written rows do —
+so on a store with many NULLs, new knowledge is progressively out-ranked by old. On the
+maintainer's store that is 3,029 of 3,122 rows (97%).
+
+**This may not apply to you.** A store created FRESH under v0.16.1 carries
+`NOT NULL DEFAULT CURRENT_TIMESTAMP` and every row is stamped — no inversion. The
+affected shape is one migrated up from v5 or earlier. Check with:
+
+```sql
+SELECT COUNT(*) FROM knowledge WHERE last_confirmed_at IS NULL AND superseded_by IS NULL;
+```
+
+Zero means you are unaffected. Tracked as #979; the backfill is deliberately deferred
+because it re-ranks every install and belongs behind the eval gate.
 
 ## [0.16.1] — 2026-08-30
 
