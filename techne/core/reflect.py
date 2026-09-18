@@ -83,6 +83,23 @@ Be strict. Return [] when nothing in this thread is worth keeping. Skip:
   - Anything implementation-ephemeral (a one-off bug fix, a now-deleted file).
   - Anything already in "What the agent already knows".
   - Anything that would be obvious from re-reading the code.
+
+A candidate can fail in one of two ways. Check both before you keep it, and
+keep it only if it is neither.
+
+  TOO OBVIOUS — a competent engineer in this domain already knows it: how a
+  common tool behaves by default, or generic hygiene advice.
+  "Re-read the repo before citing it" is this failure.
+
+  TOO SPECIFIC — it is true today and false after the next change, because it
+  leans on an identifier, a count, a version or a status. "The image tags are
+  9efefd3 and 07c015b" is this failure; the rule those tags illustrate is not.
+
+Aim between them: NON-OBVIOUS to a competent practitioner, and STILL TRUE once
+the identifiers change. If you cite an identifier, count or version, ask whether
+the claim survives it changing; if it does not, state the rule and drop the
+identifier.
+
 Prefer fewer, sharper items over many vague ones. Hard cap: {max_items} items.
 
 Output the JSON array and nothing else.
@@ -1348,9 +1365,7 @@ def emit_reflection_pass(
         # written at ingest by `_claim_answered`. Without this a thread rendered and
         # never answered was dropped with every counter reading zero. Same scope as
         # the #900 heal: only on an empty batch, so paged `emit -o` drains still work.
-        stale |= {
-            k for k in already & current_ids if k.startswith("obs-")
-        } - _answered_keys(marker)
+        stale |= {k for k in already & current_ids if k.startswith("obs-")} - _answered_keys(marker)
         stale -= _declined_keys(config, session_id)
         if stale:
             already = already - stale
@@ -1549,9 +1564,7 @@ def ingest_one_and_drain(
     )
     if not result.get("parse_failures") and not result.get("errors"):
         if thread_id:
-            result["reflection_debt_drained"] = drain_reflection_queue(
-                config.db_path, [thread_id]
-            )
+            result["reflection_debt_drained"] = drain_reflection_queue(config.db_path, [thread_id])
             _clear_decline(config, session_id, thread_id)
         elif obs_key:
             _claim_answered(config, session_id, obs_key)
@@ -1907,8 +1920,7 @@ def reflect_on_session(
         _record_reflect_marker(
             config,
             outcome="error",
-            detail=f"{result['errors']} error(s), 0 threads reflected: "
-            f"{first_error or 'see log'}",
+            detail=f"{result['errors']} error(s), 0 threads reflected: {first_error or 'see log'}",
         )
     elif result["errors"]:
         _record_reflect_marker(
