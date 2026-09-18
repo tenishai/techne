@@ -77,8 +77,31 @@ def _warn_if_outside_home(key: str, value: Path, home: Path) -> None:
         f"techne is using {value}. If this config was copied from another home, delete "
         f"the {key} line so it follows TECHNE_HOME (techne#947)."
     )
+    # ONE COPY PER KEY, NOT TWO (techne#964). Grip saw four long lines before every
+    # command with both db_path and data_dir set. The memo above is not the culprit
+    # and config is not loaded twice: `_log` routes structlog to STDERR by design
+    # (techne#107), so `log.warning` and `print(file=sys.stderr)` were the same
+    # destination with the same text. The print is kept only for the case the log
+    # does NOT cover -- a consumer that configured structlog before importing us,
+    # whose records may never reach the operator's terminal.
+    # ONE COPY PER KEY, NOT TWO (techne#964). Grip saw four long lines before every
+    # command with a config setting both db_path and data_dir. NEITHER HYPOTHESIS IN
+    # THAT ISSUE WAS RIGHT: the memo above is correct and config is loaded once. The
+    # duplicate is that both emitters land on the same stream. `log` here is STDLIB
+    # logging, unconfigured in a CLI run, so `logging.lastResort` -- a WARNING-level
+    # _StderrHandler -- already writes the record to stderr, and the print repeats it.
+    #
+    # So print ONLY when the record will not reach stderr by itself:
+    #   * the logger has its own handlers -> an embedding app owns routing, and its
+    #     records may go to a file or a collector the operator never reads;
+    #   * WARNING is filtered out -> `log.warning` is a no-op and prints nothing.
+    # Under our own default both are false, lastResort carries it, and the operator
+    # gets exactly one line. This over-warns (an app whose handler IS stderr sees two)
+    # and never under-warns, which is the right side to err on for a message that
+    # exists to stop silent writes to the wrong store.
     log.warning(msg)
-    print(msg, file=sys.stderr)
+    if log.hasHandlers() or not log.isEnabledFor(logging.WARNING):
+        print(msg, file=sys.stderr)
 
 
 @dataclass

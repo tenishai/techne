@@ -146,7 +146,31 @@ def find_repo(
     if p.is_absolute():
         for parent in p.parents:
             for marker in REPO_MARKERS:
-                if probe(parent, marker):
+                # A PROBE THAT CANNOT READ A PATH MEANS "NO MARKER HERE", NEVER AN
+                # ABORT (techne#963). The walk starts at a cwd recorded in a
+                # transcript, which on a historical corpus may be gone, may belong to
+                # another machine, or may be readable only by root -- macOS security
+                # software was the reported case. Thread detection does not depend on
+                # the repo marker resolving; it is one feature among several, and one
+                # unreadable ancestor used to cost a whole session its threads.
+                #
+                # NOT redundant with pathlib swallowing the error. `Path.exists()`
+                # re-raises EACCES on 3.11, 3.12 and 3.13, and only swallows it on
+                # 3.14 -- measured, not assumed:
+                #
+                #   3.11/3.12/3.13: exists() RAISED PermissionError [Errno 13]
+                #   3.14:           exists() -> False
+                #
+                # So the guarantee this code leaned on held only on the interpreter we
+                # develop on, while `requires-python` is >=3.11 and CI runs 3.12/3.13.
+                # Guarding at the CALL SITE rather than inside the default probe also
+                # covers an injected `fs_check`, and a future probe that opens a
+                # `.git` file instead of stat-ing it.
+                try:
+                    hit = probe(parent, marker)
+                except OSError:
+                    continue
+                if hit:
                     result = parent.name
                     break
             if result is not None:

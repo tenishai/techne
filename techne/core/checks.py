@@ -663,10 +663,31 @@ def check_hooks(config) -> list[CheckResult]:
 
 #: Self-maintenance rails, and how often each should produce something. These are
 #: the ones found four weeks cold on 2026-08-03 with nothing reporting it.
+#: (interval, note, remedy). THE REMEDY IS PER-RAIL AND NOT DERIVED FROM THE NAME
+#: (techne#936). It used to be built as f"techne {rail} --help", which is a real
+#: command for exactly one of these three: `techne consolidate` and `techne dream`
+#: do not exist and error with "No such command". The remedy line is the one part
+#: of a check an operator acts on without reading the code, so two of three rails
+#: handed them a dead end at the moment the check fired -- and the working path is
+#: not guessable from that error, because consolidate and dream have no CLI verb of
+#: their own. They run headless through `custodian run` (needs a bound model) or
+#: through the MCP emit/ingest pair, which is what a resident agent uses.
 _RAIL_EXPECTATIONS = {
-    "reflect": (timedelta(days=3), "distils sessions into knowledge candidates"),
-    "consolidate": (timedelta(days=14), "dedups/merges knowledge"),
-    "dream": (timedelta(days=14), "recombines knowledge into new connections"),
+    "reflect": (
+        timedelta(days=3),
+        "distils sessions into knowledge candidates",
+        "techne reflect --help",
+    ),
+    "consolidate": (
+        timedelta(days=14),
+        "dedups/merges knowledge",
+        "techne custodian run --rail consolidate (bound model), or techne_consolidate_emit via MCP",
+    ),
+    "dream": (
+        timedelta(days=14),
+        "recombines knowledge into new connections",
+        "techne custodian run --rail dream (bound model), or techne_dream_emit via MCP",
+    ),
 }
 
 
@@ -1429,7 +1450,7 @@ def check_maintenance_rails(config) -> list[CheckResult]:
         # rather than undecidable.
         has_material = conn.execute("SELECT COUNT(*) FROM knowledge").fetchone()[0] > 0
 
-        for rail, (interval, note) in _RAIL_EXPECTATIONS.items():
+        for rail, (interval, note, rail_remedy) in _RAIL_EXPECTATIONS.items():
             row = conn.execute(
                 "SELECT MAX(created_at), COUNT(*) FROM knowledge_candidates WHERE origin = ?",
                 (rail,),
@@ -1445,7 +1466,7 @@ def check_maintenance_rails(config) -> list[CheckResult]:
             else:
                 verdict = temporal_verdict(last, interval)
                 detail = f"{note}; {count} candidates all-time"
-                remedy = f"techne {rail} --help" if verdict is Verdict.STALE else None
+                remedy = rail_remedy if verdict is Verdict.STALE else None
                 # AND SAY WHAT HAPPENED TO THE OUTPUT (techne#636). This check reads
                 # MAX(created_at) — pure EMISSION — so it goes green the moment a rail
                 # produces a candidate and stays green no matter what becomes of it.
