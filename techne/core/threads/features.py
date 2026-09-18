@@ -154,6 +154,16 @@ def find_repo(
                 # the repo marker resolving; it is one feature among several, and one
                 # unreadable ancestor used to cost a whole session its threads.
                 #
+                # THE TRADE, STATED: this collapses "could not look" into "no
+                # marker here", so the answer is the nearest READABLE marker. If
+                # the unreadable directory itself held the true repo, an OUTER one
+                # is attributed with no signal that anything was skipped. Accepted
+                # because repo is one feature among several and losing a session's
+                # threads is the worse failure -- but it is a trade, not free.
+                # The guard is MARKER-granular, not directory-granular, which is
+                # the useful direction: a `.git` that raises while `pyproject.toml`
+                # reads fine still resolves the same directory.
+                #
                 # NOT redundant with pathlib swallowing the error. `Path.exists()`
                 # re-raises EACCES on 3.11, 3.12 and 3.13, and only swallows it on
                 # 3.14 -- measured, not assumed:

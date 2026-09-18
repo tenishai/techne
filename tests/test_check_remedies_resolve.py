@@ -11,8 +11,14 @@ The remedy line is the one part of a check an operator acts on without reading
 the code, so two of three rails handed them a dead end at exactly the moment
 the check fired.
 
-The parametrised resolver test below is the point: it catches the CLASS, not
-the two instances. Remedies are free-text, so nothing else stops the next one.
+SCOPE, STATED BECAUSE AN EARLIER DRAFT OVERSTATED IT. The parametrised test
+below covers the remedies in `_RAIL_EXPECTATIONS` -- 3 of roughly 10 remedy
+literals in checks.py. Calling it "test-enforced as a class" was wrong as
+written. `test_every_remedy_a_real_run_emits_resolves` widens it to whatever a
+real `run_checks` pass actually emits on this machine, which is the honest
+superset available without parsing arbitrary source; a remedy on a branch this
+environment never takes is still unguarded, and that is a known gap rather than
+a covered one.
 """
 
 from __future__ import annotations
@@ -81,3 +87,34 @@ def test_remedy_is_not_derived_from_the_rail_name():
             assert "custodian run" in remedy or "_emit" in remedy, (
                 f"{rail}: remedy must name the path that actually runs it: {remedy!r}"
             )
+
+
+def test_every_remedy_a_real_run_emits_resolves():
+    """Widen the guard from the table to whatever a real pass actually emits.
+
+    Roughly ten remedy literals live in checks.py and only three are in
+    `_RAIL_EXPECTATIONS`. This runs the registry and resolves every `techne ...`
+    remedy that comes back, so a free-text remedy added anywhere is covered as
+    soon as its branch is reachable here.
+
+    KNOWN GAP, NOT A CLAIM OF COMPLETENESS: a remedy on a branch this environment
+    does not take is not exercised. Resolving all of them would mean parsing
+    arbitrary source for string literals, which trades a real guard for a brittle
+    one.
+    """
+    from techne.config import Config
+    from techne.core.checks import run_checks
+
+    unresolved = []
+    for result in run_checks(Config()):
+        remedy = getattr(result, "remedy", None)
+        if not remedy or not remedy.startswith("techne "):
+            continue
+        path = _leading_command(remedy)
+        if path and not _resolves(path):
+            unresolved.append((result.name, remedy))
+
+    assert not unresolved, (
+        "checks emitted remedies naming commands that do not exist: "
+        + "; ".join(f"{n}: {r!r}" for n, r in unresolved)
+    )

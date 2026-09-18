@@ -43,7 +43,19 @@ def test_find_repo_keeps_walking_past_an_unreadable_ancestor():
     """An unreadable directory is 'no marker here', not 'stop looking'.
 
     Degrading the whole walk to None on the first denial would be a second bug:
-    a repo above the unreadable directory is still the right answer.
+    it would drop repo context for the whole path, where continuing keeps it.
+
+    WHAT THIS DOES AND DOES NOT ESTABLISH. The result is the nearest READABLE
+    marker, which is not the same as the correct one: `continue` collapses "could
+    not look" into "no marker here", so if the unreadable directory itself held
+    the true repo, an OUTER repo is attributed with no signal that anything was
+    skipped. That is accepted deliberately -- repo is one feature among several in
+    detection, and losing the session's threads entirely is the worse failure --
+    but it is a trade, not a free win.
+
+    The guard is marker-granular rather than directory-granular, which is the
+    useful direction: a directory whose `.git` raises but whose `pyproject.toml`
+    reads fine still resolves via `pyproject.toml`.
     """
 
     def probe(p: Path, m: str) -> bool:
@@ -67,7 +79,13 @@ def test_extract_features_survives_a_denying_probe():
 
 
 def test_probe_that_raises_oserror_subclass_is_also_caught():
-    """A future probe that OPENS .git instead of stat-ing it must not reintroduce this."""
+    """A future probe that OPENS .git instead of stat-ing it must not reintroduce this.
+
+    SCOPE: the guard is `except OSError` only, so a non-OSError from an injected
+    probe still propagates. That is deliberate -- OSError is the filesystem's
+    error channel, and swallowing everything would hide a genuine bug in a probe
+    rather than a genuine unreadable path.
+    """
 
     def probe(_p: Path, _m: str) -> bool:
         raise IsADirectoryError(21, "Is a directory")

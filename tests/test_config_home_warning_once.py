@@ -16,11 +16,15 @@ installs handlers on the ROOT logger:
     root handlers: [_LiveLoggingNullHandler, _FileHandler /dev/null,
                     LogCaptureHandler, LogCaptureHandler]
 
-With any root handler present `lastResort` never fires, so under pytest only
-the `print` ever reached `capsys` and the duplicate was structurally invisible.
-Any in-process test of this behaviour is blind for the same reason.
+With any root handler present `lastResort` never fires, so under pytest only the
+`print` ever reached `capsys` and the duplicate was invisible by DEFAULT.
 
-Hence the subprocess: it is the only way to observe what the operator observes.
+NOT "invisible to any in-process test", which an earlier draft of this docstring
+claimed. `_StderrHandler.stream` reads `sys.stderr` dynamically, so an in-process
+test that CLEARS the root handlers can observe lastResort perfectly well -- and
+`test_the_three_silent_configurations_still_warn` below does exactly that. The
+subprocess is preferred here because it also exercises the real CLI wiring, not
+because it is the only route.
 """
 
 from __future__ import annotations
@@ -67,10 +71,14 @@ def test_each_key_warns_exactly_once_in_a_real_run(relocated_home):
 
 
 def test_the_warning_still_reaches_stderr_at_all(relocated_home):
-    """Guards the other direction: silencing the duplicate must not silence the warning.
+    """The warning must survive at all, in the ordinary CLI configuration.
 
-    Deleting `print` outright would also pass the test above, and would leave an
-    operator whose app configures logging to a file with no visible warning.
+    SCOPE, STATED BECAUSE AN EARLIER DRAFT OVERSTATED IT: this does NOT guard
+    against `print` being deleted. In this scenario the record also arrives via
+    `lastResort`, so the assertions below still pass with the print removed --
+    measured. The arm that would actually be lost is covered by
+    `test_the_three_silent_configurations_still_warn`, which neutralises the
+    logging fallback so the print is the only possible source.
     """
     proc = _run(relocated_home, "status")
     assert "outside TECHNE_HOME" in proc.stderr
@@ -81,3 +89,83 @@ def test_nothing_leaks_to_stdout(relocated_home):
     """stdout is the MCP JSON-RPC stream and a hook's protocol channel (techne#107)."""
     proc = _run(relocated_home, "status")
     assert "outside TECHNE_HOME" not in proc.stdout
+
+
+def test_the_three_silent_configurations_still_warn(monkeypatch, capsys, tmp_path):
+    """THE REGRESSION THE FIRST FIX INTRODUCED (techne#964, caught in pre-pass).
+
+    The first attempt made the print conditional on
+    `log.hasHandlers() or not log.isEnabledFor(WARNING)` and claimed to over-warn
+    but never under-warn. Three handler-less configurations silenced it entirely:
+
+        logging.lastResort = None            (a real idiom for muting libraries)
+        logging.lastResort.setLevel(ERROR)
+        a Filter on the logger rejecting records
+
+    In each, hasHandlers() is False and WARNING is enabled, so the print arm was
+    skipped while lastResort emitted nothing and the operator saw NOTHING.
+
+    This runs IN-PROCESS on purpose: it has to neutralise the logging fallback,
+    which is exactly what a subprocess cannot be made to do from outside.
+    """
+    import logging
+
+    from techne.config import _WARNED_OUTSIDE_HOME, _warn_if_outside_home
+
+    home = tmp_path / "home"
+    outside = tmp_path / "elsewhere" / "techne.db"
+    monkeypatch.setenv("TECHNE_HOME", str(home))
+
+    _ORIGINAL_LAST_RESORT = logging.lastResort
+    logger = logging.getLogger("techne.config")
+    rejecting = logging.Filter()
+    rejecting.filter = lambda _record: False
+
+    scenarios = {
+        # EXPLICIT restore, not monkeypatch: monkeypatch unwinds at TEST end, so
+        # setting lastResort=None here left it None for the next scenario, whose
+        # setup then died on AttributeError. Each scenario must restore its own.
+        "lastResort=None": (
+            lambda: setattr(logging, "lastResort", None),
+            lambda: setattr(logging, "lastResort", _ORIGINAL_LAST_RESORT),
+        ),
+        "lastResort level=ERROR": (
+            lambda: logging.lastResort.setLevel(logging.ERROR),
+            lambda: logging.lastResort.setLevel(logging.WARNING),
+        ),
+        "filter rejects records": (
+            lambda: logger.addFilter(rejecting),
+            lambda: logger.removeFilter(rejecting),
+        ),
+    }
+
+    for label, (setup, teardown) in scenarios.items():
+        _WARNED_OUTSIDE_HOME.clear()
+        setup()
+        try:
+            _warn_if_outside_home("db_path", outside, home)
+            err = capsys.readouterr().err
+        finally:
+            teardown()
+        assert err.count("outside TECHNE_HOME") == 1, (
+            f"{label}: expected exactly one operator-visible warning, got "
+            f"{err.count('outside TECHNE_HOME')}. Under-warning here means a silent "
+            f"write to the wrong store. stderr was: {err!r}"
+        )
+
+
+def test_the_null_handler_is_what_makes_the_print_unconditional():
+    """Pins the mechanism, so removing the NullHandler fails loudly here.
+
+    Without it, stdlib logging falls back to lastResort (a WARNING-level stderr
+    handler) and the unconditional print becomes a duplicate again.
+    """
+    import logging
+
+    import techne.config  # noqa: F401 — imported for its handler side effect
+
+    handlers = logging.getLogger("techne").handlers
+    assert any(isinstance(h, logging.NullHandler) for h in handlers), (
+        "the techne logger lost its NullHandler; lastResort can fire again and the "
+        "unconditional print in _warn_if_outside_home becomes a duplicate"
+    )

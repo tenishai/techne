@@ -15,6 +15,19 @@ from techne.security.config_trust import TrustVerdict
 
 log = logging.getLogger(__name__)
 
+# THE LIBRARY NULLHANDLER IDIOM, AND IT IS LOAD-BEARING HERE (techne#964).
+# Without a handler anywhere on the chain, stdlib logging falls back to
+# `logging.lastResort`, a WARNING-level handler that writes to stderr -- so a
+# `log.warning` in this module reached the operator's terminal by itself, and any
+# code that ALSO printed produced two copies of one message. Attaching a
+# NullHandler to the top-level `techne` logger makes that fallback unreachable
+# for every techne logger, so a caller that needs operator visibility prints it
+# explicitly and gets exactly one copy.
+#
+# It does not suppress anything an embedding app configures: NullHandler does not
+# stop propagation, so records still reach the app's own root handlers.
+logging.getLogger("techne").addHandler(logging.NullHandler())
+
 Platform = Literal["claude-code", "codex", "standalone", "cabal", "opencode"]
 
 # Single source of truth for the valid platform strings. The config validator
@@ -78,30 +91,35 @@ def _warn_if_outside_home(key: str, value: Path, home: Path) -> None:
         f"the {key} line so it follows TECHNE_HOME (techne#947)."
     )
     # ONE COPY PER KEY, NOT TWO (techne#964). Grip saw four long lines before every
-    # command with both db_path and data_dir set. The memo above is not the culprit
-    # and config is not loaded twice: `_log` routes structlog to STDERR by design
-    # (techne#107), so `log.warning` and `print(file=sys.stderr)` were the same
-    # destination with the same text. The print is kept only for the case the log
-    # does NOT cover -- a consumer that configured structlog before importing us,
-    # whose records may never reach the operator's terminal.
-    # ONE COPY PER KEY, NOT TWO (techne#964). Grip saw four long lines before every
-    # command with a config setting both db_path and data_dir. NEITHER HYPOTHESIS IN
-    # THAT ISSUE WAS RIGHT: the memo above is correct and config is loaded once. The
-    # duplicate is that both emitters land on the same stream. `log` here is STDLIB
-    # logging, unconfigured in a CLI run, so `logging.lastResort` -- a WARNING-level
-    # _StderrHandler -- already writes the record to stderr, and the print repeats it.
+    # command from a config setting both db_path and data_dir. Neither hypothesis in
+    # that issue was right: the memo above is correct and config is loaded once. The
+    # duplicate was that BOTH EMITTERS LANDED ON THE SAME STREAM -- `log` here is
+    # STDLIB logging, unconfigured in a CLI run, so `logging.lastResort` (a
+    # WARNING-level _StderrHandler) already wrote the record to stderr and the print
+    # repeated it.
     #
-    # So print ONLY when the record will not reach stderr by itself:
-    #   * the logger has its own handlers -> an embedding app owns routing, and its
-    #     records may go to a file or a collector the operator never reads;
-    #   * WARNING is filtered out -> `log.warning` is a no-op and prints nothing.
-    # Under our own default both are false, lastResort carries it, and the operator
-    # gets exactly one line. This over-warns (an app whose handler IS stderr sees two)
-    # and never under-warns, which is the right side to err on for a message that
-    # exists to stop silent writes to the wrong store.
+    # THE FIRST FIX FOR THIS WAS WRONG AND IS WORTH RECORDING. It made the print
+    # conditional on `log.hasHandlers() or not log.isEnabledFor(WARNING)` and claimed
+    # to over-warn but never under-warn. Measured, three handler-less configurations
+    # silenced it completely -- the operator saw NOTHING:
+    #
+    #   logging.lastResort = None            (a real idiom for muting library output)
+    #   logging.lastResort.setLevel(ERROR)
+    #   a Filter on this logger rejecting records
+    #
+    # In each, hasHandlers() is False and WARNING is enabled, so the print arm was
+    # skipped while lastResort emitted nothing. Those are regressions against the
+    # pre-#964 code, whose print was unconditional. For a message that exists to stop
+    # silent writes to the wrong store, under-warning is the one failure that matters.
+    #
+    # SO THE CONDITION IS GONE. The NullHandler installed at import (see above) means
+    # lastResort can never fire for this logger, which is what makes an unconditional
+    # print correct rather than duplicative: the logging stack no longer writes to
+    # stderr on our behalf in ANY configuration, so the print is the single copy.
+    # An embedding app that installs its OWN stderr handler sees two lines -- that is
+    # its logging choice, and over-warning there is the right side to err on.
     log.warning(msg)
-    if log.hasHandlers() or not log.isEnabledFor(logging.WARNING):
-        print(msg, file=sys.stderr)
+    print(msg, file=sys.stderr)
 
 
 @dataclass
