@@ -1,13 +1,20 @@
 """The local-only policy in ARCHITECTURE.md, made falsifiable (#453, #537).
 
-ARCHITECTURE.md states that four things are deliberately not covered by CI.
+ARCHITECTURE.md states that three things are deliberately not covered by CI.
 That is a claim about the repo, and a claim nobody can fail is documentation
 that drifts. These assertions fail the moment the repo and the policy disagree
 in EITHER direction: if someone wires one of these into CI without updating the
 card, or removes an exclusion so a suite starts running in the default job.
 
+`eval_scale` LEFT THIS LIST ON 2026-09-17 (techne#945). It is now run by the
+`eval-vec` job, which already installs its dependencies, and this test caught the
+change the moment the workflow gained the step — which is what it is for. Its
+real-content arm is still local-only, but that is one TEST inside the marker, not
+the marker, and this file pins markers. `test_real_content_crowds_harder` guards
+itself: it skips when there is no store.
+
 WHAT THIS DOES NOT PIN, stated so the coverage is not overread: the per-suite
-test COUNTS quoted in the card (3 probe, 1 eval_llm, 1 eval_scale, 2 LSP-gated) are
+test COUNTS quoted in the card (3 probe, 1 eval_llm, 2 LSP-gated) are
 descriptive, not asserted — pinning them would fail on every added test and
 teach people to edit the number rather than think. What is asserted is the
 load-bearing half: these do not run in CI.
@@ -32,7 +39,7 @@ WORKFLOWS = sorted(
 #: Markers the card documents as deliberately uncovered. Kept here rather than
 #: parsed out of the prose: the card is written for humans, and a regex over
 #: English is a worse contract than a list the test owns.
-LOCAL_ONLY_MARKERS = ("probe", "eval_llm", "eval_scale")
+LOCAL_ONLY_MARKERS = ("probe", "eval_llm")
 
 
 def test_workflows_exist_at_all():
@@ -159,7 +166,7 @@ def test_the_card_still_carries_the_policy():
     """The other direction: code stays uncovered, prose quietly disappears."""
     card = (REPO / "ARCHITECTURE.md").read_text()
     assert "DELIBERATELY LOCAL-ONLY" in card
-    for token in (*LOCAL_ONLY_MARKERS, "RUN_LSP_INTEGRATION"):
+    for token in (*LOCAL_ONLY_MARKERS, "RUN_LSP_INTEGRATION", "eval_scale"):
         assert token in card, f"ARCHITECTURE.md no longer names `{token}` as local-only"
 
 
@@ -171,7 +178,11 @@ def test_the_card_still_carries_the_policy():
 #: from the default run because it spawns subprocesses, and the `crash-recovery`
 #: job's whole purpose is to run it — which is the case this allowlist exists to
 #: distinguish from a suite nothing executes.
-BLESSED_MARKER_EXPRESSIONS = {"eval or eval_gate", "eval_vec", "crash"}
+#: `eval_scale` blessed 2026-09-17 (techne#945, half of #895): same shape — excluded
+#: from the default run, and now deliberately executed by the `eval-vec` job because
+#: it needs exactly that job's sqlite-vec + cached model2vec. It selects the five
+#: scale arms and nothing else, so it widens selection by the intended amount.
+BLESSED_MARKER_EXPRESSIONS = {"eval or eval_gate", "eval_vec", "crash", "eval_scale"}
 
 
 def _pytest_marker_expressions(workflow: Path) -> list[str]:
