@@ -118,6 +118,8 @@ def test_retrieval_gate_vec(pinned_model2vec, tmp_path, capsys):
             half_life_days=_HALF_LIFE_DAYS,
         )
         ranked = [f"{r['source_table']}:{r['id']}" for r in retrieved]
+        # techne#935: which CHANNEL served each hit, keyed the same way as `ranked`.
+        match_sources = {f"{r['source_table']}:{r['id']}": r.get("match_source") for r in retrieved}
 
         row = {
             "id": task["id"],
@@ -127,6 +129,7 @@ def test_retrieval_gate_vec(pinned_model2vec, tmp_path, capsys):
             "mrr": round(mrr(expected, ranked), 3),
             "fpr": round(false_positive_rate(forbidden, ranked, fpr_k), 3),
             "n_results": len(ranked),
+            "gold_match_sources": [match_sources.get(e) for e in expected],
         }
         rows.append(row)
 
@@ -196,12 +199,62 @@ def test_retrieval_gate_vec(pinned_model2vec, tmp_path, capsys):
                 f"KILL-GATE [{cls}]: MRR {m['mrr']} < floor {g['mrr_floor']}"
             )
 
-    # `negative` stays gated on FPR ONLY, same as #385 — leak-prevention is
-    # this class's remit regardless of which channel(s) retrieval used.
+    # --- techne#935: the lexical task must stay LEXICAL -------------------------
+    #
+    # WITHOUT THIS THE TASK CAN SILENTLY STOP TESTING ANYTHING. Its whole purpose
+    # is to be the one positive gold the VECTOR channel does not return, so that
+    # it reaches the page only through the reserved lexical tail slot and the
+    # fusion tail becomes observable at all. If a model change, a fusion change or
+    # a re-worded row makes the vector channel start returning it, recall stays
+    # 1.0, every floor above still passes, and the gate quietly goes back to
+    # covering nothing -- which is precisely the gap techne#935 documents, with a
+    # green tick on top. The channel is therefore asserted directly, not inferred
+    # from the score.
+    for r in rows:
+        if r["class"] != "lexical":
+            continue
+        sources = r["gold_match_sources"]
+        assert sources and all(src == "fts" for src in sources), (
+            f"KILL-GATE [lexical]: {r['id']} gold arrived via {sources!r}, expected "
+            "['fts']. This task exists to exercise the LEXICAL TAIL; served by the "
+            "vector channel it tests nothing, and the recall floors above cannot "
+            "see the difference. Re-derive the dilution band in seed_eval_db.py "
+            "(techne#935) rather than relaxing this assertion."
+        )
+
+    # `negative` gates FPR — leak-prevention is this class's remit regardless of
+    # which channel(s) retrieval used.
     neg_ceiling = cfg["negative"]["fpr_ceiling"]
     assert per_class["negative"]["fpr"] <= neg_ceiling, (
         f"KILL-GATE [negative]: FPR {per_class['negative']['fpr']} > ceiling {neg_ceiling}"
     )
+
+    # ...AND NOW ITS RECALL TOO, DECIDED RATHER THAN OMITTED (techne#935).
+    #
+    # Three of the six negative tasks carry `expected_keys`: negative-stale-oncall,
+    # -redis and -ci each assert that the CURRENT revision surfaces while its
+    # superseded predecessor does not. That is a real servable behaviour, and until
+    # now a regression in it printed in the report and failed nothing -- half of
+    # what those tasks assert was decorative.
+    #
+    # THE FLOOR IS CALIBRATED TO THE VACUOUS THREE, WHICH IS WHY IT IS NOT 0.85 BY
+    # CONVENTION ALONE. The other three tasks have `expected_keys: []`, and
+    # `recall_at_k([], ...)` returns 1.0 vacuously -- verified, not assumed -- so
+    # they permanently prop the class mean up. One REAL task regressing moves the
+    # mean 1.0 -> 0.833, so the floor has to sit above that to bite. 0.85 does, and
+    # it is also the house observed-minus-0.15 number, so the two agree here by
+    # arithmetic rather than by coincidence being assumed.
+    #
+    # These golds sit at rank 1, not in the drift-fragile rank 4-10 band the
+    # paraphrase floors are loosened for, so a tight floor carries no BLAS-wobble
+    # risk.
+    neg_cfg = cfg["negative"]
+    if "recall_at_10_floor" in neg_cfg:
+        assert per_class["negative"]["recall_at_10"] >= neg_cfg["recall_at_10_floor"], (
+            f"KILL-GATE [negative]: recall@10 {per_class['negative']['recall_at_10']} < "
+            f"floor {neg_cfg['recall_at_10_floor']} — a superseded-revision task stopped "
+            "returning the CURRENT revision. FPR alone cannot see this."
+        )
 
     # --- defense-in-depth: forbidden_keys must never leak for ANY task, not
     #     just the negative class (same whole-list net as #385). ---
