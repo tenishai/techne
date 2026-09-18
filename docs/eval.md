@@ -60,10 +60,19 @@ tests/eval/
   conftest.py              # #399: pinned_model2vec fixture (reset+pin singleton, skip-when-absent)
   test_retrieval_gate_vec.py    # #399: pytest -m eval_vec gate runner (hybrid, use_vectors=True)
   test_ranking_ablation_vec.py  # #399: pytest -m eval_vec RRF-vs-simple ablation (report-only)
-  test_retrieval_gate_scale.py  # #883: pytest -m eval_scale — the SAME 24 tasks re-scored
-                           # against a corpus padded to production size. Informational
-                           # (no floors); prints the per-class delta. #385/#399 measure
-                           # retrieval on 36 rows, where paraphrase cannot fail.
+  test_retrieval_gate_scale.py  # #883/#945: pytest -m eval_scale — five arms, each
+                           # varying ONE thing against the same gold set: corpus size,
+                           # lexical-vs-hybrid channel, near-vs-far padding vocabulary,
+                           # which table crowds, and synthetic-vs-real distractors.
+                           # Informational (no floors); prints per-class deltas.
+                           # #385/#399 measure retrieval on 36 rows, where paraphrase
+                           # cannot fail. #945 FINDING: disjoint-vocabulary padding does
+                           # not degrade paraphrase at all (1.000 at n=4,036), so the
+                           # #883 curve measures semantic adjacency, not size — and no
+                           # paraphrase floor should be read off it. Real borrowed rows
+                           # score 0.167 where synthetic scores 0.667, so both synthetic
+                           # arms understate production. The real arm is local-only and
+                           # skips without a store.
   results/                # JSONL outputs (gitignored)
   EVAL.md, PHASE0.md      # (M2) methodology + frozen baseline scores + gate number
 ```

@@ -578,6 +578,30 @@ jobs:
           rm -f "$TECHNE_EVAL_METRICS_OUT"
           .venv-ci/bin/python -m pytest -m eval_vec -s
 
+      # techne#945/#895 — the scale arms live HERE rather than in a job of their
+      # own because they need exactly what this job already installed: sqlite-vec
+      # plus the cached model2vec. A separate job would re-do that setup to run
+      # ~40s of tests.
+      #
+      # #895 asked for an explicit home or an explicit reason. This is the home.
+      # The runtime objection its title implies ("a scale test probably should not
+      # run on every push") does not survive measurement: 38.8s for all five arms
+      # at the default n=2,000, against this job's own ~30s eval_vec gate, inside a
+      # 20-minute timeout.
+      #
+      # REPORTING, NOT GATING. Every arm is informational and asserts only its own
+      # instrument — that the padding is present, distinct and embedded, and that
+      # the two channels really differ. A score cannot fail this step, so it cannot
+      # block a merge on cross-machine embedding wobble. What it buys is the delta
+      # printed in the log on every push, which is the thing #883 could not see.
+      #
+      # The real-content arm skips here: it reads ~/.techne/techne.db and the
+      # runner has none. That is by design (techne#945) — it borrows the
+      # operator's private rows as distractors and is local-only.
+      - name: eval_scale arms (#883/#945 — retrieval at production scale)
+        working-directory: techne
+        run: .venv-ci/bin/python -m pytest -m eval_scale -s
+
       # (#832) THE ABSOLUTE GATE ABOVE CANNOT SEE A ONE-GOLD REGRESSION. Its
       # paraphrase recall@10 floor is 0.8, and retrieval_gold.yaml sizes it that
       # way on purpose so "a single gold slipping rank 10->11 (r@10 1.0->0.833)
