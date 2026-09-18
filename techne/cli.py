@@ -1938,9 +1938,16 @@ def import_cmd(ctx, path: "Path | None", no_prompts: bool, force: bool):
         if r.get("skipped"):
             click.echo(f"  skip {sid}  — {r.get('reason', 'skipped')}{marker}")
         else:
+            # SAY WHEN TURNS WERE SKIPPED AS REPLAYS (techne#962). Without this an
+            # all-replay resume printed "0 tool obs, 0 prompts" -- byte-identical to
+            # an empty transcript -- so the one thing an operator needs to tell
+            # those apart was in the return dict and nowhere they would see it.
+            replayed = r.get("replayed_skipped") or 0
+            replay_note = f", {replayed} replayed turn(s) skipped" if replayed else ""
             click.echo(
                 f"  ok   {sid}  — {r['tool_obs']} tool obs, "
-                f"{r['prompt_obs']} prompts{marker}  ({r.get('project_path', '')})"
+                f"{r['prompt_obs']} prompts{replay_note}{marker}"
+                f"  ({r.get('project_path', '')})"
             )
     click.echo(
         f"\n{imported} imported, {skipped} skipped — "

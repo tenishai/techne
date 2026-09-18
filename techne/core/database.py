@@ -6,7 +6,7 @@ from pathlib import Path
 
 from techne.core import migrator
 
-SCHEMA_VERSION = 26
+SCHEMA_VERSION = 27
 
 # THE ONE ON-DISK TIMESTAMP SHAPE (#515). Every TEXT timestamp column is compared
 # LEXICALLY by SQLite, so the storage format IS the ordering primitive — a second
@@ -270,9 +270,18 @@ CREATE TABLE IF NOT EXISTS observations (
     tier TEXT NOT NULL DEFAULT 'hot',
     tags TEXT,
     kind TEXT,
-    content_hash TEXT
+    content_hash TEXT,
+    -- The transcript message uuid this row came from (techne#962). A RESUMED
+    -- session replays its parent's messages under a NEW session id while the
+    -- records keep their ORIGINAL uuid, so import used to write the parent's
+    -- turns a second time. Nullable: rows captured live by the hooks have no
+    -- transcript record behind them, and every row written before v27 predates
+    -- the column.
+    source_uuid TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_observations_session ON observations(session_id);
+CREATE INDEX IF NOT EXISTS idx_observations_source_uuid
+    ON observations(source_uuid) WHERE source_uuid IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_observations_thread ON observations(thread_id);
 CREATE INDEX IF NOT EXISTS idx_observations_tier ON observations(tier);
 
@@ -1555,4 +1564,58 @@ END;
                              AND promoted_to_id IS NOT NULL)"""
             )
         conn.execute("INSERT INTO schema_version (version) VALUES (26)")
+
+    if from_version < 27 and to_version >= 27:
+        # techne#962: a resumed session replays its parent's turns under a NEW
+        # session id, and import idempotency is PER SESSION ("already has N
+        # observations"), so the replayed turns imported a second time. Measured
+        # on this machine before the fix: 52 transcript pairs share message
+        # uuids, and of the 2 pairs where both halves had been imported, 44
+        # observation rows were duplicated across the two session ids.
+        # source_uuid gives import the identity the transcript already carries.
+        #
+        # DELIBERATELY NOT BACKFILLED. There is nothing to backfill FROM in the
+        # DATABASE -- the uuid was never recorded and is not derivable from a
+        # stored row. Unlike v26's origin_session, whose source WAS recoverable
+        # from knowledge_candidates, inventing values here would be fabrication.
+        #
+        # THE COST OF THAT, STATED PRECISELY, BECAUSE AN EARLIER COMMENT SAID ONLY
+        # "existing duplicates stay; this stops new ones" AND THAT IS TOO KIND.
+        # Every pre-v27 row has source_uuid NULL, and NULL never matches `= ?`, so
+        # the import-time skip cannot see it. A resume imported AFTER the upgrade
+        # whose parent was imported BEFORE it still duplicates the parent in full
+        # -- which is the issue's own scenario on every store that is not fresh.
+        # Measured: parent + resume with the parent's uuids nulled gives 4 rows
+        # where 2 are correct, replayed_skipped=0.
+        #
+        # What WOULD close it is a backfill keyed on the transcript that produced
+        # the rows (re-read each imported session's own jsonl and stamp its uuids),
+        # which invents nothing. That is a separate change with its own risks and
+        # is filed as techne#978 rather than smuggled in here.
+        #
+        # THE ALTER AND THE CREATE TABLE DECLARE THE SAME THING, which is the
+        # standing lesson of techne#938: last_confirmed_at is `NOT NULL DEFAULT
+        # CURRENT_TIMESTAMP` on a fresh install and plain nullable on a migrated
+        # one, AT THE SAME schema_version -- so a store's provenance silently
+        # changed its retrieval order. Plain `TEXT` on both paths here.
+        # GUARDED ON THE TABLE EXISTING, like v26 above. A migration step runs
+        # against whatever shape the store actually has, and the reconciler path
+        # brings a DB forward from as far back as v7 -- fixtures at that age may
+        # carry no `observations` table at all, in which case `ALTER TABLE` dies
+        # with "no such table" and takes the whole chain down. The table is
+        # created by the schema script for any store that should have one, so
+        # "absent here" means "this step has nothing to do", not "something is
+        # wrong". Caught by 21 migration tests before this shipped.
+        has_observations = bool(
+            conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='observations'"
+            ).fetchone()
+        )
+        if has_observations:
+            _add_column_if_missing(conn, "observations", "source_uuid", "TEXT")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_observations_source_uuid "
+                "ON observations(source_uuid) WHERE source_uuid IS NOT NULL"
+            )
+        conn.execute("INSERT INTO schema_version (version) VALUES (27)")
     conn.commit()

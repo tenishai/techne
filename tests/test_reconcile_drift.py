@@ -67,7 +67,12 @@ def test_fresh_db_is_current_version(db):
         # formality.
         # Bumped 25 -> 26 for techne#949: the v26 step backfills
         # knowledge.origin_session on promoted rows from their candidates.
-        assert v == SCHEMA_VERSION == 26
+        # Bumped 26 -> 27 for techne#962: observations.source_uuid, the transcript
+        # message uuid a row came from, so a RESUMED session stops re-importing its
+        # parent's replayed turns. Nullable and NOT backfilled -- the uuid was never
+        # recorded and is not derivable from a stored row, so there is nothing to
+        # backfill from and inventing values would be fabrication.
+        assert v == SCHEMA_VERSION == 27
         # Fresh DB already has the correct (tags/kind) triggers.
         sql = conn.execute(
             "SELECT sql FROM sqlite_master WHERE name='observations_ai'"
