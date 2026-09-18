@@ -296,3 +296,24 @@ def test_unreadable_output_is_never_green():
 
     assert _parse_check_output("ruff", None) is None
     assert _parse_check_output("ruff", "") is None
+
+
+def test_an_unread_tool_does_not_hide_a_stated_failure(ledger):
+    """THE ROUND-2 REGRESSION: rule 2 was applied BEFORE rule 1 and swallowed failures.
+
+    Gating green on `not unreadable` before testing for a stated failure made
+    `ruff` reporting "Found 14 errors." alongside a silent `tsc` come back
+    UNVERIFIABLE instead of UNBACKED -- an unread tool HID a real one.
+
+    A failure is knowledge; an unread tool is the absence of knowledge, and
+    absence must never outrank it.
+    """
+    db, add = ledger
+    add("ruff check techne/", "Found 14 errors.")
+    add("tsc --noEmit", "")
+
+    ev = _evidence(db)
+    assert ev.checks.green is False, ev.checks
+    assert check_claims([{"type": "checks_green"}], ev)[0]["status"] == "unbacked", (
+        "a stated failure was hidden by an unread tool"
+    )

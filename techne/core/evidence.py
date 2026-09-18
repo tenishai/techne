@@ -1190,10 +1190,17 @@ def query_turn_evidence(
             # claimed: that guard is PER-ROW and its own docstring says asking the
             # question of the union "lets an intact row vouch for a bounded one" --
             # the opposite of rule 2. Only rule 1 resembles the suite_green block.
+            #
+            # PRECEDENCE MATTERS, AND THE FIRST CUT OF RULE 2 GOT IT WRONG. Gating
+            # green on `not check_unreadable` BEFORE testing for failure swallowed
+            # a STATED failure: `ruff` reporting "Found 14 errors." alongside a
+            # silent `tsc` came back `unverifiable` instead of `unbacked`, so an
+            # unread tool HID a real one. A failure is knowledge; an unread tool is
+            # the absence of knowledge, and absence must never outrank it.
             green=(
-                None
-                if not check_results or check_unreadable
-                else (False if any(r is False for r in check_results) else True)
+                False
+                if any(r is False for r in check_results)
+                else (None if (not check_results or check_unreadable) else True)
             ),
             tools=check_tools,
             unreadable=check_unreadable,
