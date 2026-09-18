@@ -309,7 +309,29 @@ CREATE TABLE IF NOT EXISTS knowledge (
     tags TEXT,
     confidence TEXT NOT NULL DEFAULT 'medium',
     confidence_numeric REAL NOT NULL DEFAULT 0.6,
-    last_confirmed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    -- NULLABLE, WITH NO DEFAULT, AND THAT MATCHES THE MIGRATION ON PURPOSE
+    -- (techne#938). This was `NOT NULL DEFAULT CURRENT_TIMESTAMP` while the v5
+    -- ALTER could only produce a plain nullable column here -- not because SQLite
+    -- refuses NOT NULL via ALTER (four lines above, the same v5 block adds
+    -- `confidence_numeric REAL NOT NULL DEFAULT 0.6`) but because it refuses a
+    -- NON-CONSTANT default, and CURRENT_TIMESTAMP is one:
+    --
+    --   ADD COLUMN x TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    --     -> Cannot add a column with non-constant default
+    --
+    -- so a fresh store and a migrated
+    -- one disagreed AT THE SAME schema_version, and 2,823 of 2,914 live rows on
+    -- the operator's store had it NULL. Those rows take decay_score's
+    -- no-timestamp branch, so the confidence-decay tiebreak never decayed for
+    -- 96.9% of the curated layer, while the same rows DID decay on a fresh
+    -- install. Identical code, identical schema_version, different retrieval
+    -- order, decided by a store's provenance.
+    --
+    -- The value is now guaranteed by the WRITE PATH instead: every INSERT INTO
+    -- knowledge sets it explicitly. A schema default cannot be made to agree
+    -- across both paths; an explicit write can, and it is the only place that
+    -- knows the row is being created rather than migrated.
+    last_confirmed_at TIMESTAMP,
     superseded_by INTEGER REFERENCES knowledge(id),
     -- Dependency-driven staleness (techne#117). `current` is the default. A
     -- reconcile-time cascade flips a row to `uncertain` when a fact it depends on
