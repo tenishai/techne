@@ -1261,7 +1261,15 @@ def check_instance_identity(config) -> CheckResult | None:
 
 @register_check
 def check_codex_freshness(config) -> CheckResult | None:
-    """Does this repo's code index still describe this repo? (techne#937)
+    """Was this repo's code index built at the commit HEAD is on now? (techne#937)
+
+    THAT IS NARROWER THAN "does the index still describe the repo", which an
+    earlier headline claimed. HEAD not having moved does not mean the working
+    tree is unchanged: uncommitted edits, a stash, or an index built from a dirty
+    tree all read LIVE. The predicate is deliberately the cheap, honest one --
+    proving the index matches the tree means re-hashing every file, which is
+    exactly the `@expensive` walk that would banish this from the banner.
+
 
     THE INCIDENT. A session started on 30984e0 with cabal's index 5 days old and
     60 source files changed since. Three symbols that exist in cabal source
@@ -1341,14 +1349,18 @@ def check_codex_freshness(config) -> CheckResult | None:
             remedy=f"techne codex index {root}",
         )
 
-    age = f", indexed {indexed_at}" if indexed_at else ""
+    # A TIMESTAMP, AND THE TEXT NOW SAYS SO. An earlier version called this "the
+    # age", which it is not -- `indexed_at` is a stored UTC instant and nothing
+    # here subtracts it from now. Rendering it as an age would need a clock read
+    # and a format decision; printing the instant is honest and costs nothing.
+    stamp = f", indexed at {indexed_at}Z" if indexed_at else ""
     if indexed_head == current:
         return CheckResult(
             name="codex:freshness",
             subsystem="codex",
             kind=Kind.FRESHNESS,
             verdict=Verdict.LIVE,
-            detail=f"{root.name} indexed at the current HEAD{age}",
+            detail=f"{root.name} indexed at the current HEAD{stamp}",
             evidence=f"indexed_head == HEAD == {current[:7]}",
         )
     return CheckResult(
@@ -1358,7 +1370,7 @@ def check_codex_freshness(config) -> CheckResult | None:
         verdict=Verdict.STALE,
         detail=(
             f"{root.name} was indexed at {indexed_head[:7]}, HEAD is now "
-            f"{current[:7]} — codex may answer 'not found' for code that exists{age}"
+            f"{current[:7]} — codex may answer 'not found' for code that exists{stamp}"
         ),
         evidence=f"indexed_head={indexed_head[:7]} != HEAD={current[:7]}",
         remedy=f"techne codex index {root}",
@@ -1379,10 +1391,19 @@ def check_arch_card_freshness(config) -> CheckResult | None:
 
         sha1(b"blob %d\0" % len(data) + data)
 
-    Verified byte-identical to `git hash-object` on this repo, and 19 anchors
-    hash in 0.006s with ZERO subprocesses -- roughly 80x cheaper than shelling
-    out, and comfortably inside the 5s hook budget the banner is fail-open
-    against.
+    Verified byte-identical to `git hash-object` on this repo -- 19 anchors hash
+    in 0.006s with ZERO subprocesses, roughly 80x cheaper than shelling out and
+    comfortably inside the 5s hook budget the banner is fail-open against.
+
+    THAT IDENTITY IS CONDITIONAL, AND THE UNQUALIFIED CLAIM WAS WRONG. `git
+    hash-object <path>` runs CLEAN FILTERS; the formula hashes raw bytes. They
+    agree only where no eol filter applies. Measured: with `core.autocrlf=true`
+    (the Windows default) or `* text=auto` in `.gitattributes`, a CRLF working
+    file hashes differently and every anchor would read STALE. This repo sets
+    neither -- `git config --get core.autocrlf` is empty -- so the equivalence
+    holds here, but it is a property of this checkout, not of the formula. The
+    exact claim is: identical to `git hash-object --no-filters` always, and to
+    plain `git hash-object` wherever no eol filter applies.
 
     WHY NOT MTIME, WHICH IS WHAT THE ISSUE PROPOSED. Measured first: it reported
     12 of 19 anchors stale while the sha gate said all 19 were fresh. `git
@@ -1402,10 +1423,18 @@ def check_arch_card_freshness(config) -> CheckResult | None:
     import hashlib
     import re as _re
 
-    from techne.core.repo import primary_repo_root
+    from techne.core.repo import find_repo_root
 
+    # find_repo_root, NOT primary_repo_root, AND THE DIFFERENCE IS A REAL BUG THIS
+    # CHECK SHIPPED WITH. primary_repo_root deliberately maps a linked worktree to
+    # its parent, which is right for CODEX (indexed against the primary by design)
+    # and wrong here: cards live in the checkout being EDITED. Worktree-per-session
+    # is the standing dev topology, and with the primary resolver a session that
+    # edited a seam without bumping its card read LIVE in the banner, because the
+    # PRIMARY's cards were being compared against the PRIMARY's seams. Measured
+    # from a worktree at 542211d: resolved to the primary on main, verdict LIVE.
     try:
-        root = primary_repo_root(Path.cwd())
+        root = find_repo_root(Path.cwd())
     except OSError:
         return None
     if root is None:
@@ -1424,6 +1453,7 @@ def check_arch_card_freshness(config) -> CheckResult | None:
 
     anchor_re = _re.compile(r"^anchor:\s*(\S+)\s+sha=([0-9a-f]{40})\s*$", _re.M)
     drifted: list[str] = []
+    unreadable: list[str] = []
     checked = 0
     for card in sorted(cards_dir.glob("*.md")):
         try:
@@ -1435,6 +1465,13 @@ def check_arch_card_freshness(config) -> CheckResult | None:
             try:
                 data = seam.read_bytes()
             except OSError:
+                # UNREADABLE IS A FINDING, NOT A SKIP. The pre-push gate treats a
+                # missing seam as a HARD failure ("anchor seam file missing"), and
+                # silently continuing here let the banner read LIVE while the gate
+                # was red -- a card vouching for a file that has been renamed or
+                # deleted is exactly the drift this check exists to surface.
+                checked += 1
+                unreadable.append(f"{card.name} <- {rel}")
                 continue
             checked += 1
             current = hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()  # noqa: S324
@@ -1450,23 +1487,28 @@ def check_arch_card_freshness(config) -> CheckResult | None:
             detail="no readable anchors to compare",
             evidence=f"{cards_dir} has no parsable anchor lines",
         )
-    if not drifted:
+    _EVIDENCE = (
+        "in-process git blob sha — identical to `git hash-object --no-filters`, and "
+        "to plain `git hash-object` wherever no eol filter applies"
+    )
+    problems = drifted + [f"{u} (unreadable)" for u in unreadable]
+    if not problems:
         return CheckResult(
             name="cards:freshness",
             subsystem="architecture",
             kind=Kind.FRESHNESS,
             verdict=Verdict.LIVE,
             detail=f"{checked} anchor(s) match the card vouching for them",
-            evidence="in-process git blob sha, identical to `git hash-object`",
+            evidence=_EVIDENCE,
         )
-    shown = ", ".join(drifted[:3]) + (f", +{len(drifted) - 3} more" if len(drifted) > 3 else "")
+    shown = ", ".join(problems[:3]) + (f", +{len(problems) - 3} more" if len(problems) > 3 else "")
     return CheckResult(
         name="cards:freshness",
         subsystem="architecture",
         kind=Kind.FRESHNESS,
         verdict=Verdict.STALE,
-        detail=(f"{len(drifted)} of {checked} seam(s) have drifted from their card ({shown})"),
-        evidence="in-process git blob sha, identical to `git hash-object`",
+        detail=(f"{len(problems)} of {checked} seam(s) have drifted from their card ({shown})"),
+        evidence=_EVIDENCE,
         remedy="update the card body and bump its anchor sha in the same change",
     )
 

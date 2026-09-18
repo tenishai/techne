@@ -146,13 +146,78 @@ def test_a_malformed_anchor_is_skipped_not_fatal(tmp_path, monkeypatch):
     assert r is not None and r.verdict is Verdict.LIVE, r
 
 
-def test_codex_freshness_is_unobservable_without_a_recorded_head(tmp_path, monkeypatch):
-    """A comparison that cannot be made is not a pass.
+def _indexed_repo(tmp_path, monkeypatch):
+    """A real repo with a real codex index, returning (root, db_path)."""
+    from techne.config import Config
+    from techne.core.codex import codex_db_for_repo
 
-    An index written before this change has no indexed_head. Reporting LIVE
-    there would be the false green the whole check exists to remove.
+    root = _mk_repo(tmp_path, "indexed")
+    (root / "src" / "m.py").write_text("def hello():\n    return 1\n")
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"],
+        cwd=root,
+        check=True,
+    )
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path / "home"))
+    cfg = Config()
+    from techne.codex.source import RepoSource
+
+    db = codex_db_for_repo(cfg, root)
+    if db is None:
+        pytest.skip("codex could not resolve a per-repo db in this environment")
+    RepoSource(db, root).initial_walk()
+    return root, db
+
+
+def test_codex_freshness_is_live_at_the_indexed_head(tmp_path, monkeypatch):
+    """THE LIVE PATH, which no test reached before."""
+    root, _db = _indexed_repo(tmp_path, monkeypatch)
+    r = _verdict("codex:freshness", root, monkeypatch)
+    assert r is not None and r.verdict is Verdict.LIVE, r
+
+
+def test_codex_freshness_goes_stale_when_head_moves(tmp_path, monkeypatch):
+    """THE STALE PATH. HEAD moving past the index is the whole predicate."""
+    root, _db = _indexed_repo(tmp_path, monkeypatch)
+    (root / "src" / "m.py").write_text("def hello():\n    return 2\n")
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "move"],
+        cwd=root,
+        check=True,
+    )
+    r = _verdict("codex:freshness", root, monkeypatch)
+    assert r is not None and r.verdict is Verdict.STALE, r
+    assert "HEAD is now" in r.detail
+
+
+def test_codex_freshness_is_unobservable_when_the_index_predates_head_recording(
+    tmp_path, monkeypatch
+):
+    """THE UNOBSERVABLE BRANCH, WHICH THE EARLIER TEST NEVER REACHED.
+
+    It asserted `verdict in (DORMANT, UNOBSERVABLE)` against a repo with NO index
+    at all, so it always took the DORMANT "no codex index yet" return and the
+    branch it was named for was never executed. Reaching UNOBSERVABLE needs an
+    index that EXISTS but carries no indexed_head -- exactly what every index
+    written before techne#937 looks like.
     """
-    root = _mk_repo(tmp_path)
+    from techne.core.codex import get_meta, set_meta
+
+    root, db = _indexed_repo(tmp_path, monkeypatch)
+    assert get_meta(db, "indexed_head"), "precondition: the index recorded a head"
+    set_meta(db, "indexed_head", "")
+
+    r = _verdict("codex:freshness", root, monkeypatch)
+    assert r is not None and r.verdict is Verdict.UNOBSERVABLE, r
+    assert r.verdict is not Verdict.LIVE
+    assert "cannot tell" in r.detail
+
+
+def test_codex_freshness_is_dormant_without_any_index(tmp_path, monkeypatch):
+    """Distinct from UNOBSERVABLE: nothing to be stale about yet."""
+    root = _mk_repo(tmp_path, "unindexed")
     (root / "src" / "m.py").write_text("x = 1\n")
     subprocess.run(["git", "add", "-A"], cwd=root, check=True)
     subprocess.run(
@@ -160,10 +225,60 @@ def test_codex_freshness_is_unobservable_without_a_recorded_head(tmp_path, monke
         cwd=root,
         check=True,
     )
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path / "home2"))
     r = _verdict("codex:freshness", root, monkeypatch)
-    assert r is not None
-    assert r.verdict in (Verdict.DORMANT, Verdict.UNOBSERVABLE), r
-    assert r.verdict is not Verdict.LIVE, "never LIVE without a comparison"
+    assert r is not None and r.verdict is Verdict.DORMANT, r
+
+
+def test_cards_freshness_uses_the_worktree_not_the_primary(tmp_path, monkeypatch):
+    """W1: a linked worktree was checked against the PRIMARY's cards and seams.
+
+    primary_repo_root deliberately maps a worktree to its parent, which is right
+    for codex and wrong for cards -- cards live in the checkout being EDITED. With
+    the primary resolver, editing a seam in a worktree without bumping its card
+    read LIVE, because the primary's cards were compared against the primary's
+    seams. Worktree-per-session is the standing dev topology, so this was the
+    common case, not an edge one.
+    """
+    root = _mk_repo(tmp_path, "primary")
+    seam = root / "src" / "m.py"
+    seam.write_text("x = 1\n")
+    _write_card(root, "src/m.py", _blob(seam))
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"],
+        cwd=root,
+        check=True,
+    )
+
+    wt = tmp_path / "wt"
+    subprocess.run(["git", "worktree", "add", "-q", str(wt), "HEAD"], cwd=root, check=True)
+    # Drift ONLY inside the worktree; the primary stays clean.
+    (wt / "src" / "m.py").write_text("x = 2\n")
+
+    r = _verdict("cards:freshness", wt, monkeypatch)
+    assert r is not None and r.verdict is Verdict.STALE, (
+        "the worktree's drifted seam read clean, so the check resolved to the "
+        f"primary checkout instead of the worktree. got: {r}"
+    )
+
+
+def test_a_missing_seam_is_reported_not_skipped(tmp_path, monkeypatch):
+    """W3: the pre-push gate calls a missing seam a HARD failure; this skipped it.
+
+    A card vouching for a file that has been renamed or deleted is exactly the
+    drift the check exists to surface, and silently continuing let the banner read
+    LIVE while the gate was red.
+    """
+    root = _mk_repo(tmp_path, "gone")
+    seam = root / "src" / "m.py"
+    seam.write_text("x = 1\n")
+    _write_card(root, "src/m.py", _blob(seam))
+    seam.unlink()
+
+    r = _verdict("cards:freshness", root, monkeypatch)
+    assert r is not None and r.verdict is Verdict.STALE, r
+    assert "unreadable" in r.detail
 
 
 def test_outside_a_repo_neither_check_warns(tmp_path, monkeypatch):
