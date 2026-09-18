@@ -133,6 +133,23 @@ class SuiteEvidence:
 
 
 @dataclass
+class CheckEvidence:
+    """What non-test verification commands did, and whether it can be known.
+
+    `green` is TRUE only when at least one tool stated success and none stated
+    failure. It is None whenever the outcome cannot be read -- including the case
+    where a check demonstrably RAN but is silent on success, which is not the
+    same as "no check ran" and must not be reported as green.
+    """
+
+    ran: bool = False
+    green: bool | None = None
+    tools: list[str] = field(default_factory=list)
+    #: Tools seen whose outcome could not be read from output alone.
+    unreadable: list[str] = field(default_factory=list)
+
+
+@dataclass
 class Evidence:
     """Structured view of what an agent actually did in a session window.
 
@@ -170,6 +187,7 @@ class Evidence:
     """Bash commands run (text after "Ran: " on the first content line)."""
 
     tests: SuiteEvidence = field(default_factory=SuiteEvidence)
+    checks: CheckEvidence = field(default_factory=lambda: CheckEvidence())
     observation_count: int = 0
 
     bash_captured: bool = True
@@ -230,6 +248,74 @@ def _row_totals_unreliable(output_text: str, p: int | None, f: int | None, e: in
 # commit message that says "2209 passed" certified a green suite with no test run
 # (8 rows), and `ruff check` printing "Found 181 errors" turned a green window red
 # (29 rows) — the false-accusation direction techne#105 exists to prevent.
+
+# --- verification commands that are not test runners (techne#939) ------------
+#
+# THE GATE COULD CONFIRM THAT A LINTER RAN AND NOT THAT IT PASSED. `ran_action`
+# matches a command SUBSTRING in the ledger and answers "did this appear",
+# never "what did it return" -- so an agent that runs `ruff check`, gets 14
+# errors, and then writes "lint is clean" produced a BACKED verdict. This repo's
+# own PRs are full of "ruff and mypy are clean", a sentence with no checkable
+# claim shape until now.
+#
+# OUTCOME IS READ FROM THE TOOL'S OWN SUMMARY LINE, AND THAT IS NOT A STYLISTIC
+# CHOICE -- IT IS THE ONLY ROUTE AVAILABLE. techne#939 proposes reading the exit
+# code ("sufficient for ruff / mypy / tsc"). THE LEDGER HAS NO EXIT CODE.
+# Surveyed across 52 live-captured Bash responses, the union of every key the
+# harness supplies is:
+#
+#     backgroundCwdHint, backgroundTaskId, gitOperation, interrupted,
+#     isImage, noOutputExpected, stderr, stdout
+#
+# No exit status, no returncode, nothing equivalent. So the summary line is the
+# whole of what can be known, which lands us where pi-warden's `runnerSummary`
+# ends up for a different reason: it reads the summary FIRST and lets it
+# override a zero exit code; we read it because there is no exit code to fall
+# back to.
+#
+# HENCE THE SPLIT BELOW, AND IT IS THE LOAD-BEARING PART. A tool that is SILENT
+# on success cannot be called green from output alone: silence is
+# indistinguishable from "the row's output was elided in the ledger", which is
+# exactly the failure `_row_totals_unreliable` already exists to refuse for test
+# totals ("A green run and a run whose failure line was dropped look identical
+# here, so this cannot be called green"). Those tools are RECOGNISED as
+# verification commands -- so the gate knows a check ran -- and their outcome is
+# reported `unverifiable`, never `backed`.
+
+#: Tools that print an explicit success or failure summary. Green is provable.
+#: Patterns verified by running each tool locally except where noted.
+#: BOTH SIDES ARE REGEXES, NOT SUBSTRINGS, AND THAT IS NOT TIDINESS. pyright's
+#: SUCCESS line is "0 errors, 0 warnings, 0 informations", which CONTAINS the
+#: substring "errors," -- so a substring failure-marker matched its own success
+#: line, both sides fired, and a clean run degraded to `unverifiable`. Caught by
+#: running the real tool, not by re-reading the patterns. The NUMBER is the whole
+#: signal here, so the pattern has to be able to say "nonzero".
+_CHECK_TOOLS_WITH_SUMMARY: dict[str, tuple[str, str]] = {
+    # head: (success pattern, failure pattern)
+    # VERIFIED LOCALLY 2026-09-18.
+    "ruff": (
+        r"All checks passed!|\d+ files? already formatted",
+        r"Found \d+ error|would be reformatted",
+    ),
+    # VERIFIED LOCALLY 2026-09-18: "0 errors, 0 warnings, 0 informations".
+    "pyright": (r"\b0 errors,", r"\b[1-9]\d* errors?,"),
+    # NOT verified locally (mypy is not installed here). Corroborated across
+    # several independent python/mypy issue threads (#16934, #12302) rather than
+    # recalled: mypy prints "Success: no issues found in N source file". The
+    # marker is distinctive enough that a false MATCH is implausible, and a
+    # marker that fails to match degrades to `unverifiable`, never to green.
+    "mypy": (r"Success: no issues found", r"Found \d+ error|\berror:"),
+}
+
+#: Tools whose success is SILENCE. Recognised, never provable from output.
+_CHECK_TOOLS_SILENT_ON_SUCCESS = frozenset({"tsc", "eslint", "biome", "prettier"})
+
+#: `head subcommand` forms, matched the same way test runners are.
+_CHECK_TOOL_SUBCOMMANDS: dict[str, frozenset[str]] = {
+    "go": frozenset({"vet"}),  # silent on success
+    "cargo": frozenset({"clippy"}),  # silent on success
+}
+
 _TEST_RUNNER_HEADS = frozenset(
     {
         "pytest",
@@ -539,6 +625,63 @@ def _shell_c_script(segment: str) -> str | None:
             j += 1 + n_values
             continue
         return None  # a positional before any -c: not a -c invocation
+    return None
+
+
+def _classify_check_command(command: str) -> tuple[str | None, bool]:
+    """``(tool_head, outcome_is_readable)`` for a verification command, else ``(None, False)``.
+
+    Matched on the segment's COMMAND HEAD, exactly as ``_command_runs_tests``
+    does and deliberately NOT as a substring of the whole command. pi-warden's
+    equivalent is a ``\b``-bounded regex over the entire command string, so
+    ``git commit -m "fix the ruff warning"`` classifies as a check there. Ours
+    keeps the quote-aware split and the head rule; only the vocabulary is
+    borrowed.
+    """
+    from techne.hooks.post_tool_use import _split_bash_segments
+
+    for segment in _expand_shell_c(_split_bash_segments(_strip_heredoc_bodies(command))):
+        tokens = segment.split()
+        i = 0
+        while i < len(tokens) and "=" in tokens[i] and not tokens[i].startswith("-"):
+            i += 1
+        i = _skip_transparent_prefixes(tokens, i)
+        if i >= len(tokens):
+            continue
+        head = tokens[i].rsplit("/", 1)[-1]
+        rest = tokens[i + 1 :]
+
+        if head in _CHECK_TOOLS_WITH_SUMMARY:
+            return head, True
+        if head in _CHECK_TOOLS_SILENT_ON_SUCCESS:
+            return head, False
+        subs = _CHECK_TOOL_SUBCOMMANDS.get(head)
+        if subs:
+            before_sep = rest[: rest.index("--")] if "--" in rest else rest
+            if any(tok in subs for tok in before_sep):
+                return head, False
+    return None, False
+
+
+def _parse_check_output(head: str, output: str) -> bool | None:
+    """``True``/``False`` when the tool stated its own outcome, else ``None``.
+
+    None means UNVERIFIABLE and is the default for anything ambiguous. A tool
+    that printed both a success and a failure marker -- two invocations in one
+    row -- is None rather than a guess, on the same reasoning as the test
+    aggregator: a green run and a run whose failure line was elided must not be
+    allowed to look alike.
+    """
+    markers = _CHECK_TOOLS_WITH_SUMMARY.get(head)
+    if not markers:
+        return None
+    success_re, failure_re = markers
+    saw_ok = re.search(success_re, output) is not None
+    saw_bad = re.search(failure_re, output) is not None
+    if saw_ok and not saw_bad:
+        return True
+    if saw_bad and not saw_ok:
+        return False
     return None
 
 
@@ -865,6 +1008,9 @@ def query_turn_evidence(
     all_errors: list[int] = []
     saw_test_output = False
     totals_unreliable = False
+    check_tools: list[str] = []
+    check_unreadable: list[str] = []
+    check_results: list[bool] = []
 
     for row in rows:
         tool_name: str = row[0] or ""
@@ -899,6 +1045,18 @@ def query_turn_evidence(
             if first_line.startswith("Ran: "):
                 cmd = first_line[len("Ran: ") :].strip()
                 actions.append(cmd)
+
+                # techne#939: classify non-test verification commands too.
+                head, readable = _classify_check_command(cmd)
+                if head:
+                    if head not in check_tools:
+                        check_tools.append(head)
+                    outcome = _parse_check_output(head, content) if readable else None
+                    if outcome is None:
+                        if head not in check_unreadable:
+                            check_unreadable.append(head)
+                    else:
+                        check_results.append(outcome)
 
             # SHAs are scanned across the WHOLE row, not just the output half.
             # _GIT_SHA_RE requires brackets, so it cannot be tripped by ordinary
@@ -982,6 +1140,19 @@ def query_turn_evidence(
         artifacts=artifacts,
         commits=commits,
         actions=actions,
+        checks=CheckEvidence(
+            ran=bool(check_tools),
+            # ANY stated failure wins over any stated success: a run that reported
+            # errors is not redeemed by a second tool reporting none. Mirrors the
+            # aggregation `_row_totals_unreliable` enforces for test totals.
+            green=(
+                None
+                if not check_results
+                else (False if any(r is False for r in check_results) else True)
+            ),
+            tools=check_tools,
+            unreadable=check_unreadable,
+        ),
         tests=SuiteEvidence(
             passed=passed,
             failed=failed,
@@ -1022,6 +1193,11 @@ def check_claims(claims: list[dict], evidence: Evidence) -> list[dict]:
     * ``"tests_green"``
         Backed if ``tests.suite_green is True``; unbacked if ``False``;
         unverifiable if ``None`` (no parseable output).
+    * ``"checks_green"``
+        Backed when a recognised verification command (linter, type checker,
+        formatter) stated success and none stated failure. ``unverifiable`` when
+        one RAN but is silent on success -- the ledger carries no exit status, so
+        silence cannot be distinguished from elided output (techne#939).
     * ``"ran_action"``  (required field: ``match``)
         Backed if any Bash action contains ``match`` as a substring.
     * ``"wrote_file"``  (required field: ``path``)
@@ -1133,6 +1309,36 @@ def check_claims(claims: list[dict], evidence: Evidence) -> list[dict]:
                     "the elided middle of a long output, or the row's command/output "
                     "boundary was ambiguous."
                 )
+
+        elif claim_type == "checks_green":
+            c = evidence.checks
+            if c.green is True:
+                status = "backed"
+                detail = f"Verification clean: {', '.join(c.tools)} reported no problems."
+            elif c.green is False:
+                status = "unbacked"
+                detail = f"Verification NOT clean: {', '.join(c.tools)} reported problems."
+            elif not evidence.bash_captured:
+                status = "unverifiable"
+                detail = _BASH_OFF_DETAIL
+            elif c.ran:
+                # RAN BUT UNREADABLE IS NOT GREEN, AND IT IS NOT "NOTHING RAN"
+                # EITHER. tsc, eslint, `go vet` and `cargo clippy` print NOTHING on
+                # success, and the ledger records no exit status -- surveyed across
+                # 52 live-captured Bash responses, the harness supplies stdout,
+                # stderr, interrupted, isImage, noOutputExpected and two background
+                # keys, and nothing resembling a return code. So silence here is
+                # indistinguishable from output elided in the ledger, which is the
+                # same reason `totals_unreliable` refuses to call a test run green.
+                status = "unverifiable"
+                detail = (
+                    f"{', '.join(c.unreadable)} ran, but its outcome cannot be read: it "
+                    "prints nothing on success and the ledger records no exit status, so "
+                    "a clean run and an elided one look identical."
+                )
+            else:
+                status = "unbacked"
+                detail = "No verification command (linter, type checker, formatter) in this window."
 
         elif claim_type == "ran_action":
             match_str = claim.get("match", "")
