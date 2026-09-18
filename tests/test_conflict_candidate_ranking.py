@@ -72,8 +72,13 @@ def test_the_strongest_matches_survive_truncation(config):
 def test_ordering_is_deterministic_for_equal_scores(config):
     """Equal scores tiebreak on id, so the selection is stable run to run.
 
-    techne#873 is the standing reminder: thread ids were unstable because
-    detection depended on PYTHONHASHSEED. Set ordering has the same hazard.
+    THE REAL HAZARD IS THE MISSING ORDER BY, not a hash seed. An earlier version
+    of this docstring cited techne#873's PYTHONHASHSEED instability by analogy;
+    that retraction was made in the source comment and never reached here.
+    `all_rows` is a list from a cursor and no set is iterated in ranking -- sets
+    are only intersected for their size -- so there is no hash-seed dependence.
+    What there is: SQL with no ORDER BY, so two rows with identical scores would
+    otherwise come back in whatever order SQLite chose.
     """
     db = config.db_path
     ids = [store(db, "alpha beta gamma delta", type="fact", tags="") for _ in range(6)]
@@ -166,7 +171,14 @@ def test_a_short_row_does_not_outrank_a_strong_match(config):
 
 
 def test_the_tag_path_ranks_by_shared_count_too(config):
-    """The tag path had the same defect: every tag overlap scored 1.0 and tied."""
+    """The tag path had the same defect, on the fixture below.
+
+    SCOPE: a tag overlap scores 1.0 only when one tag set CONTAINS the other,
+    which is what happens here (a one-tag row inside a two-tag focus). An earlier
+    docstring said "every tag overlap scored 1.0", which is not true in general --
+    `test_tag_path_is_ordered_but_keeps_its_single_tag_match` in this same file
+    builds a 4-tag row against a 2-tag focus and scores 0.5.
+    """
     db = config.db_path
     one_tag = store(db, "barely related", type="fact", tags="deploy")
     two_tag = store(db, "closely related", type="fact", tags="deploy,canary")

@@ -125,8 +125,16 @@ def test_every_conflict_field_survives_a_round_trip():
     and the comment on `to_yaml_dict` says `techne init` IS such a cycle.
     Reproduced before the fix: on disk the key was simply absent.
 
-    Deriving the field list from `ConflictConfig` means the NEXT field added is
-    covered without anyone remembering to extend a list.
+    THE GUARD IS LOUD, NOT AUTOMATIC, and an earlier docstring overstated it. The
+    values checked are a hand-maintained dict; the dataclass is used only to FAIL
+    when that dict falls behind. So a new field does not get covered for free --
+    someone must add a value -- but they are forced to by a red test rather than
+    trusted to remember.
+
+    The second assertion closes the hole that made the first one hollow: a value
+    equal to the field's own default exempts the field silently, because a
+    loader-read-but-never-written field also comes back as the default and the
+    comparison passes.
     """
     import dataclasses
 
@@ -144,6 +152,19 @@ def test_every_conflict_field_survives_a_round_trip():
     assert not missing, (
         f"ConflictConfig gained field(s) {sorted(missing)} that this test does not "
         "exercise — add a non-default value above so the round trip is checked"
+    )
+
+    # EVERY VALUE MUST DIFFER FROM ITS DEFAULT, or the field is exempt for free:
+    # a field the loader reads but to_yaml_dict never writes comes back as the
+    # DEFAULT, so a "non-default" value that happens to equal it makes the round
+    # trip pass on a field that was never persisted.
+    defaults = ConflictConfig()
+    same_as_default = {
+        name: value for name, value in non_default.items() if getattr(defaults, name) == value
+    }
+    assert not same_as_default, (
+        f"these test values equal the field's own default {same_as_default}, so the "
+        "round trip below cannot tell 'written and read back' from 'never written'"
     )
 
     cfg = Config._from_dict({"conflict": dict(non_default)})

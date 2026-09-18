@@ -198,8 +198,9 @@ def select_conflict_candidates(
     NO ORDERING BEFORE TRUNCATION. The SQL has no ORDER BY and nothing sorted the
     matches, so the rows that survived ``max_candidates`` were whichever SQLite
     returned first -- not the most related. Same class as techne#861
-    (``import_resolve`` resolving by row order). Sorting is by descending overlap
-    coefficient, then by id. The id tiebreak is not cosmetic: the SQL carries no
+    (``import_resolve`` resolving by row order). Sorting is by descending SHARED-TOKEN
+    COUNT, then by descending overlap coefficient, then by id -- see `_rank_key`
+    for why the count is primary. The id tiebreak is not cosmetic: the SQL carries no
     ORDER BY, so two rows with identical scores would otherwise be ordered by
     whatever SQLite returned first. (An earlier draft cited techne#873's
     PYTHONHASHSEED hazard here. That analogy is wrong -- `all_rows` is a list
