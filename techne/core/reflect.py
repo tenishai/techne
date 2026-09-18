@@ -84,11 +84,12 @@ Be strict. Return [] when nothing in this thread is worth keeping. Skip:
   - Anything already in "What the agent already knows".
   - Anything that would be obvious from re-reading the code.
 
-A candidate fails in one of two ways. Name which one before you keep it.
+A candidate can fail in one of two ways. Check both before you keep it, and
+keep it only if it is neither.
 
   TOO OBVIOUS — a competent engineer in this domain already knows it: how a
-  common tool behaves by default, or generic hygiene advice. "A fresh clone has
-  no git identity" is this failure.
+  common tool behaves by default, or generic hygiene advice.
+  "Re-read the repo before citing it" is this failure.
 
   TOO SPECIFIC — it is true today and false after the next change, because it
   leans on an identifier, a count, a version or a status. "The image tags are

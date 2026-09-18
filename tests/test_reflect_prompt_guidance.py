@@ -21,6 +21,12 @@ So an instruction that only says "prefer the rule" pushes candidates straight
 into the other ditch. The prompt has to describe the BAND: non-obvious to a
 competent practitioner, and still true once the identifiers change.
 
+THE PINNED PHRASES ARE PROVISIONAL, DELIBERATELY. They lock an exact wording that
+techne#950 itself calls unmeasured, so that a prompt edit has to be deliberate.
+When the before/after run finally happens and prefers a variant, THIS FILE CHANGES
+WITH IT -- the assertions are a lock, not a settled contract, and whoever runs that
+measurement should expect to edit them rather than work around them.
+
 WHAT THESE TESTS DO AND DO NOT ESTABLISH. They assert the guidance is present
 and survives rendering. They do NOT establish that it improves candidate
 quality -- that needs the before/after run on the same threads the issue asks
@@ -44,6 +50,14 @@ from techne.core.reflect import PROMPT_TEMPLATE
         # on the unchanged prompt and would survive deleting every line added here.
         "TOO OBVIOUS",
         "TOO SPECIFIC",
+        # THE EXAMPLES, WHICH NOTHING GUARDED (Prudence, #973). She deleted both
+        # exemplar sentences, left the headers and band paragraph standing, and
+        # the file still passed 9/9. They are the longest, most disposable-looking
+        # lines in the block and the first thing trimmed for token budget -- and
+        # the card states the change as three parts, of which this was the unpinned
+        # one.
+        "Re-read the repo before citing it",
+        "The image tags are",
         "survives it changing",
         "NON-OBVIOUS",
         "STILL TRUE",
