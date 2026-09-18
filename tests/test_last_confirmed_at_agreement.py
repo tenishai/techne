@@ -73,8 +73,10 @@ def fresh(tmp_path):
 def migrated(tmp_path):
     """A store whose column arrived via ALTER -- nullable, no default.
 
-    Built by dropping and re-adding the column the way the v5 migration does,
-    which is the only shape SQLite lets that migration produce.
+    Built by dropping and re-adding the column the way the v5 migration does.
+    It is not the only shape ALTER can produce -- a CONSTANT default would be
+    accepted -- but it is the only one reconcilable with a CURRENT_TIMESTAMP
+    default, which is what the CREATE TABLE carried.
     """
     db = tmp_path / "migrated.db"
     init_db(db)

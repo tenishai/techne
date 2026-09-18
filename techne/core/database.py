@@ -311,8 +311,15 @@ CREATE TABLE IF NOT EXISTS knowledge (
     confidence_numeric REAL NOT NULL DEFAULT 0.6,
     -- NULLABLE, WITH NO DEFAULT, AND THAT MATCHES THE MIGRATION ON PURPOSE
     -- (techne#938). This was `NOT NULL DEFAULT CURRENT_TIMESTAMP` while the v5
-    -- ALTER could only produce a plain nullable column -- SQLite cannot ADD
-    -- COLUMN ... NOT NULL without a default -- so a fresh store and a migrated
+    -- ALTER could only produce a plain nullable column here -- not because SQLite
+    -- refuses NOT NULL via ALTER (four lines above, the same v5 block adds
+    -- `confidence_numeric REAL NOT NULL DEFAULT 0.6`) but because it refuses a
+    -- NON-CONSTANT default, and CURRENT_TIMESTAMP is one:
+    --
+    --   ADD COLUMN x TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    --     -> Cannot add a column with non-constant default
+    --
+    -- so a fresh store and a migrated
     -- one disagreed AT THE SAME schema_version, and 2,823 of 2,914 live rows on
     -- the operator's store had it NULL. Those rows take decay_score's
     -- no-timestamp branch, so the confidence-decay tiebreak never decayed for

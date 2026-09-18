@@ -72,9 +72,9 @@ def _insert_card(conn, content: str, source_url: str, tags: str, confidence: str
     # second caller can't reopen the sink by forgetting to.
     cur = conn.execute(
         # last_confirmed_at is set HERE, not left to a schema default (techne#938).
-        # The CREATE TABLE no longer carries one -- it could not, because the v5
-        # ALTER cannot produce a NOT NULL DEFAULT column and the two shapes have to
-        # agree -- so every INSERT owns the value. A pending card was NULL until
+        # The CREATE TABLE no longer carries one -- it could not, because ALTER
+        # refuses a NON-CONSTANT default and the two shapes have to agree -- so
+        # every INSERT owns the value. A pending card was NULL until
         # fill_card_summary stamped it, which put it on decay_score's no-decay
         # branch in the meantime.
         """INSERT INTO knowledge
