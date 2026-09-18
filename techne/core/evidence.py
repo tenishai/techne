@@ -1394,9 +1394,15 @@ def check_claims(claims: list[dict], evidence: Evidence) -> list[dict]:
             # read or not, so building either sentence from it makes the ledger
             # speak for a tool it never heard -- "ruff, tsc reported problems"
             # when tsc printed nothing. That is the same defect as rule 2 above in
-            # the opposite polarity, and the failure branch only became reachable
-            # with an unread tool present once a stated failure started
-            # outranking one.
+            # the opposite polarity.
+            #
+            # PROVENANCE, CORRECTED: an earlier version of this comment said the
+            # failure branch "only became reachable with an unread tool present
+            # once a stated failure started outranking one". It was reachable from
+            # the FIRST commit; the unread-blocks-green cut made it UNreachable for
+            # one round, and the precedence fix restored it. Getting provenance
+            # wrong in the comment whose job is provenance is its own small version
+            # of the defect this block is about.
             if c.green is True:
                 status = "backed"
                 detail = (
