@@ -114,11 +114,32 @@ def _content_keywords(content: str) -> frozenset[str]:
     return frozenset(t for t in tokens if len(t) > 2 and t not in _STOP_WORDS)
 
 
+def _overlap_coefficient(a: frozenset[str], b: frozenset[str]) -> float:
+    """Shared tokens over the SMALLER set (techne#933).
+
+    NOT Jaccard. The union denominator is what makes Jaccard useless on short
+    keyword sets: ECC recorded the measurement in its own clustering code --
+    trigger keyword sets average ~7 words, so even clearly-related pairs top out
+    near 0.33 and nothing ever groups. The overlap coefficient asks the question
+    that is actually wanted here: how much of the smaller row is accounted for by
+    the larger one.
+
+    It has the opposite failure on its own -- a one-token set scores a perfect 1.0
+    against anything -- which is why the caller keeps a floor on the token count
+    instead of relying on this to reject weak matches. The two guards fail in
+    opposite directions and are both needed.
+    """
+    if not a or not b:
+        return 0.0
+    return len(a & b) / min(len(a), len(b))
+
+
 def select_conflict_candidates(
     db_path: Path,
     candidate_row: dict,
     *,
     max_candidates: int = 20,
+    min_shared_keywords: int = 1,
 ) -> list[dict]:
     """Select live knowledge rows that overlap with *candidate_row* by shared
     entities/tags and the same knowledge ``type``.
@@ -126,9 +147,40 @@ def select_conflict_candidates(
     Selection strategy (deliberate non-similarity):
     1. Same ``type`` — contradictions only exist within the same epistemic category.
     2. Shared tags (at least one common comma-separated token).
-    3. Fallback when *candidate_row* has no tags: significant-word overlap in content.
+    3. Fallback when *candidate_row* has no tags: significant-word overlap in content,
+       requiring at least *min_shared_keywords* shared tokens (default 1).
 
-    Excludes superseded rows and the candidate itself. Capped at *max_candidates*.
+    Excludes superseded rows and the candidate itself. Capped at *max_candidates*,
+    STRONGEST FIRST — see the ordering note below.
+
+    TWO DEFECTS THIS GUARDS, both on the path that builds the conflict-check prompt
+    (techne#933). They compounded: weak matches did not merely add noise, they took
+    slots from the contradictions the check exists to find.
+
+    NO FLOOR ON THE MATCH. Both paths were bare set intersections, so ONE shared
+    token qualified a row -- one incidental word like "session" or "config" pulled in
+    something with no topical relation. ``min_shared_keywords`` is the knob for it,
+    on the CONTENT path only (tags are curated; one shared tag is evidence in a way
+    one shared word is not, and the same floor there would drop a row whose single
+    tag is the exact subject).
+
+    IT DEFAULTS TO 1 -- TODAY'S BEHAVIOUR -- AND techne#933 ASKED FOR 2. Raising it
+    is a measured recall regression, not a free win:
+    ``test_select_candidates_keyword_fallback_no_tags`` pairs "we use postgres for
+    storage" with "switched from postgres to sqlite", a REAL contradiction sharing
+    exactly one token, and a floor of 2 drops it. What separates that from an
+    incidental match is the token's SPECIFICITY, not the count; a count is a crude
+    proxy, and an IDF-weighted guard is the honest version of the idea. The harm the
+    issue documents -- weak matches TAKING SLOTS -- is closed by the ordering below
+    instead, which needs no such trade.
+
+    NO ORDERING BEFORE TRUNCATION. The SQL has no ORDER BY and nothing sorted the
+    matches, so the rows that survived ``max_candidates`` were whichever SQLite
+    returned first -- not the most related. Same class as techne#861
+    (``import_resolve`` resolving by row order). Sorting is by descending overlap
+    coefficient, then by id: the id tiebreak is not cosmetic, it makes the
+    selection DETERMINISTIC for equal scores, which techne#873 is the standing
+    reminder about.
 
     This function is callable at the federation read-merge call site as well as
     the local consolidate emit path — it takes a plain dict and a db_path, with
@@ -159,20 +211,34 @@ def select_conflict_candidates(
     finally:
         conn.close()
 
+    scored: list[tuple[float, int, dict]] = []
     if candidate_tags:
-        # Primary path: at least one shared tag token
-        matched = [r for r in all_rows if _parse_tags(r.get("tags")) & candidate_tags]
+        # Primary path: at least one shared tag token. Tags are curated, so no floor.
+        for r in all_rows:
+            row_tags = _parse_tags(r.get("tags"))
+            if row_tags & candidate_tags:
+                scored.append(
+                    (_overlap_coefficient(row_tags, candidate_tags), int(r.get("id") or 0), r)
+                )
     else:
-        # Fallback: significant-word overlap in content (no tags on candidate)
+        # Fallback: significant-word overlap in content (no tags on candidate).
         candidate_words = _content_keywords(candidate_row.get("content", ""))
         if candidate_words:
-            matched = [
-                r
-                for r in all_rows
-                if _content_keywords(r.get("content", "")) & candidate_words
-            ]
-        else:
-            matched = []
+            for r in all_rows:
+                row_words = _content_keywords(r.get("content", ""))
+                shared = row_words & candidate_words
+                if len(shared) >= min_shared_keywords:
+                    scored.append(
+                        (
+                            _overlap_coefficient(row_words, candidate_words),
+                            int(r.get("id") or 0),
+                            r,
+                        )
+                    )
+
+    # Descending score, ascending id. The id keeps equal scores deterministic.
+    scored.sort(key=lambda t: (-t[0], t[1]))
+    matched = [r for _score, _id, r in scored]
 
     log.debug("conflict: found %d candidate(s) for id=%s", len(matched), candidate_id)
     return matched[:max_candidates]
@@ -308,7 +374,7 @@ def _already_proposed(conn, check_hash: str, origin: str) -> bool:
 
 def _effective_event_at(row: dict) -> str:
     """event_at if set, else created_at. Comparable as ISO strings (YYYY-MM-DD …)."""
-    return (row.get("event_at") or row.get("created_at") or "")
+    return row.get("event_at") or row.get("created_at") or ""
 
 
 def _is_newer(a: dict, b: dict) -> bool:
@@ -449,17 +515,16 @@ def conflict_check_emit(config: Config, *, max_items: int | None = None) -> list
                 break
 
             comparisons = select_conflict_candidates(
-                config.db_path, focus, max_candidates=max_candidates
+                config.db_path,
+                focus,
+                max_candidates=max_candidates,
+                min_shared_keywords=config.conflict.min_shared_keywords,
             )
             if not comparisons:
                 continue
 
             # Only include pairs not yet emitted this run (symmetric dedup)
-            fresh = [
-                c
-                for c in comparisons
-                if frozenset([focus["id"], c["id"]]) not in seen_pairs
-            ]
+            fresh = [c for c in comparisons if frozenset([focus["id"], c["id"]]) not in seen_pairs]
             if not fresh:
                 continue
 
@@ -467,10 +532,8 @@ def conflict_check_emit(config: Config, *, max_items: int | None = None) -> list
             all_ids = sorted([focus["id"]] + [c["id"] for c in fresh])
             check_hash = _cluster_hash(all_ids)
 
-            if _already_proposed(conn, check_hash, 'conflict'):
-                log.debug(
-                    "conflict: skipping already-proposed group hash=%s", check_hash
-                )
+            if _already_proposed(conn, check_hash, "conflict"):
+                log.debug("conflict: skipping already-proposed group hash=%s", check_hash)
                 # Mark pairs seen anyway so we don't re-check the same pair below
                 for c in fresh:
                     seen_pairs.add(frozenset([focus["id"], c["id"]]))
@@ -545,7 +608,7 @@ def conflict_check_ingest(
 
     conn = connect(config.db_path)
     try:
-        if _already_proposed(conn, ch, 'conflict'):
+        if _already_proposed(conn, ch, "conflict"):
             counts["skipped"] += 1
             return counts
 
@@ -568,7 +631,7 @@ def conflict_check_ingest(
                 decided_by="agent-triage",
                 decision_reason="no-verdicts",
                 raw=raw_for_store,
-                origin='conflict',
+                origin="conflict",
                 model_used=model_used,
             )
             conn.commit()
@@ -633,7 +696,7 @@ def conflict_check_ingest(
                     decision_reason=f"noop: {reason or ''}",
                     raw=raw_for_store,
                     model_used=model_used,
-                    origin='conflict',
+                    origin="conflict",
                 )
                 counts["noop"] += 1
 
@@ -651,7 +714,7 @@ def conflict_check_ingest(
                     decision_reason=f"distinct: {reason or ''}",
                     raw=raw_for_store,
                     model_used=model_used,
-                    origin='conflict',
+                    origin="conflict",
                 )
                 counts["distinct"] += 1
 
@@ -724,9 +787,7 @@ def _handle_supersede(
         survivor_id = comp_row["id"]
         survivor_row = comp_row
 
-    surviving_content = (
-        (suggested_content or "").strip() or (survivor_row.get("content") or "")
-    )
+    surviving_content = (suggested_content or "").strip() or (survivor_row.get("content") or "")
     surviving_type = survivor_row.get("type", "fact")
     surviving_confidence = survivor_row.get("confidence", "medium")
 
@@ -750,7 +811,7 @@ def _handle_supersede(
         decided_by=None,
         decision_reason=reason,
         raw=raw,
-        origin='conflict',
+        origin="conflict",
         model_used=model_used,
     )
 
@@ -808,7 +869,7 @@ def _handle_update(
         decision_reason=f"update (refinement — apply merged wording as an edit if desired): "
         f"{reason or ''}",
         raw=raw,
-        origin='conflict',
+        origin="conflict",
         model_used=model_used,
     )
 

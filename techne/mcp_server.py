@@ -652,6 +652,7 @@ def _techne_recall(args: dict, config: Config) -> dict:
             local_results,
             remote_deduped,
             max_candidates=config.conflict.max_comparison_candidates,
+            min_shared_keywords=config.conflict.min_shared_keywords,
         )
 
         # Step D — merge + rank (per-type BM25 normalisation handles cross-store, #56)

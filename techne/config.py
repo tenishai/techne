@@ -516,12 +516,36 @@ class ConflictConfig:
 
     model: LLM model for the conflict prompt. Falls back to Config.model when empty.
     max_comparison_candidates: how many entity-overlapping rows to compare per entry.
+    min_shared_keywords: floor on shared content tokens for the no-tags fallback path
+        (techne#933). Applies to the CONTENT path only -- tags are curated, so one
+        shared tag is evidence in a way one shared word is not.
+
+        DEFAULT 1, WHICH IS TODAY'S BEHAVIOUR, AND THAT IS DELIBERATE. techne#933
+        proposes 2 (ECC's TRIGGER_MIN_SHARED_KEYWORDS, reached independently on the
+        same problem) as "the change that matters". Measured against this repo's own
+        suite, 2 is a recall regression: test_select_candidates_keyword_fallback_no_tags
+        pairs "we use postgres for storage" with "switched from postgres to sqlite",
+        which is a REAL contradiction sharing exactly one token --
+
+            row A  {postgres, storage, use}
+            focus  {postgres, sqlite, switched}
+            shared {postgres}                     overlap coefficient 0.333
+
+        -- and a floor of 2 drops it. The distinction the issue actually wants is
+        token SPECIFICITY ("postgres" vs "session"), and a count is a crude proxy for
+        it; an IDF-weighted guard would separate them, and is more machinery than this
+        warrants without a measurement. The slot-stealing harm the issue documents is
+        closed by ORDERING instead (see select_conflict_candidates): weak matches now
+        sort below strong ones, so they can only occupy a slot when nothing better is
+        competing for it. Raise this to 2 if a corpus shows incidental single-token
+        matches surviving the sort.
     max_items_per_emit: cap on groups returned by conflict_check_emit per run.
     log_raw_response: whether to persist the agent's raw response in the candidate row.
     """
 
     model: str = ""  # falls back to Config.model
     max_comparison_candidates: int = 20
+    min_shared_keywords: int = 1
     max_items_per_emit: int = 20
     log_raw_response: bool = True
 
@@ -1159,6 +1183,7 @@ class Config:
                 max_comparison_candidates=int(
                     c.get("max_comparison_candidates", _cd.max_comparison_candidates)
                 ),
+                min_shared_keywords=int(c.get("min_shared_keywords", _cd.min_shared_keywords)),
                 max_items_per_emit=int(c.get("max_items_per_emit", _cd.max_items_per_emit)),
                 log_raw_response=bool(c.get("log_raw_response", _cd.log_raw_response)),
             )
