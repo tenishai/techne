@@ -1,7 +1,7 @@
 ---
 card: arch-card:techne-config-trust
-updated: 2026-08-27
-anchor: techne/security/config_trust.py sha=96014df502d1b001da81e0ae3aca766a916f7e95
+updated: 2026-09-18
+anchor: techne/security/config_trust.py sha=1495d550c55294e819100f2811cf4903451e7bc9
 ---
 # config-trust — operator-vs-agent boundary over egress-selecting config (techne#393)
 
