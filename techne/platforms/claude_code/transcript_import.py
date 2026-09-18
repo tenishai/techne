@@ -224,10 +224,39 @@ def import_transcript(
         prompt_count = 0
         assistant_text_count = 0
 
+        replayed_skipped = 0
+
         for rec in records:
             rtype = rec.get("type")
             ts = normalize_timestamp(rec.get("timestamp"))
             blocks = content_blocks(rec)
+
+            # A RESUMED SESSION REPLAYS ITS PARENT'S TURNS (techne#962). The new
+            # transcript carries the parent's messages under a NEW sessionId while
+            # the records keep their ORIGINAL uuid, and import idempotency is PER
+            # SESSION ("already has N observations"), so those turns imported a
+            # second time under a second id. Measured here before the fix: 52
+            # transcript pairs share message uuids, and of the 2 pairs with both
+            # halves imported, 44 observation rows were duplicated.
+            #
+            # UUID, NOT A CONTENT HASH, AND THAT CHOICE IS LOAD-BEARING. Grip's
+            # corpus is six concurrent sessions ("facets") sharing one store, one
+            # of which is an aggregator whose job is to read across its siblings.
+            # Two facets can legitimately describe the same event from different
+            # vantage points, in different transcripts, with DIFFERENT message
+            # uuids -- so a content-keyed dedup would collapse a real second
+            # observation, while the uuid key cannot: it is exact, it is an
+            # identity the transcript already carries, and it is only equal when
+            # the record literally IS the same record.
+            src_uuid = rec.get("uuid")
+            if src_uuid and not force:
+                already = conn.execute(
+                    "SELECT 1 FROM observations WHERE source_uuid = ? LIMIT 1",
+                    (src_uuid,),
+                ).fetchone()
+                if already:
+                    replayed_skipped += 1
+                    continue
 
             if rtype == "assistant":
                 for b in blocks:
@@ -258,9 +287,10 @@ def import_transcript(
                     )
                     conn.execute(
                         """INSERT INTO observations
-                           (session_id, timestamp, tool_name, content, tier, event_at, content_hash)
-                           VALUES (?, ?, 'AssistantText', ?, 'hot', ?, ?)""",
-                        (session_id, ts, redacted_text, ts, text_hash),
+                           (session_id, timestamp, tool_name, content, tier, event_at,
+                            content_hash, source_uuid)
+                           VALUES (?, ?, 'AssistantText', ?, 'hot', ?, ?, ?)""",
+                        (session_id, ts, redacted_text, ts, text_hash, src_uuid),
                     )
                     assistant_text_count += 1
 
@@ -287,8 +317,9 @@ def import_transcript(
                         )
                         conn.execute(
                             """INSERT INTO observations
-                               (session_id, timestamp, tool_name, content, tier, event_at, content_hash)
-                               VALUES (?, ?, ?, ?, 'hot', ?, ?)""",
+                               (session_id, timestamp, tool_name, content, tier, event_at,
+                                content_hash, source_uuid)
+                               VALUES (?, ?, ?, ?, 'hot', ?, ?, ?)""",
                             (
                                 session_id,
                                 event_ts,
@@ -296,6 +327,7 @@ def import_transcript(
                                 redacted_content,
                                 event_ts,
                                 content_hash,
+                                src_uuid,
                             ),
                         )
                         tool_count += 1
@@ -317,14 +349,20 @@ def import_transcript(
                         )
                         conn.execute(
                             """INSERT INTO observations
-                               (session_id, timestamp, tool_name, content, tier, event_at, content_hash)
-                               VALUES (?, ?, 'UserPrompt', ?, 'hot', ?, ?)""",
-                            (session_id, ts, redacted_prompt, ts, prompt_hash),
+                               (session_id, timestamp, tool_name, content, tier, event_at,
+                                content_hash, source_uuid)
+                               VALUES (?, ?, 'UserPrompt', ?, 'hot', ?, ?, ?)""",
+                            (session_id, ts, redacted_prompt, ts, prompt_hash, src_uuid),
                         )
                         prompt_count += 1
 
         conn.commit()
         return {
+            # Returned so a caller CAN distinguish an empty transcript from an
+            # all-replay one. "Surfaced" was too strong for the CLI until it was
+            # taught to print this -- the key existed and `techne import` summed
+            # tool_obs + prompt_obs and said "0 tool obs, 0 prompts" either way.
+            "replayed_skipped": replayed_skipped,
             "session_id": session_id,
             "project_path": project_path,
             "tool_obs": tool_count,
