@@ -1178,3 +1178,38 @@ def test_the_archivist_binding_is_rendered_not_just_flagged():
     assert "archivist" in _PRINTABLE_DESTINATIONS
     # Its predecessor is printable by the same argument; losing either is a regression.
     assert "standalone" in _PRINTABLE_DESTINATIONS
+
+
+def test_the_card_count_of_governed_sub_fields_is_current():
+    """The card states a NUMBER, and nothing was checking it (techne#933 pre-pass).
+
+    docs/arch/config-trust.md says _NOT_A_DESTINATION "carries dotted entries for
+    all N sub-fields of reflect/conflict". Adding one dotted entry made that
+    sentence false, and the arch-card gate did not notice: it compares the seam
+    file's blob sha, so re-blessing after a source change silently re-certifies a
+    body claim the change invalidated.
+
+    A number in prose is only a guard if something recomputes it.
+    """
+    import re
+    from pathlib import Path
+
+    from techne.security import config_trust
+
+    card = Path(__file__).resolve().parent.parent / "docs" / "arch" / "config-trust.md"
+    text = card.read_text(encoding="utf-8")
+
+    m = re.search(r"dotted entries for all (\d+) sub-fields", text)
+    assert m, "the card no longer states a sub-field count in the expected form"
+    claimed = int(m.group(1))
+
+    actual = sum(
+        1
+        for k in list(config_trust.EGRESS_KEYS) + list(config_trust._NOT_A_DESTINATION)
+        if k.startswith(("reflect.", "conflict."))
+    )
+    assert claimed == actual, (
+        f"docs/arch/config-trust.md claims {claimed} dotted reflect/conflict "
+        f"sub-fields; there are {actual}. Update the card body in the same change "
+        "that adds or removes one."
+    )

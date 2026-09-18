@@ -237,6 +237,9 @@ _NOT_A_DESTINATION: tuple[str, ...] = (
     # place anything goes.
     "conflict.log_raw_response",
     "conflict.max_comparison_candidates",
+    # Selects WHICH local rows are compared, never where anything is sent. Its
+    # blast radius is recall quality inside the conflict prompt (techne#933).
+    "conflict.min_shared_keywords",
     "conflict.max_items_per_emit",
     "reflect.enabled",
     "reflect.emit_max_chars",

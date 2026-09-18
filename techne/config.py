@@ -567,18 +567,77 @@ class CustodianConfig:
     timeout_seconds: int = 120
 
 
+def _positive_floor(value: object) -> int:
+    """Validate ``conflict.min_shared_keywords``: >= 1, or raise.
+
+    BOUNDS VALIDATED, NOT MERELY COERCED -- the rule this module already states
+    for techne#709, and which the sibling `custodian` block enforces. The
+    predicate is `len(shared) >= min_shared_keywords`, so 0 or a negative does not
+    LOWER the floor, it removes the topical filter entirely and every live row of
+    the same type becomes a conflict candidate. Measured: at 1 a focus got 0
+    candidates; at 0 and at -1 it got 6, none sharing a single token with it.
+
+    That is a different MODE, not a laxer setting, and it fails the way this
+    project's failures overwhelmingly do -- the rail keeps running, burns model
+    calls and stages junk. `0` is also the natural thing an operator writes for
+    "no floor", and nothing in the docs said 1 was the minimum.
+    """
+    try:
+        floor = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"conflict.min_shared_keywords must be an integer >= 1, got {value!r}."
+        ) from exc
+    if floor < 1:
+        raise ValueError(
+            f"conflict.min_shared_keywords must be >= 1, got {floor}. Values below 1 "
+            "remove the topical filter entirely rather than loosening it: every live "
+            "row of the same type would become a conflict candidate. There is no "
+            "'no floor' setting."
+        )
+    return floor
+
+
 @dataclass
 class ConflictConfig:
     """Configuration for contradiction detection → supersession (techne#213, D1).
 
     model: LLM model for the conflict prompt. Falls back to Config.model when empty.
     max_comparison_candidates: how many entity-overlapping rows to compare per entry.
+    min_shared_keywords: floor on shared content tokens for the no-tags fallback path
+        (techne#933). Applies to the CONTENT path only -- tags are curated, so one
+        shared tag is evidence in a way one shared word is not.
+
+        DEFAULT 1, WHICH IS TODAY'S BEHAVIOUR, AND THAT IS DELIBERATE. techne#933
+        proposes 2 (ECC's TRIGGER_MIN_SHARED_KEYWORDS, reached independently on the
+        same problem) as "the change that matters". Measured against this repo's own
+        suite, 2 is a recall regression: test_select_candidates_keyword_fallback_no_tags
+        pairs "we use postgres for storage" with "switched from postgres to sqlite",
+        which is a REAL contradiction sharing exactly one token --
+
+            row A  {postgres, storage, use}
+            focus  {postgres, sqlite, switched}
+            shared {postgres}                     overlap coefficient 0.333
+
+        -- and a floor of 2 drops it. The distinction the issue actually wants is
+        token SPECIFICITY ("postgres" vs "session"), and a count is a crude proxy for
+        it; an IDF-weighted guard would separate them, and is more machinery than this
+        warrants without a measurement. The slot-stealing harm the issue documents is
+        closed by ORDERING instead (see select_conflict_candidates), which ranks on
+        the number of shared tokens and uses the overlap coefficient only as a
+        tiebreak -- ranking on the coefficient alone scored a one-token row 1.0 and
+        put it ABOVE a four-token match, the opposite of the intent. Raise this to
+        2 if a corpus shows incidental single-token matches surviving the sort.
+
+        THE MINIMUM IS 1, ENFORCED. 0 or a negative does not loosen the floor, it
+        removes the topical filter entirely; the loader raises rather than coerce.
     max_items_per_emit: cap on groups returned by conflict_check_emit per run.
     log_raw_response: whether to persist the agent's raw response in the candidate row.
     """
 
     model: str = ""  # falls back to Config.model
     max_comparison_candidates: int = 20
+    min_shared_keywords: int = 1
     max_items_per_emit: int = 20
     log_raw_response: bool = True
 
@@ -1216,6 +1275,9 @@ class Config:
                 max_comparison_candidates=int(
                     c.get("max_comparison_candidates", _cd.max_comparison_candidates)
                 ),
+                min_shared_keywords=_positive_floor(
+                    c.get("min_shared_keywords", _cd.min_shared_keywords)
+                ),
                 max_items_per_emit=int(c.get("max_items_per_emit", _cd.max_items_per_emit)),
                 log_raw_response=bool(c.get("log_raw_response", _cd.log_raw_response)),
             )
@@ -1371,6 +1433,7 @@ class Config:
             "conflict": {
                 "model": self.conflict.model,
                 "max_comparison_candidates": self.conflict.max_comparison_candidates,
+                "min_shared_keywords": self.conflict.min_shared_keywords,
                 "max_items_per_emit": self.conflict.max_items_per_emit,
                 "log_raw_response": self.conflict.log_raw_response,
             },

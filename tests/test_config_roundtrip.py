@@ -113,3 +113,69 @@ def test_a_populated_config_loses_no_top_level_key():
     assert out["llm_api_base"] == "http://localhost:11434"
     assert out["sources"]["claude_code_transcripts"]["paths"] == ["/tmp/projects"]
     assert out["conflict"]["max_items_per_emit"] == 9
+
+
+def test_every_conflict_field_survives_a_round_trip():
+    """The CLASS, derived from the dataclass rather than an enumerated list.
+
+    techne#620's own regression test listed the four conflict keys explicitly, so
+    when `min_shared_keywords` was added the loader read it and `to_yaml_dict`
+    never wrote it -- and this suite stayed green. An operator's
+    `conflict: {min_shared_keywords: 2}` was reset to 1 by any load->save cycle,
+    and the comment on `to_yaml_dict` says `techne init` IS such a cycle.
+    Reproduced before the fix: on disk the key was simply absent.
+
+    THE GUARD IS LOUD, NOT AUTOMATIC, and an earlier docstring overstated it. The
+    values checked are a hand-maintained dict; the dataclass is used only to FAIL
+    when that dict falls behind. So a new field does not get covered for free --
+    someone must add a value -- but they are forced to by a red test rather than
+    trusted to remember.
+
+    The second assertion closes the hole that made the first one hollow: a value
+    equal to the field's own default exempts the field silently, because a
+    loader-read-but-never-written field also comes back as the default and the
+    comparison passes.
+    """
+    import dataclasses
+
+    from techne.config import ConflictConfig
+
+    non_default = {
+        "model": "claude-haiku-4-5-20251001",
+        "max_comparison_candidates": 17,
+        "min_shared_keywords": 2,
+        "max_items_per_emit": 3,
+        "log_raw_response": False,
+    }
+    fields = {f.name for f in dataclasses.fields(ConflictConfig)}
+    missing = fields - set(non_default)
+    assert not missing, (
+        f"ConflictConfig gained field(s) {sorted(missing)} that this test does not "
+        "exercise — add a non-default value above so the round trip is checked"
+    )
+
+    # EVERY VALUE MUST DIFFER FROM ITS DEFAULT, or the field is exempt for free:
+    # a field the loader reads but to_yaml_dict never writes comes back as the
+    # DEFAULT, so a "non-default" value that happens to equal it makes the round
+    # trip pass on a field that was never persisted.
+    defaults = ConflictConfig()
+    same_as_default = {
+        name: value for name, value in non_default.items() if getattr(defaults, name) == value
+    }
+    assert not same_as_default, (
+        f"these test values equal the field's own default {same_as_default}, so the "
+        "round trip below cannot tell 'written and read back' from 'never written'"
+    )
+
+    cfg = Config._from_dict({"conflict": dict(non_default)})
+    round_tripped = Config._from_dict(cfg.to_yaml_dict())
+
+    lost = {
+        name: (value, getattr(round_tripped.conflict, name))
+        for name, value in non_default.items()
+        if getattr(round_tripped.conflict, name) != value
+    }
+    assert not lost, (
+        "conflict fields did not survive load->save->load "
+        f"(set -> got): {lost}. to_yaml_dict is not writing them."
+    )
