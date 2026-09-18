@@ -13,6 +13,8 @@ from pathlib import Path
 
 from techne import __version__
 from techne.config import Config
+from techne.core.repo import git_dirs as _git_dirs
+from techne.core.repo import read_ref as _read_ref
 
 _HOOK_LAST_RUN_KEY = "hook:session_start:last_run"
 _HOOK_LAST_ERROR_KEY = "hook:session_start:last_error"
@@ -29,78 +31,6 @@ def _parse_ts(ts: str):
             return datetime.strptime(ts, fmt).replace(tzinfo=timezone.utc)
         except ValueError:
             continue
-    return None
-
-
-def _git_dirs(root: Path) -> tuple[Path | None, Path | None]:
-    """Resolve ``(git_dir, common_dir)`` for a checkout OR a linked worktree.
-
-    In a plain clone ``.git`` is a directory and the two are the same. In a git
-    **worktree** ``.git`` is a FILE holding ``gitdir: <main>/.git/worktrees/<n>``,
-    and only HEAD is per-worktree — ``refs/`` and ``packed-refs`` live in the
-    shared common dir named by that gitdir's ``commondir``. Worktree-per-session
-    is the standing dev topology here (techne#743), so treating ``.git``-as-file
-    as "not a checkout" would report every dev session's revision as unknowable.
-    """
-    dot = root / ".git"
-    if dot.is_dir():
-        return dot, dot
-    try:
-        raw = dot.read_text(encoding="utf-8", errors="replace").strip()
-    except OSError:
-        return None, None
-    if not raw.startswith("gitdir:"):
-        return None, None
-    git_dir = Path(raw.split(":", 1)[1].strip())
-    if not git_dir.is_absolute():
-        git_dir = (root / git_dir).resolve()
-    common = git_dir
-    try:
-        c = (git_dir / "commondir").read_text(encoding="utf-8").strip()
-        cp = Path(c)
-        common = cp if cp.is_absolute() else (git_dir / cp).resolve()
-    except OSError:
-        pass
-    return git_dir, common
-
-
-def _read_ref(git_dir: Path, common_dir: Path, rel: str, _depth: int = 0) -> str | None:
-    """Read a sha for ``rel``, following symrefs, across both git dirs.
-
-    Plain file reads only. :func:`collect_health` runs inside the SessionStart
-    hook, so shelling out to ``git`` here would put subprocess latency on every
-    session start — the constraint the old heuristic cited as its reason for
-    guessing instead of looking.
-    """
-    # Bound the symref chain exactly as git does (its own limit is 5). A cycle
-    # (HEAD -> refs/heads/loop -> refs/heads/loop) would otherwise recurse until
-    # the stack blows; session_start catches it, so the banner degrades rather
-    # than taking the hook down, but a corrupt repo should read as unknown here
-    # rather than raise at all.
-    if _depth >= 5:
-        return None
-    for base in (git_dir, common_dir):
-        try:
-            raw = (base / rel).read_text(encoding="utf-8", errors="replace").strip()
-        except OSError:
-            continue
-        if raw.startswith("ref: "):
-            return _read_ref(git_dir, common_dir, raw[5:].strip(), _depth + 1)
-        if raw:
-            return raw
-    # Never-loose refs (a fresh clone keeps origin/main here) live in packed-refs,
-    # which is always in the common dir.
-    try:
-        for line in (
-            (common_dir / "packed-refs").read_text(encoding="utf-8", errors="replace")
-        ).splitlines():
-            if line.startswith("#") or not line.strip():
-                continue
-            parts = line.split(None, 1)
-            if len(parts) == 2 and parts[1].strip() == rel:
-                return parts[0].strip()
-    except OSError:
-        return None
     return None
 
 

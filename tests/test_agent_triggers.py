@@ -220,6 +220,14 @@ def test_the_command_triggers_tell_agents_to_offer_still_exists():
 #: this and forces a human to re-read the trigger that claims doctor does not do this.
 #: Re-bless by adding the name here, the same way an arch card is re-blessed.
 DOCTOR_CHECKS_AT_LAST_REVIEW = {
+    # Reviewed 2026-09-18 for techne#937. Neither new check looks at backup
+    # SCHEDULING: check_codex_freshness compares a recorded indexed_head against
+    # the current HEAD, and check_arch_card_freshness compares an anchor's blob
+    # sha against the file it vouches for. deployment.md's backup trigger is
+    # still correct -- nothing in doctor tells an operator whether a backup is
+    # scheduled.
+    "check_codex_freshness",
+    "check_arch_card_freshness",
     # techne#824. RE-READ DONE: deployment.md:78 claims `techne doctor` does
     # not check whether anything SCHEDULES A BACKUP; a card-backlog check does
     # not touch scheduling, so that trigger's claim stands as written.
