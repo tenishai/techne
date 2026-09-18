@@ -37,7 +37,7 @@ import pytest
 from techne.core.evidence import (
     CheckEvidence,
     Evidence,
-    _classify_check_command,
+    _classify_check_commands,
     _parse_check_output,
     check_claims,
 )
@@ -56,7 +56,7 @@ from techne.core.evidence import (
     ],
 )
 def test_verification_commands_are_recognised(command, expected_head, readable):
-    assert _classify_check_command(command) == (expected_head, readable)
+    assert (expected_head, readable) in _classify_check_commands(command)
 
 
 @pytest.mark.parametrize(
@@ -75,7 +75,7 @@ def test_a_tool_named_inside_an_argument_is_not_a_check(command):
     borrowed its vocabulary and kept our own quote-aware head matching, which is
     the same distinction `_command_runs_tests` already documents for pytest.
     """
-    assert _classify_check_command(command) == (None, False)
+    assert _classify_check_commands(command) == []
 
 
 @pytest.mark.parametrize(
@@ -171,9 +171,9 @@ def test_any_failure_outweighs_any_success():
     reports not-clean for the window. That is the safe direction and is why the
     gate is scoped to a session window rather than a single command.
     """
-    from techne.core.evidence import _classify_check_command as _c
+    from techne.core.evidence import _classify_check_commands as _c
 
-    assert _c("ruff check .")[0] == "ruff"
+    assert _c("ruff check .")[0][0] == "ruff"
     ev = Evidence(checks=CheckEvidence(ran=True, green=False, tools=["ruff", "mypy"]))
     assert _claim(ev)["status"] == "unbacked"
 
@@ -369,4 +369,109 @@ def test_a_tool_named_as_failing_is_not_also_disclosed_as_silent(ledger):
     r = check_claims([{"type": "checks_green"}], _evidence(db))[0]
     assert r["detail"].count("ruff") == 1, (
         f"ruff is named twice, once as failing and once as silent: {r['detail']!r}"
+    )
+
+
+# --- the unrecognised-tool twins of test_an_unreadable_tool_blocks_green -------
+#
+# PRUDENCE'S OBSERVATION, WORTH RECORDING: five pre-pass rounds argued about tools
+# the gate had already RECOGNISED, and none asked what happens to a tool it does
+# not recognise at all. Both Criticals lived entirely in that gap.
+
+
+def test_a_second_tool_in_the_same_row_is_not_invisible(ledger):
+    """CRITICAL 1. The classifier returned at the FIRST matching segment.
+
+        ruff check techne/ && pyright src/
+          -> "All checks passed!" + "3 errors, 0 warnings, 0 informations"
+
+    gave tools=['ruff'], green=True, BACKED. pyright stated three errors, in
+    readable form, in that same output. `pyright` never entered `tools`, so
+    `unreadable` was empty and the unread-blocks-green rule had nothing to block
+    on -- the false green arrived through a door that rule cannot guard.
+
+    ORDER-DEPENDENT, which is what made it easy to miss: put the failing tool
+    first and the row classified correctly.
+    """
+    db, add = ledger
+    add(
+        "ruff check techne/ && pyright src/",
+        "All checks passed!\nsrc/a.ts:3:5 - error: bad\n3 errors, 0 warnings, 0 informations",
+    )
+    ev = _evidence(db)
+    assert "pyright" in ev.checks.tools, ev.checks
+    assert "pyright" in ev.checks.failed, ev.checks
+    assert ev.checks.green is False, ev.checks
+    assert check_claims([{"type": "checks_green"}], ev)[0]["status"] == "unbacked"
+
+
+def test_the_same_defect_with_a_silent_second_tool(ledger):
+    """The silent variant: tsc is discarded, so nothing blocks green."""
+    db, add = ledger
+    add("ruff check techne/ && tsc --noEmit", "All checks passed!")
+    ev = _evidence(db)
+    assert "tsc" in ev.checks.tools, ev.checks
+    assert ev.checks.green is not True, ev.checks
+
+
+@pytest.mark.parametrize(
+    "command,expected",
+    [
+        ("uv run ruff check .", "ruff"),
+        ("npx eslint .", "eslint"),
+        ("poetry run mypy .", "mypy"),
+        ("uvx ruff check .", "ruff"),
+        ("python -m ruff check techne tests", "ruff"),
+        (".venv-ci/bin/python -m ruff check techne tests", "ruff"),
+    ],
+)
+def test_wrapper_and_dash_m_forms_are_recognised(command, expected):
+    """CRITICAL 2. `_command_runs_tests` resolved these; this classifier did not.
+
+    Both directions were live. FALSE GREEN: `npx tsc --noEmit` reporting real
+    errors was discarded whole, and npx is the dominant invocation for every tool
+    that earns its place by BLOCKING green. FALSE ACCUSATION: `uv run ruff check`
+    passing was told "no verification command in this window" -- and this repo's
+    own CI runs `.venv-ci/bin/python -m ruff check techne tests`, so the house
+    form for the linter was the form the gate could not see.
+    """
+    assert expected in [h for h, _ in _classify_check_commands(command)]
+
+
+def test_the_dash_m_rule_stays_an_adjacent_pair():
+    """A loose token scan would classify a commit message as a check."""
+    assert _classify_check_commands('git commit -m "fix the ruff warning"') == []
+    assert _classify_check_commands('git commit -m "run mypy later"') == []
+
+
+def test_a_fix_then_rerun_window_discloses_the_later_success(ledger):
+    """IMPORTANT 4. The window limit was honest in the comment and silent in the verdict.
+
+    A head in BOTH `failed` and `passed` failed once and passed later. The
+    aggregation deliberately reports the window as not-clean -- a false accusation
+    the code comment admits to -- but a reader of the verdict had no way to learn
+    a later clean run exists.
+    """
+    db, add = ledger
+    add("ruff check .", "Found 1 error.")
+    add("ruff check .", "All checks passed!")
+    ev = _evidence(db)
+    assert "ruff" in ev.checks.failed and "ruff" in ev.checks.passed, ev.checks
+    detail = check_claims([{"type": "checks_green"}], ev)[0]["detail"]
+    assert "later in this window" in detail, detail
+
+
+def test_checks_green_is_in_the_tool_claim_vocabulary():
+    """IMPORTANT 3. The claim type shipped INERT: nothing could ask for it.
+
+    The MCP schema is the only surface from which an agent learns which claim
+    types exist, and `checks_green` was absent from it, from the tool description,
+    and from every doc. `check_claims` handled it correctly and no caller would
+    ever send it -- an unindexed capability never fires.
+    """
+    from pathlib import Path
+
+    server = (Path(__file__).resolve().parent.parent / "techne" / "mcp_server.py").read_text()
+    assert "checks_green" in server, (
+        "checks_green is not named in the MCP surface, so no agent can emit it"
     )

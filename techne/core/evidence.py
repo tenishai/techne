@@ -393,6 +393,11 @@ _TEST_RUNNER_WRAPPERS = frozenset(
         "python3",
         "py",
         "uv",
+        # `uvx` is `uv tool run` under another name, and its absence was an
+        # asymmetry rather than a decision -- `uv` and `pipx` were both here while
+        # the shorthand for the same thing was not, so `uvx pytest` read as no test
+        # run at all. Found via techne#939's classifier, which shares this set.
+        "uvx",
         "poetry",
         "pdm",
         "hatch",
@@ -644,20 +649,59 @@ def _shell_c_script(segment: str) -> str | None:
     return None
 
 
-def _classify_check_command(command: str) -> tuple[str | None, bool]:
-    """``(tool_head, outcome_is_readable)`` for a verification command, else ``(None, False)``.
+def _classify_check_commands(command: str) -> list[tuple[str, bool]]:
+    """Every verification tool this command invokes, as ``(head, outcome_readable)``.
 
-    Matched on the segment's COMMAND HEAD, the same way ``_command_runs_tests``
-    does and deliberately NOT as a substring of the whole command. ("The same
-    way", not "exactly as": that function also resolves runner SUBCOMMANDS with a
-    position rule this one does not need, and the two are not line-for-line
-    identical -- see it for the reasoning behind the head rule.) pi-warden's
-    equivalent is a ``\b``-bounded regex over the entire command string, so
-    ``git commit -m "fix the ruff warning"`` classifies as a check there. Ours
-    keeps the quote-aware split and the head rule; only the vocabulary is
-    borrowed.
+    EVERY ONE, NOT THE FIRST. An earlier version returned at the first matching
+    segment, which is free for ``_command_runs_tests`` (it returns a bool) and
+    discards information here. Measured through the real ledger:
+
+        ruff check techne/ && pyright src/
+          -> "All checks passed!" + "3 errors, 0 warnings, 0 informations"
+          -> tools=['ruff'] green=True -> BACKED
+
+    pyright stated three errors, in readable form, in that same output, and the
+    gate called the window clean. `pyright` never entered `tools`, so `unreadable`
+    was empty and the unread-blocks-green rule had nothing to block on -- a false
+    green arriving through a door that rule cannot guard. It was also
+    ORDER-DEPENDENT, which is what made it easy to miss: put the silent tool first
+    and the row classifies correctly.
+
+    WRAPPERS AND ``-m`` ARE RESOLVED, for the same reasons ``_command_runs_tests``
+    resolves them, and their absence here was measurable:
+
+        uv run pytest -q     runs_tests=True   |  uv run ruff check .    -> unseen
+        npx jest             runs_tests=True   |  npx eslint .           -> unseen
+        python -m pytest     runs_tests=True   |  python -m ruff check . -> unseen
+
+    Both directions were live. FALSE GREEN: `npx tsc --noEmit` reporting real
+    errors was discarded whole, and `npx` is the dominant invocation for every
+    tool in ``_CHECK_TOOLS_SILENT_ON_SUCCESS`` -- the half of the vocabulary that
+    earns its place by BLOCKING green was the half most often unseen. FALSE
+    ACCUSATION: `uv run ruff check techne/` passing reported "no verification
+    command in this window", and this repo's own CI runs
+    `.venv-ci/bin/python -m ruff check techne tests`, so the house form for the
+    linter was the form the gate could not see.
+
+    Matching stays on the COMMAND HEAD, and the ``-m`` rule stays an ADJACENT PAIR
+    -- `git commit -m "fix the ruff warning"` must not classify as a check, which
+    a loose token scan would do.
     """
     from techne.hooks.post_tool_use import _split_bash_segments
+
+    found: list[tuple[str, bool]] = []
+
+    def _add(head: str, readable: bool) -> None:
+        if not any(h == head for h, _ in found):
+            found.append((head, readable))
+
+    def _kind(name: str) -> tuple[bool, bool] | None:
+        """(recognised, outcome_readable) for a bare tool name."""
+        if name in _CHECK_TOOLS_WITH_SUMMARY:
+            return True, True
+        if name in _CHECK_TOOLS_SILENT_ON_SUCCESS:
+            return True, False
+        return None
 
     for segment in _expand_shell_c(_split_bash_segments(_strip_heredoc_bodies(command))):
         tokens = segment.split()
@@ -670,16 +714,39 @@ def _classify_check_command(command: str) -> tuple[str | None, bool]:
         head = tokens[i].rsplit("/", 1)[-1]
         rest = tokens[i + 1 :]
 
-        if head in _CHECK_TOOLS_WITH_SUMMARY:
-            return head, True
-        if head in _CHECK_TOOLS_SILENT_ON_SUCCESS:
-            return head, False
+        kind = _kind(head)
+        if kind is not None:
+            _add(head, kind[1])
+            continue
+
         subs = _CHECK_TOOL_SUBCOMMANDS.get(head)
         if subs:
             before_sep = rest[: rest.index("--")] if "--" in rest else rest
             if any(tok in subs for tok in before_sep):
-                return head, False
-    return None, False
+                _add(head, False)
+                continue
+
+        # `uv run ruff check .`, `npx eslint .`, `poetry run mypy .`
+        if head in _TEST_RUNNER_WRAPPERS:
+            for tok in rest:
+                wrapped = tok.rsplit("/", 1)[-1]
+                kind = _kind(wrapped)
+                if kind is not None:
+                    _add(wrapped, kind[1])
+                    break
+
+        # `python -m ruff check .`, `"$VENV" -m mypy` -- adjacent pair only.
+        if head not in _DASH_M_IS_A_MESSAGE:
+            for flag, following in zip(rest, rest[1:]):
+                if flag != "-m":
+                    continue
+                module = following.rsplit("/", 1)[-1]
+                kind = _kind(module)
+                if kind is not None:
+                    _add(module, kind[1])
+                    break
+
+    return found
 
 
 def _parse_check_output(head: str, output: str) -> bool | None:
@@ -1070,9 +1137,9 @@ def query_turn_evidence(
                 cmd = first_line[len("Ran: ") :].strip()
                 actions.append(cmd)
 
-                # techne#939: classify non-test verification commands too.
-                head, readable = _classify_check_command(cmd)
-                if head:
+                # techne#939: classify non-test verification commands too. EVERY
+                # tool in the row, not just the first -- see _classify_check_commands.
+                for head, readable in _classify_check_commands(cmd):
                     if head not in check_tools:
                         check_tools.append(head)
                     # THE OUTPUT HALF, NOT THE WHOLE ROW (techne#939 pre-pass).
@@ -1421,6 +1488,20 @@ def check_claims(claims: list[dict], evidence: Evidence) -> list[dict]:
                     detail += (
                         f" ({', '.join(silent_only)} also ran but said nothing"
                         " readable; the failure above stands on its own.)"
+                    )
+                # DISCLOSE THE WINDOW LIMIT WHERE IT BITES. A head in BOTH lists
+                # failed in one row and passed in another -- the fix-then-rerun
+                # shape -- and the aggregation deliberately reports the window as
+                # not-clean. The comment above is honest that this is a false
+                # accusation rather than "the safe direction", but the honesty
+                # stopped at the comment: a reader of the verdict had no way to
+                # learn a later clean run exists. Saying so converts a false
+                # accusation into a qualified one without touching the rule.
+                also_passed = [t for t in c.failed if t in c.passed]
+                if also_passed:
+                    detail += (
+                        f" ({', '.join(also_passed)} also reported success later in this"
+                        " window; the gate is scoped to the window, not the last run.)"
                     )
             elif not evidence.bash_captured:
                 status = "unverifiable"
