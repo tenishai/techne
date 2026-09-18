@@ -535,9 +535,10 @@ class ConflictConfig:
         token SPECIFICITY ("postgres" vs "session"), and a count is a crude proxy for
         it; an IDF-weighted guard would separate them, and is more machinery than this
         warrants without a measurement. The slot-stealing harm the issue documents is
-        closed by ORDERING instead (see select_conflict_candidates): weak matches now
-        sort below strong ones, so they can only occupy a slot when nothing better is
-        competing for it. Raise this to 2 if a corpus shows incidental single-token
+        closed by ORDERING instead (see select_conflict_candidates), which ranks on
+        the number of shared tokens and uses the overlap coefficient only as a
+        tiebreak -- ranking on the coefficient alone scored a one-token row 1.0 and
+        put it ABOVE a four-token match, which is the opposite of the intent. Raise this to 2 if a corpus shows incidental single-token
         matches surviving the sort.
     max_items_per_emit: cap on groups returned by conflict_check_emit per run.
     log_raw_response: whether to persist the agent's raw response in the candidate row.
@@ -1339,6 +1340,7 @@ class Config:
             "conflict": {
                 "model": self.conflict.model,
                 "max_comparison_candidates": self.conflict.max_comparison_candidates,
+                "min_shared_keywords": self.conflict.min_shared_keywords,
                 "max_items_per_emit": self.conflict.max_items_per_emit,
                 "log_raw_response": self.conflict.log_raw_response,
             },

@@ -11,9 +11,9 @@ whichever SQLite returned first. Same class as techne#861.
 THE FLOOR SHIPPED AS A KNOB DEFAULTING TO 1 -- today's behaviour -- not as the
 proposed 2. Raising it is a measured recall regression; see
 `test_a_floor_of_two_drops_a_real_contradiction`, which pins the counterexample
-that made the call. With ordering in place a weak match can only occupy a slot
-when nothing stronger is competing for it, which is what the issue was actually
-worried about.
+that made the call. With the CORRECTED ordering in place (shared count primary, overlap
+coefficient only as a tiebreak) a weak match can only occupy a slot when nothing
+stronger is competing for it. Ranking on the coefficient alone did the opposite.
 """
 
 from __future__ import annotations
@@ -64,8 +64,7 @@ def test_the_strongest_matches_survive_truncation(config):
     picked = select_conflict_candidates(db, focus, max_candidates=3)
 
     assert strong in {c["id"] for c in picked}, (
-        "the closest contradiction was truncated away; "
-        f"got {[c['content'][:40] for c in picked]}"
+        f"the closest contradiction was truncated away; got {[c['content'][:40] for c in picked]}"
     )
     assert picked[0]["id"] == strong, "the closest contradiction must rank first"
 
@@ -82,8 +81,7 @@ def test_ordering_is_deterministic_for_equal_scores(config):
     focus = _row(db, focus_id)
 
     runs = [
-        [c["id"] for c in select_conflict_candidates(db, focus, max_candidates=4)]
-        for _ in range(5)
+        [c["id"] for c in select_conflict_candidates(db, focus, max_candidates=4)] for _ in range(5)
     ]
     assert all(r == runs[0] for r in runs), f"unstable ordering across runs: {runs}"
     assert runs[0] == sorted(runs[0]), "equal scores must tiebreak ascending by id"
@@ -118,9 +116,9 @@ def test_a_floor_of_two_drops_a_real_contradiction(config):
     focus_id = store(db, "switched from postgres to sqlite", type="fact", tags="")
     focus = _row(db, focus_id)
 
-    assert any(
-        "postgres" in c["content"] for c in select_conflict_candidates(db, focus)
-    ), "the default must still find a one-token real contradiction"
+    assert any("postgres" in c["content"] for c in select_conflict_candidates(db, focus)), (
+        "the default must still find a one-token real contradiction"
+    )
     assert select_conflict_candidates(db, focus, min_shared_keywords=2) == [], (
         "a floor of 2 drops it — this is the recall cost, recorded deliberately"
     )
@@ -137,3 +135,97 @@ def test_tag_path_is_ordered_but_keeps_its_single_tag_match(config):
     picked = [c["id"] for c in select_conflict_candidates(db, focus)]
     assert weak in picked, "a single shared curated tag still qualifies"
     assert picked.index(strong) < picked.index(weak), "stronger tag overlap ranks first"
+
+
+def test_a_short_row_does_not_outrank_a_strong_match(config):
+    """THE PRE-PASS FINDING. The overlap coefficient alone ranked SHORT above STRONG.
+
+    shared/min(len) scores a one-token row 1.0 against anything, so sorting on it
+    put a row saying just "canary" above a row matching four of the focus's five
+    tokens. The earlier test missed this because its fixture contained no short
+    rows -- every distractor was a full sentence, so the coefficient happened to
+    agree with strength.
+
+    Measured against focus {canary, deploy, five, minutes, window}:
+
+        "the deploy canary window is thirty minutes"   4 shared, overlap 0.800
+        "canary"                                       1 shared, overlap 1.000
+    """
+    db = config.db_path
+    short = store(db, "canary", type="fact", tags="")
+    strong = store(db, "the deploy canary window is thirty minutes", type="fact", tags="")
+    store(db, "deploy window rotated yesterday", type="fact", tags="")
+
+    focus_id = store(db, "the deploy canary window is five minutes", type="fact", tags="")
+    picked = [c["id"] for c in select_conflict_candidates(db, _row(db, focus_id))]
+
+    assert picked.index(strong) < picked.index(short), (
+        "a one-token row outranked a four-token match; the coefficient is "
+        f"normalising strength away. order was {picked}"
+    )
+
+
+def test_the_tag_path_ranks_by_shared_count_too(config):
+    """The tag path had the same defect: every tag overlap scored 1.0 and tied."""
+    db = config.db_path
+    one_tag = store(db, "barely related", type="fact", tags="deploy")
+    two_tag = store(db, "closely related", type="fact", tags="deploy,canary")
+    focus_id = store(db, "the focus", type="fact", tags="deploy,canary")
+
+    picked = [c["id"] for c in select_conflict_candidates(db, _row(db, focus_id))]
+    assert picked.index(two_tag) < picked.index(one_tag), (
+        f"a single shared tag tied a two-tag match; order was {picked}"
+    )
+
+
+def test_the_three_copies_of_the_default_agree(config):
+    """W2: the knob's default is spelled in THREE places and only one was pinned.
+
+    `select_conflict_candidates`'s signature, `ConflictConfig`, and
+    `detect_cross_store_contradictions` each carry their own default. A test
+    calling the function with no kwarg reads the SIGNATURE default, so bumping
+    the config default left every test green -- the pinning test pinned the copy
+    operators do not get.
+    """
+    import inspect
+
+    from techne.config import ConflictConfig
+    from techne.core.federation import detect_cross_store_contradictions
+
+    sig_default = (
+        inspect.signature(select_conflict_candidates).parameters["min_shared_keywords"].default
+    )
+    fed_default = (
+        inspect.signature(detect_cross_store_contradictions)
+        .parameters["min_shared_keywords"]
+        .default
+    )
+    cfg_default = ConflictConfig().min_shared_keywords
+
+    assert sig_default == fed_default == cfg_default, (
+        "the three copies of min_shared_keywords' default disagree: "
+        f"signature={sig_default} federation={fed_default} config={cfg_default}. "
+        "Operators get the config one; tests calling with no kwarg get the signature one."
+    )
+
+
+def test_the_operator_facing_default_is_what_the_counterexample_pins(config):
+    """Pins the CONFIG default, not the signature default.
+
+    test_a_floor_of_two_drops_a_real_contradiction reads the signature default,
+    so a config-only bump would not trip it.
+    """
+    from techne.config import ConflictConfig
+
+    db = config.db_path
+    store(db, "we use postgres for storage", type="fact", tags="")
+    focus_id = store(db, "switched from postgres to sqlite", type="fact", tags="")
+
+    picked = select_conflict_candidates(
+        db,
+        _row(db, focus_id),
+        min_shared_keywords=ConflictConfig().min_shared_keywords,
+    )
+    assert any("postgres" in c["content"] for c in picked), (
+        "at the OPERATOR-facing default, a one-token real contradiction is dropped"
+    )

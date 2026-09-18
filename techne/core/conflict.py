@@ -120,18 +120,36 @@ def _overlap_coefficient(a: frozenset[str], b: frozenset[str]) -> float:
     NOT Jaccard. The union denominator is what makes Jaccard useless on short
     keyword sets: ECC recorded the measurement in its own clustering code --
     trigger keyword sets average ~7 words, so even clearly-related pairs top out
-    near 0.33 and nothing ever groups. The overlap coefficient asks the question
-    that is actually wanted here: how much of the smaller row is accounted for by
-    the larger one.
+    near 0.33 and nothing ever groups.
 
-    It has the opposite failure on its own -- a one-token set scores a perfect 1.0
-    against anything -- which is why the caller keeps a floor on the token count
-    instead of relying on this to reject weak matches. The two guards fail in
-    opposite directions and are both needed.
+    USED ONLY AS A TIEBREAK, NEVER AS THE PRIMARY KEY, AND A PRE-PASS IS WHY.
+    On its own it scores a one-token set 1.0 against anything, so sorting by it
+    ranks SHORT rows above STRONG ones -- the opposite of the intent. Measured
+    against a focus of {canary, deploy, five, minutes, window}:
+
+        "the deploy canary window is thirty minutes"   4 shared, overlap 0.800
+        "canary"                                       1 shared, overlap 1.000
+
+    The one-token row won. `_rank_key` therefore sorts on the SHARED COUNT first
+    and uses this only to separate rows that share the same number of tokens.
     """
     if not a or not b:
         return 0.0
     return len(a & b) / min(len(a), len(b))
+
+
+def _rank_key(row_tokens: frozenset[str], focus_tokens: frozenset[str], row_id: int) -> tuple:
+    """Sort key for a candidate: most shared tokens first, then tightest overlap.
+
+    ABSOLUTE OVERLAP IS THE PRIMARY SIGNAL because it is the one that answers
+    "how much of this focus does the row actually account for". The coefficient
+    normalises that away -- which is what made a one-token row outrank a
+    four-token match -- so it is demoted to a tiebreak between rows that share
+    equally many tokens. `row_id` last keeps equal scores DETERMINISTIC, which
+    matters because the SQL carries no ORDER BY.
+    """
+    shared = row_tokens & focus_tokens
+    return (-len(shared), -_overlap_coefficient(row_tokens, focus_tokens), row_id)
 
 
 def select_conflict_candidates(
@@ -172,15 +190,21 @@ def select_conflict_candidates(
     incidental match is the token's SPECIFICITY, not the count; a count is a crude
     proxy, and an IDF-weighted guard is the honest version of the idea. The harm the
     issue documents -- weak matches TAKING SLOTS -- is closed by the ordering below
-    instead, which needs no such trade.
+    instead, which needs no such trade. NOTE the ordering had to be CORRECTED to
+    deliver that: ranking on the coefficient alone put SHORT rows above strong
+    ones, so the primary key is the shared COUNT and the coefficient is a
+    tiebreak. See `_rank_key`.
 
     NO ORDERING BEFORE TRUNCATION. The SQL has no ORDER BY and nothing sorted the
     matches, so the rows that survived ``max_candidates`` were whichever SQLite
     returned first -- not the most related. Same class as techne#861
     (``import_resolve`` resolving by row order). Sorting is by descending overlap
-    coefficient, then by id: the id tiebreak is not cosmetic, it makes the
-    selection DETERMINISTIC for equal scores, which techne#873 is the standing
-    reminder about.
+    coefficient, then by id. The id tiebreak is not cosmetic: the SQL carries no
+    ORDER BY, so two rows with identical scores would otherwise be ordered by
+    whatever SQLite returned first. (An earlier draft cited techne#873's
+    PYTHONHASHSEED hazard here. That analogy is wrong -- `all_rows` is a list
+    from a cursor and no set is iterated in ranking, only intersected for its
+    size. The real hazard is the missing ORDER BY, which is a different thing.)
 
     This function is callable at the federation read-merge call site as well as
     the local consolidate emit path — it takes a plain dict and a db_path, with
@@ -211,15 +235,13 @@ def select_conflict_candidates(
     finally:
         conn.close()
 
-    scored: list[tuple[float, int, dict]] = []
+    scored: list[tuple[tuple, dict]] = []
     if candidate_tags:
         # Primary path: at least one shared tag token. Tags are curated, so no floor.
         for r in all_rows:
             row_tags = _parse_tags(r.get("tags"))
             if row_tags & candidate_tags:
-                scored.append(
-                    (_overlap_coefficient(row_tags, candidate_tags), int(r.get("id") or 0), r)
-                )
+                scored.append((_rank_key(row_tags, candidate_tags, int(r.get("id") or 0)), r))
     else:
         # Fallback: significant-word overlap in content (no tags on candidate).
         candidate_words = _content_keywords(candidate_row.get("content", ""))
@@ -228,17 +250,11 @@ def select_conflict_candidates(
                 row_words = _content_keywords(r.get("content", ""))
                 shared = row_words & candidate_words
                 if len(shared) >= min_shared_keywords:
-                    scored.append(
-                        (
-                            _overlap_coefficient(row_words, candidate_words),
-                            int(r.get("id") or 0),
-                            r,
-                        )
-                    )
+                    scored.append((_rank_key(row_words, candidate_words, int(r.get("id") or 0)), r))
 
-    # Descending score, ascending id. The id keeps equal scores deterministic.
-    scored.sort(key=lambda t: (-t[0], t[1]))
-    matched = [r for _score, _id, r in scored]
+    # _rank_key is already ordered "best first"; the id inside it keeps ties stable.
+    scored.sort(key=lambda t: t[0])
+    matched = [r for _key, r in scored]
 
     log.debug("conflict: found %d candidate(s) for id=%s", len(matched), candidate_id)
     return matched[:max_candidates]
