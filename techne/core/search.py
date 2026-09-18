@@ -1553,8 +1553,15 @@ def search(
                 head = list(reversed(keep)) + promoted[:dropped]
                 overflow = list(reversed(displaced))
                 for row in promoted[dropped:]:
-                    # Nothing was displaceable (an all-curated head): put the key back
-                    # so the tail may still reach it through the lexical channel.
+                    # NOTHING WAS DISPLACEABLE. The cause named here used to be "an
+                    # all-curated head", which the arithmetic above rules out
+                    # (promotion needs `deficit > 0`, so `in_head < reserve`, and
+                    # `reserve <= head_budget - 1`). The reachable cause is a SHORT
+                    # head: a thin vector channel returns fewer rows than the budget
+                    # and all of them are curated, so there is no non-curated row to
+                    # displace while the scoped pool still finds a curated row the
+                    # union never fetched. Put the key back so the tail may still
+                    # reach it through the lexical channel (Prudence, #966 r2).
                     seen.discard((row["source_table"], row["id"]))
 
     tail: list[dict] = []

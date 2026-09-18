@@ -221,6 +221,57 @@ def test_a_thin_vec_channel_does_not_mark_a_tail_row_reserved(db, monkeypatch):
     )
 
 
+def test_a_short_all_curated_head_puts_the_key_back(db, monkeypatch):
+    """The branch whose comment used to name an impossible cause (Prudence, #966 r2).
+
+    An all-curated head at full budget cannot happen — promotion needs `deficit > 0`,
+    so `in_head < reserve <= head_budget - 1`. What IS reachable is a SHORT head: a
+    thin vector channel returns fewer rows than the budget, all curated, so nothing
+    is displaceable while the scoped pool still finds a curated row the union never
+    fetched. That row's key must go back to `seen` so the lexical channel can still
+    seat it.
+    """
+    vec = [_row("knowledge", 90, 0.10), _row("knowledge", 91, 0.11)]
+    pool_only = _row("knowledge", 92, 0.30)
+    fts = [pool_only]
+    _patch_channels(monkeypatch, vec + [pool_only], fts)
+
+    page = search(db, "q", table="all", limit=10)
+
+    ids = [(r["source_table"], r["id"]) for r in page]
+    assert ("knowledge", 92) in ids, "the un-displaceable promotion must still reach the page"
+    assert len(ids) == len(set(ids)), "and it must not appear twice"
+
+
+def test_the_search_cli_honours_the_config_knob(db, monkeypatch):
+    """Prudence #966 r2: `techne search` defaults to `--table all` and held a Config,
+    but called `search()` without the knob — so an operator who set
+    `search.curated_head_slots: 0`, then reached for the CLI to check whether it took
+    effect, got the reservation anyway from the surface they debug with. Three pieces
+    of prose promise `0` restores the pre-#946 page.
+    """
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.config import Config
+
+    vec = [_row("observations", i, 0.10 + i / 100) for i in range(12)]
+    vec.append(_row("knowledge", 99, 0.90))
+    _patch_channels(monkeypatch, vec)
+
+    cfg = Config()
+    cfg.db_path = db
+    cfg.data_dir = db.parent
+    cfg.search.curated_head_slots = 0
+    monkeypatch.setattr(Config, "load", classmethod(lambda cls, *a, **k: cfg))
+
+    out = CliRunner().invoke(main, ["search", "q", "--limit", "10"]).output
+
+    assert "knowledge-99" not in out, (
+        "the CLI fired the reservation with search.curated_head_slots = 0"
+    )
+
+
 def test_a_page_already_carrying_its_quota_is_untouched(db, monkeypatch):
     """Curated rows that won on distance are not re-promoted, and nothing is marked
     reserved — the reservation only ever acts on a deficit."""
