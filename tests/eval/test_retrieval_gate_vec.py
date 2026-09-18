@@ -51,6 +51,19 @@ pytestmark = pytest.mark.eval_vec
 _HALF_LIFE_DAYS = 30.0  # pinned — see module docstring, matches #385's convention
 
 
+def _is_gated(cfg: dict, cls: str) -> bool:
+    """Is this class actually ASSERTED, as opposed to merely present in the yaml?
+
+    The report used `cls in cfg`, which is true for any class carrying a config
+    block whether or not anything reads it -- so a class with unread floors
+    printed as GATED. Enforcement is what this must key on.
+    """
+    g = cfg.get(cls)
+    if not isinstance(g, dict):
+        return False
+    return ("recall_at_5_floor" in g and "recall_at_10_floor" in g) or "fpr_ceiling" in g
+
+
 def _load_gold_yaml() -> tuple[list[dict], dict]:
     doc = yaml.safe_load((_EVAL_DIR / "retrieval_gold.yaml").read_text())
     return doc["tasks"], doc["config_vec"]
@@ -143,7 +156,7 @@ def test_retrieval_gate_vec(pinned_model2vec, tmp_path, capsys):
             f"{'r@10':>5} {'mrr':>5} {'fpr':>5} {'n':>3}"
         )
         for r in rows:
-            gated = "Y" if r["class"] in cfg else "-"
+            gated = "Y" if _is_gated(cfg, r["class"]) else "-"
             print(
                 f"{r['id']:<30} {r['class']:<11} {gated:>5} "
                 f"{r['recall_at_5']:>5} {r['recall_at_10']:>5} {r['mrr']:>5} "
@@ -153,7 +166,7 @@ def test_retrieval_gate_vec(pinned_model2vec, tmp_path, capsys):
         print("per-class means (r@5 / r@10 / mrr / fpr):")
         for cls in sorted(per_class):
             m = per_class[cls]
-            gated = "GATED" if cls in cfg else "informational"
+            gated = "GATED" if _is_gated(cfg, cls) else "informational"
             print(
                 f"  [{cls:<10}] r@5={m['recall_at_5']}  r@10={m['recall_at_10']}  "
                 f"mrr={m['mrr']}  fpr={m['fpr']}  (n={m['n']}, {gated})"
@@ -182,7 +195,22 @@ def test_retrieval_gate_vec(pinned_model2vec, tmp_path, capsys):
     # --- frozen per-class kill-gates (techne#399, ratcheted #401) ---
     # Unlike #385, paraphrase IS gated here — vec-first hybrid recall is
     # exactly the mechanism meant to serve zero-token-overlap queries.
-    for cls in ("exact", "filter", "paraphrase"):
+    # DERIVED FROM THE CONFIG, NOT HARDCODED (techne#935 pre-pass). This was a
+    # literal tuple of class names, so adding a class WITH floors to the yaml left
+    # those floors unread -- dead config that the report nonetheless printed as
+    # GATED, because the report's label keys on `cls in cfg` while enforcement
+    # keyed on the tuple. Two predicates, one of them decorative.
+    #
+    # A class is gated iff it declares recall floors. `negative` declares an
+    # fpr_ceiling instead and is asserted separately below; `k_values` is not a
+    # class.
+    gated_classes = sorted(
+        c
+        for c, g in cfg.items()
+        if isinstance(g, dict) and "recall_at_5_floor" in g and "recall_at_10_floor" in g
+    )
+    assert gated_classes, "no class declares recall floors; the gate would assert nothing"
+    for cls in gated_classes:
         g = cfg[cls]
         m = per_class[cls]
         assert m["recall_at_5"] >= g["recall_at_5_floor"], (

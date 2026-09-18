@@ -35,6 +35,19 @@ pytestmark = pytest.mark.eval_gate
 _HALF_LIFE_DAYS = 30.0  # pinned — see module docstring
 
 
+def _is_gated(cfg: dict, cls: str) -> bool:
+    """Is this class actually ASSERTED, as opposed to merely present in the yaml?
+
+    The report used `cls in cfg`, which is true for any class carrying a config
+    block whether or not anything reads it -- so a class with unread floors
+    printed as GATED. Enforcement is what this must key on.
+    """
+    g = cfg.get(cls)
+    if not isinstance(g, dict):
+        return False
+    return ("recall_at_5_floor" in g and "recall_at_10_floor" in g) or "fpr_ceiling" in g
+
+
 def _load_gold_yaml() -> tuple[list[dict], dict]:
     doc = yaml.safe_load((_EVAL_DIR / "retrieval_gold.yaml").read_text())
     return doc["tasks"], doc["config"]
@@ -108,7 +121,7 @@ def test_retrieval_gate(tmp_path, capsys):
         print("per-class means (r@5 / r@10 / mrr / fpr):")
         for cls in sorted(per_class):
             m = per_class[cls]
-            gated = "GATED" if cls in cfg else "informational"
+            gated = "GATED" if _is_gated(cfg, cls) else "informational"
             print(
                 f"  [{cls:<10}] r@5={m['recall_at_5']}  r@10={m['recall_at_10']}  "
                 f"mrr={m['mrr']}  fpr={m['fpr']}  (n={m['n']}, {gated})"
@@ -118,7 +131,22 @@ def test_retrieval_gate(tmp_path, capsys):
     # Asserted SEPARATELY per servable class so a regression in one cannot hide
     # behind another's headroom. paraphrase has NO config entry → never gated
     # (informational only); its scores are printed above for the VECTOR-arm.
-    for cls in ("exact", "filter"):
+    # DERIVED FROM THE CONFIG, NOT HARDCODED (techne#935 pre-pass). This was a
+    # literal tuple of class names, so adding a class WITH floors to the yaml left
+    # those floors unread -- dead config that the report nonetheless printed as
+    # GATED, because the report's label keys on `cls in cfg` while enforcement
+    # keyed on the tuple. Two predicates, one of them decorative.
+    #
+    # A class is gated iff it declares recall floors. `negative` declares an
+    # fpr_ceiling instead and is asserted separately below; `k_values` is not a
+    # class.
+    gated_classes = sorted(
+        c
+        for c, g in cfg.items()
+        if isinstance(g, dict) and "recall_at_5_floor" in g and "recall_at_10_floor" in g
+    )
+    assert gated_classes, "no class declares recall floors; the gate would assert nothing"
+    for cls in gated_classes:
         g = cfg[cls]
         m = per_class[cls]
         assert m["recall_at_5"] >= g["recall_at_5_floor"], (

@@ -369,9 +369,12 @@ def seed(db_path: Path) -> dict[str, str]:
     # without one: `search()` builds `head` from vec_results and computes
     # `fts_only` by EXCLUDING every key already in vec_keys, so the tail can only
     # ever hold rows the vector channel did not return. Instrumented before this
-    # row existed, `_curated_first` was called 6 times across the whole gate and
-    # reordered NOTHING -- 4 of those calls had an empty lexical tail and the
-    # other 2 a homogeneous one.
+    # row existed, `_curated_first` REORDERED NOTHING across the whole gate.
+    # Instrumented by wrapping it and replaying every task: it is called ONCE PER
+    # TASK (25 calls, 9 of them seeing a non-empty lexical tail) and reordered 0
+    # of 25. An earlier note said "called 6 times", which was wrong -- it is
+    # reached unconditionally whenever the vector channel returns anything. The 0
+    # reorders is the number that matters, and it survived the correction.
     #
     # WHY THE FILLER, AND WHY THIS MUCH OF IT. The pinned backend is
     # model2vec/potion-base-8M, a STATIC TOKEN-EMBEDDING AVERAGE, so a short row
@@ -382,21 +385,28 @@ def seed(db_path: Path) -> dict[str, str]:
     # vector channel stops returning the row, while FTS still matches the literal
     # token exactly.
     #
-    # THE MULTIPLIER IS EMPIRICAL, NOT PRINCIPLED, AND THE RELATIONSHIP IS NOT
-    # MONOTONIC. Measured against this corpus with the pinned model:
+    # THE MULTIPLIER IS EMPIRICAL, AND A PRE-PASS SHOWED THE FIRST ACCOUNT OF IT
+    # WAS WRONG. That account gave a table of multipliers against match_source and
+    # called x6 "mid-band":
     #
-    #     filler x3  -> rank 5   fts+vec
-    #     filler x4  -> rank 5   fts+vec
-    #     filler x5  -> rank 10  fts        <- the band
-    #     filler x6  -> rank 10  fts        <- chosen, middle of it
-    #     filler x8  -> rank 7   fts+vec
+    #     x3 fts+vec | x4 fts+vec | x5 fts | x6 fts | x8 fts+vec
     #
-    # Each stable across three runs. x6 sits in the middle of the observed band
-    # rather than at its edge. THE GATE ASSERTS match_source == "fts", so if a
-    # model or fusion change makes the vector channel start returning this row,
-    # the task FAILS LOUDLY instead of silently going back to testing nothing --
-    # which is the whole point, since a task that quietly stops exercising the
-    # tail is indistinguishable from the gap techne#935 describes.
+    # x7 was never measured, so "middle" was the unmeasured claim used to justify
+    # the chosen value. Measuring it exposed something larger: re-running the sweep
+    # with a DIFFERENT identifier string gave fts+vec at x5, x6, x7 AND x8. The
+    # fts-only property is therefore a JOINT property of the identifier and the
+    # filler, not a function of the multiplier, and there is no "band" to sit in
+    # the middle of.
+    #
+    # WHAT IS ACTUALLY ESTABLISHED, and it is enough: THIS row -- this identifier
+    # at this dilution against this corpus and this pinned model -- returns
+    # match_source="fts" at rank 10, verified repeatedly. Nothing generalises from
+    # that to other identifiers, and the gate does not need it to.
+    #
+    # WHICH IS EXACTLY WHY THE GATE ASSERTS match_source == "fts" DIRECTLY. A
+    # property this contingent cannot be protected by a recall number; if any
+    # change moves the row onto the vector channel the task silently stops testing
+    # the tail, and only the channel assertion notices.
     _G935_FILLER = (
         "The service mesh terminates TLS at the sidecar and forwards plaintext over "
         "the loopback interface. Connection pooling is tuned per upstream with a "
