@@ -132,6 +132,16 @@ def test_version_string_carries_the_revision(monkeypatch):
     )
     out = _version_string()
     assert "21813c1" in out and "+" in out, out
+    # THE HEADLINE TRADE, PINNED (Prudence, #971). The ` (installed)` suffix is the
+    # whole reason the string is deliberately not PEP 440, and the docstring shouts
+    # about it -- but removing it left the FULL suite green, 4220 passed. The most
+    # plausible future change here is someone making the string PEP 440-legal, which
+    # is the one change that docstring exists to forbid. A prose warning with no test
+    # behind it is the weakest possible guard.
+    assert "(installed)" in out, (
+        "the build word is gone. It is what makes this string deliberately "
+        "non-PEP-440; if that trade is being reversed, reverse it on purpose."
+    )
 
 
 def test_version_string_survives_an_unresolvable_build(monkeypatch):

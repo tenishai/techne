@@ -7,6 +7,7 @@ they report. :func:`format_banner` renders the terse operator-facing banner.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -152,7 +153,10 @@ def _installed_revision() -> str | None:
         return None
 
 
-def _revision_info(package_path: Path) -> dict:
+def _revision_info(
+    package_path: Path,
+    installed_revision: "Callable[[], str | None] | None" = None,
+) -> dict:
     """Identify the code that is actually imported, not the version it claims.
 
     ``__version__`` comes from ``importlib.metadata`` FOR AN INSTALLED BUILD
@@ -207,7 +211,19 @@ def _revision_info(package_path: Path) -> dict:
         # supplying it does NOT weaken the paragraph above. `drifted` stays None:
         # naming the commit you were built from says nothing about whether a newer
         # one exists, which is exactly the distinction this branch already draws.
-        info["revision"] = _installed_revision()
+        # INJECTABLE, TO KEEP THIS A PURE FUNCTION OF ITS ARGUMENTS (Prudence, #971).
+        # `_installed_revision()` ignores package_path and reads the REAL installed
+        # distribution, so the moment this branch started calling it, a caller that
+        # constructs a synthetic path no longer controlled the answer. That seam was
+        # crossed quietly and exactly one test witnessed it --
+        # test_site_packages_is_installed_and_reads_no_refs passed only because this
+        # venv is an EDITABLE install; against a VCS-installed environment (the one
+        # this change exists to serve) it returns a real sha and the test fails.
+        #
+        # Mocking it at each call site would have worked; restoring the purity is
+        # better, because the next caller gets it for free.
+        resolve = _installed_revision if installed_revision is None else installed_revision
+        info["revision"] = resolve()
         return info
 
     root = package_path.parent
