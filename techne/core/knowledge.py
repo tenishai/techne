@@ -124,8 +124,8 @@ def store(
             """INSERT INTO knowledge
                  (type, content, source, tags, confidence, confidence_numeric,
                   anchor_path, anchor_symbol, content_hash, anchor_git_sha,
-                  written_by, origin_source, origin_session)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                  written_by, origin_source, origin_session, last_confirmed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
             (
                 type,
                 redact_credentials(content),
@@ -218,8 +218,9 @@ def _supersede_in_conn(conn, old_id: int, new_content: str, source: str) -> int:
     cur = conn.execute(
         """INSERT INTO knowledge
              (type, content, source, tags, confidence, confidence_numeric,
-              anchor_path, anchor_symbol, content_hash, anchor_git_sha)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+              anchor_path, anchor_symbol, content_hash, anchor_git_sha,
+              last_confirmed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
         (
             old["type"],
             redact_credentials(new_content),
@@ -408,8 +409,10 @@ def _merge_in_conn(
             )
 
     cur = conn.execute(
-        """INSERT INTO knowledge (type, content, source, tags, confidence, confidence_numeric)
-           VALUES (?, ?, ?, ?, ?, ?)""",
+        """INSERT INTO knowledge
+             (type, content, source, tags, confidence, confidence_numeric,
+              last_confirmed_at)
+           VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
         (ktype, redact_credentials(merged_content), source, tags or "", confidence, numeric),
     )
     new_id = cur.lastrowid
