@@ -213,3 +213,160 @@ def test_a_parent_imported_before_v27_is_not_protected(db_path, tmp_path):
     assert len(_obs(db_path)) == 4, (
         "the parent's turns are duplicated, which is the documented limit"
     )
+
+
+def _assistant_text(uuid: str, text: str, ts: str, session_id: str) -> dict:
+    return {
+        "type": "assistant",
+        "uuid": uuid,
+        "sessionId": session_id,
+        "timestamp": ts,
+        "message": {"content": [{"type": "text", "text": text}]},
+    }
+
+
+def _tool_use(uuid: str, tool_id: str, cmd: str, ts: str, session_id: str) -> dict:
+    return {
+        "type": "assistant",
+        "uuid": uuid,
+        "sessionId": session_id,
+        "timestamp": ts,
+        "message": {
+            "content": [
+                {"type": "tool_use", "id": tool_id, "name": "Bash", "input": {"command": cmd}}
+            ]
+        },
+    }
+
+
+def _tool_result(uuid: str, tool_id: str, out: str, ts: str, session_id: str) -> dict:
+    return {
+        "type": "user",
+        "uuid": uuid,
+        "sessionId": session_id,
+        "timestamp": ts,
+        "message": {"content": [{"type": "tool_result", "tool_use_id": tool_id, "content": out}]},
+    }
+
+
+def test_all_three_insert_paths_are_guarded(db_path, tmp_path):
+    """THE REGRESSION A FUTURE AUTHOR WOULD PLAUSIBLY INTRODUCE (Prudence, #972).
+
+    Every other record in this file is built by `_prompt`, so only the UserPrompt
+    INSERT was ever exercised. Measured by Prudence: removing `source_uuid` from
+    the AssistantText and tool-result INSERTs left the WHOLE SUITE green while the
+    guard silently stopped working for both -- and those are precisely the two
+    paths where the original 44 duplicates were observed, since they were
+    (tool_name, content) rows.
+
+    The three statements are near-identical column lists in one function: what a
+    formatter reflows, a refactor splits, or a copy-paste extends for a fourth
+    observation type.
+
+    THIS ALSO EXERCISES THE ONE STRUCTURAL SUBTLETY, which was previously correct
+    by reasoning rather than by test. Skipping a replayed ASSISTANT record means
+    its `tool_use` never enters `pending`. The tool ROW is stamped with the
+    TOOL_RESULT record's uuid, so the pair is skipped or kept together and no
+    orphan row is written -- see the replayed_skipped assertion below, where 3 of
+    4 replayed records skip and the tool_use is the one that does not.
+    """
+    parent_id = "aaaa1111-0000-0000-0000-00000000000a"
+    resume_id = "bbbb2222-0000-0000-0000-00000000000b"
+
+    shared = [
+        _prompt("u-prompt", "do the thing", "2026-09-17T10:00:00Z", parent_id),
+        _assistant_text("u-assist", "here is my plan", "2026-09-17T10:00:01Z", parent_id),
+        _tool_use("u-use", "tool-1", "pytest -q", "2026-09-17T10:00:02Z", parent_id),
+        _tool_result("u-result", "tool-1", "3 passed", "2026-09-17T10:00:03Z", parent_id),
+    ]
+    parent = tmp_path / f"{parent_id}.jsonl"
+    _write(parent, shared)
+    import_transcript(db_path, parent)
+
+    before = _obs(db_path)
+    assert any("plan" in c for c in before), "precondition: assistant text was imported"
+    assert any("pytest" in c for c in before), (
+        "precondition: the tool row was imported. `should_import` drops read-only "
+        "Bash navigation, so the command has to be one with real signal."
+    )
+
+    resume = tmp_path / f"{resume_id}.jsonl"
+    _write(
+        resume,
+        [dict(r, sessionId=resume_id) for r in shared]
+        + [_prompt("u-new", "and now this", "2026-09-17T10:05:00Z", resume_id)],
+    )
+    result = import_transcript(db_path, resume)
+
+    assert _obs(db_path, resume_id) == ["and now this"], (
+        "the resume contributed more than its own turn; one of the three INSERT "
+        f"paths is unguarded. got: {_obs(db_path, resume_id)}"
+    )
+    # THREE OF FOUR, AND THE MISSING ONE IS THE POINT. The `tool_use` record's
+    # uuid never reaches `observations`: a tool_use only populates `pending`, and
+    # the row is written under the TOOL_RESULT record's uuid. So the tool_use is
+    # re-processed on the resume -- harmlessly, because all it does is repopulate
+    # `pending`, and its paired result IS skipped, so no row is written.
+    #
+    # That is the structural subtlety in this change, now MEASURED rather than
+    # hand-traced: skipping a replayed assistant record means its tool_use never
+    # enters `pending`, and the pair is still kept or skipped together.
+    assert result["replayed_skipped"] == 3, result
+    assert sorted(_obs(db_path)) == sorted(before + ["and now this"])
+
+
+def test_the_sync_adapter_also_guards_a_resume(tmp_path):
+    """THE SECOND DOOR (Prudence, #972). A different writer, the same duplication.
+
+    `techne/sync/jsonl_transcript.py` writes into `observations` with the same
+    pairing and filtering as transcript_import, but its idempotency is a per-file
+    BYTE-OFFSET cursor -- and a resumed session is a NEW file, so start_byte=0 and
+    every replayed parent record is emitted again under the new session id.
+
+    Measured by Prudence on a fresh v27 store: 5 rows where 3 are correct, with
+    source_uuid NULL throughout. The NULL stamping was the worse half: those rows
+    could not protect a later `techne import` either, so the documented "pre-v27
+    only" limit reappeared on a store that had never seen v26, from rows written
+    AFTER the upgrade.
+    """
+    import sqlite3
+
+    from techne.core.database import init_db
+    from techne.sync.jsonl_transcript import _ingest_records_from_offset
+
+    db = tmp_path / "sync.db"
+    init_db(db)
+
+    parent_id = "cccc3333-0000-0000-0000-00000000000c"
+    resume_id = "dddd4444-0000-0000-0000-00000000000d"
+    shared = [
+        _prompt("s-1", "first question", "2026-09-17T10:00:00Z", parent_id),
+        _prompt("s-2", "second question", "2026-09-17T10:01:00Z", parent_id),
+    ]
+    parent = tmp_path / f"{parent_id}.jsonl"
+    resume = tmp_path / f"{resume_id}.jsonl"
+    _write(parent, shared)
+    _write(
+        resume,
+        [dict(r, sessionId=resume_id) for r in shared]
+        + [_prompt("s-3", "third question", "2026-09-17T10:05:00Z", resume_id)],
+    )
+
+    for i, path in enumerate((parent, resume)):
+        _ingest_records_from_offset(db, path, 0, "test", cursor_key=path.stem, inode=i, head="h")
+
+    conn = sqlite3.connect(db)
+    try:
+        rows = conn.execute(
+            "SELECT session_id, source_uuid FROM observations ORDER BY id"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert len(rows) == 3, (
+        f"the adapter duplicated the parent's turns: {len(rows)} rows where 3 are correct"
+    )
+    assert all(su for _sid, su in rows), (
+        "the adapter left source_uuid NULL, so its rows cannot protect a later "
+        f"`techne import` either: {rows}"
+    )

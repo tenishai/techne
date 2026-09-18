@@ -176,6 +176,27 @@ def _ingest_records_from_offset(
                 ts = normalize_timestamp(rec.get("timestamp"))
                 blocks = content_blocks(rec)
 
+                # THE SECOND DOOR INTO techne#962, AND IT OPENS ON A FRESH STORE.
+                # This adapter is a second writer into `observations` with the same
+                # pairing and filtering as transcript_import, but its idempotency is
+                # a per-file BYTE-OFFSET cursor -- and a resumed session is a NEW
+                # file, so start_byte=0 and every replayed parent record is emitted
+                # again under the new session id. Measured on a fresh v27 store: 5
+                # rows where 3 are correct.
+                #
+                # The NULL stamping was the worse half: rows written here could not
+                # protect a later `techne import` either, so the documented "pre-v27
+                # only" limit reappeared on a store that had never seen v26, from
+                # rows written AFTER the upgrade.
+                src_uuid = rec.get("uuid")
+                if src_uuid:
+                    already = conn.execute(
+                        "SELECT 1 FROM observations WHERE source_uuid = ? LIMIT 1",
+                        (src_uuid,),
+                    ).fetchone()
+                    if already:
+                        continue
+
                 if rtype == "assistant":
                     for b in blocks:
                         if isinstance(b, dict) and b.get("type") == "tool_use":
@@ -207,9 +228,10 @@ def _ingest_records_from_offset(
                         _ensure_session(conn, session_id, jsonl_path)
                         conn.execute(
                             """INSERT INTO observations
-                               (session_id, timestamp, tool_name, content, tier, event_at, content_hash)
-                               VALUES (?, ?, 'AssistantText', ?, 'hot', ?, ?)""",
-                            (session_id, ts, content, ts, content_hash),
+                               (session_id, timestamp, tool_name, content, tier, event_at,
+                                content_hash, source_uuid)
+                               VALUES (?, ?, 'AssistantText', ?, 'hot', ?, ?, ?)""",
+                            (session_id, ts, content, ts, content_hash, src_uuid),
                         )
                         obs_count += 1
 
@@ -241,9 +263,18 @@ def _ingest_records_from_offset(
                             event_ts = tu["ts"] or ts
                             conn.execute(
                                 """INSERT INTO observations
-                                   (session_id, timestamp, tool_name, content, tier, event_at, content_hash)
-                                   VALUES (?, ?, ?, ?, 'hot', ?, ?)""",
-                                (tu["session_id"], event_ts, tool_name, content, event_ts, content_hash),
+                                   (session_id, timestamp, tool_name, content, tier, event_at,
+                                    content_hash, source_uuid)
+                                   VALUES (?, ?, ?, ?, 'hot', ?, ?, ?)""",
+                                (
+                                    tu["session_id"],
+                                    event_ts,
+                                    tool_name,
+                                    content,
+                                    event_ts,
+                                    content_hash,
+                                    src_uuid,
+                                ),
                             )
                             obs_count += 1
 
@@ -262,9 +293,10 @@ def _ingest_records_from_offset(
                         _ensure_session(conn, session_id, jsonl_path)
                         conn.execute(
                             """INSERT INTO observations
-                               (session_id, timestamp, tool_name, content, tier, event_at, content_hash)
-                               VALUES (?, ?, 'UserPrompt', ?, 'hot', ?, ?)""",
-                            (session_id, ts, content, ts, prompt_hash),
+                               (session_id, timestamp, tool_name, content, tier, event_at,
+                                content_hash, source_uuid)
+                               VALUES (?, ?, 'UserPrompt', ?, 'hot', ?, ?, ?)""",
+                            (session_id, ts, content, ts, prompt_hash, src_uuid),
                         )
                         obs_count += 1
 
