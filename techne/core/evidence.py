@@ -136,10 +136,15 @@ class SuiteEvidence:
 class CheckEvidence:
     """What non-test verification commands did, and whether it can be known.
 
-    `green` is TRUE only when at least one tool stated success and none stated
-    failure. It is None whenever the outcome cannot be read -- including the case
-    where a check demonstrably RAN but is silent on success, which is not the
-    same as "no check ran" and must not be reported as green.
+    `green` is TRUE only when at least one tool stated success, none stated
+    failure, AND NO RECOGNISED TOOL WENT UNREAD. That last clause is load-bearing
+    and was missing: without it a readable tool vouched for a silent one, so
+    `ruff check` plus `tsc --noEmit` reported green with tsc having said nothing.
+    A success can only speak for the tools that stated one.
+
+    It is None whenever the outcome cannot be read -- including the case where a
+    check demonstrably RAN but is silent on success, which is not the same as
+    "no check ran" and must not be reported as green.
     """
 
     ran: bool = False
@@ -255,8 +260,14 @@ def _row_totals_unreliable(output_text: str, p: int | None, f: int | None, e: in
 # matches a command SUBSTRING in the ledger and answers "did this appear",
 # never "what did it return" -- so an agent that runs `ruff check`, gets 14
 # errors, and then writes "lint is clean" produced a BACKED verdict. This repo's
-# own PRs are full of "ruff and mypy are clean", a sentence with no checkable
-# claim shape until now.
+# own PRs carry lint-is-clean claims with no checkable shape until now.
+#
+# THE SHAPE IS REAL, THE QUOTE WAS NOT. An earlier version of this comment said the
+# PRs are "full of 'ruff and mypy are clean'". Measured over the last 40 PR bodies:
+# that exact phrase appears ZERO times -- this repo has no mypy (issue #896), so it
+# could not -- while a lint-or-typecheck-is-clean claim appears in 21 of them. The
+# claim type is worth having for the 21; the invented sentence was not worth
+# writing.
 #
 # OUTCOME IS READ FROM THE TOOL'S OWN SUMMARY LINE, AND THAT IS NOT A STYLISTIC
 # CHOICE -- IT IS THE ONLY ROUTE AVAILABLE. techne#939 proposes reading the exit
@@ -631,8 +642,11 @@ def _shell_c_script(segment: str) -> str | None:
 def _classify_check_command(command: str) -> tuple[str | None, bool]:
     """``(tool_head, outcome_is_readable)`` for a verification command, else ``(None, False)``.
 
-    Matched on the segment's COMMAND HEAD, exactly as ``_command_runs_tests``
-    does and deliberately NOT as a substring of the whole command. pi-warden's
+    Matched on the segment's COMMAND HEAD, the same way ``_command_runs_tests``
+    does and deliberately NOT as a substring of the whole command. ("The same
+    way", not "exactly as": that function also resolves runner SUBCOMMANDS with a
+    position rule this one does not need, and the two are not line-for-line
+    identical -- see it for the reasoning behind the head rule.) pi-warden's
     equivalent is a ``\b``-bounded regex over the entire command string, so
     ``git commit -m "fix the ruff warning"`` classifies as a check there. Ours
     keeps the quote-aware split and the head rule; only the vocabulary is
@@ -673,7 +687,10 @@ def _parse_check_output(head: str, output: str) -> bool | None:
     allowed to look alike.
     """
     markers = _CHECK_TOOLS_WITH_SUMMARY.get(head)
-    if not markers:
+    if not markers or not output:
+        # `_bash_output` returns None when the row's command/output boundary is
+        # ambiguous. No readable output means no stated outcome, which is
+        # UNVERIFIABLE -- never green.
         return None
     success_re, failure_re = markers
     saw_ok = re.search(success_re, output) is not None
@@ -1051,7 +1068,15 @@ def query_turn_evidence(
                 if head:
                     if head not in check_tools:
                         check_tools.append(head)
-                    outcome = _parse_check_output(head, content) if readable else None
+                    # THE OUTPUT HALF, NOT THE WHOLE ROW (techne#939 pre-pass).
+                    # `content` is "Ran: <command>\nOutput: ...", so passing it
+                    # whole put the COMMAND TEXT in scope for the success regex:
+                    # `ruff check -q . ; echo "All checks passed!"` parsed as green
+                    # while ruff printed failures, because the echo is in the
+                    # command. That is the same "reading a command's own text as
+                    # its output" trap `_bash_output` already exists to close for
+                    # the test-totals path.
+                    outcome = _parse_check_output(head, _bash_output(content)) if readable else None
                     if outcome is None:
                         if head not in check_unreadable:
                             check_unreadable.append(head)
@@ -1142,12 +1167,32 @@ def query_turn_evidence(
         actions=actions,
         checks=CheckEvidence(
             ran=bool(check_tools),
-            # ANY stated failure wins over any stated success: a run that reported
-            # errors is not redeemed by a second tool reporting none. Mirrors the
-            # aggregation `_row_totals_unreliable` enforces for test totals.
+            # TWO RULES, AND THE SECOND WAS MISSING (techne#939 pre-pass).
+            #
+            # 1. ANY stated failure wins over any stated success. A run that
+            #    reported errors is not redeemed by another reporting none.
+            #    NOTE this is per-RESULT, not per-tool: the list cannot tell a
+            #    second tool from a RERUN of the same one, so `ruff` failing then
+            #    passing after a fix still reports not-clean for the window. That
+            #    is the safe direction, and it is why the gate is scoped to a
+            #    session window rather than to a single command.
+            #
+            # 2. AN UNREADABLE TOOL BLOCKS GREEN. `green` ignored `unreadable`
+            #    entirely, so `ruff check` + `tsc --noEmit` gave
+            #    green=True, tools=['ruff','tsc'], unreadable=['tsc'] -- and the
+            #    detail then read "Verification clean: ruff, tsc reported no
+            #    problems." tsc reported NOTHING. "ruff and tsc are clean" came
+            #    back BACKED on ruff alone, which is precisely the false green this
+            #    claim type exists to remove, asserted in the ledger's own voice.
+            #    A success can only speak for the tools that stated one.
+            #
+            # NOT "mirrors _row_totals_unreliable", which an earlier comment
+            # claimed: that guard is PER-ROW and its own docstring says asking the
+            # question of the union "lets an intact row vouch for a bounded one" --
+            # the opposite of rule 2. Only rule 1 resembles the suite_green block.
             green=(
                 None
-                if not check_results
+                if not check_results or check_unreadable
                 else (False if any(r is False for r in check_results) else True)
             ),
             tools=check_tools,
@@ -1332,9 +1377,11 @@ def check_claims(claims: list[dict], evidence: Evidence) -> list[dict]:
                 # same reason `totals_unreliable` refuses to call a test run green.
                 status = "unverifiable"
                 detail = (
-                    f"{', '.join(c.unreadable)} ran, but its outcome cannot be read: it "
-                    "prints nothing on success and the ledger records no exit status, so "
-                    "a clean run and an elided one look identical."
+                    f"{', '.join(c.unreadable)} ran, but its outcome could not be read "
+                    "from output, and the ledger records no exit status. That covers a "
+                    "tool silent on success, a quiet flag that suppresses the summary "
+                    "line, and a row whose output was elided -- all indistinguishable "
+                    "from a clean run without an exit code."
                 )
             else:
                 status = "unbacked"

@@ -2,21 +2,32 @@
 
 `tests_green` was the only claim type that checked an OUTCOME, and the only
 outcome it could parse was a test runner's. A lint or type-check claim had to go
-through `ran_action`, which matches a command substring in the ledger and
-answers "did this appear", never "what did it return". An agent that runs
-`ruff check`, gets 14 errors, and then writes "lint is clean" produced a BACKED
-verdict. This repo's own PRs are full of "ruff and mypy are clean".
+through `ran_action`, which matches a command substring in the ledger and answers
+"did this appear", never "what did it return". An agent that runs `ruff check`,
+gets 14 errors, and then writes "lint is clean" produced a BACKED verdict.
 
-OUTCOME IS READ FROM THE TOOL'S OWN SUMMARY LINE, BECAUSE THERE IS NOTHING ELSE
-TO READ. The issue proposes the exit code ("sufficient for ruff / mypy / tsc").
-THE LEDGER HAS NO EXIT CODE. Surveyed across 52 live-captured Bash responses,
-the union of every key the harness supplies is:
+THE SHAPE IS REAL, THE QUOTE WAS NOT. An earlier version of this docstring said
+this repo's PRs are "full of 'ruff and mypy are clean'". Measured over the last
+40 PR bodies: that exact phrase appears ZERO times -- this repo has no mypy
+(issue #896), so it could not -- while a lint-or-typecheck-is-clean claim appears
+in 21 of them. The claim type earns its place on those 21.
+
+OUTCOME IS READ FROM THE TOOL'S OWN SUMMARY LINE, specifically from the OUTPUT
+half of the row via `_bash_output`. Passing the whole row let the COMMAND text
+satisfy the success regex -- `ruff check -q . ; echo "All checks passed!"` parsed
+as green while ruff printed failures -- which is the same trap the test-totals
+path already closes.
+
+THE LEDGER HAS NO EXIT CODE, which is why the summary line is all there is.
+Surveyed across 52 live-captured Bash responses, the union of every key the
+harness supplies is:
 
     backgroundCwdHint, backgroundTaskId, gitOperation, interrupted,
     isImage, noOutputExpected, stderr, stdout
 
 That is the whole design constraint, and it is why the silent-on-success tools
-below are `unverifiable` rather than green.
+below are `unverifiable` rather than green -- and why a readable tool may not
+vouch for an unread one.
 """
 
 from __future__ import annotations
@@ -153,7 +164,13 @@ def test_bash_off_is_unverifiable():
 
 
 def test_any_failure_outweighs_any_success():
-    """A tool reporting errors is not redeemed by a second tool reporting none."""
+    """A stated failure is not redeemed by a stated success.
+
+    PER-RESULT, NOT PER-TOOL. The results list cannot tell a second TOOL from a
+    RERUN of the same one, so `ruff` failing and then passing after a fix still
+    reports not-clean for the window. That is the safe direction and is why the
+    gate is scoped to a session window rather than a single command.
+    """
     from techne.core.evidence import _classify_check_command as _c
 
     assert _c("ruff check .")[0] == "ruff"
@@ -167,3 +184,115 @@ def test_ran_action_is_left_alone():
     ev = Evidence(actions=["ruff check techne/"])
     r = check_claims([{"type": "ran_action", "match": "ruff check"}], ev)[0]
     assert r["status"] == "backed"
+
+
+@pytest.fixture
+def ledger(tmp_path):
+    """A real session in a real store, so the AGGREGATION runs, not a hand-built dict."""
+    from techne.core.database import connect, init_db
+
+    db = tmp_path / "ev.db"
+    init_db(db)
+    conn = connect(db)
+    conn.execute(
+        "INSERT INTO sessions (id, project_path, started_at) VALUES (?, ?, ?)",
+        ("sess-checks", "/p", "2026-09-18T10:00:00"),
+    )
+    conn.commit()
+    conn.close()
+
+    def add(command, output):
+        conn = connect(db)
+        conn.execute(
+            "INSERT INTO observations (session_id, tool_name, content, tier) "
+            "VALUES (?, 'Bash', ?, 'hot')",
+            ("sess-checks", f"Ran: {command}\nOutput: {output}"),
+        )
+        conn.commit()
+        conn.close()
+
+    return db, add
+
+
+def _evidence(db):
+    from techne.core.evidence import query_turn_evidence
+
+    return query_turn_evidence(db, "sess-checks")
+
+
+def test_an_unreadable_tool_blocks_green(ledger):
+    """THE PRE-PASS FALSE GREEN (W2), DRIVEN THROUGH THE REAL AGGREGATION.
+
+    `green` ignored `unreadable`, so a window with `ruff check` (states success)
+    and `tsc --noEmit` (silent) produced green=True with BOTH tools listed -- and
+    the detail read "Verification clean: ruff, tsc reported no problems." tsc
+    reported nothing. "ruff and tsc are clean" came back BACKED on ruff alone.
+
+    AN EARLIER VERSION OF THIS TEST HAD NO TEETH: it built CheckEvidence by hand
+    with green=None, which is the value the aggregation is supposed to COMPUTE, so
+    it exercised only check_claims' rendering. This one inserts real Bash rows and
+    lets query_turn_evidence do the aggregating.
+    """
+    db, add = ledger
+    add("ruff check techne/", "All checks passed!")
+    add("tsc --noEmit", "")
+
+    ev = _evidence(db)
+    assert set(ev.checks.tools) == {"ruff", "tsc"}, ev.checks
+    assert "tsc" in ev.checks.unreadable, ev.checks
+    assert ev.checks.green is not True, (
+        "a readable tool vouched for a silent one; green must not be True while "
+        f"a recognised tool went unread. {ev.checks}"
+    )
+
+    r = check_claims([{"type": "checks_green"}], ev)[0]
+    assert r["status"] == "unverifiable", r
+    assert not r["detail"].startswith("Verification clean"), r["detail"]
+
+
+def test_the_command_text_cannot_supply_the_success_line(ledger):
+    """THE PRE-PASS FALSE GREEN (W7), DRIVEN THROUGH THE REAL ROW PARSE.
+
+    The row is "Ran: <command>\nOutput: ...", and the whole row was handed to the
+    parser -- so a command CONTAINING the summary text satisfied the success
+    regex while the tool printed failures.
+
+    The earlier version called `_parse_check_output(head, _bash_output(row))`
+    directly, which is the helper, not the call site that was wrong.
+    """
+    db, add = ledger
+    add('ruff check -q . ; echo "All checks passed!"', "a.py:1:1: F401 unused")
+
+    ev = _evidence(db)
+    assert ev.checks.green is not True, (
+        "the command text satisfied the success pattern; the OUTPUT half is what "
+        f"should be parsed. {ev.checks}"
+    )
+    assert check_claims([{"type": "checks_green"}], ev)[0]["status"] != "backed"
+
+
+def test_a_clean_run_through_the_ledger_is_backed(ledger):
+    """The positive control: the real path still reaches BACKED."""
+    db, add = ledger
+    add("ruff check techne/", "All checks passed!")
+
+    ev = _evidence(db)
+    assert ev.checks.green is True, ev.checks
+    assert check_claims([{"type": "checks_green"}], ev)[0]["status"] == "backed"
+
+
+def test_a_failing_run_through_the_ledger_is_unbacked(ledger):
+    db, add = ledger
+    add("ruff check techne/", "Found 2 errors.")
+
+    ev = _evidence(db)
+    assert ev.checks.green is False, ev.checks
+    assert check_claims([{"type": "checks_green"}], ev)[0]["status"] == "unbacked"
+
+
+def test_unreadable_output_is_never_green():
+    """`_bash_output` returns None on an ambiguous row boundary. None is not green."""
+    from techne.core.evidence import _parse_check_output
+
+    assert _parse_check_output("ruff", None) is None
+    assert _parse_check_output("ruff", "") is None
