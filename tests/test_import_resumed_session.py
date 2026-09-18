@@ -16,6 +16,14 @@ imported, 44 observation rows were duplicated. Small here only because our
 corpus rarely imports both halves -- Grip's is 1,496 session ids from 182
 transcripts, so their exposure is structurally higher.
 
+SCOPE, AND IT IS NARROWER THAN THE FIRST DRAFT OF THIS FILE IMPLIED. Every
+row written before schema v27 has `source_uuid` NULL, and NULL never matches
+`= ?`, so the skip cannot see it. A resume imported AFTER the upgrade whose
+parent was imported BEFORE it still duplicates the parent in full -- the issue's
+own scenario on any store that is not fresh.
+`test_a_parent_imported_before_v27_is_not_protected` pins that, so the limit is
+documented behaviour rather than a surprise.
+
 WHY THE KEY IS `uuid` AND NOT A CONTENT HASH. Grip's corpus is six concurrent
 sessions ("facets") sharing one store, one of them an aggregator that reads
 across its siblings. Two facets can legitimately describe the same event from
@@ -163,3 +171,45 @@ def test_the_uuid_is_recorded_on_the_row(db_path, tmp_path):
         )
     finally:
         conn.close()
+
+
+def test_a_parent_imported_before_v27_is_not_protected(db_path, tmp_path):
+    """PINS THE LIMIT the pre-pass found (techne#962).
+
+    The skip keys on `source_uuid`, which every pre-v27 row has as NULL, and NULL
+    never matches `= ?`. So the guard protects a resume only when its PARENT was
+    also imported at v27 or later. Closing it needs a backfill keyed on each
+    session's own transcript, which invents nothing but is a separate change, filed as techne#978.
+
+    This test exists so that limit is a recorded decision, not a gap someone
+    rediscovers in production.
+    """
+    import sqlite3
+
+    parent_id = "11111111-0000-0000-0000-00000000000a"
+    resume_id = "22222222-0000-0000-0000-00000000000b"
+    shared = [
+        _prompt("uuid-old-1", "first question", "2026-09-17T10:00:00Z", parent_id),
+        _prompt("uuid-old-2", "second question", "2026-09-17T10:01:00Z", parent_id),
+    ]
+    parent = tmp_path / f"{parent_id}.jsonl"
+    _write(parent, shared)
+    import_transcript(db_path, parent)
+
+    # Simulate rows written before the column existed.
+    conn = sqlite3.connect(db_path)
+    conn.execute("UPDATE observations SET source_uuid = NULL")
+    conn.commit()
+    conn.close()
+
+    resume = tmp_path / f"{resume_id}.jsonl"
+    _write(resume, [dict(r, sessionId=resume_id) for r in shared])
+    result = import_transcript(db_path, resume)
+
+    assert result["replayed_skipped"] == 0, (
+        "premise changed: the skip now sees pre-v27 rows, so the backfill gap may "
+        "be closed and this test should be replaced by one asserting it IS protected"
+    )
+    assert len(_obs(db_path)) == 4, (
+        "the parent's turns are duplicated, which is the documented limit"
+    )

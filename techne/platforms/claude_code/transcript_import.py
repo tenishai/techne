@@ -358,8 +358,10 @@ def import_transcript(
 
         conn.commit()
         return {
-            # Surfaced, not silent: a caller seeing 0 new observations needs to know
-            # whether the transcript was empty or whether every turn was a replay.
+            # Returned so a caller CAN distinguish an empty transcript from an
+            # all-replay one. "Surfaced" was too strong for the CLI until it was
+            # taught to print this -- the key existed and `techne import` summed
+            # tool_obs + prompt_obs and said "0 tool obs, 0 prompts" either way.
             "replayed_skipped": replayed_skipped,
             "session_id": session_id,
             "project_path": project_path,

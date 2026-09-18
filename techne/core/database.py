@@ -1574,11 +1574,24 @@ END;
         # observation rows were duplicated across the two session ids.
         # source_uuid gives import the identity the transcript already carries.
         #
-        # DELIBERATELY NOT BACKFILLED. There is nothing to backfill FROM -- the
-        # uuid was never recorded and is not derivable from a stored row. Existing
-        # duplicates stay; this stops new ones. Unlike v26's origin_session, whose
-        # source WAS recoverable from knowledge_candidates, inventing values here
-        # would be fabrication.
+        # DELIBERATELY NOT BACKFILLED. There is nothing to backfill FROM in the
+        # DATABASE -- the uuid was never recorded and is not derivable from a
+        # stored row. Unlike v26's origin_session, whose source WAS recoverable
+        # from knowledge_candidates, inventing values here would be fabrication.
+        #
+        # THE COST OF THAT, STATED PRECISELY, BECAUSE AN EARLIER COMMENT SAID ONLY
+        # "existing duplicates stay; this stops new ones" AND THAT IS TOO KIND.
+        # Every pre-v27 row has source_uuid NULL, and NULL never matches `= ?`, so
+        # the import-time skip cannot see it. A resume imported AFTER the upgrade
+        # whose parent was imported BEFORE it still duplicates the parent in full
+        # -- which is the issue's own scenario on every store that is not fresh.
+        # Measured: parent + resume with the parent's uuids nulled gives 4 rows
+        # where 2 are correct, replayed_skipped=0.
+        #
+        # What WOULD close it is a backfill keyed on the transcript that produced
+        # the rows (re-read each imported session's own jsonl and stamp its uuids),
+        # which invents nothing. That is a separate change with its own risks and
+        # is filed as techne#978 rather than smuggled in here.
         #
         # THE ALTER AND THE CREATE TABLE DECLARE THE SAME THING, which is the
         # standing lesson of techne#938: last_confirmed_at is `NOT NULL DEFAULT
