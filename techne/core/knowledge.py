@@ -79,8 +79,10 @@ def store(
 
     Writes both the legacy `confidence` text enum (for display + backward
     compat) and the canonical `confidence_numeric` derived from it. The
-    `last_confirmed_at` defaults to CURRENT_TIMESTAMP so a fresh entry
-    starts at full strength.
+    `last_confirmed_at` is set BY THIS INSERT to CURRENT_TIMESTAMP so a fresh
+    entry starts at full strength. It is no longer a schema default
+    (techne#938): the CREATE TABLE could not carry one and still match what
+    the v5 ALTER produces, so every writer owns the value.
 
     `anchor` (techne#90) optionally pins the memory to evidence in a repo. Pass
     a path, or "path::symbol" to also record the symbol. When given, the file's
@@ -124,8 +126,8 @@ def store(
             """INSERT INTO knowledge
                  (type, content, source, tags, confidence, confidence_numeric,
                   anchor_path, anchor_symbol, content_hash, anchor_git_sha,
-                  written_by, origin_source, origin_session)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                  written_by, origin_source, origin_session, last_confirmed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
             (
                 type,
                 redact_credentials(content),
@@ -218,8 +220,9 @@ def _supersede_in_conn(conn, old_id: int, new_content: str, source: str) -> int:
     cur = conn.execute(
         """INSERT INTO knowledge
              (type, content, source, tags, confidence, confidence_numeric,
-              anchor_path, anchor_symbol, content_hash, anchor_git_sha)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+              anchor_path, anchor_symbol, content_hash, anchor_git_sha,
+              last_confirmed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
         (
             old["type"],
             redact_credentials(new_content),
@@ -408,8 +411,10 @@ def _merge_in_conn(
             )
 
     cur = conn.execute(
-        """INSERT INTO knowledge (type, content, source, tags, confidence, confidence_numeric)
-           VALUES (?, ?, ?, ?, ?, ?)""",
+        """INSERT INTO knowledge
+             (type, content, source, tags, confidence, confidence_numeric,
+              last_confirmed_at)
+           VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
         (ktype, redact_credentials(merged_content), source, tags or "", confidence, numeric),
     )
     new_id = cur.lastrowid
