@@ -18,9 +18,11 @@ opposite of what was asked. Both checks here are cheap by construction, and
 from __future__ import annotations
 
 import hashlib
+import re
 import subprocess
 from pathlib import Path
 
+import pytest
 
 from techne.config import Config
 from techne.core.checks import Verdict, run_checks
@@ -287,3 +289,60 @@ def test_outside_a_repo_neither_check_warns(tmp_path, monkeypatch):
     for c in run_checks(Config(), cheap_only=True):
         if c.name in ("codex:freshness", "cards:freshness"):
             assert c.verdict is not Verdict.STALE, c
+
+
+def test_banner_and_gate_cover_the_same_anchors(monkeypatch):
+    """THE CLASS, NOT THE INSTANCE (Prudence, #937).
+
+    The banner globbed `docs/arch/*.md`; the pre-push gate globs
+    ("ARCHITECTURE.md", "docs/arch/*.md"). So ARCHITECTURE.md's one anchor --
+    pyproject.toml -- was unguarded in the banner. Prudence drifted it and ran
+    both surfaces at the same instant:
+
+        GATE   exit 1, "ARCHITECTURE.md: seam drifted: pyproject.toml"
+        BANNER Verdict.LIVE, "19 anchor(s) match the card vouching for them"
+
+    Gate red, banner green, same drift -- verbatim the failure this check already
+    fixes for an unreadable seam, one directory up. And the banner did not merely
+    omit it: it reported a confident 19 that no operator could read as "19 of the
+    20 the gate guards".
+
+    WHY THE SUITE MISSED IT, which is the part worth closing. Every other test
+    here builds a synthetic repo via `_mk_repo`, which creates `docs/arch/` and
+    nothing else, so no fixture ever contained an ARCHITECTURE.md and the glob's
+    coverage was never compared against the gate's. A future author adding a third
+    card location would hit exactly this again.
+
+    Comparing the two COUNTS on the real repo closes that: a new card location
+    fails here rather than going silently unguarded in the banner.
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    from techne.config import Config
+    from techne.core.checks import run_checks
+
+    root = Path(__file__).resolve().parent.parent
+    monkeypatch.chdir(root)
+
+    banner = next(
+        (c for c in run_checks(Config(), cheap_only=True) if c.name == "cards:freshness"),
+        None,
+    )
+    assert banner is not None, "cards:freshness did not run"
+    banner_count = int(re.search(r"(\d+) (?:anchor|seam)", banner.detail).group(1))
+
+    proc = subprocess.run(
+        [sys.executable, "scripts/check_arch_cards.py"],
+        capture_output=True,
+        text=True,
+        cwd=root,
+    )
+    gate_count = int(re.search(r"(\d+) anchor\(s\)", proc.stdout).group(1))
+
+    assert banner_count == gate_count, (
+        f"the banner checks {banner_count} anchors, the pre-push gate checks "
+        f"{gate_count}. They must cover the same set, or the banner can read LIVE "
+        "while the gate is red on the same drift."
+    )

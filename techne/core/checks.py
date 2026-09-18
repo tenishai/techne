@@ -1440,8 +1440,21 @@ def check_arch_card_freshness(config) -> CheckResult | None:
     if root is None:
         return None
 
+    # THE SAME GLOBS THE PRE-PUSH GATE USES (techne#937, Prudence). The check
+    # globbed only docs/arch/*.md while scripts/check_arch_cards.py globs
+    # ("ARCHITECTURE.md", "docs/arch/*.md"), so ARCHITECTURE.md's one anchor --
+    # pyproject.toml -- was unguarded in the banner. Measured by drifting it: gate
+    # RED and banner LIVE at the same instant, on the same drift. That is verbatim
+    # the failure this check already fixes for an unreadable seam, left standing
+    # one directory up.
+    #
+    # NOT IMPORTED FROM THE SCRIPT, deliberately: scripts/ is not a package and is
+    # absent from an installed build. test_banner_and_gate_cover_the_same_anchors
+    # asserts the two lists agree, which closes the CLASS -- a third card location
+    # fails that test rather than silently going unguarded.
+    card_globs = ("ARCHITECTURE.md", "docs/arch/*.md")
     cards_dir = root / "docs" / "arch"
-    if not cards_dir.is_dir():
+    if not cards_dir.is_dir() and not (root / "ARCHITECTURE.md").is_file():
         return CheckResult(
             name="cards:freshness",
             subsystem="architecture",
@@ -1455,7 +1468,10 @@ def check_arch_card_freshness(config) -> CheckResult | None:
     drifted: list[str] = []
     unreadable: list[str] = []
     checked = 0
-    for card in sorted(cards_dir.glob("*.md")):
+    cards: list[Path] = []
+    for pattern in card_globs:
+        cards.extend(sorted(root.glob(pattern)))
+    for card in cards:
         try:
             text = card.read_text(encoding="utf-8", errors="replace")
         except OSError:
