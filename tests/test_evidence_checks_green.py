@@ -324,3 +324,49 @@ def test_an_unread_tool_does_not_hide_a_stated_failure(ledger):
     assert "tsc reported problems" not in r["detail"], r["detail"]
     assert "ruff reported problems" in r["detail"], r["detail"]
     assert "tsc" in r["detail"], "the unread tool should still be disclosed, just not blamed"
+
+
+def test_a_tool_that_failed_then_went_quiet_is_still_the_one_named(ledger):
+    """THE ROUND-4 FINDING: a name filter over `unreadable` blamed the CLEAN tool.
+
+    `unreadable` is appended when ANY row for a head is unreadable, so a tool that
+    FAILED in one row and was quiet in another lands in BOTH lists. Filtering the
+    detail by name then dropped the real speaker. Measured before the fix, with
+    ruff failing, ruff quiet, and mypy clean:
+
+        unbacked: Verification NOT clean: mypy reported problems.
+                  (ruff also ran but said nothing readable...)
+
+    mypy stated SUCCESS. ruff stated the failure. The sentence said the reverse --
+    a false accusation of the clean tool, the direction this gate must never take.
+
+    Fixed by recording per ROW which head stated what, rather than inferring it
+    from a name filter.
+    """
+    db, add = ledger
+    add("ruff check .", "Found 3 errors.")
+    add("ruff check -q .", "")
+    add("mypy techne/", "Success: no issues found in 4 source files")
+
+    ev = _evidence(db)
+    assert "ruff" in ev.checks.failed, ev.checks
+    assert "mypy" in ev.checks.passed, ev.checks
+
+    r = check_claims([{"type": "checks_green"}], ev)[0]
+    assert r["status"] == "unbacked", r
+    assert "ruff reported problems" in r["detail"], r["detail"]
+    assert "mypy reported problems" not in r["detail"], (
+        f"the clean tool is named as the failing one: {r['detail']!r}"
+    )
+
+
+def test_a_tool_named_as_failing_is_not_also_disclosed_as_silent(ledger):
+    """A head in both lists must not read as two different tools."""
+    db, add = ledger
+    add("ruff check .", "Found 3 errors.")
+    add("ruff check -q .", "")
+
+    r = check_claims([{"type": "checks_green"}], _evidence(db))[0]
+    assert r["detail"].count("ruff") == 1, (
+        f"ruff is named twice, once as failing and once as silent: {r['detail']!r}"
+    )

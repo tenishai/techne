@@ -152,6 +152,11 @@ class CheckEvidence:
     tools: list[str] = field(default_factory=list)
     #: Tools seen whose outcome could not be read from output alone.
     unreadable: list[str] = field(default_factory=list)
+    #: Tools that STATED a failure, and that stated a success. Tracked separately
+    #: from `unreadable` because a head can appear in BOTH -- one row readable and
+    #: one not -- so a name filter over `unreadable` cannot say who actually spoke.
+    failed: list[str] = field(default_factory=list)
+    passed: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -1027,6 +1032,8 @@ def query_turn_evidence(
     totals_unreliable = False
     check_tools: list[str] = []
     check_unreadable: list[str] = []
+    check_failed: list[str] = []
+    check_passed: list[str] = []
     check_results: list[bool] = []
 
     for row in rows:
@@ -1082,6 +1089,18 @@ def query_turn_evidence(
                             check_unreadable.append(head)
                     else:
                         check_results.append(outcome)
+                        # WHICH HEAD STATED WHAT, RECORDED PER ROW. `check_unreadable`
+                        # is appended when ANY row for a head is unreadable, so it
+                        # cannot distinguish "never spoke" from "spoke once, silent
+                        # once" -- and a tool that FAILED in one row and was quiet in
+                        # another (`ruff check .` then `ruff check -q .`) lands in
+                        # BOTH lists. Filtering the detail by name over `unreadable`
+                        # then dropped the real speaker and blamed whoever was left,
+                        # which in a measured case named the CLEAN tool as the one
+                        # reporting problems.
+                        bucket = check_failed if outcome is False else check_passed
+                        if head not in bucket:
+                            bucket.append(head)
 
             # SHAs are scanned across the WHOLE row, not just the output half.
             # _GIT_SHA_RE requires brackets, so it cannot be tripped by ordinary
@@ -1209,6 +1228,8 @@ def query_turn_evidence(
             ),
             tools=check_tools,
             unreadable=check_unreadable,
+            failed=check_failed,
+            passed=check_passed,
         ),
         tests=SuiteEvidence(
             passed=passed,
@@ -1376,17 +1397,24 @@ def check_claims(claims: list[dict], evidence: Evidence) -> list[dict]:
             # the opposite polarity, and the failure branch only became reachable
             # with an unread tool present once a stated failure started
             # outranking one.
-            heard = [t for t in c.tools if t not in c.unreadable] or list(c.tools)
             if c.green is True:
                 status = "backed"
-                detail = f"Verification clean: {', '.join(heard)} reported no problems."
+                detail = (
+                    f"Verification clean: {', '.join(c.passed or c.tools)} reported no problems."
+                )
             elif c.green is False:
                 status = "unbacked"
-                detail = f"Verification NOT clean: {', '.join(heard)} reported problems."
-                if c.unreadable:
+                detail = (
+                    f"Verification NOT clean: {', '.join(c.failed or c.tools)} reported problems."
+                )
+                # Disclose only tools NOT already named above. A head can be in
+                # both lists -- it failed in one row and was quiet in another -- and
+                # naming it twice reads as two different tools.
+                silent_only = [t for t in c.unreadable if t not in c.failed]
+                if silent_only:
                     detail += (
-                        f" ({', '.join(c.unreadable)} also ran but said nothing readable;"
-                        " the failure above stands on its own.)"
+                        f" ({', '.join(silent_only)} also ran but said nothing"
+                        " readable; the failure above stands on its own.)"
                     )
             elif not evidence.bash_captured:
                 status = "unverifiable"
