@@ -192,6 +192,7 @@ def _techne_search(args: dict, config: Config) -> dict:
         # rank position. The automatic injection rails filter instead, because
         # nobody CHOSE to look at what those surface.
         include_uncertain=True,
+        curated_head_slots=config.search.curated_head_slots,
     )
     return {"results": results, "count": len(results)}
 
@@ -575,6 +576,7 @@ def _techne_recall(args: dict, config: Config) -> dict:
             limit=10,
             half_life_days=config.knowledge_confidence_half_life_days,
             include_archived=False,
+            curated_head_slots=config.search.curated_head_slots,
         )
         # Graded staleness (techne#90): grade anchored knowledge results against the
         # current working tree and attach a freshness tag. Non-anchored results are
@@ -616,6 +618,7 @@ def _techne_recall(args: dict, config: Config) -> dict:
         limit=10,
         half_life_days=config.knowledge_confidence_half_life_days,
         include_archived=False,
+        curated_head_slots=config.search.curated_head_slots,
     )
     for r in local_results:
         r["_store"] = "local"

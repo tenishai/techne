@@ -383,6 +383,13 @@ class SearchConfig:
     # returns memory + this many top library docs, each labelled origin=library.
     # 0 disables the doc fold-in.
     recall_documents_limit: int = 3
+    # Head slots a table="all" page holds for curated (knowledge) rows the vector
+    # channel ranked below the head budget (techne#946). 0 disables the reservation
+    # and restores the pre-#946 page. 3 is the measured knee of an external
+    # evaluator's sweep on a 35k-observation store (2 bought nothing, 5 no more than
+    # 3); the effective value is also capped at a third of the head, so a small page
+    # is not swamped. See core/search.py:_curated_head_reservation.
+    curated_head_slots: int = 3
 
 
 @dataclass
@@ -1101,6 +1108,7 @@ class Config:
                 embedding_backend=str(s.get("embedding_backend", "")),
                 embedding_model=str(s.get("embedding_model", "")),
                 recall_documents_limit=int(s.get("recall_documents_limit", 3)),
+                curated_head_slots=int(s.get("curated_head_slots", 3)),
             )
 
         if "injection" in raw and isinstance(raw["injection"], dict):
