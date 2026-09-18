@@ -367,6 +367,7 @@ def detect_cross_store_contradictions(
     local_results: list[dict],  # noqa: ARG001 — kept for API symmetry / future use
     remote_deduped: list[dict],
     max_candidates: int = 20,
+    min_shared_keywords: int = 1,
 ) -> list[dict]:
     """For each deduped remote knowledge row, find contradicting LOCAL knowledge rows.
 
@@ -419,7 +420,10 @@ def detect_cross_store_contradictions(
             }
 
             local_matches = select_conflict_candidates(
-                local_db, r_proxy, max_candidates=max_candidates
+                local_db,
+                r_proxy,
+                max_candidates=max_candidates,
+                min_shared_keywords=min_shared_keywords,
             )
             if not local_matches:
                 continue
