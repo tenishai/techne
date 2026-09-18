@@ -196,7 +196,10 @@ techne codex blast-radius <symbol-id>     # what a change ripples into
 **Experimental, and honest about it:** indexing is manual, so the graph goes stale as
 code changes — re-run `codex index` to refresh. Every symbol injected by grep-assist
 carries a freshness marker if the graph is behind the working tree, so your agent
-knows when to double-check. (Reach for Codex when a graph is *too big to hold in your
+knows when to double-check. Since 0.17.0 you don't have to remember to look: the
+SessionStart banner's `codex:freshness` check compares the index's recorded HEAD
+against the repo's current one and says which commit it's stuck at, with the
+`techne codex index` command to fix it (#937). (Reach for Codex when a graph is *too big to hold in your
 head* or needs *deep reachability* — for a quick "where's X" on a file you're already
 reading, plain Grep still wins. The full when-to-use-it philosophy is in
 [`codex-usage.md`](./codex-usage.md).)
@@ -224,13 +227,38 @@ This exists because a hook can be flipped on in config but silently missing from
 mystery ("why isn't grep-assist firing?") into a one-line fix. Run `techne status`
 whenever something feels off.
 
+`techne doctor` asks the harder question — not "is it wired?" but "is it *working*?" —
+and prints every subsystem as LIVE / DORMANT / STALE / UNOBSERVABLE with a remedy you can
+run. Two of those checks are about **staleness of the things techne answers from** (#937):
+
+```
+! codex:freshness   stale   techne was indexed at 21813c1, HEAD is now d0a42a5 — codex
+                            may answer 'not found' for code that exists
+                              remedy: techne codex index /path/to/repo
+✓ cards:freshness   live    20 anchor(s) match the card vouching for them
+```
+
+`codex:freshness` compares the `indexed_head` recorded at index time against the repo's
+current HEAD — age is reported but doesn't decide the verdict, because a repo nobody
+touched for a month isn't stale and one touched twice this morning might be.
+`cards:freshness` checks every `anchor: <file> sha=<blob>` line in `ARCHITECTURE.md` and
+`docs/arch/*.md` against the file it vouches for. Both run on the SessionStart banner, so
+you learn the index is behind *before* you trust an answer from it rather than after.
+
 ### 🧾 The honesty features
 
 techne is opinionated that a confident wrong memory is worse than no memory:
 
 - **Evidence gate** (`techne evidence <session>`) — before your agent claims it
   committed / tested / shipped something, it can check that assertion against the
-  observation ledger of what it *actually did*.
+  observation ledger of what it *actually did*. As of 0.17.0 a lint or type-check
+  claim has a checkable shape too (`checks_green`, #939): the gate used to confirm a
+  linter *ran* and not that it *passed*, so "lint is clean" after `ruff check` returned
+  14 errors came back BACKED. Outcome is read from each tool's own summary line,
+  because the ledger carries no exit code — which splits the vocabulary honestly.
+  `ruff`, `mypy` and `pyright` print a summary, so green is provable; `tsc`, `eslint`,
+  `biome`, `prettier`, `go vet` and `cargo clippy` are silent on success, so they are
+  recognised as *ran* and their outcome is `unverifiable`, never `backed`.
 - **Faithfulness check** — when the sleep cycle merges two entries, it verifies the
   merged text didn't quietly drop a load-bearing claim before you promote it.
 - **Freshness markers** — recalled memory anchored to a file that has since changed,

@@ -250,6 +250,9 @@ So, after upgrading:
 techne init             # re-writes the hook chain, including the backfill segment;
                         #   also refreshes the bundled skills
 techne skills install   # for anyone who skipped init — otherwise a no-op
+techne agents install   # likewise, and it is a SEPARATE command: the research sandbox
+                        #   rides the same --no-skills flag but `skills install` does not
+                        #   install it. Check it with `techne agents status`.
 techne vectors backfill  # ONCE, bare — warms the model cache and catches up the backlog
 ```
 
