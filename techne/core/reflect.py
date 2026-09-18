@@ -83,15 +83,21 @@ Be strict. Return [] when nothing in this thread is worth keeping. Skip:
   - Anything implementation-ephemeral (a one-off bug fix, a now-deleted file).
   - Anything already in "What the agent already knows".
   - Anything that would be obvious from re-reading the code.
-  - Anything a competent engineer in this domain already knows: how a common
-    tool behaves by default, or generic hygiene advice.
 
-Aim for the band between those two failures: NON-OBVIOUS to a competent
-practitioner, and STILL TRUE once the identifiers change.
+A candidate fails in one of two ways. Name which one before you keep it.
 
-Prefer the rule over the instance. If you cite an identifier, count or version,
-ask whether the claim survives it changing. If it does not, state the rule and
-drop the identifier.
+  TOO OBVIOUS — a competent engineer in this domain already knows it: how a
+  common tool behaves by default, or generic hygiene advice. "A fresh clone has
+  no git identity" is this failure.
+
+  TOO SPECIFIC — it is true today and false after the next change, because it
+  leans on an identifier, a count, a version or a status. "The image tags are
+  9efefd3 and 07c015b" is this failure; the rule those tags illustrate is not.
+
+Aim between them: NON-OBVIOUS to a competent practitioner, and STILL TRUE once
+the identifiers change. If you cite an identifier, count or version, ask whether
+the claim survives it changing; if it does not, state the rule and drop the
+identifier.
 
 Prefer fewer, sharper items over many vague ones. Hard cap: {max_items} items.
 
