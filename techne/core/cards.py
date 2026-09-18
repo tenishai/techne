@@ -76,7 +76,9 @@ def _insert_card(conn, content: str, source_url: str, tags: str, confidence: str
         # refuses a NON-CONSTANT default and the two shapes have to agree -- so
         # every INSERT owns the value. A pending card was NULL until
         # fill_card_summary stamped it, which put it on decay_score's no-decay
-        # branch in the meantime.
+        # branch in the meantime -- ON A MIGRATED STORE. On a fresh one the schema
+        # default filled it at insert, which is exactly the two-shape divergence
+        # techne#938 exists to remove.
         """INSERT INTO knowledge
              (type, content, source, tags, confidence, confidence_numeric,
               last_confirmed_at)

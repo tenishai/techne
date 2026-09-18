@@ -6,8 +6,10 @@ schema_version. SQLite cannot `ADD COLUMN ... NOT NULL` without a default, so
 the v5 ALTER could never have matched the declaration as written -- a real
 constraint, not an oversight in the migration alone.
 
-THE CONSEQUENCE IS A RANKING DIVERGENCE, not a cosmetic one. None of the three
-`INSERT INTO knowledge` paths named the column. On a fresh store the schema
+THE CONSEQUENCE IS A RANKING DIVERGENCE, not a cosmetic one. None of the FIVE
+`INSERT INTO knowledge` paths named the column -- and a first cut of this change
+patched only three, which is the exact completeness error worth not repeating in
+the sentence describing it. On a fresh store the schema
 default filled it; on a migrated store there was no default, so every new row
 landed NULL -- 2,823 of 2,914 live rows on the operator's store, still growing
 (MIN created_at 2026-06-20, MAX 2026-09-15). `decay_score` returns
@@ -148,6 +150,28 @@ def test_existing_nulls_are_not_backfilled_on_open(tmp_path):
     what would silently re-rank 96.9% of the curated layer on every install.
     Issue #938 calls that option 1 and says it must be measured against the eval
     gate first.
+
+    THE DEFERRAL IS NOT COST-FREE, AND THIS IS WHERE THE NEXT PERSON WEIGHING
+    OPTION 1 WILL LOOK. Not backfilling makes a within-store INVERSION the
+    dominant regime on every migrated install, measured at a 30-day half-life
+    with confidence high/0.9:
+
+        legacy NULL row : 0.9     (never decays, permanently)
+        new row @  30d  : 0.45
+        new row @  60d  : 0.225
+        new row @ 180d  : 0.0141
+
+    At _rerank's confidence_decay_weight of 0.1 that is +0.0900 for a legacy row
+    against +0.0225 for a 60-day-old new one -- a 0.0675 delta, against the 0.0100
+    margin docs/arch/search-embeddings.md records as deciding real identifier
+    queries on this store. Where 96.9% of rows are NULL, everything written from
+    now on is progressively out-ranked by everything written before it. The decay
+    term exists so a stale entry yields to a fresh one; for the dominant
+    population it does the reverse.
+
+    Not an argument to backfill here -- the blast radius is every install and the
+    eval gate is the right arbiter -- but the next reader must inherit the WHOLE
+    trade, not the safe half. Tracked as techne#979.
     """
     import sqlite3
 
