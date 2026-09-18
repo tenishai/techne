@@ -1260,6 +1260,276 @@ def check_instance_identity(config) -> CheckResult | None:
 
 
 @register_check
+def check_codex_freshness(config) -> CheckResult | None:
+    """Was this repo's code index built at the commit HEAD is on now? (techne#937)
+
+    THAT IS NARROWER THAN "does the index still describe the repo", which an
+    earlier headline claimed. HEAD not having moved does not mean the working
+    tree is unchanged: uncommitted edits, a stash, or an index built from a dirty
+    tree all read LIVE. The predicate is deliberately the cheap, honest one --
+    proving the index matches the tree means re-hashing every file, which is
+    exactly the `@expensive` walk that would banish this from the banner.
+
+
+    THE INCIDENT. A session started on 30984e0 with cabal's index 5 days old and
+    60 source files changed since. Three symbols that exist in cabal source
+    returned ZERO hits from `codex search` -- `_delegation_budget_note`,
+    `_budget_at_least_one`, `_doom_loop_guard`. kobo was 31 files behind,
+    daedalus 22, liminal 18. All silent, because no check looked at codex at all.
+    A stale index does not degrade gracefully: it answers "we don't have that"
+    with the same confidence as a correct miss, which is the one question codex
+    exists to answer.
+
+    NOT `@expensive`, AND THAT IS THE WHOLE DESIGN CONSTRAINT. The issue flagged
+    up front that the obvious implementations -- re-hashing every file, or
+    shelling out to git -- are exactly what `@expensive` excludes, so the obvious
+    version lands in `doctor` only and the banner stays silent, which is the
+    thing being asked for rather than delivered. This reads two rows from a KV
+    table and one small file, then compares two strings.
+
+    INDEXED-HEAD, NOT AGE, IS THE PREDICATE. A fixed age threshold is crude: a
+    repo nobody has touched for a month is not stale, and one touched twice this
+    morning may be. "Indexed before the current HEAD" is the honest question, and
+    `indexed_head` is recorded at index time so asking it costs one ref read. The
+    age is reported alongside because that is what an operator reads, but it does
+    not decide the verdict.
+
+    PER-REPO, NOT GLOBAL. There are 19 codex stores on this machine; the banner
+    knows the cwd, and the current repo's index is the useful one.
+    """
+    from techne.core.codex import get_meta, resolve_repo_db_for_query
+    from techne.core.repo import head_sha, primary_repo_root
+
+    try:
+        cwd = Path.cwd()
+    except OSError:
+        return None
+
+    root = primary_repo_root(cwd)
+    if root is None:
+        return CheckResult(
+            name="codex:freshness",
+            subsystem="codex",
+            kind=Kind.FRESHNESS,
+            verdict=Verdict.DORMANT,
+            detail="not inside a repo — nothing to index",
+            evidence=f"no repo root above {cwd}",
+        )
+
+    db = resolve_repo_db_for_query(config, root)
+    if db is None or not db.exists():
+        return CheckResult(
+            name="codex:freshness",
+            subsystem="codex",
+            kind=Kind.FRESHNESS,
+            verdict=Verdict.DORMANT,
+            detail=f"{root.name} has no codex index yet",
+            evidence=f"no per-repo db for {root}",
+            remedy=f"techne codex index {root}",
+        )
+
+    indexed_head = get_meta(db, "indexed_head")
+    indexed_at = get_meta(db, "indexed_at")
+    current = head_sha(root)
+
+    # UNOBSERVABLE, NOT LIVE, WHEN THE COMPARISON CANNOT BE MADE. An index written
+    # before techne#937 has no indexed_head, and a repo whose HEAD is unreadable
+    # gives nothing to compare against. Reporting either as healthy would be the
+    # false green this check exists to remove; the banner's own convention is that
+    # a probe which could not run outranks a healthy one.
+    if not indexed_head or not current:
+        why = "index predates head recording" if not indexed_head else "HEAD unreadable"
+        return CheckResult(
+            name="codex:freshness",
+            subsystem="codex",
+            kind=Kind.FRESHNESS,
+            verdict=Verdict.UNOBSERVABLE,
+            detail=f"{root.name}: cannot tell whether the index is current ({why})",
+            evidence=f"indexed_head={indexed_head!r} current_head={current!r}",
+            remedy=f"techne codex index {root}",
+        )
+
+    # A TIMESTAMP, AND THE TEXT NOW SAYS SO. An earlier version called this "the
+    # age", which it is not -- `indexed_at` is a stored UTC instant and nothing
+    # here subtracts it from now. Rendering it as an age would need a clock read
+    # and a format decision; printing the instant is honest and costs nothing.
+    stamp = f", indexed at {indexed_at}Z" if indexed_at else ""
+    if indexed_head == current:
+        return CheckResult(
+            name="codex:freshness",
+            subsystem="codex",
+            kind=Kind.FRESHNESS,
+            verdict=Verdict.LIVE,
+            detail=f"{root.name} indexed at the current HEAD{stamp}",
+            evidence=f"indexed_head == HEAD == {current[:7]}",
+        )
+    return CheckResult(
+        name="codex:freshness",
+        subsystem="codex",
+        kind=Kind.FRESHNESS,
+        verdict=Verdict.STALE,
+        detail=(
+            f"{root.name} was indexed at {indexed_head[:7]}, HEAD is now "
+            f"{current[:7]} — codex may answer 'not found' for code that exists{stamp}"
+        ),
+        evidence=f"indexed_head={indexed_head[:7]} != HEAD={current[:7]}",
+        remedy=f"techne codex index {root}",
+    )
+
+
+@register_check
+def check_arch_card_freshness(config) -> CheckResult | None:
+    """Is any architecture card out of date with the file it vouches for? (techne#937)
+
+    THE ANSWER IS AUTHORITATIVE AND STILL CHEAP, WHICH THE ISSUE ASSUMED WAS NOT
+    AVAILABLE. It proposed comparing stat times, reasoning that the real
+    comparison needs `git hash-object` -- 21 subprocesses, 0.50s measured -- and
+    that `@expensive` would therefore banish it from the banner, which is the
+    thing being asked for rather than delivered.
+
+    But a git blob sha is not a git feature, it is a formula:
+
+        sha1(b"blob %d\0" % len(data) + data)
+
+    Verified byte-identical to `git hash-object` on this repo -- 19 anchors hash
+    in 0.006s with ZERO subprocesses, roughly 80x cheaper than shelling out and
+    comfortably inside the 5s hook budget the banner is fail-open against.
+
+    THAT IDENTITY IS CONDITIONAL, AND THE UNQUALIFIED CLAIM WAS WRONG. `git
+    hash-object <path>` runs CLEAN FILTERS; the formula hashes raw bytes. They
+    agree only where no eol filter applies. Measured: with `core.autocrlf=true`
+    (the Windows default) or `* text=auto` in `.gitattributes`, a CRLF working
+    file hashes differently and every anchor would read STALE. This repo sets
+    neither -- `git config --get core.autocrlf` is empty -- so the equivalence
+    holds here, but it is a property of this checkout, not of the formula. The
+    exact claim is: identical to `git hash-object --no-filters` always, and to
+    plain `git hash-object` wherever no eol filter applies.
+
+    WHY NOT MTIME, WHICH IS WHAT THE ISSUE PROPOSED. Measured first: it reported
+    12 of 19 anchors stale while the sha gate said all 19 were fresh. `git
+    checkout` rewrites mtimes, so every branch switch manufactures a full set of
+    false positives. The issue argued mtime "over-warns, never under-warns" and
+    that this is the right trade for a banner hint -- but 12 false positives out
+    of 19 is the "trains you to ignore it" failure this module keeps naming, and
+    a check nobody reads is worth less than no check. Over-warning is the right
+    direction only when the rate is low enough to stay readable.
+
+    Scales with anchor count, not repo size, so it stays cheap as techne#910
+    takes coverage from 20 anchors toward 120 files. `scripts/check_arch_cards.py`
+    remains the pre-push gate and keeps its own stricter contract: a MALFORMED
+    anchor is a hard failure there, while here it is skipped, because a banner
+    that cannot render is worse than a banner missing one line.
+    """
+    import hashlib
+    import re as _re
+
+    from techne.core.repo import find_repo_root
+
+    # find_repo_root, NOT primary_repo_root, AND THE DIFFERENCE IS A REAL BUG THIS
+    # CHECK SHIPPED WITH. primary_repo_root deliberately maps a linked worktree to
+    # its parent, which is right for CODEX (indexed against the primary by design)
+    # and wrong here: cards live in the checkout being EDITED. Worktree-per-session
+    # is the standing dev topology, and with the primary resolver a session that
+    # edited a seam without bumping its card read LIVE in the banner, because the
+    # PRIMARY's cards were being compared against the PRIMARY's seams. Measured
+    # from a worktree at 542211d: resolved to the primary on main, verdict LIVE.
+    try:
+        root = find_repo_root(Path.cwd())
+    except OSError:
+        return None
+    if root is None:
+        return None
+
+    # THE SAME GLOBS THE PRE-PUSH GATE USES (techne#937, Prudence). The check
+    # globbed only docs/arch/*.md while scripts/check_arch_cards.py globs
+    # ("ARCHITECTURE.md", "docs/arch/*.md"), so ARCHITECTURE.md's one anchor --
+    # pyproject.toml -- was unguarded in the banner. Measured by drifting it: gate
+    # RED and banner LIVE at the same instant, on the same drift. That is verbatim
+    # the failure this check already fixes for an unreadable seam, left standing
+    # one directory up.
+    #
+    # NOT IMPORTED FROM THE SCRIPT, deliberately: scripts/ is not a package and is
+    # absent from an installed build. test_banner_and_gate_cover_the_same_anchors
+    # asserts the two lists agree, which closes the CLASS -- a third card location
+    # fails that test rather than silently going unguarded.
+    card_globs = ("ARCHITECTURE.md", "docs/arch/*.md")
+    cards_dir = root / "docs" / "arch"
+    if not cards_dir.is_dir() and not (root / "ARCHITECTURE.md").is_file():
+        return CheckResult(
+            name="cards:freshness",
+            subsystem="architecture",
+            kind=Kind.FRESHNESS,
+            verdict=Verdict.DORMANT,
+            detail=f"{root.name} keeps no architecture cards",
+            evidence=f"no {cards_dir}",
+        )
+
+    anchor_re = _re.compile(r"^anchor:\s*(\S+)\s+sha=([0-9a-f]{40})\s*$", _re.M)
+    drifted: list[str] = []
+    unreadable: list[str] = []
+    checked = 0
+    cards: list[Path] = []
+    for pattern in card_globs:
+        cards.extend(sorted(root.glob(pattern)))
+    for card in cards:
+        try:
+            text = card.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for rel, recorded in anchor_re.findall(text):
+            seam = root / rel
+            try:
+                data = seam.read_bytes()
+            except OSError:
+                # UNREADABLE IS A FINDING, NOT A SKIP. The pre-push gate treats a
+                # missing seam as a HARD failure ("anchor seam file missing"), and
+                # silently continuing here let the banner read LIVE while the gate
+                # was red -- a card vouching for a file that has been renamed or
+                # deleted is exactly the drift this check exists to surface.
+                checked += 1
+                unreadable.append(f"{card.name} <- {rel}")
+                continue
+            checked += 1
+            current = hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()  # noqa: S324
+            if current != recorded:
+                drifted.append(f"{card.name} <- {rel}")
+
+    if not checked:
+        return CheckResult(
+            name="cards:freshness",
+            subsystem="architecture",
+            kind=Kind.FRESHNESS,
+            verdict=Verdict.DORMANT,
+            detail="no readable anchors to compare",
+            evidence=f"{cards_dir} has no parsable anchor lines",
+        )
+    _EVIDENCE = (
+        "in-process git blob sha — identical to `git hash-object --no-filters`, and "
+        "to plain `git hash-object` wherever no eol filter applies"
+    )
+    problems = drifted + [f"{u} (unreadable)" for u in unreadable]
+    if not problems:
+        return CheckResult(
+            name="cards:freshness",
+            subsystem="architecture",
+            kind=Kind.FRESHNESS,
+            verdict=Verdict.LIVE,
+            detail=f"{checked} anchor(s) match the card vouching for them",
+            evidence=_EVIDENCE,
+        )
+    shown = ", ".join(problems[:3]) + (f", +{len(problems) - 3} more" if len(problems) > 3 else "")
+    return CheckResult(
+        name="cards:freshness",
+        subsystem="architecture",
+        kind=Kind.FRESHNESS,
+        verdict=Verdict.STALE,
+        detail=(f"{len(problems)} of {checked} seam(s) have drifted from their card ({shown})"),
+        evidence=_EVIDENCE,
+        remedy="update the card body and bump its anchor sha in the same change",
+    )
+
+
+@register_check
 def check_runtime_torn(config) -> CheckResult | None:
     """A LIVE server has told us it is serving stale code (techne#696 part A).
 
