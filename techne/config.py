@@ -26,7 +26,17 @@ log = logging.getLogger(__name__)
 #
 # It does not suppress anything an embedding app configures: NullHandler does not
 # stop propagation, so records still reach the app's own root handlers.
-logging.getLogger("techne").addHandler(logging.NullHandler())
+# SCOPED TO THIS MODULE'S LOGGER, NOT THE `techne` TREE, AND A PRE-PASS IS WHY.
+# Attaching it to "techne" made lastResort unreachable for EVERY techne logger and
+# silenced the other 52 stdlib log.warning/error/exception calls in the package
+# the moment this module was imported -- which is nearly always. Fixing one
+# duplicate by muting 52 warnings is a bad trade and was not the intent.
+#
+# On "techne.config" alone it does exactly the needed job: this logger stops
+# reaching lastResort, so `log.warning` below no longer writes to stderr on our
+# behalf and the explicit print is the single copy. Every other techne logger
+# still resolves through an empty chain to lastResort and prints as before.
+log.addHandler(logging.NullHandler())
 
 Platform = Literal["claude-code", "codex", "standalone", "cabal", "opencode"]
 

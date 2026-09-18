@@ -164,8 +164,47 @@ def test_the_null_handler_is_what_makes_the_print_unconditional():
 
     import techne.config  # noqa: F401 — imported for its handler side effect
 
-    handlers = logging.getLogger("techne").handlers
+    handlers = logging.getLogger("techne.config").handlers
     assert any(isinstance(h, logging.NullHandler) for h in handlers), (
-        "the techne logger lost its NullHandler; lastResort can fire again and the "
+        "techne.config lost its NullHandler; lastResort can fire again and the "
         "unconditional print in _warn_if_outside_home becomes a duplicate"
+    )
+
+
+def test_the_null_handler_does_not_silence_the_rest_of_techne():
+    """THE ROUND-2 REGRESSION: the first fix muted 52 warnings to stop one duplicate.
+
+    The NullHandler was attached to the "techne" TREE, which made lastResort
+    unreachable for EVERY techne logger the moment this module was imported --
+    and techne.config is imported by nearly everything. The other 52 stdlib
+    log.warning/error/exception calls in the package stopped reaching the
+    operator entirely.
+
+    It belongs on THIS module's logger alone: techne.config stops reaching
+    lastResort, every sibling logger still resolves through an empty chain to it.
+    """
+    import logging
+
+    import techne.config  # noqa: F401 — imported for its handler side effect
+
+    assert not any(
+        isinstance(h, logging.NullHandler) for h in logging.getLogger("techne").handlers
+    ), "the NullHandler is on the techne TREE again; it silences the whole package"
+
+    # A SUBPROCESS, FOR THE REASON THIS MODULE ALREADY DOCUMENTS: pytest installs
+    # root handlers, so lastResort never fires in-process and an in-process probe
+    # of "does a sibling logger reach stderr" is blind either way.
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import logging, techne.config\n"
+            "logging.getLogger('techne.somewhere_else').warning('SIBLING-WARNING')\n",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert "SIBLING-WARNING" in proc.stderr, (
+        "a sibling techne logger no longer reaches the operator; the NullHandler "
+        f"is scoped too widely. stderr was: {proc.stderr!r}"
     )
