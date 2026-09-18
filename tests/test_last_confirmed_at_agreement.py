@@ -22,11 +22,11 @@ now matches what the ALTER can actually produce (nullable, no default) and the
 value is guaranteed by the WRITE path instead -- the only place that knows a row
 is being created rather than migrated.
 
-THE 2,823 LEGACY NULLS ARE LEFT ALONE, ON PURPose. Backfilling them is option 1,
+THE 2,823 LEGACY NULLS ARE LEFT ALONE, ON PURPOSE. Backfilling them is option 1,
 which the issue describes as "a retrieval-behaviour change disguised as a schema
 fix" that "should be measured against the eval gate before shipping". It changes
 what recall returns on every existing install and belongs in its own change,
-with that measurement. `test_legacy_nulls_are_not_backfilled` pins the decision
+with that measurement. `test_existing_nulls_are_not_backfilled_on_open` pins the decision
 so a later backfill is a deliberate act rather than a drive-by.
 """
 
@@ -123,27 +123,63 @@ def test_merge_stamps_the_timestamp(request, which):
     assert _lca(db, new) is not None, f"{which}: merge must stamp the new row"
 
 
-def test_legacy_nulls_are_not_backfilled(migrated):
-    """PINS THE DECISION. Backfilling is option 1 and changes ranking everywhere.
+def test_existing_nulls_are_not_backfilled_on_open(tmp_path):
+    """PINS THE DECISION not to re-rank existing installs (techne#938).
 
-    If someone later adds the backfill, this fails and makes them say so on
-    purpose -- with the eval-gate measurement the issue asks for.
+    TWO WRONG PREMISES WERE BURNED GETTING HERE, AND BOTH ARE WORTH RECORDING.
+
+    The FIRST version of this test inserted its NULL row after `init_db` had run
+    and asserted it survived. That pinned nothing: a backfill written as a
+    migration step executes inside `init_db` against an empty table and never
+    sees a row added afterwards.
+
+    The SECOND version built a v4 store with a NULL row and migrated it -- and
+    failed, because the v5 step has ALWAYS carried
+    `UPDATE knowledge SET last_confirmed_at = created_at WHERE ... IS NULL`.
+    Backfilling a row that predates the column is existing, correct behaviour.
+
+    So the 2,823 NULLs on the operator's store are NOT rows migration missed.
+    They were written AFTER v5 ran, by INSERT paths that named no column while
+    the migrated store had no default to fall back on. The risk worth pinning is
+    therefore a backfill that fires on OPEN -- in `connect()`, `store()`, or a
+    future migration step operating on an already-current store -- because that is
+    what would silently re-rank 96.9% of the curated layer on every install.
+    Issue #938 calls that option 1 and says it must be measured against the eval
+    gate first.
     """
-    conn = sqlite3.connect(migrated)
-    conn.execute(
+    import sqlite3
+
+    from techne.core.database import connect, init_db
+    from techne.core.knowledge import store
+
+    db = tmp_path / "current.db"
+    init_db(db)
+
+    # A row of the shape the old code produced: current schema, no timestamp.
+    raw = sqlite3.connect(db)
+    raw.execute(
         "INSERT INTO knowledge (type, content, source, tags, confidence) "
-        "VALUES ('fact', 'a legacy row', 'test', 't', 'high')"
+        "VALUES ('fact', 'written by the old code', 'test', 't', 'high')"
     )
-    conn.commit()
-    legacy_id = conn.execute("SELECT id FROM knowledge WHERE content='a legacy row'").fetchone()[0]
-    conn.close()
+    raw.commit()
+    raw.close()
 
-    # A later write through the fixed path must not touch the legacy row.
-    store(migrated, "an unrelated new fact", type="fact", tags="t")
+    # Everything an ordinary run does to a store.
+    connect(db).close()
+    store(db, "an unrelated new fact", type="fact", tags="t")
+    connect(db).close()
 
-    assert _lca(migrated, legacy_id) is None, (
-        "legacy NULLs must survive untouched; backfilling them is a retrieval "
-        "change that needs its own measured decision"
+    raw = sqlite3.connect(db)
+    value = raw.execute(
+        "SELECT last_confirmed_at FROM knowledge WHERE content = 'written by the old code'"
+    ).fetchone()[0]
+    raw.close()
+
+    assert value is None, (
+        "an existing NULL was backfilled by opening or writing to the store. That "
+        "is issue #938's option 1 -- it changes what recall returns on every "
+        "existing install and must be measured against the eval gate, not "
+        "smuggled in as a side effect of connect() or store()."
     )
 
 
@@ -156,3 +192,48 @@ def test_decay_semantics_for_an_absent_timestamp_are_unchanged(fresh):
     from techne.core.knowledge import decay_score
 
     assert decay_score(0.9, None, half_life_days=30) == pytest.approx(0.9)
+
+
+def test_every_insert_into_knowledge_sets_the_timestamp():
+    """THE PRE-PASS FINDING, AND THE ONLY SHAPE THAT COULD HAVE CAUGHT IT.
+
+    The first cut of this change said "all three INSERT INTO knowledge paths"
+    and patched three. There are FIVE: `cards.py::_insert_card` and
+    `reflect.py::_apply_add` were missed, and _apply_add is promote_candidate's
+    "add" dispatch -- the main way curated knowledge grows.
+
+    That is worse than leaving them alone. Removing the CREATE TABLE default was
+    safe only if every writer set the value; with two writers not setting it, a
+    FRESH install started writing NULL where the default used to fill it. The
+    change moved fresh stores TOWARD the migrated store's broken state for
+    reflect-promoted and card rows -- the opposite of its purpose.
+
+    An enumerated test cannot catch a path nobody enumerated, so this one derives
+    the list from the source. A new writer is covered the day it is written.
+    """
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent / "techne"
+    pattern = re.compile(r"INSERT\s+(?:OR\s+\w+\s+)?INTO\s+knowledge\b", re.I)
+
+    missing = []
+    for path in sorted(root.rglob("*.py")):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for match in pattern.finditer(text):
+            # knowledge_candidates / knowledge_vec / knowledge_fts are other tables.
+            after = text[match.end() : match.end() + 1]
+            if after and (after.isalnum() or after == "_"):
+                continue
+            window = text[match.start() : match.start() + 700]
+            statement = window.split('"""')[0] if '"""' in window else window[:400]
+            if "last_confirmed_at" not in statement:
+                line = text[: match.start()].count("\n") + 1
+                missing.append(f"{path.relative_to(root.parent)}:{line}")
+
+    assert not missing, (
+        "INSERT INTO knowledge without last_confirmed_at: "
+        + ", ".join(missing)
+        + ". The CREATE TABLE carries no default (techne#938), so a path that "
+        "omits the column writes NULL and the row never decays."
+    )

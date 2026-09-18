@@ -2105,9 +2105,13 @@ def _apply_add(conn, row, db_path: Path) -> int | None:
         tags = row["tags"] or ""
         ktype = _card_type_or_fact(row["type"] if row["type"] in VALID_TYPES else "fact", tags)
         cur2 = conn.execute(
+            # last_confirmed_at is set HERE (techne#938). This is promote_candidate's
+            # "add" dispatch -- the main way curated knowledge grows -- and the
+            # CREATE TABLE no longer carries a default to fall back on.
             """INSERT INTO knowledge
-                 (type, content, source, tags, confidence, confidence_numeric)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+                 (type, content, source, tags, confidence, confidence_numeric,
+                  last_confirmed_at)
+               VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
             (ktype, content, source, tags, conf, numeric),
         )
         new_id = cur2.lastrowid

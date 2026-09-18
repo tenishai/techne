@@ -79,8 +79,10 @@ def store(
 
     Writes both the legacy `confidence` text enum (for display + backward
     compat) and the canonical `confidence_numeric` derived from it. The
-    `last_confirmed_at` defaults to CURRENT_TIMESTAMP so a fresh entry
-    starts at full strength.
+    `last_confirmed_at` is set BY THIS INSERT to CURRENT_TIMESTAMP so a fresh
+    entry starts at full strength. It is no longer a schema default
+    (techne#938): the CREATE TABLE could not carry one and still match what
+    the v5 ALTER produces, so every writer owns the value.
 
     `anchor` (techne#90) optionally pins the memory to evidence in a repo. Pass
     a path, or "path::symbol" to also record the symbol. When given, the file's
