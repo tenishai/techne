@@ -609,9 +609,7 @@ class IndexFailure(Exception):
     """
 
 
-def _index_file(
-    db_path: Path, file_path: Path, repo_root: Path, *, force: bool = False
-) -> int:
+def _index_file(db_path: Path, file_path: Path, repo_root: Path, *, force: bool = False) -> int:
     """Parse and index *file_path* into codex.db. Returns symbol count (0 = skipped).
 
     Incremental: reads the current file hash from the symbols table.  If the
@@ -1090,9 +1088,7 @@ class RepoSource:
         try:
             conn = plain_connect(self._db_path)
             try:
-                conn.execute(
-                    "DELETE FROM codex_meta WHERE key = ?", (self.REPARSE_OWED_KEY,)
-                )
+                conn.execute("DELETE FROM codex_meta WHERE key = ?", (self.REPARSE_OWED_KEY,))
                 conn.commit()
             finally:
                 conn.close()
@@ -1189,6 +1185,30 @@ class RepoSource:
             from techne.core.codex import set_meta
 
             set_meta(self._db_path, "repo_root", str(self._root.resolve()))
+            # RECORDED, NOT INFERRED FROM FILE MTIME (techne#937). The banner needs
+            # to say whether this index still describes the checkout, and the db's
+            # mtime cannot answer it: mtime moves on any write, including a WAL
+            # checkpoint, so it drifts YOUNGER than the actual index and reads
+            # fresh when it is not.
+            #
+            # indexed_head is the STRONGER of the two signals and the reason the
+            # banner check needs no git subprocess and no filesystem walk: comparing
+            # it to the current HEAD is one small file read plus a string compare.
+            # "Indexed before HEAD" is also the honest predicate, where a fixed age
+            # threshold is not -- a repo nobody touched for a month is not stale.
+            # indexed_at is kept for the age line, which is what an operator reads.
+            from datetime import datetime, timezone
+
+            set_meta(
+                self._db_path,
+                "indexed_at",
+                datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds"),
+            )
+            from techne.core.repo import head_sha
+
+            head = head_sha(self._root)
+            if head:
+                set_meta(self._db_path, "indexed_head", head)
         except Exception:  # noqa: BLE001
             log.warning("codex: failed to persist repo_root in codex_meta", exc_info=True)
 

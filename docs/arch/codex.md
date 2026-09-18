@@ -1,11 +1,14 @@
 ---
 card: arch-card:techne-codex
-updated: 2026-09-17
+updated: 2026-09-18
 anchor: techne/core/codex.py sha=5fecf86b3fd14a0fc5694727b36c8684e3df2293
-anchor: techne/codex/source.py sha=02731eb427fbede6e9e03e790899e76ef3c2790c
+anchor: techne/codex/source.py sha=e1bc518b637fd8f2511d0e283869de11dd899544
 anchor: techne/codex/import_resolve.py sha=d02ae2cd30fea01c0b27861dc8c8330ef4b81c72
 ---
 # codex — code-graph store (EXPERIMENTAL)
+
+
+**INDEX PROVENANCE IS RECORDED, NEVER INFERRED FROM FILE MTIME (techne#937).** `initial_walk` writes `indexed_at` and `indexed_head` into `codex_meta` beside `repo_root`. The db's own mtime cannot answer "does this index still describe the checkout": mtime moves on ANY write including a WAL checkpoint, so it drifts YOUNGER than the actual index and reads fresh when it is not. `indexed_head` is the load-bearing one — comparing it to the current HEAD is one small ref read and a string compare, which is what lets `codex:freshness` live in the SessionStart banner instead of being marked `@expensive` and vanishing from it. THE FAILURE IT EXISTS FOR: a 5-day-old cabal index with 60 files changed answered `codex search` with ZERO hits for three symbols that exist in source (`_delegation_budget_note`, `_budget_at_least_one`, `_doom_loop_guard`), and a stale index does not degrade gracefully — it says "we don't have that" with exactly the confidence of a correct miss.
 
 STATUS: experimental, P1 only; tree-sitter+graphqlite deferred until the Codex persona is scoped (docs/roadmap.md).
 SEAM: persona-agnostic code-graph substrate, db-per-repo (codex/<slug>-<hash>.db, PRAGMA user_version, CODEX_VERSION=5). files→symbols→call/import/def-use edges stored RELATIONALLY on SQLite — NOT a graph DB (keeps the single-file/portable substrate). Reachability/blast-radius = hand-rolled recursive CTEs, not a graph engine. graphqlite (Cypher + PageRank/Louvain UDF) = possible future techne[codex] upgrade, NOT built.
