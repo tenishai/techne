@@ -373,8 +373,20 @@ def seed(db_path: Path) -> dict[str, str]:
     # Instrumented by wrapping it and replaying every task: it is called ONCE PER
     # TASK (25 calls, 9 of them seeing a non-empty lexical tail) and reordered 0
     # of 25. An earlier note said "called 6 times", which was wrong -- it is
-    # reached unconditionally whenever the vector channel returns anything. The 0
-    # reorders is the number that matters, and it survived the correction.
+    # reached unconditionally whenever the vector channel returns anything.
+    #
+    # WHICH HALF OF THE TAIL THIS ACTUALLY COVERS, because the two are not the
+    # same and an earlier header ran them together (Prudence, techne#935):
+    #
+    #   THE RESERVATION (techne#827/#831) IS COVERED. Reverting `_fts_floor` to
+    #   `return 0` takes lexical r@10 from 1.0 to 0.0 and fails the gate.
+    #
+    #   THE CURATED-VS-RAW ORDERING (techne#934) IS NOT. Reverting `_curated_first`
+    #   to `return fts_only` leaves both gates GREEN. This task's tail is
+    #   `['knowledge']` -- a single curated row, so the partition is still a
+    #   structural no-op and the totals are unchanged from base: 0 reorders of 25,
+    #   0 mixed tails. Covering that needs a task whose tail is MIXED, which this
+    #   one is not.
     #
     # WHY THE FILLER, AND WHY THIS MUCH OF IT. The pinned backend is
     # model2vec/potion-base-8M, a STATIC TOKEN-EMBEDDING AVERAGE, so a short row

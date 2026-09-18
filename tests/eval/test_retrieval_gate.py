@@ -146,6 +146,24 @@ def test_retrieval_gate(tmp_path, capsys):
         if isinstance(g, dict) and "recall_at_5_floor" in g and "recall_at_10_floor" in g
     )
     assert gated_classes, "no class declares recall floors; the gate would assert nothing"
+
+    # AND PIN THE SET, BECAUSE THE DERIVATION IS SYMMETRIC (Prudence, techne#935).
+    # Deriving the gated set from config makes ADDING a gate free -- the win -- and
+    # makes REMOVING one SILENT, which is the same failure this change exists to
+    # eliminate, pointed the other way. Executed: deleting the `paraphrase:` block
+    # from config_vec is a four-line YAML edit; at base it raised KeyError and the
+    # gate failed, at head the gate passed GREEN and the report printed
+    # "[paraphrase] ... (n=6, informational)". Paraphrase is the class the vec arm
+    # exists for. `assert gated_classes` only catches losing EVERY class at once.
+    #
+    # The repo already carries this shape at test_retrieval_gate.py's
+    # `assert "paraphrase" not in cfg` -- a pin on the config's shape guarding the
+    # opposite direction.
+    _EXPECTED_GATED = frozenset({"exact", "filter", "lexical"})
+    assert set(gated_classes) == _EXPECTED_GATED, (
+        f"gated set changed: {sorted(gated_classes)} != {sorted(_EXPECTED_GATED)}. "
+        "Adding a class is fine -- update this pin deliberately. Losing one is not."
+    )
     for cls in gated_classes:
         g = cfg[cls]
         m = per_class[cls]

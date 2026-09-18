@@ -351,6 +351,12 @@ tasks:
   # THE LOAD-BEARING NUMBER SURVIVED THE CORRECTION: it REORDERED NOTHING, 0 of 25.
   # The gate's coverage of that path was not weak, it was absent.
   #
+  # SCOPE, because the two halves are not the same: this task makes the
+  # RESERVATION observable -- reverting `_fts_floor` now fails the gate -- and
+  # NOT the curated-vs-raw ORDERING. Its tail is a single curated row, so
+  # reverting `_curated_first` leaves both gates green and the totals unchanged
+  # at 0 reorders of 25. That half needs a task with a MIXED tail.
+  #
   # The query is a bare identifier -- exactly the shape techne#831 and techne#827
   # exist for (a ticket, a sha, a config key). The gold row buries it in unrelated
   # prose so the static token-embedding average stops surfacing it; see
