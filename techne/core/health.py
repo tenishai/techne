@@ -103,6 +103,43 @@ def _read_ref(git_dir: Path, common_dir: Path, rel: str, _depth: int = 0) -> str
     return None
 
 
+def _installed_revision() -> str | None:
+    """The commit an INSTALLED build was built from, via PEP 610 (techne#965).
+
+    `pip install "techne @ git+https://...@<sha>"` writes `direct_url.json` into
+    the dist-info with `vcs_info.commit_id` -- the resolved sha, not merely the
+    ref that was asked for. Verified against a real install:
+
+        {"url": "...", "vcs_info": {"commit_id": "21813c16ed8be...",
+         "requested_revision": "21813c1...", "vcs": "git"}}
+
+    WHY THIS MATTERS AND WHY THE GIT PATH CANNOT COVER IT. An installed build has
+    no checkout to read, so `_revision_info` reported `revision: None` and
+    `--version` named the last RELEASE. Inside the team we work around that by
+    reading git in the runtime checkout; a consumer who installed from a sha --
+    which is what we tell external consumers to do -- has no equivalent, and Grip
+    had to identify their build by probing for features instead. That is the same
+    complaint as techne#1100/#825 seen from outside.
+
+    Returns None for a wheel/sdist/PyPI install (no vcs_info), for an editable
+    install (dir_info instead), and when the metadata is absent or malformed --
+    all of which are "genuinely unknowable", not failures.
+    """
+    try:
+        import json
+        from importlib.metadata import PackageNotFoundError, distribution
+
+        raw = distribution("techne").read_text("direct_url.json")
+        if not raw:
+            return None
+        commit = (json.loads(raw).get("vcs_info") or {}).get("commit_id")
+        return str(commit)[:7] if commit else None
+    except (PackageNotFoundError, OSError, ValueError, KeyError, TypeError):
+        return None
+    except Exception:  # noqa: BLE001 — metadata probing must never break a health read
+        return None
+
+
 def _revision_info(package_path: Path) -> dict:
     """Identify the code that is actually imported, not the version it claims.
 
@@ -153,6 +190,12 @@ def _revision_info(package_path: Path) -> dict:
         # checked and it is level, which is the opposite of what the banner says
         # and would let a consumer of the payload draw the reassuring conclusion
         # the banner refuses to draw.
+        #
+        # THE REVISION, HOWEVER, IS KNOWABLE FOR A VCS INSTALL (techne#965), and
+        # supplying it does NOT weaken the paragraph above. `drifted` stays None:
+        # naming the commit you were built from says nothing about whether a newer
+        # one exists, which is exactly the distinction this branch already draws.
+        info["revision"] = _installed_revision()
         return info
 
     root = package_path.parent

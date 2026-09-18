@@ -61,8 +61,35 @@ class _AliasedGroup(click.Group):
         return name, cmd, rest
 
 
+def _version_string() -> str:
+    """Version, plus the build identity when there is one (techne#965).
+
+    `techne --version` printed `0.16.1` on a build installed from a sha carrying
+    seven merged PRs, two schema migrations and new CLI surface -- because
+    `__version__` names the last RELEASE, not the code. We tell external
+    consumers to install from a sha, so this is the one surface that has to
+    answer "which build am I on" for them, and it could not.
+
+    A PEP 440 local label (`0.16.1+21813c1`) is the right shape: sortable,
+    legal, and unmistakably not a release. `build` disambiguates the two ways a
+    revision can be absent -- an editable checkout whose version came from
+    pyproject, versus a wheel with no VCS provenance at all.
+    """
+    from techne.core.health import _revision_info
+
+    try:
+        info = _revision_info(Path(__file__).parent)  # cli.py lives IN the package
+        revision, build = info.get("revision"), info.get("build")
+    except Exception:  # noqa: BLE001 — --version must never fail
+        revision, build = None, None
+
+    if revision:
+        return f"{__version__}+{revision} ({build})"
+    return f"{__version__} ({build})" if build else __version__
+
+
 @click.group(cls=_AliasedGroup)
-@click.version_option(version=__version__)
+@click.version_option(version=_version_string())
 @click.pass_context
 def main(ctx):
     """techne — agentic memory and knowledge system."""
@@ -5020,8 +5047,7 @@ def codex_index(ctx, repo, languages, lsp, rebuild):
     "--rebuild",
     is_flag=True,
     default=False,
-    help="Re-parse every file in every repo, ignoring the unchanged-file skip "
-    "(techne#864).",
+    help="Re-parse every file in every repo, ignoring the unchanged-file skip (techne#864).",
 )
 @click.pass_context
 def codex_index_all(ctx, languages, rebuild):
