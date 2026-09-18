@@ -1585,10 +1585,24 @@ END;
         # CURRENT_TIMESTAMP` on a fresh install and plain nullable on a migrated
         # one, AT THE SAME schema_version -- so a store's provenance silently
         # changed its retrieval order. Plain `TEXT` on both paths here.
-        _add_column_if_missing(conn, "observations", "source_uuid", "TEXT")
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_observations_source_uuid "
-            "ON observations(source_uuid) WHERE source_uuid IS NOT NULL"
+        # GUARDED ON THE TABLE EXISTING, like v26 above. A migration step runs
+        # against whatever shape the store actually has, and the reconciler path
+        # brings a DB forward from as far back as v7 -- fixtures at that age may
+        # carry no `observations` table at all, in which case `ALTER TABLE` dies
+        # with "no such table" and takes the whole chain down. The table is
+        # created by the schema script for any store that should have one, so
+        # "absent here" means "this step has nothing to do", not "something is
+        # wrong". Caught by 21 migration tests before this shipped.
+        has_observations = bool(
+            conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='observations'"
+            ).fetchone()
         )
+        if has_observations:
+            _add_column_if_missing(conn, "observations", "source_uuid", "TEXT")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_observations_source_uuid "
+                "ON observations(source_uuid) WHERE source_uuid IS NOT NULL"
+            )
         conn.execute("INSERT INTO schema_version (version) VALUES (27)")
     conn.commit()
