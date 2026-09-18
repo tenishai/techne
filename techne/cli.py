@@ -840,7 +840,19 @@ def search(ctx, query, table, limit):
     # techne#501: `techne search` is an EXPLICIT query, so untrusted rows are
     # SHOWN and tagged rather than filtered. The automatic injection rails do the
     # opposite — see the contract note in core/search.py.
-    results = do_search(config.db_path, query, table=table, limit=limit, include_uncertain=True)
+    # `curated_head_slots` FROM CONFIG, like the MCP sites (Prudence, #966 r2). This
+    # surface defaults to `--table all`, so without it the knob read as inert exactly
+    # where an operator would check whether it took effect — two surfaces answering
+    # one query differently, which is the defect #727's connection seam exists to
+    # remove.
+    results = do_search(
+        config.db_path,
+        query,
+        table=table,
+        limit=limit,
+        include_uncertain=True,
+        curated_head_slots=config.search.curated_head_slots,
+    )
     if not results:
         click.echo("No results.")
         return

@@ -1199,6 +1199,100 @@ def _curated_first(fts_only: list[dict]) -> list[dict]:
     return curated + rest
 
 
+#: Head slots a `table="all"` page reserves for curated rows arriving on the VECTOR
+#: channel (techne#946). Small by default, and the smallness is the whole position —
+#: see `_curated_head_reservation` for why no number here is derivable from theory.
+CURATED_HEAD_SLOTS_DEFAULT = 3
+
+
+def _curated_slots(slots: int | None) -> int:
+    """Resolve the caller's `curated_head_slots` (None = the module default).
+
+    This module takes tuning as ARGUMENTS and never reads `Config` — see its import
+    list, which is deliberately free of `techne.config`. The config field
+    (`SearchConfig.curated_head_slots`) is plumbed by the callers that already hold a
+    Config, so a store can tune the reservation without search.py growing a dependency
+    that would make it unimportable from the migration path.
+    """
+    return CURATED_HEAD_SLOTS_DEFAULT if slots is None else slots
+
+
+def _curated_head_reservation(head_budget: int, slots: int) -> int:
+    """How many HEAD slots are held for curated rows the vector channel ranked low.
+
+    THE PROBLEM THIS SOLVES IS NOT THE ONE #827/#831 SOLVE (techne#946). Those two
+    reserve a slot in the lexical TAIL, so they can only rescue a curated row the FTS
+    channel found. A curated row that the VECTOR channel found but ranked below the
+    head budget is invisible to both: `fts_only` excludes every vec key by
+    construction, so `_curated_first` never sees it. Measured by an external evaluator
+    on a 35k-observation store with 25 curated rows: three gold queries ranked their
+    curated answer at vec-rank 1, 2 and 7 within `table="knowledge"` and lost it
+    entirely at `table="all"`, because 35k observations supplied closer distances.
+
+    WHY A RESERVATION AND NOT A SCORE PRIOR. Both are shipped patterns, and the
+    architect store holds the argument between them. `Confidence-banded rerank`
+    multiplies a provenance weight into the retrieval score; `Relevance and trust as
+    two fields, never fused into one number` (ard-spec) answers that a fused number is
+    undecomposable — you cannot afterwards tell whether a row placed low because it
+    matched poorly or because its source is trusted less, so you can neither debug a
+    ranking complaint nor move one policy without moving the other. A reserved slot is
+    the decomposable form: a row is here because it filled slot N, and the page says
+    so in `reserved_slot`. It is also the mechanism this file already uses at
+    `_fts_floor`, so the page has one shape rather than two.
+
+    THE SIZE IS MEASURED, NOT ARGUED — AND NOT BY US. A web survey found no published
+    number for a minority collection's quota: Google Cloud Search ships a crowding cap
+    of 3 per source with no tuning study attached, and the SIGIR '26 soft-quota work
+    exists because STATIC quotas are the known failure mode, its contribution being the
+    per-query calibration we have no demand signal for. The default therefore comes
+    from the only real-corpus sweep of this defect that exists — the external
+    evaluator's, on 35k observations with a fully embedded curated layer, their gold
+    set, k=10, 14 scored queries:
+
+        table="all" (status quo)        11/14   MRR 0.587
+        table="knowledge" only          12/14   MRR 0.638
+        knowledge-first, k=10 total     12/14   MRR 0.638
+        knowledge-first, k=20 total     12/14   MRR 0.638
+        reserved 2 of 10                11/14   MRR 0.631
+        reserved 3 of 10                12/14   MRR 0.649   <- the knee
+        reserved 5 of 10                12/14   MRR 0.645
+        rank fusion (RRF k=60)          11/14   MRR 0.657
+        reserved 3 THEN fused           12/14   MRR 0.649   (identical to 3 alone)
+
+    Two is no better than the status quo on recall; five is no better than three and
+    slightly worse on MRR. THAT SWEEP IS THEIRS, ON THEIR CORPUS, and is cited because
+    it is the only one of its shape. Our own gated eval cannot reproduce it: its tasks
+    query `table="knowledge"`, where this reservation is a no-op by construction.
+
+    FUSION IS NOT THE ANSWER HERE, which the same sweep settles. RRF took the best MRR
+    (0.657) on the worst recall tier (11/14) — it reorders what the page already holds
+    and cannot surface what `all` never retrieved. Stacking it on top of the
+    reservation measured IDENTICAL to the reservation alone, because fusion's MRR
+    advantage WAS promoting curated rows, which the reservation does by construction.
+
+    NEVER MORE THAN THE HEAD MINUS ONE. At `head_budget` 1 this returns 0: a
+    single-slot head belongs to the vector channel, matching `_fts_floor`'s refusal to
+    reserve at ``limit <= 1``. Without that clamp a one-row page could be handed to a
+    curated row the vector channel ranked last, which is a different product, not a
+    prior.
+
+    Returns 0 for a non-positive ``slots``, which is how an operator turns the
+    reservation off entirely.
+
+    THE PROPORTIONAL CAP IS WHAT KEEPS A NARROW PAGE SANE. The measured knee is 3 of a
+    10-row page, about a third; a flat 3 would be three quarters of the 4-slot head at
+    ``limit=5``, a size nobody has measured and a different product. `_fts_floor`'s own
+    docstring warns that a wider page affording more is a trap rather than a licence,
+    and the mirror of that trap is a narrow page being handed the same absolute count.
+    So the reservation is the smallest of three: what the caller asked for, one less
+    than the head, and a third of the head. At ``head_budget`` 9 — the ``limit=10``
+    page with the floor at 1 — that is exactly the measured 3.
+    """
+    if slots <= 0 or head_budget <= 1:
+        return 0
+    return min(slots, head_budget - 1, max(1, head_budget // 3))
+
+
 def search(
     db_path: Path,
     query: str,
@@ -1209,6 +1303,7 @@ def search(
     include_archived: bool = True,
     include_uncertain: bool = False,
     row_chars: int | None = None,
+    curated_head_slots: int | None = None,
 ) -> list[dict]:
     """Hybrid search: BM25 (FTS5) + vector (cosine) combined by a vec-first
     union (techne#401).
@@ -1247,11 +1342,26 @@ def search(
     pre-#827, while a floor of 2 or more drops it to 0.833 / 0.528. See
     ``_fts_floor`` for the ablation and for why this does not scale with limit.
 
+    THE HEAD RESERVES SLOTS FOR CURATED ROWS (techne#946). The tail floor can only
+    rescue a curated row the LEXICAL channel found; one the vector channel found but
+    ranked below the head budget was invisible to it. ``curated_head_slots`` holds
+    that many head positions for the best curated vec rows, displacing the weakest
+    non-curated rows of the head one for one — so the page never grows and the tail
+    floor is untouched. ``None`` takes ``CURATED_HEAD_SLOTS_DEFAULT``; 0 disables it
+    and restores the pre-#946 page exactly. An unfilled reservation costs nothing: if
+    the curated channel has fewer rows than the reservation, the remaining slots stay
+    with the rows that earned them, the same way the tail spends unused head budget.
+
     Returned rows include:
 
       - ``match_source``: ``"fts"``, ``"vec"``, or ``"fts+vec"``
       - ``fusion``: ``"vec_first"`` — how order was decided. Unchanged by the
         floor: the vector channel still decides the head of the page.
+      - ``reserved_slot``: present ONLY on a row that is on the page because a
+        reservation put it there — ``"curated_head"`` (#946) or ``"lexical_tail"``
+        (#827). Absent means the row earned its place on rank. This is the field that
+        makes a ranking complaint answerable without re-deriving arithmetic, which is
+        the property a fused score prior would have destroyed.
 
     When vec is requested but no vec results came back (extras not
     installed, vec tables empty, etc.), falls through to FTS-only —
@@ -1328,15 +1438,9 @@ def search(
     seen: set[tuple] = set()
     head: list[dict] = []
 
-    for r in vec_results:
-        if len(head) >= limit - floor:
-            break
-        key = (r["source_table"], r["id"])
-        if key in seen:
-            continue
-        seen.add(key)
+    def _as_page_row(r: dict) -> dict:
         row = dict(r)  # copy — don't mutate the caller's rows
-        fts_row = fts_by_key.get(key)
+        fts_row = fts_by_key.get((r["source_table"], r["id"]))
         if fts_row is not None:
             row["match_source"] = "fts+vec"
             # Carry the FTS BM25 `rank` onto the overlap row. Vec rows have only
@@ -1349,7 +1453,116 @@ def search(
         else:
             row["match_source"] = "vec"
         row["fusion"] = "vec_first"
-        head.append(row)
+        return row
+
+    head_budget = limit - floor
+    #: Rows the head reservation displaced. Appended after the tail so a page that
+    #: gave up a head slot cannot come back short (Prudence, #966 r1).
+    overflow: list[dict] = []
+    for r in vec_results:
+        if len(head) >= head_budget:
+            break
+        key = (r["source_table"], r["id"])
+        if key in seen:
+            continue
+        seen.add(key)
+        head.append(_as_page_row(r))
+
+    # CURATED HEAD RESERVATION (techne#946) — a DISPLACEMENT, not an extra slot, so
+    # `head + tail` is still exactly `limit` and the #827 tail floor is untouched.
+    # Only rows the natural fill left behind are promoted, so a page that already
+    # carries its quota of curated rows is returned byte-identical to the pre-#946
+    # one, and a store with no curated vec hits pays nothing at all.
+    # SCOPED TO `table="all"`, AND THE EVAL GATE IS WHY THIS LINE EXISTS. Without the
+    # scope check the reservation fired on a `table="observations"` or
+    # `table="threads"` query too, injecting knowledge rows into a page the caller had
+    # deliberately narrowed — a contract violation, not a ranking preference. The #385
+    # filter tasks caught it immediately: four of six leaked a forbidden knowledge
+    # distractor into a single-table page (fpr 0.0 -> 0.667). A single-table query has
+    # no cross-table competition to correct, so there is nothing here to reserve
+    # against.
+    reserve = (
+        _curated_head_reservation(head_budget, _curated_slots(curated_head_slots))
+        if table == "all"
+        else 0
+    )
+    if reserve:
+        in_head = sum(1 for r in head if r.get("source_table") in _CURATED_TABLES)
+        deficit = reserve - in_head
+        if deficit > 0:
+            # THE CANDIDATES COME FROM A SCOPED QUERY, NOT FROM `vec_results`, AND
+            # THAT IS THE WHOLE MECHANISM. `search_vec` is itself capped at `limit`,
+            # so the union's own results hold at most `limit` rows across every
+            # table: on a store where observations crowd the page, the curated row
+            # worth promoting was never fetched, and a reservation reading
+            # `vec_results` would find nothing to seat. Measured on the live store
+            # before this: 12 real queries, mean curated rows per page 4.00 -> 4.08,
+            # i.e. one extra row in twelve pages — a reservation in name only.
+            # One extra ANN query against the knowledge table is what makes the slots
+            # real. IT FETCHES `deficit + in_head`, NOT `deficit` (Temperance, #966):
+            # the pool is deduped against rows already seated in the head, so a pool
+            # sized to the deficit alone can come back short by exactly the number of
+            # curated rows that won on distance. The surplus is the dedup buffer.
+            curated_pool = search_vec(
+                db_path,
+                query,
+                table="knowledge",
+                limit=deficit + in_head,
+                include_archived=include_archived,
+                include_uncertain=include_uncertain,
+                row_chars=row_chars,
+            )
+            promoted: list[dict] = []
+            for r in curated_pool:
+                if len(promoted) >= deficit:
+                    break
+                key = (r["source_table"], r["id"])
+                if key in seen:
+                    continue
+                seen.add(key)
+                row = _as_page_row(r)
+                row["reserved_slot"] = "curated_head"
+                promoted.append(row)
+            if promoted:
+                # Displace from the BACK of the head, worst-ranked first, and only
+                # non-curated rows — displacing a curated row to seat a curated row
+                # would be a no-op that silently costs a result. The promoted rows
+                # land at the end of the head: they are on the page by reservation,
+                # not by distance, and the order says so.
+                keep, dropped, displaced = [], 0, []
+                for row in reversed(head):
+                    if dropped < len(promoted) and row.get("source_table") not in _CURATED_TABLES:
+                        dropped += 1
+                        # KEEP THE DISPLACED ROW AS OVERFLOW, do not drop it
+                        # (Prudence, #966 r1). The promotion pool is not deduped
+                        # against `fts_only`, so a curated row the vector channel
+                        # never fetched but FTS matched can be promoted here AND be
+                        # the tail floor's only candidate — `seen` then empties the
+                        # tail, and a page that surrendered a head slot comes back
+                        # one row SHORT for nothing, since `_curated_first` would
+                        # have seated that same row in the floor slot anyway.
+                        # Measured: 12 observations + 1 lexical-only curated row,
+                        # limit 10 -> 9 rows. Appending after the tail lets the
+                        # closing `[:limit]` decide: in the ordinary case the row
+                        # falls off the end exactly as before, and in this case it
+                        # refills the slot the empty tail left.
+                        displaced.append(row)
+                        seen.discard((row["source_table"], row["id"]))
+                        continue
+                    keep.append(row)
+                head = list(reversed(keep)) + promoted[:dropped]
+                overflow = list(reversed(displaced))
+                for row in promoted[dropped:]:
+                    # NOTHING WAS DISPLACEABLE. The cause named here used to be "an
+                    # all-curated head", which the arithmetic above rules out
+                    # (promotion needs `deficit > 0`, so `in_head < reserve`, and
+                    # `reserve <= head_budget - 1`). The reachable cause is a SHORT
+                    # head: a thin vector channel returns fewer rows than the budget
+                    # and all of them are curated, so there is no non-curated row to
+                    # displace while the scoped pool still finds a curated row the
+                    # union never fetched. Put the key back so the tail may still
+                    # reach it through the lexical channel (Prudence, #966 r2).
+                    seen.discard((row["source_table"], row["id"]))
 
     tail: list[dict] = []
     for r in _curated_first(fts_only):
@@ -1360,11 +1573,22 @@ def search(
         row = dict(r)  # copy — don't mutate the caller's rows
         row["match_source"] = "fts"
         row["fusion"] = "vec_first"
+        # The first `floor` tail rows are the ones #827 reserved; anything after them
+        # is slack the thin-vec case handed back. Marking only the reserved ones keeps
+        # `reserved_slot` an honest answer to "why is this row here".
+        # GATED ON THE HEAD ACTUALLY HAVING SPENT ITS BUDGET (Prudence, #966 r1):
+        # with a thin vec channel the first tail row is on the page regardless, so
+        # marking it reserved answers "why is this row here" with a reservation that
+        # did nothing.
+        if len(tail) < floor and len(head) >= head_budget:
+            row["reserved_slot"] = "lexical_tail"
         tail.append(row)
 
     # `head` may be shorter than its budget (a thin vec channel); the tail is
-    # allowed to spend the slack rather than returning a short page.
-    return (head + tail)[:limit]
+    # allowed to spend the slack rather than returning a short page. `overflow`
+    # holds rows the head reservation displaced: last in line, so they refill a
+    # short page rather than shrinking it (#966 r1).
+    return (head + tail + overflow)[:limit]
 
 
 def backfill_vectors(
