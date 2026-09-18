@@ -57,6 +57,13 @@ config:
   # baseline hit exactly 0.0 (deletion + supersession filtering both held even
   # against lexically-tempting queries) — ceiling has NO slack; any leak is a
   # regression.
+  # techne#935. FTS-only finds this trivially (observed r@5/r@10/mrr = 1.0/1.0/1.0),
+  # so the floors follow the exact/filter convention of observed - 0.15. The class
+  # earns its keep on the VEC side, not here; see config_vec below.
+  lexical:
+    recall_at_5_floor: 0.85
+    recall_at_10_floor: 0.85
+    mrr_floor: 0.85
   negative:
     fpr_ceiling: 0.0
 
@@ -107,8 +114,41 @@ config_vec:
     recall_at_5_floor: 0.5
     recall_at_10_floor: 0.8
     mrr_floor: 0.4
+  # techne#935 — THE CLASS THAT MAKES THE FUSION TAIL OBSERVABLE.
+  #
+  # Observed on the vec path: r@5=0.0, r@10=1.0, mrr=0.1. Those numbers are not a
+  # weakness, they ARE the mechanism under test. The gold arrives at rank 10 --
+  # the RESERVED LEXICAL TAIL SLOT (techne#827/#831) -- because it is the one
+  # positive gold the vector channel does not return, so it can only reach the
+  # page through the reservation. If that reservation breaks the row does not
+  # slip a rank, it leaves the page entirely and r@10 goes 1.0 -> 0.0.
+  #
+  # recall_at_5_floor IS DELIBERATELY VACUOUS at 0.0, and saying so is the point.
+  # The gold legitimately sits at the LAST slot, so any non-zero r@5 floor would
+  # fail on correct behaviour. The gate requires both recall floors to consider a
+  # class gated at all, so it is set explicitly with its reason rather than tuned
+  # to look meaningful.
+  #
+  # THESE FLOORS WERE DEAD CONFIG WHEN FIRST WRITTEN. Both gates iterated a
+  # HARDCODED tuple of class names, so a new class's floors were never read --
+  # while the report printed the class as GATED, because its label keyed on YAML
+  # membership rather than on enforcement. The gates now derive the gated set from
+  # the config, and the report uses the same predicate.
+  #
+  # mrr_floor is OMITTED (the gate makes it optional). With n=1 at the last slot,
+  # MRR is 0.1 and every ON-PAGE direction it can move is UP -- rank 10 is the
+  # worst position that still counts. It can of course go DOWN, to 0.0, in exactly
+  # the scenario this class exists for: the reservation breaks and the row leaves
+  # the page. (An earlier comment said "every direction it can move is UP", which
+  # contradicted its own next sentence.) A floor would therefore trip on precisely
+  # the same event as recall_at_10 and add nothing.
+  lexical:
+    recall_at_5_floor: 0.0
+    recall_at_10_floor: 0.8
   negative:
     fpr_ceiling: 0.0
+    # techne#935: see test_retrieval_gate_vec.py for why 0.85 and not lower.
+    recall_at_10_floor: 0.85
 
 tasks:
   # --- exact: literal token overlap with the gold doc ---------------------
@@ -290,3 +330,41 @@ tasks:
     table: all
     expected_keys: [g385_neg_sup_ci_new]
     forbidden_keys: [g385_neg_sup_ci_old]
+
+  # --- lexical-only (techne#935) ---------------------------------------------
+  # THE ONLY POSITIVE TASK AT table=all WHOSE GOLD IS REACHABLE ONLY THROUGH THE
+  # LEXICAL CHANNEL. Every other positive task either pins a single table (18 of
+  # 24), which makes the lexical tail homogeneous and any curated-vs-raw reorder a
+  # structural no-op; of the remaining `table: all` tasks, three of the six
+  # negatives (`negative-deleted-*`) carry NO expected_keys at all and so have
+  # no gold to return, and the three that do (`negative-stale-*`) return it via
+  # `fts+vec`, served from `head` and never reaching the tail. (An earlier
+  # framing said "the other 6 return gold via fts+vec", which contradicted this
+  # file's own note that three of the six carry expected_keys.)
+  #
+  # INSTRUMENTED, AND THE FIRST NUMBERS WERE WRONG. An earlier note said
+  # `_curated_first` "was called 6 times across the whole gate". Measured by
+  # wrapping it and replaying every task: it is called ONCE PER TASK -- 25 calls --
+  # because it is reached unconditionally whenever the vector channel returns
+  # anything. 9 of those calls see a non-empty lexical tail.
+  #
+  # THE LOAD-BEARING NUMBER SURVIVED THE CORRECTION: it REORDERED NOTHING, 0 of 25.
+  # The gate's coverage of that path was not weak, it was absent.
+  #
+  # SCOPE, because the two halves are not the same: this task makes the
+  # RESERVATION observable -- reverting `_fts_floor` now fails the gate -- and
+  # NOT the curated-vs-raw ORDERING. Its tail is a single curated row, so
+  # reverting `_curated_first` leaves both gates green and the totals unchanged
+  # at 0 reorders of 25. That half needs a task with a MIXED tail.
+  #
+  # The query is a bare identifier -- exactly the shape techne#831 and techne#827
+  # exist for (a ticket, a sha, a config key). The gold row buries it in unrelated
+  # prose so the static token-embedding average stops surfacing it; see
+  # seed_eval_db.py for the measured dilution band and why the multiplier is
+  # empirical.
+  - id: lexical-ticket-identifier
+    class: lexical
+    query: "CHG-7742-KM"
+    table: all
+    expected_keys: [g935_lexical_ticket]
+    forbidden_keys: []
