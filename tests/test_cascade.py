@@ -221,8 +221,9 @@ def test_dep_edge_idempotent(db):
 
 
 def test_mark_uncertain_flips_a_current_row(db):
-    """Until now `uncertain` was only REACHABLE by the cascade — something was
-    superseded, so its dependents became doubtful. A writer had no way to say
+    """Until now the only route from a `current` row to `uncertain` was the cascade —
+    something was superseded, so its dependents became doubtful. (`unarchive` also
+    writes the state, but only from `archived`.) A writer had no way to say
     "this is what I concluded and nothing has checked it", so agent-authored
     rows landed `current` and came back indistinguishable from curated ones."""
     kid = store(db, "something an agent concluded", type="fact")

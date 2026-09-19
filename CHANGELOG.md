@@ -646,6 +646,11 @@ takes it to v26, #962 to v27). A consistent snapshot is written first, through S
 online backup API rather than a file copy, so it is safe in WAL mode. It is written **once**
 for the whole transition, not per step, so budget one copy of your store.
 
+**Your codex indexes migrate too**, and each takes its own backup. `CODEX_VERSION` goes
+3 → 5 in this release, and a codex database is per-repo, so running the `techne codex index`
+step above opens one per repo you have indexed and copies each before migrating it. Budget
+for those on top of the store copy.
+
 The 0.9s figure quoted during development measured a single step on a ~220 MB store of
 roughly 48,000 observations — the maintainer's store took v25 → v26 and v26 → v27 on
 separate days, as two main builds. A tag-installer runs both step bodies inside one open, so
