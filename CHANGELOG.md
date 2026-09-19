@@ -237,8 +237,10 @@ All notable changes to techne are documented here. Format loosely follows
   into a store (cabal#141), where those rows landed `current` and came back as established
   fact. Retrieval largely honoured the state already (#501: filter from auto-injection, tag
   on explicit search); only the write side was missing. One rail is an exception worth
-  knowing: the tier-0 session-start band keeps an uncertain row eligible and sorts it last
-  with an `[uncertain]` marker rather than dropping it, which is pinned by
+  knowing: the tier-0 session-start band keeps an uncertain row eligible and marks it
+  `[uncertain]` rather than dropping it, ranking it lower within its band through a ×0.5
+  penalty on its decayed confidence. That is a penalty, not a demotion to last — a
+  day-old uncertain row still outranks a 90-day-old current one. Pinned by
   `tests/test_egress.py::test_uncertain_row_still_eligible`.
 
 ### Changed

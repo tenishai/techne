@@ -262,8 +262,10 @@ def test_mark_uncertain_and_reconfirm_are_inverses(db):
 def test_mark_uncertain_leaves_an_archived_row_alone(db):
     """The other half of the guard, and the one the status column alone would not
     pin. `archive_scan` soft-archives a stale uncertain row; re-marking it must not
-    quietly resurrect it into the live band. Without this, widening the guard to
-    `status != 'superseded'` passes every other test in this file."""
+    quietly resurrect it into the live band. The mutant this uniquely kills is
+    `status IN ('current','archived')` — measured: every other mark_uncertain test
+    passes under it. (`status != 'superseded'` is NOT that mutant; "superseded" is
+    never a status value, so it matches every row and the idempotence test kills it.)"""
     from datetime import datetime, timedelta
 
     kid = store(db, "an old claim nobody reaffirmed", type="fact")
@@ -277,7 +279,7 @@ def test_mark_uncertain_leaves_an_archived_row_alone(db):
 
 def test_an_uncertain_row_is_not_recalled_by_default(db):
     """THE PROPERTY THAT MATTERS. Writing as uncertain is only useful because
-    search excludes it unless a caller opts in (techne#1027: filter from
+    search excludes it unless a caller opts in (techne#501: filter from
     auto-injection, tag on explicit search)."""
     from techne.core.search import search
 

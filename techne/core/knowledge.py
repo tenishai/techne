@@ -489,7 +489,7 @@ def cascade_uncertain(db_path: Path, trigger_id: int) -> int:
 def mark_uncertain(db_path: Path, knowledge_id: int) -> bool:
     """Mark an entry `uncertain` — live, retrievable on request, not established.
 
-    The write-side counterpart to `reconfirm`, which is its inverse. Until now
+    The write-side counterpart to `reconfirm`, its inverse on `status` alone. Until now
     `uncertain` could only be REACHED by the dependency cascade: something was
     superseded, so its dependents became doubtful. There was no way for a WRITER
     to say "this is what I concluded, and nothing has checked it."
