@@ -496,7 +496,7 @@ def mark_uncertain(db_path: Path, knowledge_id: int) -> bool:
 
     That is what an agent's self-authored memory is (cabal#141). It must not be
     recallable as an established fact — `search()` already excludes `uncertain`
-    unless a caller opts in, which is techne#1027's decision: filter from
+    unless a caller opts in, which is techne#501's decision: filter from
     auto-injection, tag on explicit search — but before this there was no
     supported way to put a row into that state at write time, so callers wrote
     `current` and their own conclusions came back indistinguishable from

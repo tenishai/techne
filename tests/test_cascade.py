@@ -14,6 +14,7 @@ from techne.core.knowledge import (
     UNCERTAIN_CONFIDENCE_PENALTY,
     _add_dep_in_conn,
     annotate_uncertain,
+    archive_scan,
     cascade_uncertain,
     effective_confidence,
     mark_uncertain,
@@ -256,6 +257,22 @@ def test_mark_uncertain_and_reconfirm_are_inverses(db):
     assert _status(db, kid) == "uncertain"
     assert reconfirm(db, kid) is True
     assert _status(db, kid) == "current"
+
+
+def test_mark_uncertain_leaves_an_archived_row_alone(db):
+    """The other half of the guard, and the one the status column alone would not
+    pin. `archive_scan` soft-archives a stale uncertain row; re-marking it must not
+    quietly resurrect it into the live band. Without this, widening the guard to
+    `status != 'superseded'` passes every other test in this file."""
+    from datetime import datetime, timedelta
+
+    kid = store(db, "an old claim nobody reaffirmed", type="fact")
+    mark_uncertain(db, kid)
+    archive_scan(db, now=datetime.now() + timedelta(days=3650))
+    assert _status(db, kid) == "archived", "precondition: the row is archived"
+
+    assert mark_uncertain(db, kid) is False
+    assert _status(db, kid) == "archived", "archived row must not be touched"
 
 
 def test_an_uncertain_row_is_not_recalled_by_default(db):

@@ -222,16 +222,24 @@ All notable changes to techne are documented here. Format loosely follows
 
 - **A writer can mark a knowledge row `uncertain`** (#885). The state was reachable only
   by the dependency cascade — something was superseded, so its dependents became doubtful.
-  `mark_uncertain()` is now `reconfirm()`'s exact inverse, so a caller can say "this is what
-  I concluded and nothing has checked it." It is idempotent, and it leaves a superseded or
-  archived row alone: superseded is the stronger statement and must not be weakened into
-  uncertain.
+  `mark_uncertain()` is the write-side counterpart to `reconfirm()`, so a caller can say
+  "this is what I concluded and nothing has checked it." It is idempotent, and it leaves a
+  superseded or archived row alone: superseded is the stronger statement and must not be
+  weakened into uncertain.
+
+  **Counterpart, not an exact inverse.** The two are inverses on `status` only. `reconfirm`
+  bumps `last_confirmed_at` and `mark_uncertain` does not restore it, so a round trip leaves
+  the row confirmed more recently than it was; and `reconfirm` carries no `superseded_by`
+  guard, so their domains differ.
 
   **A library seam, with no CLI or MCP surface** — nothing in techne calls it and techne's
   own behaviour is unchanged. It exists for an agent persona writing its own conclusions
   into a store (cabal#141), where those rows landed `current` and came back as established
-  fact. Retrieval already honoured the state (#1027: filter from auto-injection, tag on
-  explicit search); only the write side was missing.
+  fact. Retrieval largely honoured the state already (#501: filter from auto-injection, tag
+  on explicit search); only the write side was missing. One rail is an exception worth
+  knowing: the tier-0 session-start band keeps an uncertain row eligible and sorts it last
+  with an `[uncertain]` marker rather than dropping it, which is pinned by
+  `tests/test_egress.py::test_uncertain_row_still_eligible`.
 
 ### Changed
 
@@ -642,9 +650,11 @@ release carries no `indexed_head`, so the new `codex:freshness` check reports
 UNOBSERVABLE — a mark on every session start until you re-index. It clears on the first
 index; nothing is broken in the meantime.
 
-**Have free disk space equal to your store.** Opening the store migrates it v26 → v27
-and writes a byte-for-byte backup first. Measured on a 223 MB store with 48,396
-observations: 0.9s including the backup.
+**Have free disk space equal to your store.** Coming from the released v0.16.1 your store
+is at schema v25, and opening it migrates v25 → v27 — both steps are in this release (#949
+takes it to v26, #962 to v27). A consistent snapshot is written first, through SQLite's
+online backup API rather than a file copy, so it is safe in WAL mode. Measured on a 223 MB
+store with 48,396 observations: 0.9s including the backup.
 
 **Nothing else is required.** No `techne init`, no `techne vectors backfill` for this
 release.
