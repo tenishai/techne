@@ -643,8 +643,13 @@ index; nothing is broken in the meantime.
 **Have free disk space equal to your store.** Coming from the released v0.16.1 your store
 is at schema v25, and opening it migrates v25 → v27 — both steps are in this release (#949
 takes it to v26, #962 to v27). A consistent snapshot is written first, through SQLite's
-online backup API rather than a file copy, so it is safe in WAL mode. Measured on a 223 MB
-store with 48,396 observations: 0.9s including the backup.
+online backup API rather than a file copy, so it is safe in WAL mode, and each step writes
+its own — so budget for two.
+
+The 0.9s figure quoted during development measured a **single** step on a ~220 MB store of
+roughly 48,000 observations (the maintainer's store took v25 → v26 and v26 → v27 on separate
+days, as two main builds). A tag-installer does both in one open, so expect about twice
+that, plus a second backup's disk.
 
 **Nothing else is required.** No `techne init`, no `techne vectors backfill` for this
 release.
