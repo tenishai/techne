@@ -5,6 +5,8 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.17.0] — 2026-09-18
+
 ### Added
 
 - **Four new retrieval-at-scale arms, and the #883 vocabulary confound is settled**
@@ -217,6 +219,17 @@ All notable changes to techne are documented here. Format loosely follows
   **One lane pi still lacks, as opencode does:** no compaction checkpoint/restore. Claude
   Code's `PreCompact`/`PostCompact` hooks have no pi equivalent, so a compaction there
   loses the checkpoint that a Claude Code session keeps.
+
+- **A writer can mark a knowledge row `uncertain`** (#885). The only way from a `current`
+  row to that state was the dependency cascade — something was superseded, so its
+  dependents became doubtful.
+  `mark_uncertain()` is the write-side counterpart to `reconfirm()`, inverse on `status`
+  alone. It is idempotent, and it leaves a superseded or archived row alone.
+
+  **A library seam with no CLI or MCP surface** — nothing in techne calls it and techne's
+  own behaviour is unchanged. It exists for an agent persona writing its own conclusions
+  into a store (cabal#141), where those rows landed `current` and came back as established
+  fact.
 
 ### Changed
 
@@ -627,9 +640,21 @@ release carries no `indexed_head`, so the new `codex:freshness` check reports
 UNOBSERVABLE — a mark on every session start until you re-index. It clears on the first
 index; nothing is broken in the meantime.
 
-**Have free disk space equal to your store.** Opening the store migrates it v26 → v27
-and writes a byte-for-byte backup first. Measured on a 223 MB store with 48,396
-observations: 0.9s including the backup.
+**Have free disk space equal to your store.** Coming from the released v0.16.1 your store
+is at schema v25, and opening it migrates v25 → v27 — both steps are in this release (#949
+takes it to v26, #962 to v27). A consistent snapshot is written first, through SQLite's
+online backup API rather than a file copy, so it is safe in WAL mode. It is written **once**
+for the whole transition, not per step, so budget one copy of your store.
+
+**Your codex indexes migrate too**, and each takes its own backup. `CODEX_VERSION` goes
+3 → 5 in this release, and a codex database is per-repo, so running the `techne codex index`
+step above opens one per repo you have indexed and copies each before migrating it. Budget
+for those on top of the store copy.
+
+The 0.9s figure quoted during development measured a single step on a ~220 MB store of
+roughly 48,000 observations — the maintainer's store took v25 → v26 and v26 → v27 on
+separate days, as two main builds. A tag-installer runs both step bodies inside one open, so
+expect longer; that path has not been timed end to end.
 
 **Nothing else is required.** No `techne init`, no `techne vectors backfill` for this
 release.

@@ -14,6 +14,7 @@ from techne.core.knowledge import (
     UNCERTAIN_CONFIDENCE_PENALTY,
     _add_dep_in_conn,
     annotate_uncertain,
+    archive_scan,
     cascade_uncertain,
     effective_confidence,
     mark_uncertain,
@@ -220,8 +221,9 @@ def test_dep_edge_idempotent(db):
 
 
 def test_mark_uncertain_flips_a_current_row(db):
-    """Until now `uncertain` was only REACHABLE by the cascade — something was
-    superseded, so its dependents became doubtful. A writer had no way to say
+    """Until now the only route from a `current` row to `uncertain` was the cascade —
+    something was superseded, so its dependents became doubtful. (`unarchive` also
+    writes the state, but only from `archived`.) A writer had no way to say
     "this is what I concluded and nothing has checked it", so agent-authored
     rows landed `current` and came back indistinguishable from curated ones."""
     kid = store(db, "something an agent concluded", type="fact")
@@ -258,9 +260,27 @@ def test_mark_uncertain_and_reconfirm_are_inverses(db):
     assert _status(db, kid) == "current"
 
 
+def test_mark_uncertain_leaves_an_archived_row_alone(db):
+    """The other half of the guard, and the one the status column alone would not
+    pin. `archive_scan` soft-archives a stale uncertain row; re-marking it must not
+    quietly resurrect it into the live band. The mutant this uniquely kills is
+    `status IN ('current','archived')` — measured: every other mark_uncertain test
+    passes under it. (`status != 'superseded'` is NOT that mutant; "superseded" is
+    never a status value, so it matches every row and the idempotence test kills it.)"""
+    from datetime import datetime, timedelta
+
+    kid = store(db, "an old claim nobody reaffirmed", type="fact")
+    mark_uncertain(db, kid)
+    archive_scan(db, now=datetime.now() + timedelta(days=3650))
+    assert _status(db, kid) == "archived", "precondition: the row is archived"
+
+    assert mark_uncertain(db, kid) is False
+    assert _status(db, kid) == "archived", "archived row must not be touched"
+
+
 def test_an_uncertain_row_is_not_recalled_by_default(db):
     """THE PROPERTY THAT MATTERS. Writing as uncertain is only useful because
-    search excludes it unless a caller opts in (techne#1027: filter from
+    search excludes it unless a caller opts in (techne#501: filter from
     auto-injection, tag on explicit search)."""
     from techne.core.search import search
 
