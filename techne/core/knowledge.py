@@ -489,14 +489,14 @@ def cascade_uncertain(db_path: Path, trigger_id: int) -> int:
 def mark_uncertain(db_path: Path, knowledge_id: int) -> bool:
     """Mark an entry `uncertain` — live, retrievable on request, not established.
 
-    The write-side counterpart to `reconfirm`, which is its inverse. Until now
-    `uncertain` could only be REACHED by the dependency cascade: something was
-    superseded, so its dependents became doubtful. There was no way for a WRITER
+    The write-side counterpart to `reconfirm`, its inverse on `status` alone. Until now
+    the only route from a `current` row to `uncertain` was the dependency cascade:
+    something was superseded, so its dependents became doubtful. There was no way for a WRITER
     to say "this is what I concluded, and nothing has checked it."
 
     That is what an agent's self-authored memory is (cabal#141). It must not be
     recallable as an established fact — `search()` already excludes `uncertain`
-    unless a caller opts in, which is techne#1027's decision: filter from
+    unless a caller opts in, which is techne#501's decision: filter from
     auto-injection, tag on explicit search — but before this there was no
     supported way to put a row into that state at write time, so callers wrote
     `current` and their own conclusions came back indistinguishable from
