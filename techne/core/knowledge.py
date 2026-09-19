@@ -490,8 +490,8 @@ def mark_uncertain(db_path: Path, knowledge_id: int) -> bool:
     """Mark an entry `uncertain` — live, retrievable on request, not established.
 
     The write-side counterpart to `reconfirm`, its inverse on `status` alone. Until now
-    `uncertain` could only be REACHED by the dependency cascade: something was
-    superseded, so its dependents became doubtful. There was no way for a WRITER
+    the only route from a `current` row to `uncertain` was the dependency cascade:
+    something was superseded, so its dependents became doubtful. There was no way for a WRITER
     to say "this is what I concluded, and nothing has checked it."
 
     That is what an agent's self-authored memory is (cabal#141). It must not be
