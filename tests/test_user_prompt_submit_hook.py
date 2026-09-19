@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 
 import pytest
 
@@ -1646,8 +1647,16 @@ def test_no_carrier_still_documents_the_removed_ceiling():
     # CHANGELOG's SHIPPED release sections are historical record and must keep
     # describing what shipped — 0.16.1 really did clamp to 499. Only the live
     # carriers are checked, plus CHANGELOG above its first dated release.
+    #
+    # Found the FIRST DATED release rather than naming one: a hardcoded anchor
+    # goes stale at the next release cut, silently widening this slice to cover
+    # the block just shipped. It was pinned to `## [0.16.1]` and the 0.17.0 cut
+    # made the whole 682-line shipped block read as `[Unreleased]`. Same regex
+    # shape as `_RELEASED` in tests/test_changelog.py.
     changelog = _P("CHANGELOG.md").read_text()
-    first_release = changelog.index("\n## [0.16.1]")
+    m = re.search(r"^## \[\d+\.\d+\.\d+\]", changelog, flags=re.M)
+    assert m, "no dated release block in CHANGELOG.md — the heading format changed"
+    first_release = m.start()
     carriers = {
         "techne/config.py": _P("techne/config.py").read_text(),
         "README.md": _P("README.md").read_text(),

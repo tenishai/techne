@@ -46,6 +46,21 @@ operator runs afterwards — or saying plainly that nothing is needed. This is p
 `tests/test_changelog.py::test_the_newest_released_block_carries_an_upgrading_section`, so
 step 2 is the one step here that fails loudly. It exists because the *next* step cannot.
 
+**The rename creates two more obligations, and only one of them fails loudly.**
+
+- **Leave a fresh empty `## [Unreleased]` above the renamed block.**
+  `test_the_changelog_parses_into_release_blocks` asserts the first block is `[Unreleased]`,
+  so renaming alone turns CI red. Found the hard way at the 0.17.0 cut; `ad878ff` did it
+  right for 0.16.1 without anyone writing down that it was required.
+- **Re-point any test that anchors on the previously-newest release heading.**
+  `tests/test_user_prompt_submit_hook.py` sliced CHANGELOG at a hardcoded
+  `"\n## [0.16.1]"` to find "everything above the first dated release", so the 0.17.0 cut
+  silently pushed a 682-line shipped block into the slice it polices as live text. This one
+  is fail-*closed* — a spurious red, never a missed defect — which is precisely why it
+  would have widened at every release until someone noticed. It is now derived with the
+  same regex shape `tests/test_changelog.py` uses. Grep for a hardcoded `## [` anchor
+  before you cut.
+
 **3. Bump the version and the pinned refs.** `pyproject.toml`, then grep the tree for the
 previous `@vX.Y.Z` — README and ARCHITECTURE.md carry install lines pinned to a tag, and a
 stale one sends new users to the previous release.
