@@ -222,26 +222,13 @@ All notable changes to techne are documented here. Format loosely follows
 
 - **A writer can mark a knowledge row `uncertain`** (#885). The state was reachable only
   by the dependency cascade — something was superseded, so its dependents became doubtful.
-  `mark_uncertain()` is the write-side counterpart to `reconfirm()`, so a caller can say
-  "this is what I concluded and nothing has checked it." It is idempotent, and it leaves a
-  superseded or archived row alone: superseded is the stronger statement and must not be
-  weakened into uncertain.
+  `mark_uncertain()` is the write-side counterpart to `reconfirm()`, inverse on `status`
+  alone. It is idempotent, and it leaves a superseded or archived row alone.
 
-  **Counterpart, not an exact inverse.** The two are inverses on `status` only. `reconfirm`
-  bumps `last_confirmed_at` and `mark_uncertain` does not restore it, so a round trip leaves
-  the row confirmed more recently than it was; and `reconfirm` carries no `superseded_by`
-  guard, so their domains differ.
-
-  **A library seam, with no CLI or MCP surface** — nothing in techne calls it and techne's
+  **A library seam with no CLI or MCP surface** — nothing in techne calls it and techne's
   own behaviour is unchanged. It exists for an agent persona writing its own conclusions
   into a store (cabal#141), where those rows landed `current` and came back as established
-  fact. Retrieval largely honoured the state already (#501: filter from auto-injection, tag
-  on explicit search); only the write side was missing. One rail is an exception worth
-  knowing: the tier-0 session-start band keeps an uncertain row eligible and marks it
-  `[uncertain]` rather than dropping it, ranking it lower within its band through a ×0.5
-  penalty on its decayed confidence. That is a penalty, not a demotion to last — a
-  day-old uncertain row still outranks a 90-day-old current one. Pinned by
-  `tests/test_egress.py::test_uncertain_row_still_eligible`.
+  fact.
 
 ### Changed
 
