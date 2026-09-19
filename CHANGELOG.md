@@ -220,8 +220,9 @@ All notable changes to techne are documented here. Format loosely follows
   Code's `PreCompact`/`PostCompact` hooks have no pi equivalent, so a compaction there
   loses the checkpoint that a Claude Code session keeps.
 
-- **A writer can mark a knowledge row `uncertain`** (#885). The state was reachable only
-  by the dependency cascade — something was superseded, so its dependents became doubtful.
+- **A writer can mark a knowledge row `uncertain`** (#885). The only way from a `current`
+  row to that state was the dependency cascade — something was superseded, so its
+  dependents became doubtful.
   `mark_uncertain()` is the write-side counterpart to `reconfirm()`, inverse on `status`
   alone. It is idempotent, and it leaves a superseded or archived row alone.
 

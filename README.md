@@ -328,7 +328,7 @@ print(techne.identity.list_entries(config.db_path, prefix="team."))
 
 ## MCP tools
 
-The complete agent-facing surface — 33 tools, grouped by purpose — is documented in
+The complete agent-facing surface — 38 tools, grouped by purpose — is documented in
 **[`docs/mcp-tools.md`](docs/mcp-tools.md)**, generated from the live registry and
 pinned by a test so a new tool cannot ship undocumented.
 
