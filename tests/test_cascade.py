@@ -16,6 +16,7 @@ from techne.core.knowledge import (
     annotate_uncertain,
     cascade_uncertain,
     effective_confidence,
+    mark_uncertain,
     reconfirm,
     store,
     supersede,
@@ -213,3 +214,66 @@ def test_dep_edge_idempotent(db):
     finally:
         conn.close()
     assert n == 1
+
+
+# --- the write side: a writer can say "unchecked" (cabal#141) ----------------
+
+
+def test_mark_uncertain_flips_a_current_row(db):
+    """Until now `uncertain` was only REACHABLE by the cascade — something was
+    superseded, so its dependents became doubtful. A writer had no way to say
+    "this is what I concluded and nothing has checked it", so agent-authored
+    rows landed `current` and came back indistinguishable from curated ones."""
+    kid = store(db, "something an agent concluded", type="fact")
+    assert _status(db, kid) == "current"
+
+    assert mark_uncertain(db, kid) is True
+    assert _status(db, kid) == "uncertain"
+
+
+def test_mark_uncertain_is_idempotent(db):
+    kid = store(db, "a claim", type="fact")
+    assert mark_uncertain(db, kid) is True
+    assert mark_uncertain(db, kid) is False, "already uncertain → no-op, not an error"
+
+
+def test_mark_uncertain_leaves_a_superseded_row_alone(db):
+    """Superseded is a STRONGER statement than uncertain and must not be
+    weakened into it — the same invariant the cascade already honours."""
+    kid = store(db, "v1", type="fact")
+    supersede(db, kid, "v2")
+
+    assert mark_uncertain(db, kid) is False
+    assert _status(db, kid) == "current", "superseded row must not be touched"
+
+
+def test_mark_uncertain_and_reconfirm_are_inverses(db):
+    """The pair is the whole verdict loop: an agent proposes (uncertain), a
+    judge confirms (reconfirm). cabal#140."""
+    kid = store(db, "proposed by an agent", type="fact")
+
+    assert mark_uncertain(db, kid) is True
+    assert _status(db, kid) == "uncertain"
+    assert reconfirm(db, kid) is True
+    assert _status(db, kid) == "current"
+
+
+def test_an_uncertain_row_is_not_recalled_by_default(db):
+    """THE PROPERTY THAT MATTERS. Writing as uncertain is only useful because
+    search excludes it unless a caller opts in (techne#1027: filter from
+    auto-injection, tag on explicit search)."""
+    from techne.core.search import search
+
+    kid = store(db, "zebra mnemonics for cabal dispatch", type="fact")
+    assert [r for r in search(db, "zebra mnemonics", limit=5) if r["id"] == kid]
+
+    mark_uncertain(db, kid)
+
+    default = [r for r in search(db, "zebra mnemonics", limit=5) if r["id"] == kid]
+    assert not default, "an unchecked claim must not come back as established"
+    opted_in = [
+        r
+        for r in search(db, "zebra mnemonics", limit=5, include_uncertain=True)
+        if r["id"] == kid
+    ]
+    assert opted_in, "but it must still be retrievable when asked for explicitly"
