@@ -56,7 +56,7 @@ techne init
 > across interpreter changes:
 >
 > ```bash
-> pipx install "techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.16.1"
+> pipx install "techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.17.0"
 > techne init
 > ```
 >
@@ -169,7 +169,7 @@ gracefully** when absent (vector search returns empty, the CVE gate fails open, 
 
 Combine freely — extras compose: `pip install -e ".[vectors,watch,llm]"`. For the
 non-editable pinned install, use the direct-reference form:
-`pipx install "techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.16.1"`.
+`pipx install "techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.17.0"`.
 
 **Python 3.14 note:** `fastembed` pulls in `onnxruntime` which has no 3.14 wheel yet. `techne` auto-selects `model2vec` (a numpy-only static embedding backend, no onnxruntime/torch) as the vector backend on 3.14+ instead. FTS5 search works fully on every supported Python (3.11+); vector search works via whichever backend is available.
 

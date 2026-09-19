@@ -5,6 +5,8 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.17.0] — 2026-09-18
+
 ### Added
 
 - **Four new retrieval-at-scale arms, and the #883 vocabulary confound is settled**
@@ -217,6 +219,19 @@ All notable changes to techne are documented here. Format loosely follows
   **One lane pi still lacks, as opencode does:** no compaction checkpoint/restore. Claude
   Code's `PreCompact`/`PostCompact` hooks have no pi equivalent, so a compaction there
   loses the checkpoint that a Claude Code session keeps.
+
+- **A writer can mark a knowledge row `uncertain`** (#885). The state was reachable only
+  by the dependency cascade — something was superseded, so its dependents became doubtful.
+  `mark_uncertain()` is now `reconfirm()`'s exact inverse, so a caller can say "this is what
+  I concluded and nothing has checked it." It is idempotent, and it leaves a superseded or
+  archived row alone: superseded is the stronger statement and must not be weakened into
+  uncertain.
+
+  **A library seam, with no CLI or MCP surface** — nothing in techne calls it and techne's
+  own behaviour is unchanged. It exists for an agent persona writing its own conclusions
+  into a store (cabal#141), where those rows landed `current` and came back as established
+  fact. Retrieval already honoured the state (#1027: filter from auto-injection, tag on
+  explicit search); only the write side was missing.
 
 ### Changed
 
