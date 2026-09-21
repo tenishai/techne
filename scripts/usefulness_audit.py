@@ -217,7 +217,8 @@ def run_corrections_emit(db: Path, projects: Path, out: Path, top_k: int = TOP_K
     # ("no, that's wrong") is typed word-for-word in unrelated sessions, and keying
     # on the prompt alone merged those into one record (Prudence, PR #996 r1). A
     # replay copies the preceding reply too. Record uuids are no substitute: a
-    # re-created transcript assigns new ones, so they miss real replays.
+    # re-created transcript can carry new ones (a 2026-07-02 turn copied into
+    # 2026-09-09 transcripts kept its text and lost its uuid), so they miss replays.
     found: dict[tuple[str, str], tuple[float, str, list[Turn], int]] = {}
     for sid, turns in turns_by_session.items():
         for i, turn in enumerate(turns):

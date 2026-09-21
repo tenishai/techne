@@ -563,11 +563,12 @@ _CITATION_RE = re.compile(r"(?:knowledge ?#|techne#|🧠)(\d+)")
 # Which rail wrote a knowledge row, from knowledge.source: reflect-promoted rows
 # carry "reflect-promote:<session>:<n>" (or "reflect:<...>"), consolidate merges
 # "consolidate-merge:<candidate>". Everything else is bucketed as "hand": stored
-# directly by the agent or the operator, imported (cc-memory:*), or written by a
-# machine path that is not a maintenance rail (probe, filesystem sync). An injected
-# id with no knowledge row at all (hard-deleted since) is "unknown", never "hand":
-# hand is the baseline reflect is compared against, so it must not absorb rows of
-# any origin (PR #996 r1).
+# directly ("agent" from techne_store, "session", "manual" from the CLI, "team"),
+# the probe canary ("probe"), and legacy import rows ("cc-memory:*", which nothing
+# writes any more). An injected id that is not found in `knowledge` is "unknown",
+# never "hand": it may be a row deleted since, or a non-knowledge row that
+# per_turn_recall injected (an observation id). hand is the baseline reflect is
+# compared against, so it must not absorb rows of any origin (PR #996 r1).
 _ORIGINS = ("reflect", "consolidate", "hand", "unknown")
 
 
