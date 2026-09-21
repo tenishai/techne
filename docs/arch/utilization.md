@@ -1,7 +1,7 @@
 ---
 card: arch-card:techne-utilization
-updated: 2026-08-19
-anchor: techne/core/utilization.py sha=0aef9fe8098a30ee27363c2fe6b0506b05698104
+updated: 2026-09-21
+anchor: techne/core/utilization.py sha=ac68b495eedd5605ba8f57d5815586c244b78c6c
 ---
 # utilization — is the read path earning its tokens? (techne#329)
 
@@ -12,7 +12,7 @@ SURFACE: `techne audit` (`cli.py`, text + `--json`). Four functions, all read-on
 - `injection_utilization` — per-source volume and token cost. What the rails SPENT.
 - `read_write_ledger` — read-vs-write ratios per domain. #329's original audit, re-runnable.
 - `edit_rail_attribution` — did a codex edit-rail injection precede an edit to a file/symbol it named?
-- `recall_attribution` — did the agent go on to CITE an injected knowledge id (`techne#237` / `knowledge#956`)? This is #416, #329's deferred join, shipped in #560.
+- `recall_attribution` — did the agent go on to CITE an injected knowledge id (`techne#237`, `knowledge#956`, `🧠2862`, `knowledge #2862`)? This is #416, #329's deferred join, shipped in #560. Since #995 it also splits the result BY ORIGIN (`per_origin`: reflect / consolidate / hand, from `knowledge.source` via `knowledge_origin`), which is how to ask whether the reflect rail earns its injections.
 
 ## THE THING TO UNDERSTAND BEFORE QUOTING ANY NUMBER FROM HERE
 
@@ -31,6 +31,8 @@ Live figures as of 2026-08-16 (all-time): 1,601 injections analysed, 28 cited in
 - **EVERY DOMAIN NEEDS ITS OWN READ TUPLE, INCLUDING THE ARCHIVIST.** `archivist_search` was counted by nothing — three of the four domain-named tools landed in the ledger and the archivist's vanished. The bite does not need an archivist row: when a read MIGRATES from `techne_recall` to `archivist_search`, which the docs now tell operators to do, `memory.read` falls and the panel reports a read-path DECLINE that is actually a read-path migration.
 - **THE PANEL IS THE ONLY THING AN OPERATOR SEES, SO SOMETHING MUST RENDER IT.** Every ledger test asserts the dict `read_write_ledger` returns; none rendered it, so `techne audit` died with a NameError partway through the panel while the full suite stayed green at 3367. A shallow smoke test now runs the command and asserts every domain is named.
 - **THE READ TUPLES ARE EXACT MATCHES, SO A NEW TOOL MUST BE ADDED TO THEM.** `_ARCHITECT_READ` missed `architect_search` for the same reason, and the failure is the nasty direction: successful adoption reads as `never queried`, i.e. the ledger reports neglect at precisely the moment the tool is being used. A test asserts the domain-named tool is counted; the older test that asserted the stale constant is why the suite stayed green through the regression, and it now asserts the DERIVATION instead — a test pinning a constant cannot notice the constant going stale.
+- **THE CITATION PATTERN MUST TRACK THE WRITING CONVENTION.** The interactive sigil `🧠N` (adopted 2026-08-31) and the machine form `knowledge #N` matched nothing until #995, so every citation written in the current convention went uncounted and the floor sank further than the caveat above admits. When the reference convention changes, change `_CITATION_RE` in the same PR.
+- **ORIGIN IS COUNTED PER INJECTED ROW, NOT PER INJECTION.** One injection mixes rows from several rails, so `per_origin` counts (row, injection) pairs. Its rate excludes pairs in ledger-blind sessions, for the same reason `attributable` does.
 - **THE PER-ITEM TABLE IS WHERE THE ACTION IS.** `items` gives encounters vs citations per injected id. An item with many encounters and zero citations is EITHER load-bearing-and-silent OR pure token cost, and no automated signal can tell those apart — only an operator can.
 
 ## KNOWN GAPS
@@ -38,4 +40,4 @@ Live figures as of 2026-08-16 (all-time): 1,601 injections analysed, 28 cited in
 - **THE COUNTERFACTUAL IS UNMEASURED AND IS techne#682 — not #105, not #416 (corrected 2026-08-19).** "Would it have happened WITHOUT the injection" is the question both attribution figures fail to answer, and four source sites claimed it was tracked, by two different numbers, neither of which is it. #105 is the EVIDENCE GATE (does an agent's CLAIM have ledger backing — a different question, and shipped); #416 is closed and built the PROXY, deferring the judge. One of the wrong pointers was in `techne audit`'s operator-facing output. Found while closing #105 for the #647 Tier 8 pass, which would otherwise have left three comments citing a closed issue for a live problem.
 - The LLM-judge half of #416 is deliberately unbuilt. The proxy is free, deterministic and CI-runnable; the judge costs model calls and should be reached for only where the proxy is ambiguous (relevant injection, turn happened not to act on it).
 - Nothing here scores the SESSION-START rail's prose blocks — only id-bearing hits.
-- `recall_attribution` was invisible to `codex_search` when this card was written (#595), which is part of why it was nearly rebuilt from scratch. If you are reading this card INSTEAD of grepping, that is the intended path (techne#812).
+- `recall_attribution` was invisible to `codex_search` when this card was written (#595), which is part of why it was nearly rebuilt from scratch. If you are reading this card INSTEAD of grepping, that is the intended path (techne#812). It happened again on 2026-09-21: a transcript-based citation prototype was built before anyone ran `techne audit`, and was cut back to the one thing this seam lacked (the origin split) under #995. Run `techne audit` before building any memory metric.

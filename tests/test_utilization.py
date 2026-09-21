@@ -1203,3 +1203,58 @@ def test_stats_are_populated_even_when_nothing_is_cut(tmp_path):
     assert empty_stats == {"rows_truncated": 1, "chars_dropped": 700}, (
         "the empty exit must still report what it severed"
     )
+
+
+# ---- recall_attribution: current citation forms + per-origin split (techne#995) --
+
+
+def test_recall_attribution_matches_sigil_and_spaced_forms(db):
+    # 🧠N is the interactive convention since 2026-08-31 and "knowledge #N" the
+    # machine-readable one; before #995 neither matched, so both went uncounted.
+    _kinject(db, "2026-01-01 12:00:00", [2862])
+    _act(db, "2026-01-01 12:00:10", "per 🧠2862 (sigils), ship it")
+    _kinject(db, "2026-01-01 13:00:00", [877])
+    _act(db, "2026-01-01 13:00:10", "Relates to knowledge #877.")
+    assert recall_attribution(db)["cited_in_window"] == 2
+
+
+def test_recall_attribution_sigil_does_not_match_a_longer_id(db):
+    _kinject(db, "2026-01-01 12:00:00", [286])
+    _act(db, "2026-01-01 12:00:10", "see 🧠2862")
+    assert recall_attribution(db)["cited_in_window"] == 0
+
+
+def test_recall_attribution_splits_rows_by_origin(db):
+    from techne.core.knowledge import store
+
+    hand = store(db, "hand-stored fact", source="agent")
+    refl = store(db, "reflect fact", source="reflect-promote:sess:1")
+    cons = store(db, "merged fact", source="consolidate-merge:7")
+    _kinject(db, "2026-01-01 12:00:00", [hand, refl, cons])
+    _act(db, "2026-01-01 12:00:10", f"following 🧠{refl}")
+
+    po = recall_attribution(db)["per_origin"]
+    assert po["reflect"]["pairs"] == 1 and po["reflect"]["cited_in_window"] == 1
+    assert po["reflect"]["cited_in_window_pct"] == 100.0
+    assert po["hand"]["cited_in_window"] == 0 and po["hand"]["items_never_cited"] == 1
+    assert po["consolidate"]["pairs"] == 1 and po["consolidate"]["cited_in_window_pct"] == 0.0
+
+
+def test_recall_attribution_origin_rate_excludes_ledger_blind_pairs(db):
+    from techne.core.knowledge import store
+
+    refl = store(db, "reflect fact", source="reflect-promote:sess:1")
+    _kinject(db, "2026-01-01 12:00:00", [refl])
+    _act(db, "2026-01-01 12:00:10", f"techne#{refl}")
+    ensure_session(db, "blind")
+    _kinject(db, "2026-01-01 12:00:00", [refl], session="blind")  # no observations
+
+    r = recall_attribution(db)["per_origin"]["reflect"]
+    assert r["pairs"] == 2 and r["unobserved"] == 1
+    assert r["cited_in_window_pct"] == 100.0  # 1 of 1 observable, not 1 of 2
+
+
+def test_recall_attribution_empty_db_has_per_origin(db):
+    po = recall_attribution(db)["per_origin"]
+    assert set(po) == {"reflect", "consolidate", "hand"}
+    assert po["reflect"]["cited_in_window_pct"] is None
