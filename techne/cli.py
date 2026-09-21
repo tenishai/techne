@@ -2217,6 +2217,20 @@ def audit(ctx, since_days, as_json):
                 f"window {s['cited_in_window']:>3} · session {s['cited_in_session']:>3} "
                 f"· blind {s['unobserved_session']:>3}"
             )
+        # Which rail wrote the rows being shown (techne#995): is reflect earning its
+        # injections? Per injected ROW, since one injection mixes origins.
+        click.echo(
+            "  by origin (per injected row; rows/never cited count every row, "
+            "shown/cited exclude ledger-blind sessions):"
+        )
+        for name, o in recall["per_origin"].items():
+            if not o["pairs"]:
+                continue
+            click.echo(
+                f"    {name:12} rows {o['items']:>5} · never cited {o['items_never_cited']:>5} "
+                f"· shown {o['pairs'] - o['unobserved']:>5} · cited in window "
+                f"{o['cited_in_window']:>4} ({_q(o['cited_in_window_pct'])})"
+            )
         click.echo(
             f"  items injected: {recall['items_injected']} · "
             f"never cited: {recall['items_never_cited']} "
