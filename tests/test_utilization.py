@@ -1256,5 +1256,19 @@ def test_recall_attribution_origin_rate_excludes_ledger_blind_pairs(db):
 
 def test_recall_attribution_empty_db_has_per_origin(db):
     po = recall_attribution(db)["per_origin"]
-    assert set(po) == {"reflect", "consolidate", "hand"}
+    assert set(po) == {"reflect", "consolidate", "hand", "unknown"}
     assert po["reflect"]["cited_in_window_pct"] is None
+
+
+def test_recall_attribution_does_not_credit_spaced_techne_form(db):
+    # "techne #412" is how a GitHub issue gets written in prose, not a citation form.
+    _kinject(db, "2026-01-01 12:00:00", [412])
+    _act(db, "2026-01-01 12:00:10", "tracked in techne #412")
+    assert recall_attribution(db)["cited_in_window"] == 0
+
+
+def test_recall_attribution_buckets_a_missing_row_as_unknown_not_hand(db):
+    _kinject(db, "2026-01-01 12:00:00", [987654])  # no knowledge row with this id
+    _act(db, "2026-01-01 12:00:10", "unrelated")
+    po = recall_attribution(db)["per_origin"]
+    assert po["unknown"]["pairs"] == 1 and po["hand"]["pairs"] == 0

@@ -43,6 +43,8 @@ DEFAULT_PROJECTS = Path.home() / ".claude" / "projects"
 #: Distinctive terms per correction used to query the store, and rows kept.
 QUERY_TERMS = 10
 TOP_K = 5
+#: Chars of the preceding reply that, with the prompt, identify a replayed turn.
+REPLAY_TAIL = 300
 
 _TOKEN = re.compile(r"[a-z0-9_][a-z0-9_.\-/]{3,}")
 _STOP = frozenset(
@@ -69,6 +71,10 @@ def tokens(text: str) -> list[str]:
         if len(t) >= 4 and not t.isdigit() and t not in _STOP:
             out.append(t)
     return out
+
+
+def _norm(text: str) -> str:
+    return " ".join(text.lower().split())
 
 
 def rare_terms(text: str, df: Counter, k: int = QUERY_TERMS) -> list[str]:
@@ -207,14 +213,19 @@ def run_corrections_emit(db: Path, projects: Path, out: Path, top_k: int = TOP_K
 
     # Resumed/forked sessions copy earlier turns into a new transcript with new
     # timestamps, so the same correction appears more than once. Keep the earliest.
-    found: dict[str, tuple[float, str, list[Turn], int]] = {}
+    # The key is the prompt AND the tail of the reply it answered: stock pushback
+    # ("no, that's wrong") is typed word-for-word in unrelated sessions, and keying
+    # on the prompt alone merged those into one record (Prudence, PR #996 r1). A
+    # replay copies the preceding reply too. Record uuids are no substitute: a
+    # re-created transcript assigns new ones, so they miss real replays.
+    found: dict[tuple[str, str], tuple[float, str, list[Turn], int]] = {}
     for sid, turns in turns_by_session.items():
         for i, turn in enumerate(turns):
             if i == 0 or len(turn.prompt) > 600 or not _CORRECTION.search(turn.prompt):
                 continue
-            norm = " ".join(turn.prompt.lower().split())
-            if norm not in found or turn.ts < found[norm][0]:
-                found[norm] = (turn.ts, sid, turns, i)
+            key = (_norm(turn.prompt), _norm(turns[i - 1].reply_text[-REPLAY_TAIL:]))
+            if key not in found or turn.ts < found[key][0]:
+                found[key] = (turn.ts, sid, turns, i)
     log.debug("corrections: %d distinct after dedup", len(found))
 
     n = 0

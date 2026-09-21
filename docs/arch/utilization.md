@@ -1,7 +1,7 @@
 ---
 card: arch-card:techne-utilization
 updated: 2026-09-21
-anchor: techne/core/utilization.py sha=ac68b495eedd5605ba8f57d5815586c244b78c6c
+anchor: techne/core/utilization.py sha=9f1dd630439eb529ab202a7c9795ae28661a7486
 ---
 # utilization — is the read path earning its tokens? (techne#329)
 
@@ -12,7 +12,7 @@ SURFACE: `techne audit` (`cli.py`, text + `--json`). Four functions, all read-on
 - `injection_utilization` — per-source volume and token cost. What the rails SPENT.
 - `read_write_ledger` — read-vs-write ratios per domain. #329's original audit, re-runnable.
 - `edit_rail_attribution` — did a codex edit-rail injection precede an edit to a file/symbol it named?
-- `recall_attribution` — did the agent go on to CITE an injected knowledge id (`techne#237`, `knowledge#956`, `🧠2862`, `knowledge #2862`)? This is #416, #329's deferred join, shipped in #560. Since #995 it also splits the result BY ORIGIN (`per_origin`: reflect / consolidate / hand, from `knowledge.source` via `knowledge_origin`), which is how to ask whether the reflect rail earns its injections.
+- `recall_attribution` — did the agent go on to CITE an injected knowledge id (`techne#237`, `knowledge#956`, `🧠2862`, `knowledge #2862`)? This is #416, #329's deferred join, shipped in #560. Since #995 it also splits the result BY ORIGIN (`per_origin`: reflect / consolidate / hand, from `knowledge.source` via `knowledge_origin`, plus `unknown` for an injected id whose row no longer exists), which is how to ask whether the reflect rail earns its injections.
 
 ## THE THING TO UNDERSTAND BEFORE QUOTING ANY NUMBER FROM HERE
 
@@ -33,6 +33,8 @@ Live figures as of 2026-08-16 (all-time): 1,601 injections analysed, 28 cited in
 - **THE READ TUPLES ARE EXACT MATCHES, SO A NEW TOOL MUST BE ADDED TO THEM.** `_ARCHITECT_READ` missed `architect_search` for the same reason, and the failure is the nasty direction: successful adoption reads as `never queried`, i.e. the ledger reports neglect at precisely the moment the tool is being used. A test asserts the domain-named tool is counted; the older test that asserted the stale constant is why the suite stayed green through the regression, and it now asserts the DERIVATION instead — a test pinning a constant cannot notice the constant going stale.
 - **THE CITATION PATTERN MUST TRACK THE WRITING CONVENTION.** The interactive sigil `🧠N` (adopted 2026-08-31) and the machine form `knowledge #N` matched nothing until #995, so every citation written in the current convention went uncounted and the floor sank further than the caveat above admits. When the reference convention changes, change `_CITATION_RE` in the same PR.
 - **ORIGIN IS COUNTED PER INJECTED ROW, NOT PER INJECTION.** One injection mixes rows from several rails, so `per_origin` counts (row, injection) pairs. Its rate excludes pairs in ledger-blind sessions, for the same reason `attributable` does.
+- **THE PER-ORIGIN RATE IS A THIRD RATE.** It is neither `cited_in_window_pct` (over all injections) nor the attributable rate (which also drops `no_actions_in_window`), so it compares origins with EACH OTHER and must not be set beside the headline figure. Per-pair weighting also lets one heavily re-injected row dominate its origin; the `items` / `items_never_cited` columns are the counterweight, so read the two together.
+- **A MISSING ROW IS `unknown`, NEVER `hand`.** `hand` is the baseline reflect is compared against; defaulting hard-deleted ids into it would let rows of any origin inflate or deflate the comparison.
 - **THE PER-ITEM TABLE IS WHERE THE ACTION IS.** `items` gives encounters vs citations per injected id. An item with many encounters and zero citations is EITHER load-bearing-and-silent OR pure token cost, and no automated signal can tell those apart — only an operator can.
 
 ## KNOWN GAPS

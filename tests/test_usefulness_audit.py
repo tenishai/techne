@@ -189,3 +189,32 @@ def test_summarize_accepts_answer_found_outside_candidates_only_with_its_facts()
     }
     s = ua.summarize_corrections(emitted, verdicts)["counts"]
     assert s["use_failure"] == 1 and s["answer_outside_candidates"] == 1 and s["bad_verdict"] == 1
+
+
+def test_corrections_emit_keeps_same_pushback_from_unrelated_sessions(tmp_path):
+    # Stock pushback typed in two unrelated sessions, after different replies, is
+    # two corrections. Keying the dedup on the prompt alone merged them (PR #996 r1).
+    db = tmp_path / "t.db"
+    _make_db(
+        db,
+        rows=[(1, "claude update never npm install", "agent", "2026-09-01 00:00:00")],
+        injections=[],
+    )
+    for sid, day, reply in (
+        ("s1", "21", "Running npm install -g"),
+        ("s2", "23", "Deleting the branch"),
+    ):
+        _write_transcript(
+            tmp_path / "p" / "proj" / f"{sid}.jsonl",
+            [
+                _u(f"2026-09-{day}T10:00:00Z", "do the thing"),
+                _a(f"2026-09-{day}T10:00:05Z", [{"type": "text", "text": reply}]),
+                _u(
+                    f"2026-09-{day}T10:01:00Z",
+                    "No,  that's WRONG" if sid == "s2" else "no, that's wrong",
+                ),
+            ],
+        )
+    out = tmp_path / "c.jsonl"
+    assert ua.run_corrections_emit(db, tmp_path / "p", out) == 2
+    assert sorted(json.loads(ln)["session"] for ln in out.read_text().splitlines()) == ["s1", "s2"]

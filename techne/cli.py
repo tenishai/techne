@@ -2219,7 +2219,10 @@ def audit(ctx, since_days, as_json):
             )
         # Which rail wrote the rows being shown (techne#995): is reflect earning its
         # injections? Per injected ROW, since one injection mixes origins.
-        click.echo("  by origin (per injected row, ledger-blind excluded):")
+        click.echo(
+            "  by origin (per injected row; rows/never cited count every row, "
+            "shown/cited exclude ledger-blind sessions):"
+        )
         for name, o in recall["per_origin"].items():
             if not o["pairs"]:
                 continue

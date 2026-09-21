@@ -556,13 +556,19 @@ _KNOWLEDGE_RAILS = ("per_turn_recall", "session_start")
 # Before techne#995 only the first two matched, so every citation written in the
 # current convention went uncounted. The ⟦…⟧ brackets the injection banner uses
 # sit OUTSIDE the match, so ⟦techne#237⟧ is caught by the same pattern.
-_CITATION_RE = re.compile(r"(?:(?:techne|knowledge) ?#|🧠)(\d+)")
+# Exactly those four: "techne #N" (with a space) is NOT one, and it is also how a
+# GitHub issue gets written in prose, so it stays unmatched (PR #996 r1).
+_CITATION_RE = re.compile(r"(?:knowledge ?#|techne#|🧠)(\d+)")
 
 # Which rail wrote a knowledge row, from knowledge.source: reflect-promoted rows
 # carry "reflect-promote:<session>:<n>" (or "reflect:<...>"), consolidate merges
-# "consolidate-merge:<candidate>". Everything else was stored directly — by the
-# agent, the operator, or an import — and is bucketed as "hand".
-_ORIGINS = ("reflect", "consolidate", "hand")
+# "consolidate-merge:<candidate>". Everything else is bucketed as "hand": stored
+# directly by the agent or the operator, imported (cc-memory:*), or written by a
+# machine path that is not a maintenance rail (probe, filesystem sync). An injected
+# id with no knowledge row at all (hard-deleted since) is "unknown", never "hand":
+# hand is the baseline reflect is compared against, so it must not absorb rows of
+# any origin (PR #996 r1).
+_ORIGINS = ("reflect", "consolidate", "hand", "unknown")
 
 
 def knowledge_origin(source: str | None) -> str:
@@ -657,7 +663,8 @@ def recall_attribution(
 
     For each injection from ``sources``, look at the SAME session's observations
     that follow it and ask whether the agent went on to CITE an injected item by
-    id ("techne#237" / "knowledge#956"), at two window widths:
+    id (any form ``_CITATION_RE`` matches: "techne#237", "knowledge#956",
+    "🧠2862", "knowledge #2862"), at two window widths:
 
       - **window** — within the next ``next_actions`` actions AND
         ``window_minutes`` minutes. Tight, so a citation plausibly follows FROM
@@ -782,7 +789,7 @@ def recall_attribution(
             src["no_actions_in_window"] += 1
 
         for i in idset:
-            o = per_origin[origin_of.get(i, "hand")]
+            o = per_origin[origin_of.get(i, "unknown")]
             o["pairs"] += 1
             o["unobserved"] += not following
             o["cited_in_window"] += i in cited_window
@@ -826,7 +833,7 @@ def recall_attribution(
                 "sessions": len(v["sessions"]),
                 "cited_in_window": v["cited_in_window"],
                 "cited_in_session": v["cited_in_session"],
-                "origin": origin_of.get(v["id"], "hand"),
+                "origin": origin_of.get(v["id"], "unknown"),
             }
             for v in items.values()
         ),
