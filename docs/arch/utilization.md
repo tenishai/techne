@@ -1,7 +1,7 @@
 ---
 card: arch-card:techne-utilization
 updated: 2026-09-21
-anchor: techne/core/utilization.py sha=6ba63a830627440d4d774d2945e2cbb39304e41a
+anchor: techne/core/utilization.py sha=23c7ed6188d144e8db87da3b62c91ce2863f0d51
 ---
 # utilization — is the read path earning its tokens? (techne#329)
 
@@ -34,7 +34,7 @@ Live figures as of 2026-08-16 (all-time): 1,601 injections analysed, 28 cited in
 - **THE CITATION PATTERN MUST TRACK THE WRITING CONVENTION.** The interactive sigil `🧠N` (adopted 2026-08-31) and the machine form `knowledge #N` matched nothing until #995, so every citation written in the current convention went uncounted and the floor sank further than the caveat above admits. When the reference convention changes, change `_CITATION_RE` in the same PR.
 - **ORIGIN IS COUNTED PER INJECTED ROW, NOT PER INJECTION.** One injection mixes rows from several rails, so `per_origin` counts (row, injection) pairs. Its rate excludes pairs in ledger-blind sessions, for the same reason `attributable` does.
 - **THE PER-ORIGIN RATE IS A THIRD RATE.** It is neither `cited_in_window_pct` (over all injections) nor the attributable rate (which also drops `no_actions_in_window`), so it compares origins with EACH OTHER and must not be set beside the headline figure. Per-pair weighting also lets one heavily re-injected row dominate its origin; the `items` / `items_never_cited` columns are the counterweight, so read the two together.
-- **AN ID NOT FOUND IN `knowledge` IS `unknown`, NEVER `hand`.** `hand` is the baseline reflect is compared against; defaulting unmatched ids into it would let rows of any origin inflate or deflate the comparison. `unknown` means "not in `knowledge`", which covers a row deleted since AND a non-knowledge row per_turn_recall injected (an observation id), so do not read an `unknown` count as deletions. It was empty on the live store when this shipped. The same id space causes a quieter, pre-existing error: an injected observation id that happens to equal a knowledge id is credited to that knowledge row.
+- **AN ID NOT FOUND IN `knowledge` IS `unknown`, NEVER `hand`.** `hand` is the baseline reflect is compared against; defaulting unmatched ids into it would let rows of any origin inflate or deflate the comparison. Both knowledge rails inject knowledge rows only (per_turn_recall calls `search(table="knowledge")`), so today `unknown` means a row deleted after it was injected; it was empty on the live store when this shipped. If the rail is ever widened to `table="all"`, observation ids join the same id space and would be looked up against `knowledge` — the latent hazard `user_prompt_submit.py` already documents for techne#608.
 - **THE PER-ITEM TABLE IS WHERE THE ACTION IS.** `items` gives encounters vs citations per injected id. An item with many encounters and zero citations is EITHER load-bearing-and-silent OR pure token cost, and no automated signal can tell those apart — only an operator can.
 
 ## KNOWN GAPS

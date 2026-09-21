@@ -562,13 +562,16 @@ _CITATION_RE = re.compile(r"(?:knowledge ?#|techne#|🧠)(\d+)")
 
 # Which rail wrote a knowledge row, from knowledge.source: reflect-promoted rows
 # carry "reflect-promote:<session>:<n>" (or "reflect:<...>"), consolidate merges
-# "consolidate-merge:<candidate>". Everything else is bucketed as "hand": stored
-# directly ("agent" from techne_store, "session", "manual" from the CLI, "team"),
-# the probe canary ("probe"), and legacy import rows ("cc-memory:*", which nothing
-# writes any more). An injected id that is not found in `knowledge` is "unknown",
-# never "hand": it may be a row deleted since, or a non-knowledge row that
-# per_turn_recall injected (an observation id). hand is the baseline reflect is
-# compared against, so it must not absorb rows of any origin (PR #996 r1).
+# "consolidate-merge:<candidate>". Everything else is bucketed as "hand". That
+# includes rows stored directly ("agent", "session", "manual", "team"), whatever
+# free-text source a caller passes to techne_store, document_card rows sourced by
+# URL or path, the probe canary, and legacy imports ("cc-memory:*").
+#
+# An injected id not found in `knowledge` is "unknown", never "hand": hand is the
+# baseline reflect is compared against, so it must not absorb rows of any origin
+# (PR #996 r1). Both knowledge rails inject knowledge rows only (per_turn_recall
+# calls search(table="knowledge")), so today "unknown" means a row deleted after
+# it was injected.
 _ORIGINS = ("reflect", "consolidate", "hand", "unknown")
 
 
