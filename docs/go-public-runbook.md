@@ -113,15 +113,29 @@ would run unapproved**. Enable approval in the same sitting or do not do it.
   body carries no address. Nothing to do here; it is left in writing because a
   cleared blocker that vanishes from the runbook reads as one nobody checked.
 
-  **Settle it yourself rather than trusting this line** — one command, and it
-  is the same one that answers the bullet below:
+  **Settle THIS BULLET yourself rather than trusting the line above.** It
+  checks #207 in techne and nothing else — the five-repo claim in the next
+  bullet is a different job, with different scripts, named there.
 
   ```bash
   gh api graphql -f query='query { repository(owner: "tenishai", name: "techne") {
     issue(number: 207) { userContentEdits(first: 20) {
       totalCount nodes { createdAt deletedAt diff } } } } }'
-  # expect: totalCount 2, and one node with deletedAt set and diff "deleted"
   ```
+
+  Output when run 2026-09-22, which is where the expected values come from
+  rather than from anyone's memory:
+
+  ```json
+  {"totalCount": 2, "nodes": [
+    {"createdAt": "2026-08-13T20:12:09Z", "deletedAt": null,
+     "diff": "## What\n\nAdd a small **durable, local, d…"},
+    {"createdAt": "2026-08-13T20:12:09Z", "deletedAt": "2026-08-16T13:53:55Z",
+     "diff": "deleted"}]}
+  ```
+
+  A second deleted revision appearing here later is not drift to shrug at: it
+  means something was redacted since, and the redaction made a new revision.
 - **The rest of the edit histories are clean**, measured 2026-09-22 (#1002):
   383 revisions across all five repos, scanned via GraphQL `userContentEdits`
   because REST cannot see revisions. No credentials; the only emails are
