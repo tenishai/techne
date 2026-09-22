@@ -112,11 +112,24 @@ would run unapproved**. Enable approval in the same sitting or do not do it.
   revision `deletedAt: 2026-08-16T13:53:55Z`, diff `deleted`, and the current
   body carries no address. Nothing to do here; it is left in writing because a
   cleared blocker that vanishes from the runbook reads as one nobody checked.
+
+  **Settle it yourself rather than trusting this line** — one command, and it
+  is the same one that answers the bullet below:
+
+  ```bash
+  gh api graphql -f query='query { repository(owner: "tenishai", name: "techne") {
+    issue(number: 207) { userContentEdits(first: 20) {
+      totalCount nodes { createdAt deletedAt diff } } } } }'
+  # expect: totalCount 2, and one node with deletedAt set and diff "deleted"
+  ```
 - **The rest of the edit histories are clean**, measured 2026-09-22 (#1002):
   383 revisions across all five repos, scanned via GraphQL `userContentEdits`
   because REST cannot see revisions. No credentials; the only emails are
   Richard's own plus-addresses. **Re-run it immediately before the flip** —
   revisions accumulate, and every redaction made from here on creates one.
+  Scripts: `fetch_edits.py` + `scan_edits.py`, attached to #1002. That result
+  is one person's scan and nobody has reproduced it, so treat the re-run as
+  the verification rather than as a formality.
 - Other repos have their own blockers (cabal's tracked `.env`, gojira/ladon
   copyright, skills' missing LICENSE). Out of scope here; techne carries
   AGPL-3.0 already. The five-repo readiness pass tracks them in #1003.
