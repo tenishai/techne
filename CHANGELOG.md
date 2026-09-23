@@ -11,8 +11,9 @@ All notable changes to techne are documented here. Format loosely follows
   both memory layers drifts and double-injects. In a terminal, a new user is asked;
   on yes only `autoMemoryEnabled` in `~/.claude/settings.json` changes, re-read
   immediately before the write. Non-interactive init only prints the recommendation.
-  With existing Claude Code memory (the spool-primary posture) nothing is offered;
-  init says how to move to techne-only deliberately.
+  Under the spool-primary posture nothing is offered (the offer keys on the
+  resolved posture, not on detected memory files); init instead says how to move
+  to techne-only, and that techne does not import Claude Code's existing memory.
 
 - **The architect's pattern-target roster is now configured, not hardcoded** (#1008).
   It was a literal set of ten of this project's own repo names, and the

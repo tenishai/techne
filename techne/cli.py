@@ -2354,8 +2354,10 @@ def _offer_auto_memory_off(spool_primary: bool) -> None:
     if spool_primary:
         click.echo(
             "Claude Code auto-memory is on, and techne is working alongside it "
-            "(spool-primary). To use techne alone instead: run `techne memory sync` to "
-            "import its memory, set `autoMemoryEnabled: false` in "
+            "(spool-primary). techne does not take over Claude Code's memory: your "
+            "MEMORY.md files stay where they are, and techne writes memory of its own "
+            "only with `reflect.enabled: true` in ~/.techne/config.yaml. To use techne "
+            "alone: turn reflect on, set `autoMemoryEnabled: false` in "
             f"~/.claude/settings.json, then run `{posture_switch_command('observe')}`."
         )
         return
