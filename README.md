@@ -506,7 +506,9 @@ techne architect add --name N --source URL [--surveyed YYYY-MM-DD] [--body T | -
                                            # that ships. No markdown to hand-write, so no
                                            # format to get wrong; body also reads stdin.
                                            # The richer procedures (/investigate-url,
-                                           # /survey-field) live in tenishai/skills
+                                           # /survey-field) live in tenishai/skills,
+                                           # which is not public yet — `add` and
+                                           # `ingest` are the feeders that ship here.
 techne architect ingest PATTERNS_MD [--verdict skip|skip-with-flag|patterns-only|full-eval]
                                            # seed from an architectural-patterns.md corpus.
                                            # --verdict records YOUR judgment of the
@@ -829,4 +831,18 @@ Semantic versioning. **Full release history: [`CHANGELOG.md`](CHANGELOG.md).**
 
 ## License
 
-AGPL-3.0-or-later. See `LICENSE` file.
+Copyright (C) 2026 tenishai
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License along
+with this program. If not, see <https://www.gnu.org/licenses/>.
+
+Full text: [LICENSE](LICENSE).
