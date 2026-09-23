@@ -49,11 +49,14 @@ hooks:
   codex_reindex_on_edit: false
 ```
 
-> **A hook change needs `techne init` afterward, and only takes effect from
-> the next session.** Claude Code loads its hook chain at session start, so
-> flipping a flag in config and continuing the current session changes
-> nothing until you restart it. `techne status` warns if config and the
-> registered hooks have drifted apart; `techne init` reconciles them.
+> **Two of these need `techne init` and a new session; the rest apply on the
+> next tool call.** `per_turn_recall` and `codex_grep_assist` decide which hooks
+> are registered in Claude Code's `settings.json`, and Claude Code loads that
+> hook chain at session start, so run `techne init` and restart after changing
+> either. `techne status` warns if config and the registered hooks have drifted
+> apart. `capture_bash`, `codex_edit_rail` and `codex_reindex_on_edit` are read
+> by the always-registered PostToolUse hook each time it runs, so they apply
+> immediately, mid-session, with no init.
 
 `techne init` also handles two related setup steps for you: it downloads the
 embedding model once so vector search works without a separate step (pass
@@ -68,8 +71,17 @@ Running Claude Code's own auto-memory (`autoMemoryEnabled` in
 `settings.json`) alongside techne is two parallel memory layers writing and
 reading independently, which causes drift between them and can double-inject
 the same fact from both sources. Turn `autoMemoryEnabled` off if techne is
-your memory layer — `techne init` asks before doing this for you rather than
-flipping it silently.
+your memory layer. `techne init` offers to turn it off for you, and never
+flips it silently. It only asks when both ends are a terminal; otherwise it
+prints the recommendation. Under `spool-primary` (below) it does not offer,
+because techne is then deliberately working alongside that memory.
+
+To move from `spool-primary` to techne alone: run `techne memory sync` to
+import Claude Code's memory, set `autoMemoryEnabled: false` in
+`~/.claude/settings.json`, then run
+`techne init --platform claude-code --posture observe`. Passing the posture
+matters: a bare `techne init` re-detects the memory files and resolves back to
+`spool-primary`.
 
 This is not the same question as whether techne *detects* existing CC memory
 files: `techne init` always checks the project directory for them
