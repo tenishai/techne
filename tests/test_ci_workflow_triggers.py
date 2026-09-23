@@ -83,14 +83,27 @@ def test_the_go_public_runbook_exists_and_the_workflow_points_at_it():
     )
 
     text = runbook.read_text()
-    # The load-bearing step. If someone trims the runbook down, this is the line
-    # that must survive: stopping the runner is what makes the post-flip window
-    # safe, rather than merely short.
-    assert "STOP THE CONTAINER" in text, (
-        "the runbook no longer states the stop-the-container step in its own "
-        "words — API de-registration alone does NOT stick (measured: prinkle "
-        "re-registered itself twice via its stored PAT)"
+    # The load-bearing step. If someone trims this down, this is what must
+    # survive: stopping the runner is what makes the post-flip window safe,
+    # rather than merely short.
+    assert "Stop the runner container" in text, (
+        "the runbook no longer states the stop-the-runner step in its own words "
+        "— API de-registration alone does NOT stick, because an ephemeral "
+        "runner's entrypoint re-registers on start"
     )
+
+    # AND THE INVERSE, which is why the detailed runbook left this repo (#1005).
+    # This file ships with the public repo. The document it replaced named the
+    # CI host, its compose paths and what else ran beside it — a map of the
+    # machine the sequence exists to protect, handed over before an attacker
+    # needed to probe for it. Anything that names infrastructure belongs in the
+    # private copy, and this assertion is what stops it coming back.
+    for leak in ("mash1", "prinkle", "dev02", "dev04", "/var/servers", "ssh "):
+        assert leak not in text, (
+            f"{leak!r} is back in docs/go-public-runbook.md. This file is public "
+            "at the flip; infrastructure detail belongs in the private copy "
+            "(#1005)."
+        )
 
     assert "docs/go-public-runbook.md" in WORKFLOW.read_text(), (
         "the workflow no longer points at the runbook, so someone editing CI has "
