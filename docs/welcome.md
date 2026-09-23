@@ -40,9 +40,10 @@ and talks you through it.
 
 It answers the question a document cannot: not "what does techne have", but **what is
 switched off here, and what would turning it on buy you**, with the numbers from your
-own ledger attached. A fresh install reports **8 of 8 capabilities off**, because
-nearly everything below is opt-in by design. That is the honest starting point, and
-this guide exists to tell you which of the eight are worth it.
+own ledger attached. A fresh install reports **5 of 8 capabilities on** — the ones the
+[operator guide](./operator-guide.md#recommended-configuration) covers below — and 3
+still opt-in (`per_turn_seed`, `capture_read`, `startup_directive`). That is the honest
+starting point, and this guide exists to tell you whether the rest are worth it for you.
 
 It also reports the bundled workflows that aren't on your disk — something no config
 flag can see.
@@ -136,19 +137,21 @@ or not the grep text hit it.
 
 It's a `PreToolUse` hook, and it's built to be invisible when it has nothing to add:
 it never blocks the tool, degrades to a no-op on any error, and scopes symbols to the
-repo you're actually searching (never bleeds another project's code in). **Opt-in and
-experimental** — off by default. Turn it on:
+repo you're actually searching (never bleeds another project's code in). **On by
+default.** Turn it off if you don't want it:
 
 ```yaml
 # ~/.techne/config.yaml
 hooks:
-  codex_grep_assist: true       # default: false
+  codex_grep_assist: false
   codex_grep_assist_limit: 8    # max symbols injected per Grep
 ```
 
-Then `techne init` to (re-)register the hook. It only fires for repos you've indexed
-with Codex (below). *Claude Code loads hooks at session start — restart the session
-after enabling.*
+Then `techne init` to reconcile the hook, and restart the session — Claude Code
+loads hooks at session start, so a config change doesn't take effect until then.
+It only fires for repos you've indexed with Codex (below). See the
+[operator guide](./operator-guide.md#recommended-configuration) for the full
+default-on list and what each one costs.
 
 ### 💬 Per-turn recall — the right memory, right when you ask
 
@@ -160,17 +163,21 @@ session-start block. So "how did we decide the auth flow?" pulls the actual deci
 into context the moment you ask, without you running a recall by hand.
 
 Best-effort by design: it never blocks or delays your turn, and stays silent when
-nothing relevant turns up. **Opt-in, experimental** — off by default:
+nothing relevant turns up. **On by default** — this is the one that makes memory feel
+present, and it has a limit worth knowing: it only matches what you typed, so pasted
+or replayed content and tool output get nothing injected (see the
+[operator guide](./operator-guide.md#the-recall-rule-and-its-limit)). Turn it off if
+you'd rather call `techne_recall` by hand:
 
 ```yaml
 # ~/.techne/config.yaml
 hooks:
-  per_turn_recall: true       # default: false
-  per_turn_recall_limit: 5    # max facts injected per prompt
-  per_turn_recall_chars: 450  # max characters per fact; a shortened one ends in '…'
+  per_turn_recall: false
+  per_turn_recall_limit: 5     # max facts injected per prompt
+  per_turn_recall_chars: 1000  # max characters per fact; a shortened one ends in '…'
 ```
 
-Then `techne init` and restart the session to load the hook.
+Then `techne init` and restart the session for the change to take effect.
 
 ### 🗺️ Codex — a code graph, one per repo
 
@@ -306,14 +313,14 @@ running, here's the shape of a healthy setup, and why each piece is there:
 1. **`techne init --platform claude-code`** wires the lifecycle hooks (session start,
    end, post-tool-use, pre/post-compact) and registers the MCP server. From then on
    every session is captured and thread-summarized with zero effort.
-2. **Turn on grep-assist + index your active repos with Codex.** This is the
-   difference between "memory of past sessions" and "memory that also understands the
-   code in front of you." Index the repos you actually work in; skip the ones you
-   don't.
-3. **Restart the session after changing hooks.** Claude Code loads hooks at session
-   *start*, so a newly-registered hook (like grep-assist) doesn't fire until the next
-   session. Enable it, restart, then confirm with a real Grep that symbols get
-   injected — that's the go-live signal, not just "the hook is registered."
+2. **Index your active repos with Codex.** grep-assist is on by default, but it only
+   fires for repos you've indexed. This is the difference between "memory of past
+   sessions" and "memory that also understands the code in front of you." Index the
+   repos you actually work in; skip the ones you don't.
+3. **Restart the session after changing any hook.** Claude Code loads hooks at session
+   *start*, so a config change doesn't fire until the next session. Change it, restart,
+   then confirm with a real Grep that symbols get injected — that's the go-live signal,
+   not just "the hook is registered."
 4. **Run `techne status` after any hook change.** If it reports drift, `techne init`
    reconciles it. No drift warning = you're live.
 5. **Review the candidate queue periodically** (`techne reflect review`). The sleep
@@ -335,6 +342,10 @@ was the whole point.
 
 - **[README](../README.md)** — the full reference: every CLI command, config key, and
   the library API for embedding techne in a non-Claude-Code runtime.
+- **[Operator guide](./operator-guide.md)** — the recommended hook configuration
+  (what's on by default, what it costs, how to turn it off) plus the recall rule's
+  limits, the knowledge-row/issue reference convention, the model-pin trap, and the
+  silent-import trap — the operating habits that came from running techne ourselves.
 - **`techne capabilities`** — what is on, what is off, and what each would buy you,
   measured against *your* store. Start here rather than with any document, this one
   included.

@@ -9,6 +9,8 @@ Concretely: a SQLite-backed memory store whose core is a **single local file** (
 > **New here? Start with the brochure:** [**Welcome to your new memory**](docs/welcome.md) — the friendly first-timer tour (the memory loop, the good bits you'd never find on your own, and the five things worth turning on). This README is the reference manual; read the welcome guide first.
 >
 > **Tour the pieces:** [`docs/modules.md`](docs/modules.md) — a short sales-pitch for each module (what it does, why it's different, how to enable it).
+>
+> **Running techne day to day, or across a fleet of machines?** [**The operator guide**](docs/operator-guide.md) — the recommended hook configuration (what's on by default, what it costs, how to turn it off) and the operating habits that came from running techne ourselves: the recall rule's limits, the knowledge-row/issue reference convention, the model-pin trap, and why CLAUDE.md imports need a fallback line.
 
 ---
 
@@ -557,7 +559,9 @@ Personal `techne.db` deliberately stays raw-SQLite and local-only. techne is **S
 
 ## Configuration
 
-Lives at `~/.techne/config.yaml`. Example:
+Lives at `~/.techne/config.yaml`. Example — see the
+[operator guide](docs/operator-guide.md#recommended-configuration) for why each
+default-on hook is on, what it costs, and how to turn it off:
 
 > **Operators: there is a second, higher-authority layer for the keys that decide where
 > memory can GO.** See [Operator-owned config](#operator-owned-config-egress-selecting-keys)
@@ -578,7 +582,7 @@ threads:
   detector: heuristic         # 'heuristic' (default, no LLM) or 'llm'
   summarizer: heuristic       # 'heuristic' (default, no LLM) or 'llm' (one call per thread)
   min_observations: 15        # below this the LLM detector collapses to single-thread; heuristic always runs
-  link_threshold: 0.85        # BM25-derived similarity threshold for cross-session linking
+  link_threshold: 0.05        # BM25-derived similarity threshold for cross-session linking
   complete_after_hours: 48    # active → completed if no resume_points and stale
   stale_after_days: 30        # completed → stale
   # Extend the heuristic detector with your own MCP server families.
@@ -612,24 +616,33 @@ search:
 
 hooks:
   post_tool_use: true         # capture tool use as observations
-  capture_bash: false         # include Bash tool calls
-  capture_read: false         # include Read tool calls
-  codex_grep_assist: false    # opt-in (#206): a PreToolUse hook that augments the agent's
+  capture_bash: true          # include Bash tool calls. On by default: it's what lets
+                              #   techne_check_evidence confirm a claim like "tests passed"
+                              #   in the same turn it's made, from a live marker rather than
+                              #   waiting on the transcript backfill.
+  capture_read: false         # include Read tool calls. Stays opt-in — Read fires far more
+                              #   often than Bash, so capturing it inflates the observation
+                              #   ledger without a matching gain.
+  codex_grep_assist: true     # on by default (#206): a PreToolUse hook that augments the agent's
                               #   own Grep with matching Codex symbols (needs an indexed repo).
                               #   Re-run 'techne init' after flipping; restart the session to load it.
   codex_grep_assist_limit: 8  # max symbols injected per Grep
-  codex_edit_rail: false      # opt-in (#335): a PostToolUse hook that, after an Edit, injects the
+  codex_edit_rail: true       # on by default (#335): a PostToolUse hook that, after an Edit, injects the
                               #   edited symbol's blast-radius (its dependents — "what breaks if I
                               #   change this"), but only when it has enough dependents to matter.
                               #   Re-run 'techne init' after flipping; restart the session to load it.
   codex_edit_rail_min_deps: 3 # min transitive dependents before the edit rail fires (skip leaf edits)
   codex_edit_rail_limit: 10   # max dependents injected per edit (closest-first by depth)
-  per_turn_recall: false      # opt-in (#109/#277): a UserPromptSubmit hook injects the durable
+  codex_reindex_on_edit: true # on by default (#301): a PostToolUse hook that incrementally
+                              #   reindexes just the edited file, so the two codex rails above
+                              #   don't answer from a graph that's gone stale mid-session.
+  per_turn_recall: true       # on by default (#109/#277): a UserPromptSubmit hook injects the durable
                               #   facts most relevant to each prompt — the DYNAMIC per-turn
-                              #   complement to the STABLE SessionStart block. Re-run 'techne init'
-                              #   after flipping; loads from the next session.
+                              #   complement to the STABLE SessionStart block. Only matches what you
+                              #   TYPED — see docs/operator-guide.md for the limit and the recall rule.
+                              #   Re-run 'techne init' after flipping; loads from the next session.
   per_turn_recall_limit: 5    # max knowledge rows injected per turn
-  per_turn_recall_chars: 450  # max characters per injected row (#826). The cut lands on a
+  per_turn_recall_chars: 1000 # max characters per injected row (#826). The cut lands on a
                               #   sentence or word boundary and a shortened row ends in '…',
                               #   so a truncated fact is distinguishable from a whole one.
                               #   Raising this raises per-prompt token cost on EVERY turn.
