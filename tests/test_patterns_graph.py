@@ -172,9 +172,6 @@ def configured_targets(tmp_path, monkeypatch):
         "architect:\n  pattern_targets: [techne, cabal, liminal]\n"
     )
     monkeypatch.setenv("TECHNE_HOME", str(home))
-    from techne.config import Config
-
-    Config.load.cache_clear() if hasattr(Config.load, "cache_clear") else None
     yield
 
 
@@ -1103,13 +1100,38 @@ def test_default_target_set_names_no_private_project(tmp_path, monkeypatch):
     assert known_targets() == {"techne"}
 
 
-def test_configured_targets_reach_the_mcp_description(tmp_path, monkeypatch):
-    """The tool description advertises the OPERATOR's projects, not ours."""
+def test_the_mcp_description_names_no_project_at_all(tmp_path, monkeypatch):
+    """The tool description must not enumerate targets, ours OR the operator's.
+
+    Interpolating the configured set is what leaked our repo names in the first
+    place, and it also meant docs/mcp-tools.md — generated from this string —
+    regenerated differently on every machine, so an operator with a real roster
+    wrote their projects into the shipped doc (found reviewing #1014).
+    """
     home = tmp_path / "configured-home"
     home.mkdir()
     (home / "config.yaml").write_text("architect:\n  pattern_targets: [alpha, beta]\n")
     monkeypatch.setenv("TECHNE_HOME", str(home))
 
-    from techne.mcp_server import _known_target_hint
+    from techne.mcp_server import TOOLS
 
-    assert _known_target_hint() == "alpha|beta"
+    desc = next(t for t in TOOLS if t["name"] == "pattern_search")["description"]
+    for leaked in ("alpha", "beta", "agora", "argus", "kaminos", "ladon", "prudence"):
+        assert leaked not in desc, f"{leaked!r} leaked into the tool description"
+    assert "architect.pattern_targets" in desc
+
+
+def test_an_unknown_target_is_an_error_not_an_empty_result(tmp_path, monkeypatch):
+    """#674's defect was SILENCE: a rejected target read as "no patterns exist"."""
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.yaml").write_text("architect:\n  pattern_targets: [techne]\n")
+    monkeypatch.setenv("TECHNE_HOME", str(home))
+
+    from techne.config import Config
+    from techne.mcp_server import _pattern_search
+
+    out = _pattern_search({"target": "kaminos"}, Config.load())
+    assert out["count"] == 0
+    assert "unknown target" in out["error"]
+    assert "techne" in out["error"]

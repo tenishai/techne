@@ -397,6 +397,33 @@ class HeuristicConfig:
     user_prompt_score: float = 0.3
 
 
+def _pattern_targets(raw: object) -> list[str]:
+    """Normalise `architect.pattern_targets` from YAML.
+
+    THREE SHAPES BREAK THIS IF TAKEN LITERALLY, and all three fail silently
+    because an empty or wrong roster makes `_apply_targets` drop every token
+    rather than raise (techne#1008 review):
+
+      pattern_targets: cabal      -> a STRING. Iterating it yields characters,
+                                     so the roster became {'c','a','b','l'} and
+                                     even `techne` stopped resolving.
+      pattern_targets: [Cabal]    -> case. `_apply_targets` lowercases the token
+                                     it parses, so `Cabal` never matched.
+      pattern_targets: [" cabal"] -> whitespace, same outcome.
+
+    A single name is the natural one-project spelling, so it is accepted.
+    """
+    if raw is None or raw == "":
+        return ["techne"]
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, (list, tuple, set)):
+        return ["techne"]
+    out = [str(t).strip().lower() for t in raw]
+    out = [t for t in out if t]
+    return out or ["techne"]
+
+
 @dataclass
 class ArchitectConfig:
     """Who the architect records as having surveyed a pattern (techne#754).
@@ -1233,7 +1260,7 @@ class Config:
                 # empty list, would make EVERY target unknown and silently drop every
                 # one on the write side. A bad config should not look like a corpus
                 # with no targets.
-                pattern_targets=[str(t) for t in (a.get("pattern_targets") or ["techne"])],
+                pattern_targets=_pattern_targets(a.get("pattern_targets")),
             )
         if "search" in raw and isinstance(raw["search"], dict):
             s = raw["search"]

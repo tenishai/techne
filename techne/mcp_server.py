@@ -749,23 +749,19 @@ def _parse_due_at(s: str) -> str:
 
 # --- Tool definitions ---
 
-#: The project targets `pattern_search` advertises, DERIVED from the write-side
-#: authority rather than spelled again here (techne#674). The literal used to read
-#: `techne|cabal|limenal|agent-infra`: it named a target that had been RENAMED
-#: (`limenal` -> `liminal` on 2026-08-11), so an agent following this description
-#: passed a value `_KNOWN_TARGETS` rejects and got ZERO patterns with no error —
-#: absence reported as fact. It also omitted the six targets #674 added, so those
-#: were undiscoverable from the tool surface. Deriving it means the description
-#: cannot drift from the set again. As of techne#1008 the set is CONFIGURED
-#: (`architect.pattern_targets`), so this advertises the operator's projects
-#: rather than ours — the default is just `techne`.
-def _known_target_hint() -> str:
-    from techne.core.patterns import known_targets
-
-    return "|".join(sorted(known_targets()))
-
-
-_KNOWN_TARGET_HINT = _known_target_hint()
+#: THE DESCRIPTION NO LONGER ENUMERATES THE TARGETS, and that is deliberate
+#: (techne#1008). It used to interpolate the configured set, which put ten of
+#: THIS project's repo names into every connecting agent's context. Making the
+#: set configurable fixed the leak at the source but left two problems:
+#: docs/mcp-tools.md is generated from this description, so an operator with a
+#: non-default roster regenerated OUR project names straight back into the
+#: shipped doc; and a description built at import time cannot describe a set
+#: that is per-install anyway.
+#:
+#: What #674 actually needed was for a wrong target to FAIL rather than return
+#: zero rows silently — `_pattern_search` now says which targets are valid, at
+#: call time, from the operator's own config. That is better than advertising
+#: a list nobody can keep current, and it cannot leak.
 
 TOOLS = [
     {
@@ -1141,7 +1137,8 @@ TOOLS = [
             "Search the Architect's architectural-pattern corpus (architect.db) — design "
             "patterns borrowed from other projects' code, the team-shared 'what's worth "
             "borrowing' store. Optionally scope to patterns that apply to a project "
-            f"(target={_KNOWN_TARGET_HINT}); with a target and no query, lists "
+            "(target=<one of your configured architect.pattern_targets — run "
+            "`techne architect targets` to see them>); with a target and no query, lists "
             "all patterns for that project."
         ),
         "inputSchema": {
@@ -2192,6 +2189,22 @@ def _pattern_search(args: dict, config: Config) -> dict:
     query = args.get("query", "")
     limit = args.get("limit", 20)
     target = args.get("target")
+    if target:
+        from techne.core.patterns import known_targets
+
+        allowed_targets = known_targets()
+        if target not in allowed_targets:
+            # #674's real defect was SILENCE: a target the roster rejected
+            # returned zero rows and read as "no patterns exist". Say so.
+            return {
+                "error": (
+                    f"unknown target {target!r}. Configured targets: "
+                    f"{', '.join(sorted(allowed_targets))}. "
+                    "Set architect.pattern_targets, or run `techne architect targets`."
+                ),
+                "results": [],
+                "count": 0,
+            }
     if target and not query:
         hits = patterns_for_target(db, target, limit=limit)
     else:

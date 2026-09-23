@@ -5,6 +5,30 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Changed
+
+- **The architect's pattern-target roster is now configured, not hardcoded** (#1008).
+  It was a literal set of ten of this project's own repo names, and the
+  `pattern_search` MCP description interpolated it — so every agent connecting to a
+  techne server received a list of projects it could not see. It is now
+  `architect.pattern_targets`, defaulting to `["techne"]`.
+
+  **UPGRADING AN EXISTING STORE NEEDS ONE LINE OF CONFIG.** This set is validation as
+  well as documentation: tagging drops a target that is not on the list, silently,
+  because an unknown token is nearly always a typo. If your store has patterns tagged
+  with anything other than `techne`, new patterns will stop being tagged with those
+  names until you configure them. Nothing already stored is lost or unqueryable, and
+  re-running `techne architect backfill` recovers missed tags once the config is right.
+
+  Run `techne architect targets` — it compares your config against what the store
+  actually holds and prints the line to paste:
+
+      architect:
+        pattern_targets: ["cabal", "liminal", "techne"]
+
+- `pattern_search` now returns an explicit error for an unknown target instead of zero
+  results. A rejected target reading as "no patterns exist" was #674's original defect.
+
 ## [0.17.0] — 2026-09-18
 
 ### Added
