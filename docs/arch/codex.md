@@ -7,6 +7,8 @@ anchor: techne/codex/import_resolve.py sha=d02ae2cd30fea01c0b27861dc8c8330ef4b81
 ---
 # codex — code-graph store (EXPERIMENTAL)
 
+> Citations like "Prudence, #872 r2" below are automated code-review findings,
+> not a person — see [Who's who](../../README.md#whos-who).
 
 **INDEX PROVENANCE IS RECORDED, NEVER INFERRED FROM FILE MTIME (techne#937).** `initial_walk` writes `indexed_at` and `indexed_head` into `codex_meta` beside `repo_root`. The db's own mtime cannot answer "does this index still describe the checkout": mtime moves on ANY write including a WAL checkpoint, so it drifts YOUNGER than the actual index and reads fresh when it is not. `indexed_head` is the load-bearing one — comparing it to the current HEAD is one small ref read and a string compare, which is what lets `codex:freshness` live in the SessionStart banner instead of being marked `@expensive` and vanishing from it. THE FAILURE IT EXISTS FOR: a 5-day-old cabal index with 60 files changed answered `codex search` with ZERO hits for three symbols that exist in source (`_delegation_budget_note`, `_budget_at_least_one`, `_doom_loop_guard`), and a stale index does not degrade gracefully — it says "we don't have that" with exactly the confidence of a correct miss.
 
