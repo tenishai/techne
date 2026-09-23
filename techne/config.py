@@ -231,8 +231,8 @@ class HookConfig:
     # Mid-session codex freshness (techne#301): when ON, a PostToolUse on
     # Write/Edit/MultiEdit incrementally reindexes just the edited file into its repo's
     # codex db, so codex queries don't go stale between SessionStart reindexes.
-    # Best-effort, only touches already-indexed repos + supported langs. Off by
-    # default (adds a small per-edit reindex).
+    # Best-effort, only touches already-indexed repos + supported langs. ON by
+    # default since #1020 (a small per-edit reindex; a no-op outside indexed repos).
     codex_reindex_on_edit: bool = True
     # Experimental (techne#335): codex "edit rail". When ON, a PostToolUse on
     # Edit/MultiEdit maps the edit to its enclosing symbol and injects that symbol's
@@ -1139,21 +1139,25 @@ class Config:
         if "hooks" in raw and isinstance(raw["hooks"], dict):
             h = raw["hooks"]
             _hd = HookConfig()
+
+            def _g(key):  # the config value, else the HookConfig default (#1028 r1)
+                return h.get(key, getattr(_hd, key))
+
             cfg.hooks = HookConfig(
-                post_tool_use=h.get("post_tool_use", True),
-                capture_bash=h.get("capture_bash", True),
-                capture_read=h.get("capture_read", False),
-                timeout_s=float(h.get("timeout_s", _hd.timeout_s)),
-                codex_grep_assist=h.get("codex_grep_assist", True),
-                codex_grep_assist_limit=int(h.get("codex_grep_assist_limit", 8)),
-                codex_reindex_on_edit=h.get("codex_reindex_on_edit", True),
-                codex_edit_rail=h.get("codex_edit_rail", True),
-                codex_edit_rail_min_deps=int(h.get("codex_edit_rail_min_deps", 3)),
-                codex_edit_rail_limit=int(h.get("codex_edit_rail_limit", 10)),
-                per_turn_recall=h.get("per_turn_recall", True),
-                per_turn_recall_limit=int(h.get("per_turn_recall_limit", 5)),
-                per_turn_recall_chars=int(h.get("per_turn_recall_chars", 1000)),
-                per_turn_recall_log=h.get("per_turn_recall_log", True),
+                post_tool_use=_g("post_tool_use"),
+                capture_bash=_g("capture_bash"),
+                capture_read=_g("capture_read"),
+                timeout_s=float(_g("timeout_s")),
+                codex_grep_assist=_g("codex_grep_assist"),
+                codex_grep_assist_limit=int(_g("codex_grep_assist_limit")),
+                codex_reindex_on_edit=_g("codex_reindex_on_edit"),
+                codex_edit_rail=_g("codex_edit_rail"),
+                codex_edit_rail_min_deps=int(_g("codex_edit_rail_min_deps")),
+                codex_edit_rail_limit=int(_g("codex_edit_rail_limit")),
+                per_turn_recall=_g("per_turn_recall"),
+                per_turn_recall_limit=int(_g("per_turn_recall_limit")),
+                per_turn_recall_chars=int(_g("per_turn_recall_chars")),
+                per_turn_recall_log=_g("per_turn_recall_log"),
                 per_turn_recall_floor_vec_distance=(
                     float(h["per_turn_recall_floor_vec_distance"])
                     if h.get("per_turn_recall_floor_vec_distance") is not None
@@ -1164,9 +1168,9 @@ class Config:
                     if h.get("per_turn_recall_floor_bm25") is not None
                     else None
                 ),
-                defer_session_start_context=h.get("defer_session_start_context", True),
-                per_turn_seed=h.get("per_turn_seed", False),
-                startup_directive=h.get("startup_directive", False),
+                defer_session_start_context=_g("defer_session_start_context"),
+                per_turn_seed=_g("per_turn_seed"),
+                startup_directive=_g("startup_directive"),
             )
 
         if "heuristic" in raw and isinstance(raw["heuristic"], dict):

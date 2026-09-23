@@ -14,9 +14,11 @@ All notable changes to techne are documented here. Format loosely follows
   outside an indexed repo.
 
   **UPGRADING:** an existing `config.yaml` that does not set these keys picks up the
-  new values. `capture_bash` takes effect immediately and grows the observation log
-  (read-only navigation commands are still filtered). The recall and codex hooks
-  register on the next `techne init` and load from the next session. To keep the old
+  new values. `capture_bash`, `codex_edit_rail` and `codex_reindex_on_edit` take
+  effect immediately: they are checked inside the PostToolUse hook every install
+  already has (`capture_bash` grows the observation log; read-only navigation commands
+  are still filtered). `per_turn_recall` and `codex_grep_assist` are separate hooks:
+  they register on the next `techne init` and load from the next session. To keep the old
   behaviour, set any of them to `false` explicitly.
 
 - **The architect's pattern-target roster is now configured, not hardcoded** (#1008).

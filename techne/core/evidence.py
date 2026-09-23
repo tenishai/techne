@@ -204,7 +204,8 @@ class Evidence:
     """Whether Bash observations are recorded for this install (config.hooks.capture_bash).
 
     LOAD-BEARING for honesty: commits, actions, and test results are all parsed
-    from Bash output, but Bash capture is OFF by default in techne. When it's off,
+    from Bash output, and Bash capture can be turned off (it is ON by default since
+    #1020, OFF before). When it's off,
     the ledger simply has no Bash rows — so a real commit/test-run is ABSENT, not
     DISPROVEN. check_claims() must therefore return ``unverifiable`` (not
     ``unbacked``) for Bash-derived claims when this is False, or the gate would

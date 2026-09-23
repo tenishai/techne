@@ -621,7 +621,8 @@ hooks:
   codex_edit_rail: true       # default on (#335, #1020): a PostToolUse hook that, after an Edit,
                               #   injects the edited symbol's blast-radius (its dependents — "what
                               #   breaks if I change this"), only when enough depend on it and only
-                              #   in an indexed repo. Re-run 'techne init' after changing it.
+                              #   in an indexed repo. Checked inside PostToolUse, so a change
+                              #   applies on the next edit; no 'techne init' needed.
   codex_edit_rail_min_deps: 3 # min transitive dependents before the edit rail fires (skip leaf edits)
   codex_edit_rail_limit: 10   # max dependents injected per edit (closest-first by depth)
   per_turn_recall: true       # default on (#109/#277, #1020): a UserPromptSubmit hook injects the

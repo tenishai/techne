@@ -801,7 +801,7 @@ def register_hooks(config: Config):
             entry["timeout"] = _HOOK_TIMEOUTS_S[event]
         groups.append({"matcher": "", "hooks": [entry]})
 
-    # PreToolUse grep-assist (techne#206) — OPT-IN, experimental. Only registered
+    # PreToolUse grep-assist (techne#206) — ON by default (#1020), experimental. Only registered
     # when hooks.codex_grep_assist is ON. It's the sole techne PreToolUse entry —
     # so a flipped-off flag on re-init cleanly removes it (the strip below drops
     # any prior techne PreToolUse group).
@@ -830,7 +830,7 @@ def register_hooks(config: Config):
     if not pre_groups:
         del hooks["PreToolUse"]
 
-    # UserPromptSubmit per-turn recall (techne#109/#277) — OPT-IN, experimental.
+    # UserPromptSubmit per-turn recall (techne#109/#277) — ON by default (#1020), experimental.
     # The DYNAMIC per-turn complement to the stable SessionStart injection: on each
     # prompt, inject the durable facts most relevant to it. Gated on
     # hooks.per_turn_recall; empty matcher (UserPromptSubmit isn't tool-scoped). It's
