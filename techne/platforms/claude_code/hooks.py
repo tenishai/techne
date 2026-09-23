@@ -1166,10 +1166,15 @@ def _load_json(path: Path) -> dict | None:
 
 
 def auto_memory_enabled() -> bool:
-    """Is Claude Code's own auto-memory on? It defaults on; `autoMemoryEnabled: false`
-    in settings.json or the CLAUDE_CODE_DISABLE_AUTO_MEMORY env var turn it off."""
-    if os.environ.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "").strip() not in ("", "0"):
+    """Is Claude Code's own auto-memory on? Mirrors Claude Code's own order (read from
+    the 2.1.281 binary, #1030 r1): CLAUDE_CODE_DISABLE_AUTO_MEMORY truthy -> off;
+    explicitly falsy ("0", "false") -> FORCED ON, whatever settings say; unset ->
+    settings.json `autoMemoryEnabled`, which defaults on."""
+    env = os.environ.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "").strip().lower()
+    if env in ("1", "true", "yes", "on"):
         return False
+    if env in ("0", "false", "no", "off"):
+        return True
     return (_load_json(SETTINGS_PATH) or {}).get("autoMemoryEnabled", True) is not False
 
 
