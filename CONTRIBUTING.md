@@ -8,11 +8,17 @@ cd techne
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 pytest -q                  # the full suite; -n auto if you want it parallel
-ruff check techne tests
+ruff check techne tests    # ADVISORY — see below
 ```
 
 Then: branch, commit, open a PR. Keep the suite green — CI runs pytest on 3.12
 and 3.13 on every push.
+
+**ruff is advisory here, and a clean checkout is not clean.** `ruff check techne
+tests` reports 157 errors on an untouched tree today, and CI runs the identical
+command with `|| true`, so lint never fails the build. Run it to compare against
+the lines you touched, not as a gate you have to reach zero on. If that surprises
+you, it is the project's state and not your environment.
 
 A few things worth knowing before you spend effort:
 
