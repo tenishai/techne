@@ -299,6 +299,7 @@ COMMAND_TREE_AT_LAST_REVIEW = {
     "architect dedup",
     "architect snapshot",
     "architect applies",
+    "architect targets",
     "architect backfill",
     "architect export",
     "architect graph",

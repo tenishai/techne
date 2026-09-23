@@ -59,6 +59,23 @@ def test_wikilink_targets_strips_file_prefix_and_dedups():
     assert _wikilink_targets(body) == ["Hybrid rank fusion", "Bare Name"]
 
 
+# The configured target set (techne#1008). These unit tests pass what they mean
+# instead of depending on an operator's config — the roster used to be a literal
+# in patterns.py, and these tests pinned THAT rather than the parsing behaviour
+# they are actually about.
+TARGETS = {
+    "techne",
+    "cabal",
+    "liminal",
+    "prudence",
+    "daedalus",
+    "kaminos",
+    "argus",
+    "ladon",
+    "agora",
+}
+
+
 def test_wikilink_targets_empty():
     assert _wikilink_targets("no links here") == []
     assert _wikilink_targets("") == []
@@ -67,21 +84,23 @@ def test_wikilink_targets_empty():
 def test_apply_targets_live_heading_form():
     # The live corpus folds the target into the heading bold span.
     body = "**Where to apply in techne**: gate vec0.\n**Where to apply in cabal**: route."
-    assert _apply_targets(body) == ["techne", "cabal"]
+    assert _apply_targets(body, allowed=TARGETS) == ["techne", "cabal"]
 
 
 def test_apply_targets_ignores_prose_bold_false_positives():
     # Bold prose NOT on a where-to-apply line must not manufacture an apply
     # (Prudence, PR#130). `**built in techne**` is a description, not a target.
-    assert _apply_targets("This was **built in techne** last year.") == []
+    assert _apply_targets("This was **built in techne** last year.", allowed=TARGETS) == []
     # An unknown token inside a real heading is dropped.
-    assert _apply_targets("**Where to apply in widgets**: nope.") == []
+    assert _apply_targets("**Where to apply in widgets**: nope.", allowed=TARGETS) == []
 
 
 def test_apply_targets_prose_after_colon_not_extracted():
     # Honest under-reach: a target mentioned only in the prose AFTER the bold
     # heading (e.g. a comparison) is not turned into an apply.
-    assert _apply_targets("**Where to apply in techne**: similar to limenal's gate.") == ["techne"]
+    assert _apply_targets(
+        "**Where to apply in techne**: similar to limenal's gate.", allowed=TARGETS
+    ) == ["techne"]
 
 
 def test_norm_collapses_noise():
@@ -139,7 +158,27 @@ def test_add_apply_idempotent(db):
 # --- backfill_graph ---------------------------------------------------------
 
 
-def test_backfill_graph_counts_and_queries(db):
+@pytest.fixture
+def configured_targets(tmp_path, monkeypatch):
+    """backfill_graph reads the operator's configured targets (techne#1008).
+
+    Without this the test would assert against whatever the machine running it
+    has in config — which is how a test starts passing or failing for reasons
+    that have nothing to do with the code.
+    """
+    home = tmp_path / "techne-home"
+    home.mkdir()
+    (home / "config.yaml").write_text(
+        "architect:\n  pattern_targets: [techne, cabal, liminal]\n"
+    )
+    monkeypatch.setenv("TECHNE_HOME", str(home))
+    from techne.config import Config
+
+    Config.load.cache_clear() if hasattr(Config.load, "cache_clear") else None
+    yield
+
+
+def test_backfill_graph_counts_and_queries(db, configured_targets):
     a = _mk(
         db,
         "Alpha",
@@ -316,7 +355,7 @@ def test_reconcile_relations_noop_on_fresh_schema(db):
 # --- ingest populates the graph ---------------------------------------------
 
 
-def test_ingest_md_populates_graph(db):
+def test_ingest_md_populates_graph(db, configured_targets):
     md = (
         "## Alpha\n\n- **Source**: http://x/a\n- **Surveyed**: 2026-06-26\n\n"
         "Uses [[architectural-patterns#Beta]].\n\n**Where to apply in techne**: gate.\n\n---\n\n"
@@ -690,7 +729,7 @@ def test_apply_targets_accepts_the_projects_the_skill_actually_names():
     """
     for target in ("prudence", "daedalus", "kaminos", "argus", "ladon", "agora"):
         body = f"**Where to apply in {target}**: the reviewer's own audit surface."
-        assert _apply_targets(body) == [target], target
+        assert _apply_targets(body, allowed=TARGETS) == [target], target
 
 
 def test_apply_targets_canonicalises_the_pre_rename_spelling():
@@ -701,8 +740,8 @@ def test_apply_targets_canonicalises_the_pre_rename_spelling():
     double-listed under two targets for one project. Canonicalising at
     extraction is what stops one project occupying two rows.
     """
-    assert _apply_targets("**Where to apply in limenal**: gate it.") == ["liminal"]
-    assert _apply_targets("**Where to apply in liminal**: gate it.") == ["liminal"]
+    assert _apply_targets("**Where to apply in limenal**: gate it.", allowed=TARGETS) == ["liminal"]
+    assert _apply_targets("**Where to apply in liminal**: gate it.", allowed=TARGETS) == ["liminal"]
 
 
 def test_apply_targets_dedupes_across_the_alias():
@@ -711,7 +750,7 @@ def test_apply_targets_dedupes_across_the_alias():
         "**Where to apply in liminal**: the dispatch chokepoint.\n"
         "**Where to apply in limenal**: the same gateway, older spelling."
     )
-    assert _apply_targets(body) == ["liminal"]
+    assert _apply_targets(body, allowed=TARGETS) == ["liminal"]
 
 
 def test_widening_the_target_set_did_not_weaken_the_pr130_guard():
@@ -720,9 +759,11 @@ def test_widening_the_target_set_did_not_weaken_the_pr130_guard():
     Prudence caught these in PR#130. Adding targets must not let bold prose or a
     trailing comparison manufacture an apply row.
     """
-    assert _apply_targets("This was **built in techne** last year.") == []
-    assert _apply_targets("**Where to apply in widgets**: still unknown.") == []
-    assert _apply_targets("**Where to apply in techne**: similar to liminal's gate.") == ["techne"]
+    assert _apply_targets("This was **built in techne** last year.", allowed=TARGETS) == []
+    assert _apply_targets("**Where to apply in widgets**: still unknown.", allowed=TARGETS) == []
+    assert _apply_targets(
+        "**Where to apply in techne**: similar to liminal's gate.", allowed=TARGETS
+    ) == ["techne"]
 
 
 # ---------------------------------------------------------------------------
@@ -1042,3 +1083,33 @@ def test_an_accepted_re_ingest_moves_the_date_with_the_verdict(tmp_path):
     row = _row(db)
     assert row["verdict"] == "patterns-only"
     assert row["surveyed_at"] == "2026-08-24T00:00:00"
+
+
+def test_default_target_set_names_no_private_project(tmp_path, monkeypatch):
+    """The DEFAULT must not advertise this project's repos (techne#1008).
+
+    The set used to be a literal holding agora, argus, kaminos, ladon, prudence
+    and agent-infra, and mcp_server interpolates it into the pattern_search tool
+    description — so every agent connecting to a public techne received a list of
+    projects it can never see. A default of just `techne` is the fix; this test
+    is what stops the roster creeping back in.
+    """
+    home = tmp_path / "empty-home"
+    home.mkdir()
+    monkeypatch.setenv("TECHNE_HOME", str(home))
+
+    from techne.core.patterns import known_targets
+
+    assert known_targets() == {"techne"}
+
+
+def test_configured_targets_reach_the_mcp_description(tmp_path, monkeypatch):
+    """The tool description advertises the OPERATOR's projects, not ours."""
+    home = tmp_path / "configured-home"
+    home.mkdir()
+    (home / "config.yaml").write_text("architect:\n  pattern_targets: [alpha, beta]\n")
+    monkeypatch.setenv("TECHNE_HOME", str(home))
+
+    from techne.mcp_server import _known_target_hint
+
+    assert _known_target_hint() == "alpha|beta"

@@ -422,6 +422,21 @@ class ArchitectConfig:
     surveyed_by: str = "operator"
     #: Recorded as `investigations.lens` — the angle the survey was done from.
     lens: str = "infra"
+    #: The project names `pattern_applies.target` accepts, and the ONLY thing the
+    #: `pattern_search` MCP description advertises (techne#1008).
+    #:
+    #: SAME DEFECT AS `surveyed_by` ABOVE, one layer out. The set was a literal in
+    #: `core/patterns.py` holding ten of THIS PROJECT'S repo names — agora, argus,
+    #: kaminos, ladon, prudence, agent-infra among them — and `mcp_server.py`
+    #: interpolates it into the tool description, so every agent connecting to a
+    #: public techne received a list of private projects it can never see.
+    #:
+    #: It is validation as well as a hint: `_apply_targets` DROPS a target that is
+    #: not in this list, silently, because an unknown token is usually a typo and a
+    #: typo should not mint a target. So an operator with history sets this to what
+    #: their store already uses, exactly like `surveyed_by` — `techne architect
+    #: targets` prints what the store holds.
+    pattern_targets: list[str] = field(default_factory=lambda: ["techne"])
 
 
 @dataclass
@@ -1214,6 +1229,11 @@ class Config:
                 # cheaper than the corpus split (Prudence, #807 r1).
                 surveyed_by=str(a.get("surveyed_by") or "operator"),
                 lens=str(a.get("lens") or "infra"),
+                # Same floor as surveyed_by: `pattern_targets:` with no value, or an
+                # empty list, would make EVERY target unknown and silently drop every
+                # one on the write side. A bad config should not look like a corpus
+                # with no targets.
+                pattern_targets=[str(t) for t in (a.get("pattern_targets") or ["techne"])],
             )
         if "search" in raw and isinstance(raw["search"], dict):
             s = raw["search"]
@@ -1385,6 +1405,7 @@ class Config:
             "architect": {
                 "surveyed_by": self.architect.surveyed_by,
                 "lens": self.architect.lens,
+                "pattern_targets": list(self.architect.pattern_targets),
             },
             "search": {
                 "recency_weight": self.search.recency_weight,

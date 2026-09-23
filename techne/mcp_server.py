@@ -10,7 +10,6 @@ import sys
 
 from techne import __version__
 from techne.config import Config
-from techne.core.patterns import _KNOWN_TARGETS as _PATTERN_TARGETS
 
 log = logging.getLogger(__name__)
 
@@ -757,8 +756,16 @@ def _parse_due_at(s: str) -> str:
 #: passed a value `_KNOWN_TARGETS` rejects and got ZERO patterns with no error —
 #: absence reported as fact. It also omitted the six targets #674 added, so those
 #: were undiscoverable from the tool surface. Deriving it means the description
-#: cannot drift from the set again.
-_KNOWN_TARGET_HINT = "|".join(sorted(_PATTERN_TARGETS))
+#: cannot drift from the set again. As of techne#1008 the set is CONFIGURED
+#: (`architect.pattern_targets`), so this advertises the operator's projects
+#: rather than ours — the default is just `techne`.
+def _known_target_hint() -> str:
+    from techne.core.patterns import known_targets
+
+    return "|".join(sorted(known_targets()))
+
+
+_KNOWN_TARGET_HINT = _known_target_hint()
 
 TOOLS = [
     {
