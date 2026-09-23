@@ -17,8 +17,10 @@ All notable changes to techne are documented here. Format loosely follows
   well as documentation: tagging drops a target that is not on the list, silently,
   because an unknown token is nearly always a typo. If your store has patterns tagged
   with anything other than `techne`, new patterns will stop being tagged with those
-  names until you configure them. Nothing already stored is lost or unqueryable, and
-  re-running `techne architect backfill` recovers missed tags once the config is right.
+  names until you configure them. Nothing already stored is lost, and nothing becomes
+  unqueryable — `pattern_search` serves rows under an unconfigured target and returns a
+  `notice` saying it is unconfigured, rather than rejecting it. Re-running
+  `techne architect backfill` recovers missed tags once the config is right.
 
   Run `techne architect targets` — it compares your config against what the store
   actually holds and prints the line to paste:
@@ -26,8 +28,10 @@ All notable changes to techne are documented here. Format loosely follows
       architect:
         pattern_targets: ["cabal", "liminal", "techne"]
 
-- `pattern_search` now returns an explicit error for an unknown target instead of zero
-  results. A rejected target reading as "no patterns exist" was #674's original defect.
+- `pattern_search` now returns an explicit error for a target that is neither configured
+  nor present in the store, instead of zero results — a rejected target reading as "no
+  patterns exist" was #674's original defect. A target that IS present is served, with a
+  notice, because the roster governs writing and the store governs reading.
 
 ## [0.17.0] — 2026-09-18
 

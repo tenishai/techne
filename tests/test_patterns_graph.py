@@ -1135,3 +1135,72 @@ def test_an_unknown_target_is_an_error_not_an_empty_result(tmp_path, monkeypatch
     assert out["count"] == 0
     assert "unknown target" in out["error"]
     assert "techne" in out["error"]
+
+
+def test_an_unconfigured_target_with_rows_is_served_not_rejected(tmp_path, monkeypatch, db):
+    """An upgrade must not make stored patterns unqueryable (#1014 r2).
+
+    THE REGRESSION THIS PINS: the roster gate rejected any unconfigured target
+    before looking at the store, so a store holding `cabal` rows under the new
+    default of ["techne"] got "unknown target 'cabal'" from MCP while
+    `techne architect applies cabal` still listed the rows. The CLI and the
+    agent-facing surface disagreed about the same row, and the CHANGELOG
+    promised nothing stored would become unqueryable.
+    """
+    from techne.core.patterns import add_apply
+
+    a = _mk(db, "Alpha", "x")
+    add_apply(db, pattern_id=a, target="cabal")
+
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.yaml").write_text("architect:\n  pattern_targets: [techne]\n")
+    monkeypatch.setenv("TECHNE_HOME", str(home))
+    monkeypatch.setenv("TECHNE_ARCHITECT_DB", str(db))
+
+    from techne.config import Config
+    from techne.mcp_server import _pattern_search
+
+    cfg = Config.load()
+    monkeypatch.setattr("techne.core.architect.architect_db", lambda _c: db)
+
+    out = _pattern_search({"target": "cabal"}, cfg)
+    assert "error" not in out
+    assert out["count"] == 1
+    assert [h["name"] for h in out["results"]] == ["Alpha"]
+    assert "not in architect.pattern_targets" in out["notice"]
+
+    # And a target with NO rows is still the #674 case: an error, not silence.
+    missing = _pattern_search({"target": "kaminos"}, cfg)
+    assert missing["count"] == 0
+    assert "unknown target" in missing["error"]
+
+
+def test_architect_targets_names_what_the_store_holds(tmp_path, monkeypatch, db):
+    """The only migration tool this change ships, so its OUTPUT is pinned.
+
+    `test_agent_triggers.py` pins the command's existence in the CLI surface;
+    nothing checked what it says. A diagnostic that stops naming the gap is
+    worse than no diagnostic, because it reads as an all-clear (#1014 r2 nit).
+    """
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.core.patterns import add_apply
+
+    a = _mk(db, "Alpha", "x")
+    add_apply(db, pattern_id=a, target="cabal")
+
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.yaml").write_text("architect:\n  pattern_targets: [techne]\n")
+    monkeypatch.setenv("TECHNE_HOME", str(home))
+    monkeypatch.setattr("techne.core.architect.architect_db", lambda _c: db)
+
+    result = CliRunner().invoke(main, ["architect", "targets"])
+
+    assert result.exit_code == 0, result.output
+    assert "cabal" in result.output
+    assert "NOT CONFIGURED" in result.output
+    # It must hand the operator the line to paste, not just the diagnosis.
+    assert 'pattern_targets: ["cabal", "techne"]' in result.output

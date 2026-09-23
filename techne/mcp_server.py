@@ -2189,22 +2189,38 @@ def _pattern_search(args: dict, config: Config) -> dict:
     query = args.get("query", "")
     limit = args.get("limit", 20)
     target = args.get("target")
+    notice = None
     if target:
         from techne.core.patterns import known_targets
 
         allowed_targets = known_targets()
         if target not in allowed_targets:
-            # #674's real defect was SILENCE: a target the roster rejected
-            # returned zero rows and read as "no patterns exist". Say so.
-            return {
-                "error": (
-                    f"unknown target {target!r}. Configured targets: "
-                    f"{', '.join(sorted(allowed_targets))}. "
-                    "Set architect.pattern_targets, or run `techne architect targets`."
-                ),
-                "results": [],
-                "count": 0,
-            }
+            # THE ROSTER GOVERNS WRITING, NOT READING, and conflating the two
+            # turned an upgrade into a read regression (#1014 r2). A store whose
+            # rows predate the config would have had them declared "unknown"
+            # while `techne architect applies` still listed them — the CLI and
+            # MCP disagreeing about the same row.
+            #
+            # So the store decides. Rows present: serve them, and say the target
+            # is unconfigured, because that is exactly when the operator needs
+            # to hear it. No rows: this is #674's case, where silence read as
+            # "no patterns exist" — error instead.
+            existing = patterns_for_target(db, target, limit=1)
+            if not existing:
+                return {
+                    "error": (
+                        f"unknown target {target!r}. Configured targets: "
+                        f"{', '.join(sorted(allowed_targets))}. "
+                        "Set architect.pattern_targets, or run `techne architect targets`."
+                    ),
+                    "results": [],
+                    "count": 0,
+                }
+            notice = (
+                f"{target!r} holds patterns but is not in architect.pattern_targets "
+                f"({', '.join(sorted(allowed_targets))}) — these rows are served, but NEW "
+                "patterns will not be tagged with it. Run `techne architect targets`."
+            )
     if target and not query:
         hits = patterns_for_target(db, target, limit=limit)
     else:
@@ -2215,7 +2231,10 @@ def _pattern_search(args: dict, config: Config) -> dict:
             # single target ever exceeds it (it would silently drop valid hits).
             allowed = {p["id"] for p in patterns_for_target(db, target, limit=100_000)}
             hits = [h for h in hits if h["id"] in allowed]
-    return {"results": hits, "count": len(hits)}
+    out: dict = {"results": hits, "count": len(hits)}
+    if notice:
+        out["notice"] = notice
+    return out
 
 
 def _pattern_related(args: dict, config: Config) -> dict:
