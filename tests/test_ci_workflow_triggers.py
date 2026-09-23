@@ -83,14 +83,29 @@ def test_the_go_public_runbook_exists_and_the_workflow_points_at_it():
     )
 
     text = runbook.read_text()
-    # The load-bearing step. If someone trims the runbook down, this is the line
-    # that must survive: stopping the runner is what makes the post-flip window
-    # safe, rather than merely short.
-    assert "STOP THE CONTAINER" in text, (
-        "the runbook no longer states the stop-the-container step in its own "
-        "words — API de-registration alone does NOT stick (measured: prinkle "
-        "re-registered itself twice via its stored PAT)"
+    # The load-bearing step. If someone trims this down, this is what must
+    # survive: stopping the runner is what makes the post-flip window safe,
+    # rather than merely short.
+    assert "Stop the runner container" in text, (
+        "the runbook no longer states the stop-the-runner step in its own words "
+        "— API de-registration alone does NOT stick, because an ephemeral "
+        "runner's entrypoint re-registers on start"
     )
+
+    # AND THE INVERSE, which is why the detailed runbook left this repo (#1005).
+    # This file ships with the public repo. The document it replaced named the
+    # CI host, its compose paths and what else ran beside it — a map of the
+    # machine the sequence exists to protect, handed over before an attacker
+    # needed to probe for it. Anything that names infrastructure belongs in the
+    # private copy, and this assertion is what stops it coming back.
+    # Host names that also appear as synthetic fixture text elsewhere in the tree,
+    # so they are checked here rather than tree-wide (see INFRA_LEAKS below).
+    for leak in ("dev02", "dev04", "ssh "):
+        assert leak not in text.lower(), (
+            f"{leak!r} is back in docs/go-public-runbook.md. This file is public "
+            "at the flip; infrastructure detail belongs in the private copy "
+            "(#1005)."
+        )
 
     assert "docs/go-public-runbook.md" in WORKFLOW.read_text(), (
         "the workflow no longer points at the runbook, so someone editing CI has "
@@ -1157,4 +1172,35 @@ def test_every_default_suite_job_fetches_origin_main():
         "`git -C … fetch`, `env … git fetch`, `cd x && git fetch` and "
         "`git fetch origin main` all read as absent even though they work. "
         "If your step really does fetch, widen the guard; do not delete it."
+    )
+
+
+# Hosts, runner paths and hardware that must not ship with the public repo (#1005).
+# The runbook left the repo for naming them, and the same names were still in the
+# workflow and in two docstrings when it did, so this checks every tracked file
+# rather than the one that was cleaned. Case-insensitive: "Mash1" is the same leak.
+INFRA_LEAKS = ("mash1", "prinkle", "/var/servers", "i7-8700")
+# Files allowed to spell the names, because each is a guard listing them.
+INFRA_LEAK_GUARDS = {"tests/test_ci_workflow_triggers.py", "tests/test_skills_install.py"}
+
+
+def test_no_tracked_file_names_ci_infrastructure():
+    import subprocess
+
+    root = WORKFLOW.parent.parent.parent
+    files = subprocess.run(
+        ["git", "ls-files", "-z"], cwd=root, capture_output=True, check=True
+    ).stdout.decode().split("\0")
+    hits = []
+    for rel in filter(None, files):
+        if rel in INFRA_LEAK_GUARDS:
+            continue
+        try:
+            text = (root / rel).read_text(encoding="utf-8").lower()
+        except (UnicodeDecodeError, FileNotFoundError, IsADirectoryError):
+            continue
+        hits += [f"{rel}: {leak}" for leak in INFRA_LEAKS if leak in text]
+    assert not hits, (
+        "CI infrastructure is named in files that ship with the public repo "
+        f"(#1005); move the detail to the private runbook: {hits}"
     )
