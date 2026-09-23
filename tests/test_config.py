@@ -503,3 +503,32 @@ def test_loaded_from_is_never_written_into_config_yaml(tmp_path, monkeypatch):
     cfg.save(out)
 
     assert "loaded_from" not in yaml.safe_load(out.read_text())
+
+
+def test_pattern_targets_accepts_a_scalar_and_normalises_case():
+    """A bad roster fails SILENTLY — every token drops — so parsing must be forgiving.
+
+    Found reviewing #1014: `pattern_targets: cabal` iterated the STRING, giving
+    {'c','a','b','l'}, and `[Cabal]` never matched because _apply_targets
+    lowercases what it parses. Both left every new pattern untagged with no error.
+    """
+    from techne.config import _pattern_targets
+
+    assert _pattern_targets("cabal") == ["cabal"]
+    assert _pattern_targets(["Cabal", "TECHNE"]) == ["cabal", "techne"]
+    assert _pattern_targets([" liminal "]) == ["liminal"]
+    for empty in (None, "", [], 123, {}):
+        assert _pattern_targets(empty) == ["techne"], empty
+
+
+def test_pattern_targets_round_trip_through_config(tmp_path, monkeypatch):
+    from techne.config import Config
+
+    home = tmp_path / "h"
+    home.mkdir()
+    (home / "config.yaml").write_text("architect:\n  pattern_targets: Cabal\n")
+    monkeypatch.setenv("TECHNE_HOME", str(home))
+
+    cfg = Config.load()
+    assert cfg.architect.pattern_targets == ["cabal"]
+    assert cfg.to_yaml_dict()["architect"]["pattern_targets"] == ["cabal"]

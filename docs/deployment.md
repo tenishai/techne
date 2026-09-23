@@ -230,6 +230,13 @@ An upgrade replaces the code. It does **not** touch `~/.claude/settings.json`, a
 not embed anything. Two consequences that neither the upgrade output nor `techne doctor`
 will tell you about:
 
+**A store with patterns tagged outside `techne` needs one line of config (0.18+).**
+`architect.pattern_targets` replaced a hardcoded roster in #1008, and it defaults to
+`["techne"]` alone. Tagging silently drops a target that is not configured, so run
+`techne architect targets` after upgrading: it compares the config with what the store
+holds and prints the line to paste. Nothing already stored is lost, and
+`techne architect backfill` recovers any tags missed in between.
+
 **`techne init` owns the hook chain, and only `init` rewrites it.** `register_hooks` strips
 every hook group whose command mentions techne and re-appends its own template, so the
 SessionStart chain an install is running is the one written the last time `init` ran. An

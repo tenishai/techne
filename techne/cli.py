@@ -4422,12 +4422,57 @@ def architect_related(ctx, pattern_id):
             click.echo(f"  [{r['kind']}] {r['src_pattern_id']}  {r['src_pattern_name']}")
 
 
+@architect.command("targets")
+@click.pass_context
+def architect_targets(ctx):
+    """Show configured pattern targets against what the store actually holds.
+
+    The configured list is validation: `_apply_targets` DROPS a target that is
+    not on it. So a store with history under a name the config omits will
+    silently stop tagging new patterns with it (techne#1008).
+    """
+    config = ctx.obj["config"]
+    from techne.core.architect import architect_db
+    from techne.core.patterns import known_targets
+    from techne.core.stores import plain_connect
+
+    configured = known_targets()
+    with plain_connect(architect_db(config)) as conn:
+        rows = conn.execute(
+            "SELECT target, COUNT(*) AS n FROM pattern_applies GROUP BY target ORDER BY n DESC"
+        ).fetchall()
+
+    click.echo("configured (architect.pattern_targets):")
+    for t in sorted(configured):
+        click.echo(f"  {t}")
+
+    if not rows:
+        click.echo("\nstore holds no tagged patterns yet.")
+        return
+
+    click.echo("\nin the store:")
+    unlisted = []
+    for r in rows:
+        mark = " " if r["target"] in configured else "  <- NOT CONFIGURED"
+        if r["target"] not in configured:
+            unlisted.append(r["target"])
+        click.echo(f"  {r['target']:<16} {r['n']:>5}{mark}")
+
+    if unlisted:
+        click.echo(
+            "\nAdd these to architect.pattern_targets or new patterns will stop "
+            "being tagged with them:\n  pattern_targets: ["
+            + ", ".join(f'"{t}"' for t in sorted(configured | set(unlisted)))
+            + "]"
+        )
+
+
 @architect.command("applies")
 @click.argument("target")
 @click.option("--limit", default=100)
 @click.pass_context
 def architect_applies(ctx, target, limit):
-    """List patterns tagged as applying to TARGET (see techne.core.patterns._KNOWN_TARGETS)."""
+    """List patterns tagged as applying to TARGET (see techne.core.patterns.known_targets())."""
     config = ctx.obj["config"]
     from techne.core.architect import architect_db
     from techne.core.patterns import patterns_for_target

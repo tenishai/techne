@@ -397,6 +397,33 @@ class HeuristicConfig:
     user_prompt_score: float = 0.3
 
 
+def _pattern_targets(raw: object) -> list[str]:
+    """Normalise `architect.pattern_targets` from YAML.
+
+    THREE SHAPES BREAK THIS IF TAKEN LITERALLY, and all three fail silently
+    because an empty or wrong roster makes `_apply_targets` drop every token
+    rather than raise (techne#1008 review):
+
+      pattern_targets: cabal      -> a STRING. Iterating it yields characters,
+                                     so the roster became {'c','a','b','l'} and
+                                     even `techne` stopped resolving.
+      pattern_targets: [Cabal]    -> case. `_apply_targets` lowercases the token
+                                     it parses, so `Cabal` never matched.
+      pattern_targets: [" cabal"] -> whitespace, same outcome.
+
+    A single name is the natural one-project spelling, so it is accepted.
+    """
+    if raw is None or raw == "":
+        return ["techne"]
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, (list, tuple, set)):
+        return ["techne"]
+    out = [str(t).strip().lower() for t in raw]
+    out = [t for t in out if t]
+    return out or ["techne"]
+
+
 @dataclass
 class ArchitectConfig:
     """Who the architect records as having surveyed a pattern (techne#754).
@@ -422,6 +449,21 @@ class ArchitectConfig:
     surveyed_by: str = "operator"
     #: Recorded as `investigations.lens` — the angle the survey was done from.
     lens: str = "infra"
+    #: The project names `pattern_applies.target` accepts, and the ONLY thing the
+    #: `pattern_search` MCP description advertises (techne#1008).
+    #:
+    #: SAME DEFECT AS `surveyed_by` ABOVE, one layer out. The set was a literal in
+    #: `core/patterns.py` holding ten of THIS PROJECT'S repo names — agora, argus,
+    #: kaminos, ladon, prudence, agent-infra among them — and `mcp_server.py`
+    #: interpolates it into the tool description, so every agent connecting to a
+    #: public techne received a list of private projects it can never see.
+    #:
+    #: It is validation as well as a hint: `_apply_targets` DROPS a target that is
+    #: not in this list, silently, because an unknown token is usually a typo and a
+    #: typo should not mint a target. So an operator with history sets this to what
+    #: their store already uses, exactly like `surveyed_by` — `techne architect
+    #: targets` prints what the store holds.
+    pattern_targets: list[str] = field(default_factory=lambda: ["techne"])
 
 
 @dataclass
@@ -1214,6 +1256,11 @@ class Config:
                 # cheaper than the corpus split (Prudence, #807 r1).
                 surveyed_by=str(a.get("surveyed_by") or "operator"),
                 lens=str(a.get("lens") or "infra"),
+                # Same floor as surveyed_by: `pattern_targets:` with no value, or an
+                # empty list, would make EVERY target unknown and silently drop every
+                # one on the write side. A bad config should not look like a corpus
+                # with no targets.
+                pattern_targets=_pattern_targets(a.get("pattern_targets")),
             )
         if "search" in raw and isinstance(raw["search"], dict):
             s = raw["search"]
@@ -1385,6 +1432,7 @@ class Config:
             "architect": {
                 "surveyed_by": self.architect.surveyed_by,
                 "lens": self.architect.lens,
+                "pattern_targets": list(self.architect.pattern_targets),
             },
             "search": {
                 "recency_weight": self.search.recency_weight,
