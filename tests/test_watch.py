@@ -112,9 +112,9 @@ class TestDebouncer:
         coalesce. That is the house rule "a guard's precondition is a way to
         switch the guard off", in a test rather than in production code.
 
-        Observed, not theorised: this failed on the dev02 runner during the
+        Observed, not theorised: this failed on one CI runner during the
         2026-08-16 fleet migration — asserted one event, saw two — and passed on
-        prinkle and mash1 at the same commit. The fleet move did not fix it, it
+        the other two at the same commit. The fleet move did not fix it, it
         only stopped triggering it.
 
         Widening the delay was rejected: it buys headroom, keeps the race, and

@@ -109,8 +109,8 @@ class Debouncer:
     coalesce only if every sleep returns within the 50ms window. That margin is 5x
     and unguarded, so a loaded host falsifies the PRECONDITION and the failure is
     indistinguishable from the Debouncer genuinely failing to coalesce. Observed,
-    not theorised — `tests/test_watch.py` failed on the dev02 runner during the
-    2026-08-16 fleet migration and passed on prinkle and mash1 at the same commit.
+    not theorised — `tests/test_watch.py` failed on one CI runner during the
+    2026-08-16 fleet migration and passed on the other two at the same commit.
     It is not fixed by the migration, only no longer triggered.
 
     Widening the delay was rejected: it buys headroom, keeps the race, re-tunes a
