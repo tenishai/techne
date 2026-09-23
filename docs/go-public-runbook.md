@@ -104,16 +104,49 @@ would run unapproved**. Enable approval in the same sitting or do not do it.
 
 ### Blockers outside this repo
 
-- **#207 contains a collaborator's personal email in an edit revision.** The body
-  was redacted 2026-08-13, but the redaction *created* a revision that still
-  holds the address. Purging revisions is UI-only. **His commits use GitHub's
-  private-email address, so publishing this undoes a privacy setting he
-  deliberately enabled.** Confirm the revision is purged before the flip. (The
-  current body is clean — checked 2026-08-17 — which is exactly why this is easy
-  to miss.)
+- **#207's leaked revision is PURGED — done 2026-08-16, verified 2026-09-22.**
+  The hazard was real: the body was redacted 2026-08-13, and the redaction
+  *created* a revision holding a collaborator's personal email, where his
+  commits use GitHub's private-email address — so publishing it would have
+  undone a privacy setting he deliberately enabled. GraphQL now reports that
+  revision `deletedAt: 2026-08-16T13:53:55Z`, diff `deleted`, and the current
+  body carries no address. Nothing to do here; it is left in writing because a
+  cleared blocker that vanishes from the runbook reads as one nobody checked.
+
+  **Settle THIS BULLET yourself rather than trusting the line above.** It
+  checks #207 in techne and nothing else — the five-repo claim in the next
+  bullet is a different job, with different scripts, named there.
+
+  ```bash
+  gh api graphql -f query='query { repository(owner: "tenishai", name: "techne") {
+    issue(number: 207) { userContentEdits(first: 20) {
+      totalCount nodes { createdAt deletedAt diff } } } } }'
+  ```
+
+  Output when run 2026-09-22, which is where the expected values come from
+  rather than from anyone's memory:
+
+  ```json
+  {"totalCount": 2, "nodes": [
+    {"createdAt": "2026-08-13T20:12:09Z", "deletedAt": null,
+     "diff": "## What\n\nAdd a small **durable, local, d…"},
+    {"createdAt": "2026-08-13T20:12:09Z", "deletedAt": "2026-08-16T13:53:55Z",
+     "diff": "deleted"}]}
+  ```
+
+  A second deleted revision appearing here later is not drift to shrug at: it
+  means something was redacted since, and the redaction made a new revision.
+- **The rest of the edit histories are clean**, measured 2026-09-22 (#1002):
+  383 revisions across all five repos, scanned via GraphQL `userContentEdits`
+  because REST cannot see revisions. No credentials; the only emails are
+  Richard's own plus-addresses. **Re-run it immediately before the flip** —
+  revisions accumulate, and every redaction made from here on creates one.
+  Scripts: `fetch_edits.py` + `scan_edits.py`, attached to #1002. That result
+  is one person's scan and nobody has reproduced it, so treat the re-run as
+  the verification rather than as a formality.
 - Other repos have their own blockers (cabal's tracked `.env`, gojira/ladon
   copyright, skills' missing LICENSE). Out of scope here; techne carries
-  AGPL-3.0 already.
+  AGPL-3.0 already. The five-repo readiness pass tracks them in #1003.
 
 ---
 
