@@ -37,19 +37,40 @@ def config(tmp_path, monkeypatch):
     return cfg
 
 
-def test_fresh_install_reports_everything_off(config):
-    """The partner experience, which is the whole reason #638 exists: they cross
-    six migrations and feel nothing, because the capability is opt-in."""
+def _all_off(config):
+    """Every capability OFF. The tests below are about how the report describes an
+    OFF capability; before #1020 a fresh install was that state, now it is not."""
+    for cap in CAPABILITIES:
+        setattr(config.hooks, cap.flag, False)
+    return config
+
+
+#: On by default since #1020: a first-time user should not get a worse techne
+#: because they never heard of a flag. The rest stay opt-in.
+DEFAULT_ON = {
+    "per_turn_recall",
+    "capture_bash",
+    "codex_grep_assist",
+    "codex_edit_rail",
+    "codex_reindex_on_edit",
+}
+
+
+def test_fresh_install_reports_exactly_the_default_on_set(config):
+    """#638 existed because partners crossed six migrations and felt nothing, the
+    capabilities all being opt-in. #1020 turned the recommended ones on by default;
+    the report must say so, and still offer the others."""
     report = capability_report(config)
-    assert report["off_count"] == len(CAPABILITIES)
-    assert all(not c["on"] for c in report["capabilities"])
+    on = {c["flag"] for c in report["capabilities"] if c["on"]}
+    assert on == DEFAULT_ON
+    assert report["off_count"] == len(CAPABILITIES) - len(DEFAULT_ON)
 
 
 def test_every_capability_carries_all_three_required_parts(config):
     """#638 requires three things per capability, and a report missing any one of
     them is decorative rather than actionable: is it on, what it buys, and the
     exact line to enable it."""
-    for cap in capability_report(config)["capabilities"]:
+    for cap in capability_report(_all_off(config))["capabilities"]:
         assert isinstance(cap["on"], bool)
         assert cap["buys"].strip(), f"{cap['flag']} has no plain-language benefit"
         assert cap["flag"] in cap["enable"], f"{cap['flag']}'s enable line is not actionable"
@@ -61,7 +82,7 @@ def test_enable_snippet_cannot_be_read_as_current_state(config):
     bare it is just valid YAML, and a reader takes it as status — which happened:
     an agent quoted it for an OFF flag and the operator concluded the flag was on.
     So the frame (which file, and that it is currently OFF) travels WITH it."""
-    report = capability_report(config)
+    report = capability_report(_all_off(config))
     for cap in report["capabilities"]:
         assert not cap["on"]
         first = cap["enable"].splitlines()[0]
@@ -113,7 +134,9 @@ def test_evidence_is_grounded_in_the_actual_store(config):
     assert facts.knowledge == 7
 
     recall = next(
-        c for c in capability_report(config)["capabilities"] if c["flag"] == "per_turn_recall"
+        c
+        for c in capability_report(_all_off(config))["capabilities"]
+        if c["flag"] == "per_turn_recall"
     )
     assert "7" in recall["evidence"]
 
@@ -191,6 +214,7 @@ def test_invitation_records_the_version_even_when_it_says_nothing(config):
 
 
 def test_invitation_counts_what_is_off(config):
+    _all_off(config)
     config.hooks.per_turn_recall = True
     conn = connect(config.db_path)
     try:

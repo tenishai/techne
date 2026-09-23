@@ -209,22 +209,23 @@ class ThreadConfig:
 @dataclass
 class HookConfig:
     post_tool_use: bool = True
-    capture_bash: bool = False
+    capture_bash: bool = True
     # Default OFF on VOLUME, not maturity (techne#456): Read is far more frequent
     # than Bash, so capturing it inflates the observation ledger without a
-    # matching gain. Shipped and symmetric with capture_bash — turn it on if you
-    # want the coverage and accept the row count.
+    # matching gain. capture_bash is ON by default (#1020); Read stays off — turn
+    # it on if you want the coverage and accept the row count.
     capture_read: bool = False
     # Hard wall-clock budget for any single hook process.  If the hook exceeds
     # this many seconds (SQLite contention, slow LLM call, stalled network) a
     # SIGALRM fires and the hook exits 0 silently.  Overrides the
     # TECHNE_HOOK_TIMEOUT env-var default (5.0 s) when set explicitly.
     timeout_s: float = 5.0
-    # Experimental (techne#206): opt-in graph-assist on the agent's own Grep/Glob.
+    # Experimental (techne#206): graph-assist on the agent's own Grep/Glob.
     # When ON, a PreToolUse hook runs a Codex symbol search for the search pattern
     # and injects matching symbols into the model's context via additionalContext.
-    # Strictly best-effort — never blocks the tool. Default OFF.
-    codex_grep_assist: bool = False
+    # Strictly best-effort — never blocks the tool. Default ON since #1020: it
+    # no-ops outside an indexed repo (`noop:no-repo-db`), so it costs nothing there.
+    codex_grep_assist: bool = True
     # Hard cap on the number of symbols injected per Grep/Glob (config-over-hardcode).
     codex_grep_assist_limit: int = 8
     # Mid-session codex freshness (techne#301): when ON, a PostToolUse on
@@ -232,25 +233,28 @@ class HookConfig:
     # codex db, so codex queries don't go stale between SessionStart reindexes.
     # Best-effort, only touches already-indexed repos + supported langs. Off by
     # default (adds a small per-edit reindex).
-    codex_reindex_on_edit: bool = False
-    # Experimental (techne#335): opt-in codex "edit rail". When ON, a PostToolUse on
+    codex_reindex_on_edit: bool = True
+    # Experimental (techne#335): codex "edit rail". When ON, a PostToolUse on
     # Edit/MultiEdit maps the edit to its enclosing symbol and injects that symbol's
     # blast-radius (transitive dependents — "what breaks if I change this") into
     # context, but only when the symbol has >= codex_edit_rail_min_deps dependents
     # (threshold-gated so leaf edits stay silent). Best-effort; never blocks the
     # tool; logs to context_injections (source=codex_edit_rail) so its utilization
-    # is measurable against the other injection paths (#329/#684). Default OFF.
-    codex_edit_rail: bool = False
+    # is measurable against the other injection paths (#329/#684). Default ON
+    # since #1020; it returns early when the repo is not indexed.
+    codex_edit_rail: bool = True
     # Minimum transitive-dependent count for the edit rail to fire (skip low-risk edits).
     codex_edit_rail_min_deps: int = 3
     # Hard cap on dependents injected per edit (closest-first by depth).
     codex_edit_rail_limit: int = 10
-    # Experimental (techne#109/#277): opt-in per-turn recall injection. When ON, a
+    # Experimental (techne#109/#277): per-turn recall injection. When ON, a
     # UserPromptSubmit hook runs a knowledge search scoped to the submitted prompt
     # and injects the most relevant durable facts into context via additionalContext
     # — the DYNAMIC per-turn complement to the STABLE SessionStart block. Strictly
-    # best-effort — never blocks the turn. Default OFF.
-    per_turn_recall: bool = False
+    # best-effort — never blocks the turn. Default ON since #1020: without it the
+    # agent must decide to call techne_recall, and measured transcripts show it
+    # does not (#1018), so an install without this rail has no working recall.
+    per_turn_recall: bool = True
     # Hard cap on the number of knowledge rows injected per turn.
     per_turn_recall_limit: int = 5
     #: CHARACTER CAP PER INJECTED ROW (techne#826). Was a bare `[:200]` in
@@ -258,7 +262,9 @@ class HookConfig:
     #: fixed number in this rail's tuning surface, and the one that decides
     #: whether a multi-step SOP arrives as a procedure or as its title.
     #:
-    #: THE DEFAULT IS 450, RAISED FROM 200 (techne#826). An earlier version of this
+    #: THE DEFAULT IS 1000 SINCE #1020 (at 450 a multi-step procedure still
+    #: arrived as its first half; up to ~5,000 chars/turn at limit 5).
+    #: BEFORE THAT IT WAS 450, RAISED FROM 200 (techne#826). An earlier version of this
     #: paragraph said "THE DEFAULT IS DELIBERATELY UNCHANGED. Five rows at 200 is
     #: ~250 tokens on EVERY prompt … raising this for everyone is a cost decision
     #: an operator should make, not a default" — and it sat twenty-four lines above
@@ -298,7 +304,7 @@ class HookConfig:
     #: The 500 that remains is the DEFAULT (`_ROW_CHAR_CAP`), which still applies
     #: to observation and thread rows unconditionally — those are the tool ledger,
     #: and this knob deliberately does not move them.
-    per_turn_recall_chars: int = 450
+    per_turn_recall_chars: int = 1000
     # techne#329 — log each per-turn recall attempt (trigger, hit ids, scores,
     # token cost) to the context_injections table so this READ path is auditable
     # (it left no trace before). The SessionStart tier-0 block is logged the same
@@ -1135,18 +1141,18 @@ class Config:
             _hd = HookConfig()
             cfg.hooks = HookConfig(
                 post_tool_use=h.get("post_tool_use", True),
-                capture_bash=h.get("capture_bash", False),
+                capture_bash=h.get("capture_bash", True),
                 capture_read=h.get("capture_read", False),
                 timeout_s=float(h.get("timeout_s", _hd.timeout_s)),
-                codex_grep_assist=h.get("codex_grep_assist", False),
+                codex_grep_assist=h.get("codex_grep_assist", True),
                 codex_grep_assist_limit=int(h.get("codex_grep_assist_limit", 8)),
-                codex_reindex_on_edit=h.get("codex_reindex_on_edit", False),
-                codex_edit_rail=h.get("codex_edit_rail", False),
+                codex_reindex_on_edit=h.get("codex_reindex_on_edit", True),
+                codex_edit_rail=h.get("codex_edit_rail", True),
                 codex_edit_rail_min_deps=int(h.get("codex_edit_rail_min_deps", 3)),
                 codex_edit_rail_limit=int(h.get("codex_edit_rail_limit", 10)),
-                per_turn_recall=h.get("per_turn_recall", False),
+                per_turn_recall=h.get("per_turn_recall", True),
                 per_turn_recall_limit=int(h.get("per_turn_recall_limit", 5)),
-                per_turn_recall_chars=int(h.get("per_turn_recall_chars", 450)),
+                per_turn_recall_chars=int(h.get("per_turn_recall_chars", 1000)),
                 per_turn_recall_log=h.get("per_turn_recall_log", True),
                 per_turn_recall_floor_vec_distance=(
                     float(h["per_turn_recall_floor_vec_distance"])

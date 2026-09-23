@@ -560,7 +560,7 @@ def _truncate_for_injection(content: str, limit: int) -> tuple[str, bool]:
 
 
 def _build_context(
-    rows: list[dict], char_limit: int = 450, stats: dict | None = None
+    rows: list[dict], char_limit: int = 1000, stats: dict | None = None
 ) -> str:
     """Render recalled knowledge rows into a compact additionalContext block.
 

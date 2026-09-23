@@ -87,7 +87,8 @@ def test_hook_gate_off_does_not_reindex(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "techne.core.codex.reindex_edited_file", lambda c, f: called.append(f)
     )
-    config = _config(tmp_path)  # codex_reindex_on_edit defaults False
+    config = _config(tmp_path)
+    config.hooks.codex_reindex_on_edit = False  # explicitly: the default is ON since #1020
     post_tool_use._maybe_reindex_codex(config, "Edit", {"file_path": "/x/y.py"})
     assert not called
 
