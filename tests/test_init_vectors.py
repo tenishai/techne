@@ -42,11 +42,12 @@ def _init(*args):
     return result.output
 
 
-def _loader(calls, cached: bool, download_ok: bool = True):
+def _loader(calls, cached, download_ok: bool = True, monkeypatch=None):
+    """`cached` is what model_cached() reports: True, False, or None (cannot tell)."""
+    monkeypatch.setattr("techne.core.embeddings.model_cached", lambda config=None: cached)
+
     def load(config=None, *, allow_download=True):
         calls.append(allow_download)
-        if not allow_download and not cached:
-            raise OSError("not in cache")
         if allow_download and not download_ok:
             raise OSError("network unreachable")
         return object()
@@ -56,7 +57,7 @@ def _loader(calls, cached: bool, download_ok: bool = True):
 
 def test_a_cached_model_is_not_downloaded_again(isolated, real_warm, monkeypatch):
     monkeypatch.setattr(
-        "techne.core.embeddings._get_embedding_model", _loader(real_warm, cached=True)
+        "techne.core.embeddings._get_embedding_model", _loader(real_warm, cached=True, monkeypatch=monkeypatch)
     )
     out = _init()
     assert real_warm == [False], "a cached model must be loaded without a download"
@@ -66,10 +67,13 @@ def test_a_cached_model_is_not_downloaded_again(isolated, real_warm, monkeypatch
 
 def test_a_cold_cache_downloads_once_then_embeds(isolated, real_warm, monkeypatch):
     monkeypatch.setattr(
-        "techne.core.embeddings._get_embedding_model", _loader(real_warm, cached=False)
+        "techne.core.embeddings._get_embedding_model", _loader(real_warm, cached=False, monkeypatch=monkeypatch)
     )
     out = _init()
-    assert real_warm == [False, True]
+    # ONE load, downloading. Never an offline probe first: on model2vec that probe
+    # left huggingface_hub offline for the process and the download then failed
+    # (#1029 r1, Critical).
+    assert real_warm == [True]
     assert "Downloading the embedding model (stub/model)" in out
     assert "Semantic recall ready" in out
     assert "nothing embedded yet" not in out, "the old hint contradicts a warmed model"
@@ -78,10 +82,10 @@ def test_a_cold_cache_downloads_once_then_embeds(isolated, real_warm, monkeypatc
 def test_a_failed_download_does_not_fail_init(isolated, real_warm, monkeypatch):
     monkeypatch.setattr(
         "techne.core.embeddings._get_embedding_model",
-        _loader(real_warm, cached=False, download_ok=False),
+        _loader(real_warm, cached=False, download_ok=False, monkeypatch=monkeypatch),
     )
     out = _init()  # exit code 0 asserted inside
-    assert "could not be downloaded (network unreachable)" in out
+    assert "could not be loaded (network unreachable)" in out
     assert "keyword-only" in out and "techne vectors backfill" in out
 
 
@@ -94,8 +98,33 @@ def test_no_backend_falls_back_to_the_install_hint(isolated, real_warm, monkeypa
 
 def test_no_vectors_skips_the_download(isolated, real_warm, monkeypatch):
     monkeypatch.setattr(
-        "techne.core.embeddings._get_embedding_model", _loader(real_warm, cached=False)
+        "techne.core.embeddings._get_embedding_model", _loader(real_warm, cached=False, monkeypatch=monkeypatch)
     )
     out = _init("--no-vectors")
     assert real_warm == [], "--no-vectors must not touch the model"
     assert "Downloading" not in out
+
+
+def test_an_unknown_cache_state_downloads_rather_than_guessing(isolated, real_warm, monkeypatch):
+    """model_cached() returns None when it cannot tell; treat that as not cached."""
+    monkeypatch.setattr(
+        "techne.core.embeddings._get_embedding_model",
+        _loader(real_warm, cached=None, monkeypatch=monkeypatch),
+    )
+    _init()
+    assert real_warm == [True]
+
+
+def test_a_failed_backfill_does_not_fail_init(isolated, real_warm, monkeypatch):
+    """#1029 r1 nit 3: the backfill except-branch was untested."""
+    monkeypatch.setattr(
+        "techne.core.embeddings._get_embedding_model",
+        _loader(real_warm, cached=True, monkeypatch=monkeypatch),
+    )
+
+    def boom(db, **kw):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr("techne.core.search.backfill_vectors", boom)
+    out = _init()  # exit code 0 asserted inside
+    assert "embedding failed (disk full)" in out

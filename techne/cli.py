@@ -2339,23 +2339,32 @@ def _warm_vectors(config) -> list[str] | None:
     [] when the model is ready, or lines explaining a failure. Never raises: a
     failed download must not fail the install.
     """
-    from techne.core.embeddings import _get_embedding_model, _select_backend, backend_available
+    from techne.core.embeddings import (
+        _get_embedding_model,
+        _select_backend,
+        backend_available,
+        model_cached,
+    )
 
     if not backend_available():
         return None
-    try:
-        _get_embedding_model(config, allow_download=False)
-    except Exception:
+    # ONE LOAD, NEVER AN OFFLINE PROBE FIRST (#1029 r1, Critical). Probing with
+    # allow_download=False sets HF_HUB_OFFLINE for model2vec, and huggingface_hub
+    # keeps its offline state for the life of the process after the env var is
+    # restored, so the download that followed always failed. model_cached() answers
+    # by looking at the cache directory: no load, no env, no network.
+    cached = model_cached(config)
+    if not cached:  # False, or None = cannot tell
         _, model = _select_backend(config)
         click.echo(f"Downloading the embedding model ({model}) — one time, then cached...")
-        try:
-            _get_embedding_model(config, allow_download=True)
-        except Exception as e:
-            return [
-                f"  Semantic recall: the embedding model could not be downloaded ({e}).",
-                "  Search is keyword-only until you run, with network access:",
-                "    techne vectors backfill",
-            ]
+    try:
+        _get_embedding_model(config, allow_download=not cached)
+    except Exception as e:
+        return [
+            f"  Semantic recall: the embedding model could not be loaded ({e}).",
+            "  Search is keyword-only until you run, with network access:",
+            "    techne vectors backfill",
+        ]
     from techne.core.search import backfill_vectors
 
     try:

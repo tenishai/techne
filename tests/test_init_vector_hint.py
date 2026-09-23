@@ -75,10 +75,13 @@ def test_the_install_hint_never_prints_a_non_release_tag(isolated, monkeypatch):
     assert "0.0.0+unknown" not in out
 
 
-def test_init_never_loads_the_model_even_with_a_backend_stamp(isolated, monkeypatch):
+def test_the_next_steps_check_never_loads_the_model_even_with_a_backend_stamp(
+    isolated, monkeypatch
+):
     """A second `init` on a store that was backfilled has an identity stamp, and
     vector_channel_status builds the backend (a model load) whenever one exists.
-    The next-steps check must not."""
+    The next-steps check must not. Since #1021 init DOES load the model by default,
+    to warm it; `--no-vectors` isolates the check this test is about."""
     from techne.core.database import connect, init_db
     from techne.core.extension_state import set_state
 
@@ -101,6 +104,6 @@ def test_init_never_loads_the_model_even_with_a_backend_stamp(isolated, monkeypa
 
     monkeypatch.setattr("techne.core.embeddings.backend_available", lambda: True)
     monkeypatch.setattr("techne.core.embeddings._get_embedding_model", spy)
-    out = _init("--platform", "standalone")
-    assert not calls, "init built the embedding backend (a model load)"
+    out = _init("--platform", "standalone", "--no-vectors")
+    assert not calls, "the next-steps check built the embedding backend (a model load)"
     assert "nothing embedded yet" in out
