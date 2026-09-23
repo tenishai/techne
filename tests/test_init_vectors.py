@@ -57,7 +57,8 @@ def _loader(calls, cached, download_ok: bool = True, monkeypatch=None):
 
 def test_a_cached_model_is_not_downloaded_again(isolated, real_warm, monkeypatch):
     monkeypatch.setattr(
-        "techne.core.embeddings._get_embedding_model", _loader(real_warm, cached=True, monkeypatch=monkeypatch)
+        "techne.core.embeddings._get_embedding_model",
+        _loader(real_warm, cached=True, monkeypatch=monkeypatch),
     )
     out = _init()
     assert real_warm == [False], "a cached model must be loaded without a download"
@@ -67,7 +68,8 @@ def test_a_cached_model_is_not_downloaded_again(isolated, real_warm, monkeypatch
 
 def test_a_cold_cache_downloads_once_then_embeds(isolated, real_warm, monkeypatch):
     monkeypatch.setattr(
-        "techne.core.embeddings._get_embedding_model", _loader(real_warm, cached=False, monkeypatch=monkeypatch)
+        "techne.core.embeddings._get_embedding_model",
+        _loader(real_warm, cached=False, monkeypatch=monkeypatch),
     )
     out = _init()
     # ONE load, downloading. Never an offline probe first: on model2vec that probe
@@ -98,7 +100,8 @@ def test_no_backend_falls_back_to_the_install_hint(isolated, real_warm, monkeypa
 
 def test_no_vectors_skips_the_download(isolated, real_warm, monkeypatch):
     monkeypatch.setattr(
-        "techne.core.embeddings._get_embedding_model", _loader(real_warm, cached=False, monkeypatch=monkeypatch)
+        "techne.core.embeddings._get_embedding_model",
+        _loader(real_warm, cached=False, monkeypatch=monkeypatch),
     )
     out = _init("--no-vectors")
     assert real_warm == [], "--no-vectors must not touch the model"
