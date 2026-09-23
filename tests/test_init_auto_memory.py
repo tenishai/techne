@@ -12,6 +12,7 @@ import pytest
 from click.testing import CliRunner
 
 from techne.cli import main
+from techne.core.checks import posture_switch_command
 from techne.platforms.claude_code import hooks
 
 
@@ -92,7 +93,7 @@ def test_forced_spool_primary_without_memory_files_is_not_offered(isolated, monk
     Claude Code authors memory; offering to switch its authoring off contradicts that."""
     out = _init(monkeypatch, interactive=True, answer="y\n", args=("--posture", "spool-primary"))
     assert "autoMemoryEnabled" not in _settings()
-    assert "techne init --posture observe" in out
+    assert posture_switch_command("observe") in out
 
 
 def test_forced_observe_with_memory_files_is_offered(isolated, monkeypatch):

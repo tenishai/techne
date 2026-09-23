@@ -2345,6 +2345,7 @@ def _offer_auto_memory_off(spool_primary: bool) -> None:
     were detected (#1030 r1): under spool-primary techne works WITH Claude Code's
     memory, so nothing is offered and the message says how to move to techne-only.
     """
+    from techne.core.checks import posture_switch_command
     from techne.platforms.claude_code.hooks import auto_memory_enabled, disable_auto_memory
 
     if not auto_memory_enabled():
@@ -2355,7 +2356,7 @@ def _offer_auto_memory_off(spool_primary: bool) -> None:
             "Claude Code auto-memory is on, and techne is working alongside it "
             "(spool-primary). To use techne alone instead: run `techne memory sync` to "
             "import its memory, set `autoMemoryEnabled: false` in "
-            "~/.claude/settings.json, then run `techne init --posture observe`."
+            f"~/.claude/settings.json, then run `{posture_switch_command('observe')}`."
         )
         return
     why = (
