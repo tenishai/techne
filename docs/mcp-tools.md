@@ -202,7 +202,7 @@ you want. `techne bindings` reports what each name currently resolves to.
 
 ### `pattern_search`
 
-Search the Architect's architectural-pattern corpus (architect.db) — design patterns borrowed from other projects' code, the team-shared 'what's worth borrowing' store. Optionally scope to patterns that apply to a project (target=agent-infra|agora|argus|cabal|daedalus|kaminos|ladon|liminal|prudence|techne); with a target and no query, lists all patterns for that project.
+Search the Architect's architectural-pattern corpus (architect.db) — design patterns borrowed from other projects' code, the team-shared 'what's worth borrowing' store. Optionally scope to patterns that apply to a project (target=<one of your configured architect.pattern_targets — run `techne architect targets` to see them>); with a target and no query, lists all patterns for that project.
 
 ### `pattern_related`
 

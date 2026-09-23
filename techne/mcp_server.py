@@ -10,7 +10,6 @@ import sys
 
 from techne import __version__
 from techne.config import Config
-from techne.core.patterns import _KNOWN_TARGETS as _PATTERN_TARGETS
 
 log = logging.getLogger(__name__)
 
@@ -750,15 +749,19 @@ def _parse_due_at(s: str) -> str:
 
 # --- Tool definitions ---
 
-#: The project targets `pattern_search` advertises, DERIVED from the write-side
-#: authority rather than spelled again here (techne#674). The literal used to read
-#: `techne|cabal|limenal|agent-infra`: it named a target that had been RENAMED
-#: (`limenal` -> `liminal` on 2026-08-11), so an agent following this description
-#: passed a value `_KNOWN_TARGETS` rejects and got ZERO patterns with no error —
-#: absence reported as fact. It also omitted the six targets #674 added, so those
-#: were undiscoverable from the tool surface. Deriving it means the description
-#: cannot drift from the set again.
-_KNOWN_TARGET_HINT = "|".join(sorted(_PATTERN_TARGETS))
+#: THE DESCRIPTION NO LONGER ENUMERATES THE TARGETS, and that is deliberate
+#: (techne#1008). It used to interpolate the configured set, which put ten of
+#: THIS project's repo names into every connecting agent's context. Making the
+#: set configurable fixed the leak at the source but left two problems:
+#: docs/mcp-tools.md is generated from this description, so an operator with a
+#: non-default roster regenerated OUR project names straight back into the
+#: shipped doc; and a description built at import time cannot describe a set
+#: that is per-install anyway.
+#:
+#: What #674 actually needed was for a wrong target to FAIL rather than return
+#: zero rows silently — `_pattern_search` now says which targets are valid, at
+#: call time, from the operator's own config. That is better than advertising
+#: a list nobody can keep current, and it cannot leak.
 
 TOOLS = [
     {
@@ -1134,7 +1137,8 @@ TOOLS = [
             "Search the Architect's architectural-pattern corpus (architect.db) — design "
             "patterns borrowed from other projects' code, the team-shared 'what's worth "
             "borrowing' store. Optionally scope to patterns that apply to a project "
-            f"(target={_KNOWN_TARGET_HINT}); with a target and no query, lists "
+            "(target=<one of your configured architect.pattern_targets — run "
+            "`techne architect targets` to see them>); with a target and no query, lists "
             "all patterns for that project."
         ),
         "inputSchema": {
@@ -2185,6 +2189,38 @@ def _pattern_search(args: dict, config: Config) -> dict:
     query = args.get("query", "")
     limit = args.get("limit", 20)
     target = args.get("target")
+    notice = None
+    if target:
+        from techne.core.patterns import known_targets
+
+        allowed_targets = known_targets()
+        if target not in allowed_targets:
+            # THE ROSTER GOVERNS WRITING, NOT READING, and conflating the two
+            # turned an upgrade into a read regression (#1014 r2). A store whose
+            # rows predate the config would have had them declared "unknown"
+            # while `techne architect applies` still listed them — the CLI and
+            # MCP disagreeing about the same row.
+            #
+            # So the store decides. Rows present: serve them, and say the target
+            # is unconfigured, because that is exactly when the operator needs
+            # to hear it. No rows: this is #674's case, where silence read as
+            # "no patterns exist" — error instead.
+            existing = patterns_for_target(db, target, limit=1)
+            if not existing:
+                return {
+                    "error": (
+                        f"unknown target {target!r}. Configured targets: "
+                        f"{', '.join(sorted(allowed_targets))}. "
+                        "Set architect.pattern_targets, or run `techne architect targets`."
+                    ),
+                    "results": [],
+                    "count": 0,
+                }
+            notice = (
+                f"{target!r} holds patterns but is not in architect.pattern_targets "
+                f"({', '.join(sorted(allowed_targets))}) — these rows are served, but NEW "
+                "patterns will not be tagged with it. Run `techne architect targets`."
+            )
     if target and not query:
         hits = patterns_for_target(db, target, limit=limit)
     else:
@@ -2195,7 +2231,10 @@ def _pattern_search(args: dict, config: Config) -> dict:
             # single target ever exceeds it (it would silently drop valid hits).
             allowed = {p["id"] for p in patterns_for_target(db, target, limit=100_000)}
             hits = [h for h in hits if h["id"] in allowed]
-    return {"results": hits, "count": len(hits)}
+    out: dict = {"results": hits, "count": len(hits)}
+    if notice:
+        out["notice"] = notice
+    return out
 
 
 def _pattern_related(args: dict, config: Config) -> dict:

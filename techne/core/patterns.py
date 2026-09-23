@@ -81,18 +81,22 @@ _APPLY_RE = re.compile(
 # block, so a pattern that says "apply in prudence" resolves instead of being
 # silently dropped (techne#674 — 14 pattern bodies named Prudence and none could
 # ever link, which made `architect applies prudence` read as "we hold nothing").
-_KNOWN_TARGETS = {
-    "techne",
-    "cabal",
-    "liminal",
-    "agent-infra",
-    "prudence",
-    "daedalus",
-    "kaminos",
-    "argus",
-    "ladon",
-    "agora",
-}
+def known_targets() -> set[str]:
+    """The project names a pattern may be tagged as applying to.
+
+    CONFIGURED, not hardcoded (techne#1008). This used to be a literal set of ten
+    of this project's own repo names, and `mcp_server.py` interpolates it into the
+    `pattern_search` tool description — so every agent connecting to a public
+    techne was handed a list of private projects it can never see.
+
+    It is validation as well as advertising: `_apply_targets` DROPS an unlisted
+    target rather than minting one, because an unknown token is nearly always a
+    typo. So an operator whose store has history must list what that history uses,
+    which `techne architect targets` prints.
+    """
+    from techne.config import Config
+
+    return {str(t) for t in Config.load().architect.pattern_targets}
 
 # Pre-rename spellings still present in older pattern bodies. Extraction
 # canonicalises through this map so ONE PROJECT CANNOT OCCUPY TWO TARGETS —
@@ -169,15 +173,22 @@ def _wikilink_targets(body: str) -> list[str]:
     return out
 
 
-def _apply_targets(body: str) -> list[str]:
+def _apply_targets(body: str, allowed: set[str] | None = None) -> list[str]:
     """Extract canonical project targets from `where to apply in <target>` phrases
     in *body*. Only the token immediately after "apply in" is taken; unknown tokens
-    are dropped. Deduped, order-preserved."""
+    are dropped. Deduped, order-preserved.
+
+    *allowed* defaults to the configured set (`known_targets()`). Callers looping
+    over many rows should resolve it ONCE and pass it, rather than re-reading
+    config per row; tests pass the set they mean instead of the operator's.
+    """
     out: list[str] = []
     seen: set[str] = set()
+    if allowed is None:
+        allowed = known_targets()
     for raw in _APPLY_RE.findall(body or ""):
         t = _TARGET_ALIASES.get(raw.lower(), raw.lower())
-        if t in _KNOWN_TARGETS and t not in seen:
+        if t in allowed and t not in seen:
             seen.add(t)
             out.append(t)
     return out
@@ -439,7 +450,7 @@ def add_relation(
 
 
 def add_apply(db_path: Path, *, pattern_id: str, target: str) -> bool:
-    """Tag a pattern as applying to a project target (see _KNOWN_TARGETS).
+    """Tag a pattern as applying to a project target (see known_targets()).
     Idempotent. Returns True if a new row was inserted."""
     conn = plain_connect(db_path)
     try:
@@ -726,6 +737,9 @@ def backfill_graph(db_path: Path) -> dict:
             "SELECT id, name, body FROM patterns WHERE status = 'active'"
         ).fetchall()
         index = _name_index(conn)
+        # Resolved ONCE for the whole backfill: _apply_targets would otherwise
+        # re-read config per row, and this loop runs over every active pattern.
+        _allowed_targets = known_targets()
         rel_total = rel_resolved = applies_total = 0
         for r in rows:
             src = r["id"]
@@ -745,7 +759,7 @@ def backfill_graph(db_path: Path) -> dict:
                 )
                 rel_total += 1
                 rel_resolved += int(dst_id is not None)
-            for target in _apply_targets(r["body"]):
+            for target in _apply_targets(r["body"], allowed=_allowed_targets):
                 conn.execute(
                     "INSERT OR IGNORE INTO pattern_applies (pattern_id, target) VALUES (?, ?)",
                     (src, target),
@@ -798,7 +812,7 @@ def related_patterns(db_path: Path, pattern_id: str) -> dict:
 
 
 def patterns_for_target(db_path: Path, target: str, *, limit: int = 100) -> list[dict]:
-    """All active patterns tagged as applying to *target* (see _KNOWN_TARGETS).
+    """All active patterns tagged as applying to *target* (see known_targets()).
 
     Takes the target VERBATIM — no aliasing. A pre-rename spelling such as
     `limenal` therefore returns [] rather than `liminal`'s rows; canonicalisation

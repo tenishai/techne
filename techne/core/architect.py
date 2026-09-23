@@ -203,7 +203,7 @@ def _step_v2_to_v3_validity_window(conn) -> None:
 def _step_v3_to_v4_canonicalise_liminal(conn) -> None:
     """v3 → v4 step (techne#674; collapse the pre-rename `limenal` target).
 
-    `liminal` was renamed from `limenal` on 2026-08-11 and `_KNOWN_TARGETS` was
+    `liminal` was renamed from `limenal` on 2026-08-11 and the known-target set was
     not updated, so `backfill_graph` could only ever emit the OLD spelling while
     the direct-tag path wrote the new one. The live store ended up with the same
     11 patterns listed under BOTH targets — one project, two rows, and a read
