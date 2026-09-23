@@ -4,8 +4,8 @@
 flip waits until more milestones are complete. This is the plan, not a record.
 
 **The step-by-step runbook is held privately and is not in this repo (#1005).**
-It names the CI host, its compose paths and what else runs beside it — a map of
-the machine this sequence exists to protect, in a file that would ship with the
+It names the CI host and its paths — a map of the machine this sequence exists
+to protect, in a file that would ship with the
 public repo. The operator has it; ask before executing.
 
 What is safe to say here, because the workflow already shows it, is *why* the
