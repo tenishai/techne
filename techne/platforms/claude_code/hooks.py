@@ -1165,6 +1165,26 @@ def _load_json(path: Path) -> dict | None:
         ) from e
 
 
+def auto_memory_enabled() -> bool:
+    """Is Claude Code's own auto-memory on? It defaults on; `autoMemoryEnabled: false`
+    in settings.json or the CLAUDE_CODE_DISABLE_AUTO_MEMORY env var turn it off."""
+    if os.environ.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "").strip() not in ("", "0"):
+        return False
+    return (_load_json(SETTINGS_PATH) or {}).get("autoMemoryEnabled", True) is not False
+
+
+def disable_auto_memory() -> None:
+    """Set `autoMemoryEnabled: false` and change nothing else (techne#1023).
+
+    settings.json is shared by every Claude Code session on the machine, so it is
+    re-read immediately before the write and only this one key is set: a copy read
+    earlier would silently revert another session's change (knowledge #1013).
+    """
+    data = _load_json(SETTINGS_PATH) or {}
+    data["autoMemoryEnabled"] = False
+    _save_json(SETTINGS_PATH, data)
+
+
 def _save_json(path: Path, data: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
     # Atomic write: a crash mid-write must never leave the file truncated/empty — the

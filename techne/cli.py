@@ -2328,6 +2328,49 @@ def _vector_next_steps(db_path: Path) -> list[str]:
     return []
 
 
+def _interactive() -> bool:
+    import sys
+
+    return sys.stdin.isatty()
+
+
+def _offer_auto_memory_off(has_cc_memory: bool) -> None:
+    """Claude Code's auto-memory is a second memory layer beside techne (techne#1023).
+
+    Running both drifts and double-injects (knowledge #426), so a new user is asked
+    whether to turn it off. It is never switched off silently: it is another
+    product's setting. With existing Claude Code memory, init has already chosen
+    the spool-primary posture, where techne works WITH that memory, so nothing is
+    offered; the message says how to move to techne-only deliberately instead.
+    """
+    from techne.platforms.claude_code.hooks import auto_memory_enabled, disable_auto_memory
+
+    if not auto_memory_enabled():
+        return
+    click.echo("")
+    if has_cc_memory:
+        click.echo(
+            "Claude Code auto-memory is on and you have Claude Code memory files; techne "
+            "is working alongside them (spool-primary). To use techne alone instead: run "
+            "`techne memory sync` to import them, set `autoMemoryEnabled: false` in "
+            "~/.claude/settings.json, then re-run `techne init`."
+        )
+        return
+    why = (
+        "Claude Code auto-memory is on. It is a second memory layer beside techne: both "
+        "write and both inject, which drifts and duplicates context."
+    )
+    if not _interactive():
+        click.echo(why + " Recommended: set `autoMemoryEnabled: false` in ~/.claude/settings.json.")
+        return
+    click.echo(why)
+    if click.confirm("Turn Claude Code auto-memory off (only that setting changes)?", default=True):
+        disable_auto_memory()
+        click.echo("Claude Code auto-memory: off (autoMemoryEnabled: false). Takes effect next session.")
+    else:
+        click.echo("Left on. Change it any time with `autoMemoryEnabled` in ~/.claude/settings.json.")
+
+
 @main.command("init")
 @click.option("--platform", type=click.Choice(list(PLATFORMS)), default="claude-code")
 @click.option(
@@ -2455,6 +2498,9 @@ def init(ctx, platform, identity_dir, posture, install_skills, force_skills):
             "Posture: observe — techne captures + (if you enable reflect) may author its own"
             f" knowledge ({cc_note})."
         )
+
+    if platform == "claude-code":
+        _offer_auto_memory_off(has_cc_memory=cc)
 
     # Save config. Report the resolved path save() actually wrote to (honors
     # TECHNE_HOME), not the import-time DEFAULT_CONFIG snapshot.

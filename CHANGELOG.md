@@ -7,6 +7,13 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Changed
 
+- **`techne init` asks before turning off Claude Code auto-memory** (#1023). Running
+  both memory layers drifts and double-injects. In a terminal, a new user is asked;
+  on yes only `autoMemoryEnabled` in `~/.claude/settings.json` changes, re-read
+  immediately before the write. Non-interactive init only prints the recommendation.
+  With existing Claude Code memory (the spool-primary posture) nothing is offered;
+  init says how to move to techne-only deliberately.
+
 - **The architect's pattern-target roster is now configured, not hardcoded** (#1008).
   It was a literal set of ten of this project's own repo names, and the
   `pattern_search` MCP description interpolated it — so every agent connecting to a
