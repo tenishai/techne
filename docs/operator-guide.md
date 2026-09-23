@@ -76,9 +76,12 @@ flips it silently. It only asks when both ends are a terminal; otherwise it
 prints the recommendation. Under `spool-primary` (below) it does not offer,
 because techne is then deliberately working alongside that memory.
 
-To move from `spool-primary` to techne alone: run `techne memory sync` to
-import Claude Code's memory, set `autoMemoryEnabled: false` in
-`~/.claude/settings.json`, then run
+Moving from `spool-primary` to techne alone does not bring Claude Code's
+memory with you. Your `MEMORY.md` files stay where they are. `techne memory
+sync` mirrors one project's files for the claim-gate only, and nothing serves
+them back into context. techne writes memory of its own only with
+`reflect.enabled: true` in `~/.techne/config.yaml`. To switch: turn reflect on,
+set `autoMemoryEnabled: false` in `~/.claude/settings.json`, then run
 `techne init --platform claude-code --posture observe`. Passing the posture
 matters: a bare `techne init` re-detects the memory files and resolves back to
 `spool-primary`.
