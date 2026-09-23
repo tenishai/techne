@@ -1,5 +1,45 @@
 # Contributing to techne
 
+## Getting a change in
+
+```bash
+git clone https://github.com/tenishai/techne.git
+cd techne
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+pytest -q                  # the full suite; -n auto if you want it parallel
+ruff check techne tests    # ADVISORY — see below
+```
+
+Then: branch, commit, open a PR. Keep the suite green — CI runs pytest on 3.12
+and 3.13 on every push.
+
+**ruff is advisory here, and a clean checkout is not clean.** `ruff check techne
+tests` reports 157 errors on an untouched tree today, and CI runs the identical
+command with `|| true`, so lint never fails the build. Run it to compare against
+the lines you touched, not as a gate you have to reach zero on. If that surprises
+you, it is the project's state and not your environment.
+
+A few things worth knowing before you spend effort:
+
+- **Tests live beside the code they cover**, in `tests/`, and a behaviour change
+  wants a test that fails without it. "It is covered by an existing test" is worth
+  checking rather than assuming — reverting your change and watching a test fail is
+  the cheap way to know.
+- **Architecture cards.** Load-bearing subsystems have a card in `docs/arch/`, each
+  pinned to its source file by a content hash. Change such a subsystem and you update
+  its card in the same commit, hash included. `python scripts/check_arch_cards.py`
+  tells you; so does CI.
+- **Schema changes have their own rules**, below. Read that section before touching
+  anything that creates or alters a table — picking the wrong mechanism either leaves
+  existing databases broken or burns a version bump that was not needed.
+- **AGENTS.md** is the context file for AI coding agents, and `CLAUDE.md` is a
+  one-line bridge to it. If you add a rule an agent must follow, it belongs there,
+  not only here.
+
+Issues are the place for design discussion. A PR that changes behaviour is easier to
+review when it says what it measured, not only what it intends.
+
 ## Schema evolution
 
 Two parallel mechanisms manage the SQLite schema. Pick the right one — using the wrong one either leaves old databases broken or burns a SCHEMA_VERSION bump on a change that didn't need one.
