@@ -21,6 +21,12 @@ All notable changes to techne are documented here. Format loosely follows
   they register on the next `techne init` and load from the next session. To keep the old
   behaviour, set any of them to `false` explicitly.
 
+- **`techne init` downloads the embedding model** (#1021). A fresh install never got
+  semantic search: the SessionStart backfill passes `--no-download` (#815) so a cold
+  cache cannot hang startup, and nothing else fetched the model. `init` now does the
+  one-time download in the foreground and embeds what is stored. A failed download
+  prints how to finish later and never fails the install. `--no-vectors` skips it.
+
 - **The architect's pattern-target roster is now configured, not hardcoded** (#1008).
   It was a literal set of ten of this project's own repo names, and the
   `pattern_search` MCP description interpolated it — so every agent connecting to a

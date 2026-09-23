@@ -115,6 +115,7 @@ markers = [
     "eval_gate: retrieval-correctness regression gate (#385); excluded from default runs",
     "eval_vec: vector/hybrid retrieval gate + RRF-vs-simple ablation (#399); needs sqlite-vec + a cached model2vec model, else skipped",
     "eval_scale: the #399 gold set re-scored against a production-sized corpus (#883), plus the #945 channel/vocabulary/table/real-content arms; informational, not gated — same deps as eval_vec, RUN BY THE `eval-vec` CI job",
+    "real_warm_vectors: runs init's real model-warming helper with the loader stubbed (#1021); every other test gets it stubbed by conftest",
 ]
 
 # Ship the OPERATOR-FACING guides inside the package (techne#754, 0.16.0).
