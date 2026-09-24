@@ -1406,6 +1406,7 @@ class TestMcpCheckEvidence:
         assert data["unbacked_count"] == 0
 
     def test_unbacked_count_correct(self, config, db_path):
+        config.hooks.capture_bash = False  # the case under test; the default is ON since #1020
         _insert_session(db_path, "sess-ub")
         # A recorded-but-no-deed turn (a UserPrompt, no Write/Edit/Bash) with
         # capture_bash off. Under techne#105 honesty:

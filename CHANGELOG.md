@@ -7,6 +7,20 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Changed
 
+- **Recommended hooks are on by default** (#1020). `per_turn_recall`, `capture_bash`,
+  `codex_grep_assist`, `codex_edit_rail` and `codex_reindex_on_edit` now default to
+  `true`, and `per_turn_recall_chars` to 1000 (was 450). A first-time user should not
+  get a worse techne because they never heard of a flag. The codex rails do nothing
+  outside an indexed repo.
+
+  **UPGRADING:** an existing `config.yaml` that does not set these keys picks up the
+  new values. `capture_bash`, `codex_edit_rail` and `codex_reindex_on_edit` take
+  effect immediately: they are checked inside the PostToolUse hook every install
+  already has (`capture_bash` grows the observation log; read-only navigation commands
+  are still filtered). `per_turn_recall` and `codex_grep_assist` are separate hooks:
+  they register on the next `techne init` and load from the next session. To keep the old
+  behaviour, set any of them to `false` explicitly.
+
 - **The architect's pattern-target roster is now configured, not hardcoded** (#1008).
   It was a literal set of ten of this project's own repo names, and the
   `pattern_search` MCP description interpolated it — so every agent connecting to a
