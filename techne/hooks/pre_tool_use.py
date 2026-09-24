@@ -753,7 +753,7 @@ def main() -> None:
         print(f"techne: config load failed, skipping grep-assist: {e}", file=sys.stderr)
         sys.exit(0)
 
-    # Default-off gate: this is opt-in, experimental. Deliberately NOT recorded
+    # Flag gate: ON by default since #1020, experimental. Deliberately NOT recorded
     # as a liveness event — a disabled rail is DORMANT by configuration, not a
     # rail that ran and did nothing, and conflating the two is what makes
     # "enabled" indistinguishable from "working" (techne#468).

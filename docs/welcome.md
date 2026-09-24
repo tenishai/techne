@@ -136,17 +136,17 @@ or not the grep text hit it.
 
 It's a `PreToolUse` hook, and it's built to be invisible when it has nothing to add:
 it never blocks the tool, degrades to a no-op on any error, and scopes symbols to the
-repo you're actually searching (never bleeds another project's code in). **Opt-in and
-experimental** — off by default. Turn it on:
+repo you're actually searching (never bleeds another project's code in). **Experimental,
+on by default** since #1020; it does nothing until a repo is indexed. To turn it off:
 
 ```yaml
 # ~/.techne/config.yaml
 hooks:
-  codex_grep_assist: true       # default: false
+  codex_grep_assist: false      # default: true
   codex_grep_assist_limit: 8    # max symbols injected per Grep
 ```
 
-Then `techne init` to (re-)register the hook. It only fires for repos you've indexed
+Then `techne init` to (re-)register the hooks. It only fires for repos you've indexed
 with Codex (below). *Claude Code loads hooks at session start — restart the session
 after enabling.*
 
@@ -160,14 +160,16 @@ session-start block. So "how did we decide the auth flow?" pulls the actual deci
 into context the moment you ask, without you running a recall by hand.
 
 Best-effort by design: it never blocks or delays your turn, and stays silent when
-nothing relevant turns up. **Opt-in, experimental** — off by default:
+nothing relevant turns up. **On by default** since #1020 — without it, memory is only
+used when the agent decides to recall, which in practice it rarely does. To tune or
+turn it off:
 
 ```yaml
 # ~/.techne/config.yaml
 hooks:
-  per_turn_recall: true       # default: false
+  per_turn_recall: true       # default: true (set false to turn it off)
   per_turn_recall_limit: 5    # max facts injected per prompt
-  per_turn_recall_chars: 450  # max characters per fact; a shortened one ends in '…'
+  per_turn_recall_chars: 1000 # max characters per fact; a shortened one ends in '…'
 ```
 
 Then `techne init` and restart the session to load the hook.

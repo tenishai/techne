@@ -66,8 +66,10 @@ def _run(monkeypatch, capsys, payload: dict) -> str:
     return capsys.readouterr().out
 
 
-def test_flag_off_default_emits_nothing(home, monkeypatch, capsys):
-    """Flag OFF (default) → no stdout, even with a populated per-repo db."""
+def test_flag_off_emits_nothing(home, monkeypatch, capsys):
+    """Flag OFF → no stdout, even with a populated per-repo db. Set explicitly: the
+    default is ON since #1020."""
+    _write_config(home, codex_grep_assist=False)
     repo, db = _make_repo(home, indexed=True)
     add_symbol(
         db,
@@ -77,7 +79,6 @@ def test_flag_off_default_emits_nothing(home, monkeypatch, capsys):
         kind="function",
         signature="def authenticate(user): ...",
     )
-    # No config.yaml at all → codex_grep_assist defaults to False.
     out = _run(monkeypatch, capsys, _grep("authenticate", repo))
     assert out == ""
 
