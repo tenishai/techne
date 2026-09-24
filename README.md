@@ -65,6 +65,8 @@ techne init
 > warns about them and installs nothing extra.
 >
 > `[recommended]` pulls semantic recall + the CVE pre-install audit (`vectors` + `security`).
+> With a vectors backend installed, `techne init` downloads the embedding model once (tens
+> of MB, then cached) so search is semantic from the first session; `--no-vectors` skips it.
 > Drop it for a **core-only** install, or swap in any other set — see the
 > [extras matrix](#extras--what-to-install) for the full possibility space.
 >
