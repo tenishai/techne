@@ -33,7 +33,7 @@ def find_repo_root(path: Path) -> Path | None:
 def primary_repo_root(path: Path) -> Path | None:
     """The PRIMARY checkout that owns *path* — a linked worktree maps to its parent.
 
-    WHY THIS EXISTS (tenishai/agents#53). Reviews and the worktree-per-session SOP
+    WHY THIS EXISTS (tenishai/agents#10). Reviews and the worktree-per-session SOP
     (techne#376/#740) run inside `git worktree` checkouts, and `find_repo_root` stops at
     the worktree because a worktree has its own `.git`. The codex is db-per-repo and is
     indexed against the PRIMARY checkout, so every query from inside a worktree resolved

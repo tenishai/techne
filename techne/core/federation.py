@@ -42,7 +42,7 @@ def _resolve_conn_db_path(raw: str) -> Path:
     primary db_path/data_dir already default there — so a *committed* config.yaml
     can carry a portable relative path (e.g. ``db_path: team-mirror.db``) and each
     machine resolves it locally, no per-machine templating (the pain surfaced
-    wiring the prudence read-back, tenishai/agents#2). Absolute paths and ``~``
+    wiring the prudence read-back, tenishai/agents-archive#2). Absolute paths and ``~``
     are unchanged. Resolution happens here at open time, not at config load, so
     the stored spec keeps the portable string for save round-trips.
     """

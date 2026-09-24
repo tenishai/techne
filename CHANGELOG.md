@@ -1656,7 +1656,7 @@ open and is not reversible — back up first.
   which works *precisely because* it patches the call that was doing the overwriting.
 
 - **A codex read from inside a `git worktree` resolves to the primary index** (#719,
-  tenishai/agents#53). `db-per-repo` silently meant *db-per-checkout*: a linked worktree
+  tenishai/agents#10). `db-per-repo` silently meant *db-per-checkout*: a linked worktree
   has its own `.git`, so every query from a review worktree or a worktree-per-session
   checkout answered "no codex index for the active repo". Measured on a review agent's
   own history: its impact pass ran on 6% of reviews, because its instructions correctly
