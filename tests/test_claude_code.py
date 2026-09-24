@@ -103,12 +103,19 @@ class TestRegisterHooks:
                     )
 
     def test_matcher_is_empty_string(self, fake_home, cfg):
-        # techne wants every fire of every event, so matcher is "".
+        # techne wants every fire of every event, so matcher is "" — except the
+        # grep-assist PreToolUse group, which is tool-scoped by design and is
+        # registered by default since #1020.
+        from techne.platforms.claude_code.hooks import GREP_ASSIST_MATCHER
+
         claude_code.register_hooks(cfg)
         settings = json.loads(claude_code.SETTINGS_PATH.read_text())
         for event, groups in settings["hooks"].items():
             for group in groups:
-                assert group["matcher"] == ""
+                if event == "PreToolUse":
+                    assert group["matcher"] == GREP_ASSIST_MATCHER
+                else:
+                    assert group["matcher"] == ""
 
     def test_hook_commands_route_through_launcher(self, fake_home, cfg):
         # After techne#276, hooks no longer invoke sys.executable directly —

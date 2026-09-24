@@ -801,7 +801,7 @@ def register_hooks(config: Config):
             entry["timeout"] = _HOOK_TIMEOUTS_S[event]
         groups.append({"matcher": "", "hooks": [entry]})
 
-    # PreToolUse grep-assist (techne#206) — OPT-IN, experimental. Only registered
+    # PreToolUse grep-assist (techne#206) — ON by default (#1020), experimental. Only registered
     # when hooks.codex_grep_assist is ON. It's the sole techne PreToolUse entry —
     # so a flipped-off flag on re-init cleanly removes it (the strip below drops
     # any prior techne PreToolUse group).
@@ -830,7 +830,7 @@ def register_hooks(config: Config):
     if not pre_groups:
         del hooks["PreToolUse"]
 
-    # UserPromptSubmit per-turn recall (techne#109/#277) — OPT-IN, experimental.
+    # UserPromptSubmit per-turn recall (techne#109/#277) — ON by default (#1020), experimental.
     # The DYNAMIC per-turn complement to the stable SessionStart injection: on each
     # prompt, inject the durable facts most relevant to it. Gated on
     # hooks.per_turn_recall; empty matcher (UserPromptSubmit isn't tool-scoped). It's
@@ -1163,6 +1163,31 @@ def _load_json(path: Path) -> dict | None:
             f"{path} exists but could not be read/parsed ({e}); refusing to overwrite it. "
             "Fix or remove the file, then re-run."
         ) from e
+
+
+def auto_memory_enabled() -> bool:
+    """Is Claude Code's own auto-memory on? Mirrors Claude Code's own order (read from
+    the 2.1.281 binary, #1030 r1): CLAUDE_CODE_DISABLE_AUTO_MEMORY truthy -> off;
+    explicitly falsy ("0", "false") -> FORCED ON, whatever settings say; unset ->
+    settings.json `autoMemoryEnabled`, which defaults on."""
+    env = os.environ.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "").strip().lower()
+    if env in ("1", "true", "yes", "on"):
+        return False
+    if env in ("0", "false", "no", "off"):
+        return True
+    return (_load_json(SETTINGS_PATH) or {}).get("autoMemoryEnabled", True) is not False
+
+
+def disable_auto_memory() -> None:
+    """Set `autoMemoryEnabled: false` and change nothing else (techne#1023).
+
+    settings.json is shared by every Claude Code session on the machine, so it is
+    re-read immediately before the write and only this one key is set: a copy read
+    earlier would silently revert another session's change (knowledge #1013).
+    """
+    data = _load_json(SETTINGS_PATH) or {}
+    data["autoMemoryEnabled"] = False
+    _save_json(SETTINGS_PATH, data)
 
 
 def _save_json(path: Path, data: dict):

@@ -187,6 +187,9 @@ def test_mcp_check_evidence_mixes_deed_and_state_claims(tmp_path):
 
     cfg = Config()
     cfg.db_path = db
+    # Bash uncaptured, so "completion" is unverifiable rather than unbacked — the
+    # count below relies on it. The default is ON since #1020.
+    cfg.hooks.capture_bash = False
     claims = [
         {"type": "completion"},
         {"type": "capability", "path": "src.py", "pattern": "already_do_x"},

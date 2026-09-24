@@ -2328,6 +2328,113 @@ def _vector_next_steps(db_path: Path) -> list[str]:
     return []
 
 
+def _interactive() -> bool:
+    """Both ends a terminal: with `techne init > log` the prompt would go into the log
+    and init would look hung (#1030 r1)."""
+    import sys
+
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _offer_auto_memory_off(spool_primary: bool) -> None:
+    """Claude Code's auto-memory is a second memory layer beside techne (techne#1023).
+
+    Running both drifts and double-injects (knowledge #426), so a new user is asked
+    whether to turn it off. It is never switched off silently: it is another
+    product's setting. Keyed on the RESOLVED posture, not on whether memory files
+    were detected (#1030 r1): under spool-primary techne works WITH Claude Code's
+    memory, so nothing is offered and the message says how to move to techne-only.
+    """
+    from techne.core.checks import posture_switch_command
+    from techne.platforms.claude_code.hooks import auto_memory_enabled, disable_auto_memory
+
+    if not auto_memory_enabled():
+        return
+    click.echo("")
+    if spool_primary:
+        click.echo(
+            "Claude Code auto-memory is on, and techne is working alongside it "
+            "(spool-primary). techne does not take over Claude Code's memory: your "
+            "MEMORY.md files stay where they are, and techne writes memory of its own "
+            "only with `reflect.enabled: true` in ~/.techne/config.yaml. To use techne "
+            "alone: turn reflect on, set `autoMemoryEnabled: false` in "
+            f"~/.claude/settings.json, then run `{posture_switch_command('observe')}`."
+        )
+        return
+    why = (
+        "Claude Code auto-memory is on. It is a second memory layer beside techne: both "
+        "write and both inject, which drifts and duplicates context."
+    )
+    if not _interactive():
+        click.echo(why)
+        click.echo("Recommended: set `autoMemoryEnabled: false` in ~/.claude/settings.json.")
+        return
+    click.echo(why)
+    if click.confirm("Turn Claude Code auto-memory off (only that setting changes)?", default=True):
+        disable_auto_memory()
+        click.echo("Claude Code auto-memory: off (autoMemoryEnabled: false). Next session on.")
+    else:
+        click.echo("Left on. Change it with `autoMemoryEnabled` in ~/.claude/settings.json.")
+
+
+def _warm_vectors(config) -> list[str] | None:
+    """Download the embedding model once and embed what is stored (techne#1021).
+
+    Without this a fresh install never gets semantic search: the SessionStart
+    backfill passes `--no-download` so a cold cache cannot hang startup (#815), and
+    nothing else fetches the model. `init` is where a one-time wait is expected.
+
+    Returns None when no backend is installed (the caller prints the install hint),
+    [] when the model is ready, or lines explaining a failure. Never raises: a
+    failed download must not fail the install.
+    """
+    from techne.core.embeddings import (
+        _get_embedding_model,
+        _select_backend,
+        backend_available,
+        model_cached,
+    )
+
+    if not backend_available():
+        return None
+    # ONE LOAD, NEVER AN OFFLINE PROBE FIRST (#1029 r1, Critical). Probing with
+    # allow_download=False sets HF_HUB_OFFLINE for model2vec, and huggingface_hub
+    # keeps its offline state for the life of the process after the env var is
+    # restored, so the download that followed always failed. model_cached() answers
+    # by looking at the cache directory: no load, no env, no network.
+    cached = model_cached(config)
+    if not cached:  # False, or None = cannot tell
+        _, model = _select_backend(config)
+        click.echo(f"Downloading the embedding model ({model}) — one time, then cached...")
+    try:
+        _get_embedding_model(config, allow_download=not cached)
+    except Exception as e:
+        return [
+            f"  Semantic recall: the embedding model could not be loaded ({e}).",
+            "  Search is keyword-only until you run, with network access:",
+            "    techne vectors backfill",
+        ]
+    from techne.core.search import backfill_vectors
+
+    try:
+        counts = backfill_vectors(config.db_path, allow_download=False)
+    except Exception as e:
+        return [
+            f"  Semantic recall: the model is ready but embedding failed ({e}). Run:",
+            "    techne vectors backfill",
+        ]
+    click.echo(f"Semantic recall ready: embedded {sum(counts.values())} stored row(s).")
+    return []
+
+
+def _vector_lines(config, setup_vectors: bool) -> list[str]:
+    if setup_vectors:
+        lines = _warm_vectors(config)
+        if lines is not None:
+            return lines
+    return _vector_next_steps(config.db_path)
+
+
 @main.command("init")
 @click.option("--platform", type=click.Choice(list(PLATFORMS)), default="claude-code")
 @click.option(
@@ -2366,7 +2473,16 @@ def _vector_next_steps(db_path: Path) -> list[str]:
     help="Overwrite a procedure you have edited. Off by default: techne reports a "
     "diverged copy rather than silently restoring its own.",
 )
-def init(ctx, platform, identity_dir, posture, install_skills, force_skills):
+@click.option(
+    "--vectors/--no-vectors",
+    "setup_vectors",
+    default=True,
+    show_default=True,
+    help="Download the embedding model (one time, tens of MB) and embed what is stored, "
+    "so search is semantic from the start. --no-vectors keeps search keyword-only until "
+    "`techne vectors backfill` (techne#1021).",
+)
+def init(ctx, platform, identity_dir, posture, install_skills, force_skills, setup_vectors):
     """Initialize techne — create database, register hooks, set up MCP."""
     from techne.core.database import init_db
     from techne.core.memory_doctor import find_curated_memory_files
@@ -2462,6 +2578,11 @@ def init(ctx, platform, identity_dir, posture, install_skills, force_skills):
     config.save(saved_path)
     click.echo(f"Config saved: {saved_path}")
 
+    # After the save, so an Abort (EOF, Ctrl-C) at the prompt cannot leave a
+    # registered install with no config.yaml (#1030 r1).
+    if platform == "claude-code":
+        _offer_auto_memory_off(spool_primary=resolved_mode == "spool-primary")
+
     # Platform-specific next-steps so the operator isn't left guessing.
     if platform == "standalone":
         click.echo("")
@@ -2480,7 +2601,7 @@ def init(ctx, platform, identity_dir, posture, install_skills, force_skills):
         click.echo("  Inspect what's been captured:")
         click.echo("    techne status")
         click.echo("    techne search '<query>'")
-        vector_steps = _vector_next_steps(config.db_path)
+        vector_steps = _vector_lines(config, setup_vectors)
         if vector_steps:
             click.echo("")
             for line in vector_steps:
@@ -2490,7 +2611,7 @@ def init(ctx, platform, identity_dir, posture, install_skills, force_skills):
         return
 
     click.echo("\ntechne initialized. Run 'techne status' to verify.")
-    for line in _vector_next_steps(config.db_path):
+    for line in _vector_lines(config, setup_vectors):
         click.echo(line)
 
 

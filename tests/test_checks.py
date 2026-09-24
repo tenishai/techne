@@ -9,6 +9,7 @@ is to make "cannot tell" a distinct, failing answer.
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -2244,18 +2245,38 @@ def test_init_remedy_is_the_only_place_the_init_hint_is_spelled():
     # Keeping both: the brace tell still catches a split spelling like
     # `"techne init " f"--posture {mode}"` that the literal tell would miss.
     tells = ("--posture {", "techne init --posture")
+    # A third tell, for the FULL form both builders produce (`techne init --platform
+    # claude-code --posture observe`), which neither literal above matches (#1030 r2).
+    full_form = re.compile(r"techne init [^\"'`\n]*--posture")
     builder = pathlib.Path("core/checks.py")  # by PATH, not basename
 
     offenders = sorted(
         str(f.relative_to(root))
         for f in root.rglob("*.py")
-        if any(t in f.read_text() for t in tells) and f.relative_to(root) != builder
+        if (any(t in f.read_text() for t in tells) or full_form.search(f.read_text()))
+        and f.relative_to(root) != builder
     )
 
     assert offenders == [], (
         "these modules spell the `techne init --posture …` hint by hand instead of "
         f"calling init_remedy(), so they do not inherit its platform/posture guards: {offenders}"
     )
+
+
+def test_posture_switch_command_is_called_only_where_posture_changes_on_purpose():
+    """posture_switch_command skips init_remedy's guards by design (#1030 r2): a repair
+    site that called it would demote a spool-primary operator (#480) with the spelling
+    guard still green. Pin its call sites; add one here only where the text says the
+    posture will change."""
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[1] / "techne"
+    callers = {
+        str(f.relative_to(root)): f.read_text().count("posture_switch_command(")
+        for f in root.rglob("*.py")
+        if f.relative_to(root) != pathlib.Path("core/checks.py")
+    }
+    assert {k: v for k, v in callers.items() if v} == {"cli.py": 1}
 
 
 class TestPerLaneConsumer:

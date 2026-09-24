@@ -137,13 +137,13 @@ or not the grep text hit it.
 
 It's a `PreToolUse` hook, and it's built to be invisible when it has nothing to add:
 it never blocks the tool, degrades to a no-op on any error, and scopes symbols to the
-repo you're actually searching (never bleeds another project's code in). **On by
-default.** Turn it off if you don't want it:
+repo you're actually searching (never bleeds another project's code in). **Experimental,
+on by default** since #1020; it does nothing until a repo is indexed. To turn it off:
 
 ```yaml
 # ~/.techne/config.yaml
 hooks:
-  codex_grep_assist: false
+  codex_grep_assist: false      # default: true
   codex_grep_assist_limit: 8    # max symbols injected per Grep
 ```
 
@@ -163,16 +163,16 @@ session-start block. So "how did we decide the auth flow?" pulls the actual deci
 into context the moment you ask, without you running a recall by hand.
 
 Best-effort by design: it never blocks or delays your turn, and stays silent when
-nothing relevant turns up. **On by default** — this is the one that makes memory feel
-present, and it has a limit worth knowing: it only matches what you typed, so pasted
-or replayed content and tool output get nothing injected (see the
+nothing relevant turns up. **On by default** since #1020 — this is the one that makes
+memory feel present, and it has a limit worth knowing: it only matches what you typed,
+so pasted or replayed content and tool output get nothing injected (see the
 [operator guide](./operator-guide.md#the-recall-rule-and-its-limit)). Turn it off if
 you'd rather call `techne_recall` by hand:
 
 ```yaml
 # ~/.techne/config.yaml
 hooks:
-  per_turn_recall: false
+  per_turn_recall: false       # default: true
   per_turn_recall_limit: 5     # max facts injected per prompt
   per_turn_recall_chars: 1000  # max characters per fact; a shortened one ends in '…'
 ```
