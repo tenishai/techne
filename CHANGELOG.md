@@ -5,6 +5,16 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `knowledge.delete` now removes the entry's dependency edges (`knowledge_deps`,
+  either direction) and unlinks any entry that named it as its replacement
+  (`superseded_by`), in one transaction, before deleting the row. Both foreign keys
+  have no ON DELETE clause and every connection enforces them, so deleting a referenced
+  entry failed with `FOREIGN KEY constraint failed`. Seen live when an agent's seeder
+  retired a stale seed entry that a dream-promote had drawn an edge to: the delete
+  raised at every boot and the agent crash-looped for two days.
+
 ### Changed
 
 - **`techne init` asks before turning off Claude Code auto-memory** (#1023). Running

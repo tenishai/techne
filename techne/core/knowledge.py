@@ -655,11 +655,33 @@ def get(db_path: Path, entry_id: int) -> dict | None:
 
 
 def delete(db_path: Path, entry_id: int) -> bool:
+    """Delete one knowledge entry, and everything that points at it.
+
+    Two foreign keys reference `knowledge.id` with no ON DELETE clause, and every
+    connection enforces them: `knowledge_deps` (an edge a dream-promote drew to or
+    from this entry) and `knowledge.superseded_by` (an older entry this one
+    replaced). A bare DELETE fails on either with `FOREIGN KEY constraint failed`,
+    which is how a seeder retiring one stale entry crash-looped an agent at boot
+    (2026-09-24). The edges go with the entry; the entries it replaced are unlinked
+    rather than deleted (they stay superseded-in-fact but no longer name a row that
+    is gone). One transaction, so a failure part-way leaves nothing half-removed.
+    """
     conn = connect(db_path)
     try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "DELETE FROM knowledge_deps WHERE dependent_id = ? OR trigger_id = ?",
+            (entry_id, entry_id),
+        )
+        conn.execute(
+            "UPDATE knowledge SET superseded_by = NULL WHERE superseded_by = ?", (entry_id,)
+        )
         cur = conn.execute("DELETE FROM knowledge WHERE id = ?", (entry_id,))
         conn.commit()
         return cur.rowcount > 0
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
