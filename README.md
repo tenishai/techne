@@ -829,6 +829,25 @@ Semantic versioning. **Full release history: [`CHANGELOG.md`](CHANGELOG.md).**
 
 ---
 
+## Who's who
+
+The docs and `CHANGELOG.md` cite people and agents by first name — enough that
+an outside reader hits them before knowing what they mean:
+
+- **Richard** (also "Rich") — tenishai's maintainer. Cited for design and
+  policy decisions ("Richard's call, 2026-08-17") and as a co-author on
+  design proposals under `docs/proposals/`.
+- **Raven** and **Poe** — named Claude (Opus 4.7/4.8) session identities that
+  paired with Richard on specific design docs, cited as authors in
+  `docs/proposals/` and `docs/roadmap.md`. Not products or tools of their
+  own — a way of tracking which session wrote which document.
+- **Prudence** — an automated code-review agent, part of tenishai's review
+  fleet (`tenishai/agents`, private). A citation like "Prudence, #872 r2" (see
+  `docs/arch/codex.md`, `CHANGELOG.md`) means a specific finding from a
+  specific automated review round on that pull request — evidence, not a
+  person's opinion. Prudence has two sibling review passes, Temperance and
+  Constance; together they're "the Fates."
+
 ## License
 
 Copyright (C) 2026 tenishai
