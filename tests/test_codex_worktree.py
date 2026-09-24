@@ -1,6 +1,6 @@
 """A codex query from inside a `git worktree` must resolve to the PRIMARY index.
 
-tenishai/agents#53. The reviewer runs in a throwaway worktree (techne#740) and the
+tenishai/agents#10. The reviewer runs in a throwaway worktree (techne#740) and the
 codex is indexed against the shared checkout, so `find_repo_root` stopped at the
 worktree — a path with no db — and every query answered "no codex index for the active
 repo". Measured across 340 posted reviews, the impact pass ran in 6% of them: her
@@ -161,7 +161,7 @@ def test_a_query_from_a_worktree_finds_the_primarys_index(primary, worktree, tmp
     db.touch()  # the primary is indexed; the worktree never is
 
     assert resolve_repo_db_for_query(cfg, worktree) == db, (
-        "a query from inside a worktree missed the primary's index — the agents#53 bug"
+        "a query from inside a worktree missed the primary's index — the agents#10 bug"
     )
     assert resolve_repo_db_for_query(cfg, primary) == db, "the primary case regressed"
 

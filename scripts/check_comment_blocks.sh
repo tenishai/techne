@@ -5,7 +5,7 @@
 #
 # Refuses rather than warns; a warning is what scrolls past.
 # Escape deliberately:  ALLOW_LONG_COMMENT=1 git commit ...
-# Why it exists, and the measurement behind it: agents#88 and agents README,
+# Why it exists, and the measurement behind it: tenishai/agents-archive#88 and agents README,
 # "Where the reasoning goes".
 
 set -uo pipefail

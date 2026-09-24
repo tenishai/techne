@@ -648,7 +648,7 @@ def _codex_db_with_fan_in(tmp_path, n: int, proven: int | None = None):
 
 
 def test_blast_radius_caps_the_response_and_says_it_did(tmp_path, config, monkeypatch):
-    """tenishai/agents#53. A hot symbol's radius exceeded the MCP tool's token ceiling
+    """tenishai/agents#10. A hot symbol's radius exceeded the MCP tool's token ceiling
     outright — measured on techne, `execute` returned 500 nodes / 175,020 characters,
     about 44k tokens — so the reviewer got `Error: result exceeds maximum allowed tokens`
     instead of an impact set. An answer too large to return is the same as no answer,
