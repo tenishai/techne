@@ -79,7 +79,7 @@ dev = [
     # user 40s, dominated by per-test filesystem setup rather than by the
     # assertions. Note that is kernel CPU time, NOT I/O wait — user+sys is 85s
     # of 102s wall, so the suite is ~83% CPU-busy and the speedup ceiling is
-    # core count. 101s -> 26s on 6 cores; ~2x on the 2-core runner.
+    # core count. 101s -> 26s on 6 cores; ~2x on the retired 2-core runners.
     "pytest-xdist>=3.6",
     "ruff>=0.5.0",
     "litellm>=1.0",
