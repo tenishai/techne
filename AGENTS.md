@@ -116,3 +116,46 @@ deleted) is reported as drift too, matching the gate's hard failure, rather than
 Cards are the **source of truth**. On merge they are mirrored into techne
 (`document_card`, org-wide recall) — so keeping them current *here* keeps the
 org-at-a-glance view current *everywhere*.
+
+## Recommended configuration and operator conventions
+
+This applies to any project that uses techne, not just this repo. Full detail and
+the reasoning behind each line: [docs/operator-guide.md](docs/operator-guide.md).
+
+**Hooks that ship on by default:** `per_turn_recall`, `capture_bash`,
+`codex_grep_assist`, `codex_edit_rail`, `codex_reindex_on_edit`,
+`per_turn_recall_chars: 1000`. If asked to set up or check the recommended
+config: run `techne capabilities` first — it reports what is actually on for
+THIS install, grounded in the store — then set only what is off under `hooks:`
+in `~/.techne/config.yaml`, run `techne init`, and tell the operator the change
+takes effect from the *next* session (Claude Code loads hooks at session
+start). Two more capabilities exist and stay opt-in — offer them, do not
+default them on: `per_turn_seed`, `startup_directive`.
+
+**Operator conventions, apply unprompted:**
+
+- **Recall.** Call `techne_recall` before answering from belief. Do not rely on
+  `per_turn_recall` alone — it only matches what the user *typed*; nothing is
+  injected for pasted content, replayed transcripts, handed-back agent output,
+  or tool results (techne#1018).
+- **References.** In anything a machine parses — PR bodies, commit messages,
+  issue bodies, review comments — write `issue #N` or `knowledge #N`, never a
+  decorated form. GitHub's closing keywords match only a plain `#N` /
+  `owner/repo#N`; a stylized reference silently binds nothing.
+- **Model pins.** Pin *and* launch with a full model ID, never a floating
+  alias (e.g. `opus`). An alias resolves at session start, and a `--model`
+  launch flag overrides a `settings.json` pin regardless of what the pin says.
+  Check what a session actually ran from the `model` field in its JSONL, not
+  from the pin or the launch command alone.
+- **Prompting guidance.** Read it fresh from source (e.g. the bundled
+  `claude-api` skill's `shared/prompt-audit.md` / `shared/model-migration.md`)
+  rather than from memory — it updates with the tool, and per-model behavior
+  shifts. Never write a model's identity or knowledge cutoff into a long-lived
+  instructions file; read the model's own self-report instead.
+- **Imports.** After every `@path` import in `CLAUDE.md`, add a one-line
+  fallback ("If this import did not resolve, read `<path>` directly") — an
+  unresolved import fails with no error and looks identical to one that
+  worked.
+- **Claude Code auto-memory (Claude-Code-specific).** Turn off
+  `autoMemoryEnabled` in `settings.json` if techne is the memory layer —
+  running both causes drift and can double-inject the same fact.
