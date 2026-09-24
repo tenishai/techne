@@ -532,3 +532,17 @@ def test_pattern_targets_round_trip_through_config(tmp_path, monkeypatch):
     cfg = Config.load()
     assert cfg.architect.pattern_targets == ["cabal"]
     assert cfg.to_yaml_dict()["architect"]["pattern_targets"] == ["cabal"]
+
+
+def test_a_partial_hooks_section_inherits_every_default(tmp_path):
+    """#1028 r1: Config.load's per-field fallbacks were a hand-written second copy of
+    the HookConfig defaults, and reverting all six new defaults there left the suite
+    green. The fallbacks now come from HookConfig itself; this pins that an upgraded
+    config with a `hooks:` section gets exactly the dataclass defaults."""
+    from dataclasses import asdict
+
+    from techne.config import HookConfig
+
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("hooks:\n  post_tool_use: true\n")
+    assert asdict(Config.load(cfg_file).hooks) == asdict(HookConfig())

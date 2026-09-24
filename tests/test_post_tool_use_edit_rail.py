@@ -95,9 +95,10 @@ def _edit_rail_context(out: str) -> str | None:
     return json.loads(out)["hookSpecificOutput"]["additionalContext"]
 
 
-def test_flag_off_default_emits_nothing(home, monkeypatch, capsys):
-    """Flag OFF (default) → the rail stays silent even for a heavily-used symbol."""
-    _write_config(home)  # codex_edit_rail defaults False
+def test_flag_off_emits_nothing(home, monkeypatch, capsys):
+    """Flag OFF → the rail stays silent even for a heavily-used symbol. Set
+    explicitly: the default is ON since #1020."""
+    _write_config(home, codex_edit_rail=False)
     repo, db = _make_indexed_repo(home)
     _seed_handle_with_deps(repo, db, 5)
     out = _run(monkeypatch, capsys, _edit_payload(repo))

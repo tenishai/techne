@@ -40,7 +40,7 @@ SKIP_TOOLS = {
 # commit SHA, no test result) and would only dilute the observation ledger and the
 # vector index. Anything NOT in this set (git, gh, pytest, make, docker, uv, pip,
 # npm, terraform, …) is captured. This is what lets capture_bash be ON without the
-# noise cost that kept it OFF by default (techne#557 root-cause + capture_bash decision).
+# noise cost that once kept it OFF by default (techne#557); it is ON since #1020.
 _READONLY_BASH_HEADS = frozenset(
     {
         "ls",
@@ -649,7 +649,7 @@ def _inject_due_reminders(config: Config, session_id: str) -> str | None:
 def _maybe_reindex_codex(config: Config, tool_name: str, tool_input: dict) -> None:
     """Best-effort mid-session codex refresh (techne#301): after a Write/Edit,
     incrementally reindex the touched file into its repo's codex db so codex
-    queries don't go stale between SessionStart reindexes. Opt-in and fail-safe
+    queries don't go stale between SessionStart reindexes. On by default (#1020), fail-safe
     — any error is swallowed so the hook exit stays 0 and never breaks a tool
     call. `reindex_edited_file` no-ops on non-code files / un-indexed repos."""
     if not config.hooks.codex_reindex_on_edit:

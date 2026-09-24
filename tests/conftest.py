@@ -305,3 +305,16 @@ def fastembed_is_the_live_backend() -> bool:
         return backend == "fastembed"
     except Exception:
         return False
+
+
+@pytest.fixture(autouse=True)
+def _no_model_download_on_init(request, monkeypatch):
+    """`techne init` downloads the embedding model (techne#1021). No test may do that
+    by accident: stub it here. Tests marked `real_warm_vectors`
+    (tests/test_init_vectors.py) run the real helper with the model loader stubbed.
+
+    raising=False: CI's eval-vec base leg runs THESE tests against main's library,
+    which has no _warm_vectors until this lands."""
+    if request.node.get_closest_marker("real_warm_vectors"):
+        return
+    monkeypatch.setattr("techne.cli._warm_vectors", lambda config: None, raising=False)

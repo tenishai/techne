@@ -75,8 +75,20 @@ def _injection_log_rows(source: str | None = None) -> list[dict]:
         conn.close()
 
 
-def test_flag_off_default_emits_nothing(home, monkeypatch, capsys):
-    """Flag OFF (no config.yaml → default False) → no stdout, even with a match."""
+def test_flag_default_is_on(home, monkeypatch, capsys):
+    """#1020: with no config.yaml at all, the rail fires. A fresh install should not
+    need to know the flag exists."""
+    _seed(
+        "Postgres was chosen over MongoDB for join semantics.", type="decision", confidence="high"
+    )
+    out = _run(monkeypatch, capsys, {"prompt": "why postgres"})
+    assert "Postgres was chosen" in out
+
+
+def test_flag_off_emits_nothing(home, monkeypatch, capsys):
+    """Flag OFF → no stdout, even with a match. Explicitly off: the default is ON
+    since #1020 (test_flag_default_is_on pins that)."""
+    _write_config(home, per_turn_recall=False)
     _seed(
         "Postgres was chosen over MongoDB for join semantics.", type="decision", confidence="high"
     )
@@ -389,11 +401,12 @@ def test_the_two_declared_defaults_cannot_diverge():
 def test_the_shipped_default_is_actually_deliverable():
     """The default cap must be a value the rail can honour (techne#826/#842).
 
-    `search()` pre-truncates knowledge rows to `_SEARCH_ROW_CEILING` before the
-    hook ever sees them, so a default at or above it cannot be delivered — and
-    worse, an unclamped cap there makes a severed row look whole and suppresses
-    the `…` marker. This pins the invariant, not the number: raise the default
-    freely, but never to a value the ceiling forbids.
+    Until #842, `search()` cut every knowledge row at a hidden 500, so a default at
+    or above it could not be delivered and a severed row looked whole. #842 made
+    `search()` take `row_chars`, and the rail asks for `cap + 1`. So the invariant
+    is now behavioural: for the SHIPPED default, `search()` returns cap + 1
+    characters of a longer row. The 450 -> 1000 move (#1020) is what exposed the
+    old check as a pin on a ceiling that no longer exists.
 
     WHY 450 AND NOT 200: measured 2026-08-31 over 2,468 live injectable rows,
     median length 476 chars. A 200-cap WOULD sever 2,442 of them (98%) where 450
@@ -401,13 +414,26 @@ def test_the_shipped_default_is_actually_deliverable():
     cut; it injects five per turn by similarity, so it never severed 2,442 of
     anything (#852 r1). The old default would have cut a typical entry in half.
     """
+    import tempfile
+    from pathlib import Path
+
     from techne.config import HookConfig
-    from techne.hooks.user_prompt_submit import _SEARCH_ROW_CEILING
+    from techne.core.database import init_db
+    from techne.core.knowledge import store as store_knowledge
+    from techne.core.search import search
 
     default = HookConfig().per_turn_recall_chars
-    assert 0 < default < _SEARCH_ROW_CEILING, (
-        f"shipped default {default} is not deliverable: search() truncates at "
-        f"{_SEARCH_ROW_CEILING}, so the cap must sit strictly below it"
+    assert default > 0
+    with tempfile.TemporaryDirectory() as d:
+        db = Path(d) / "t.db"
+        init_db(db)
+        body = " ".join(f"word{i:03d}" for i in range(default))  # ~8x the cap
+        store_knowledge(db, content=body, type="procedure", tags="probe", confidence="high")
+        rows = search(db, "word001", table="knowledge", limit=1, row_chars=default + 1)
+    got = len(rows[0]["content"])
+    assert got == default + 1, (
+        f"shipped default {default} is not deliverable: search() returned {got} "
+        f"characters where the rail asks for {default + 1}"
     )
 
 
@@ -544,7 +570,7 @@ class TestInjectedTypeLabel:
         injection whose size is set by whatever the longest matching row happens to
         be.
 
-        This row is 500 unbroken `x`, so there is no boundary for techne#826's
+        This row is `cap + 500` unbroken `x`, so there is no boundary for techne#826's
         boundary-seeking to find and the cut is hard at the cap — which is what
         keeps this assertion a test of the CAP rather than of the cut point. The
         boundary behaviour is pinned separately below."""
@@ -558,10 +584,13 @@ class TestInjectedTypeLabel:
         from techne.config import HookConfig
 
         cap = HookConfig().per_turn_recall_chars
-        assert cap == 450, (
+        assert cap == 1000, (
             "the shipped default moved; #808 measures per-session context as already "
             "the dominant cost, so this is a deliberate decision, not a tuning tweak"
         )
+        # MOVED 450 -> 1000 on 2026-09-23 (#1020), the operator's decision: at 450 a
+        # multi-step procedure still arrived as its first half. Worst case ~5,000
+        # chars/turn at limit 5.
         # MOVED 200 -> 450 on 2026-08-31, and this tripwire is why it was a decision
         # rather than a drift: it failed, and the number changed only after measuring.
         #
@@ -594,11 +623,12 @@ class TestInjectedTypeLabel:
         # PER-TURN against #808's PER-SESSION block, so
         # comparable only multiplied out: 312 × 40 ≈ 12,500 over a 40-turn session.
         #
-        # 450 not 500 because search() pre-truncates at _SEARCH_ROW_CEILING (#842) and
-        # the cap must sit strictly below it — pinned by
-        # test_the_shipped_default_is_actually_deliverable.
+        # Sized from the cap so it is always longer than it: a fixed 500 stopped being
+        # a truncation test when the default moved past it (#1020). Deliverability of
+        # the cap through search() is pinned by test_the_shipped_default_is_actually_deliverable.
         out = self._ctx(
-            [{"id": 1, "source_table": "knowledge", "knowledge_type": "fact", "content": "x" * 500}]
+            [{"id": 1, "source_table": "knowledge", "knowledge_type": "fact",
+              "content": "x" * (cap + 500)}]
         )
         assert "x" * cap in out
         assert "x" * (cap + 1) not in out
@@ -617,6 +647,13 @@ class TestInjectedTypeLabel:
             " It also has to reach past the raised cap, so this sentence carries it "
             "beyond four hundred and fifty characters without a boundary landing exactly "
             "at the cut point itself, which is the property the fixture exists to hold."
+            " When the cap moved again, from four hundred and fifty to one thousand, the "
+            "fixture had to grow with it, because a row shorter than the cap is never cut "
+            "and a test that never cuts cannot tell a boundary-seeking truncation from a bare "
+            "slice. So this closing passage keeps going, sentence after sentence, long enough "
+            "to pass one thousand characters with the cut falling inside a word, which the "
+            "assertions below check directly rather than trusting the arithmetic of whomever "
+            "last lengthened it, since two earlier corrections here were each off by one."
         )
         # THE FIXTURE'S DISCRIMINATING PROPERTY, ASSERTED RATHER THAN ASSUMED.
         # An earlier version of this test could not fail: its character at the cap
@@ -630,6 +667,9 @@ class TestInjectedTypeLabel:
         # guard was right and only its explanation was wrong — worth correcting
         # because this is the comment that says why the fixture can be trusted.)
         #
+        # LENGTHENED AGAIN 2026-09-23 when the cap moved 450 -> 1000 (#1020): 1052 chars,
+        # and body[999]/body[1000] fall inside "since" — computed by script, then held by
+        # the assertion below rather than by this comment.
         # LENGTHENED 2026-08-31 when the cap moved 200 -> 450: the 282-char fixture no
         # longer exceeded the cap, and this test says so out loud rather than passing
         # on a row it never cuts — the `len(body) > cap` assertion below is what caught
@@ -693,7 +733,7 @@ class TestInjectedTypeLabel:
         """A truncated row that looks complete is the whole defect. The marker is
         what lets a reader tell "I have this" from "I have the first sentence of
         this", and the header names the knob so the remedy is in the block."""
-        long_out = self._ctx([{"id": 1, "knowledge_type": "fact", "content": "word " * 200}])
+        long_out = self._ctx([{"id": 1, "knowledge_type": "fact", "content": "word " * 300}])
         # ROW-anchored: `" …" in long_out` also matches the header's own
         # "Rows ending in …" text, so it passed without ever inspecting the row.
         assert long_out.splitlines()[-1].endswith(" …")

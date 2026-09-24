@@ -65,6 +65,8 @@ techne init
 > warns about them and installs nothing extra.
 >
 > `[recommended]` pulls semantic recall + the CVE pre-install audit (`vectors` + `security`).
+> With a vectors backend installed, `techne init` downloads the embedding model once (tens
+> of MB, then cached) so search is semantic from the first session; `--no-vectors` skips it.
 > Drop it for a **core-only** install, or swap in any other set — see the
 > [extras matrix](#extras--what-to-install) for the full possibility space.
 >
@@ -612,24 +614,26 @@ search:
 
 hooks:
   post_tool_use: true         # capture tool use as observations
-  capture_bash: false         # include Bash tool calls
+  capture_bash: true          # include Bash tool calls (default on since #1020)
   capture_read: false         # include Read tool calls
-  codex_grep_assist: false    # opt-in (#206): a PreToolUse hook that augments the agent's
-                              #   own Grep with matching Codex symbols (needs an indexed repo).
-                              #   Re-run 'techne init' after flipping; restart the session to load it.
+  codex_grep_assist: true     # default on (#206, #1020): a PreToolUse hook that augments the
+                              #   agent's own Grep with matching Codex symbols. No-op outside an
+                              #   indexed repo. Re-run 'techne init' after changing it.
   codex_grep_assist_limit: 8  # max symbols injected per Grep
-  codex_edit_rail: false      # opt-in (#335): a PostToolUse hook that, after an Edit, injects the
-                              #   edited symbol's blast-radius (its dependents — "what breaks if I
-                              #   change this"), but only when it has enough dependents to matter.
-                              #   Re-run 'techne init' after flipping; restart the session to load it.
+  codex_edit_rail: true       # default on (#335, #1020): a PostToolUse hook that, after an Edit,
+                              #   injects the edited symbol's blast-radius (its dependents — "what
+                              #   breaks if I change this"), only when enough depend on it and only
+                              #   in an indexed repo. Checked inside PostToolUse, so a change
+                              #   applies on the next edit; no 'techne init' needed.
   codex_edit_rail_min_deps: 3 # min transitive dependents before the edit rail fires (skip leaf edits)
   codex_edit_rail_limit: 10   # max dependents injected per edit (closest-first by depth)
-  per_turn_recall: false      # opt-in (#109/#277): a UserPromptSubmit hook injects the durable
-                              #   facts most relevant to each prompt — the DYNAMIC per-turn
-                              #   complement to the STABLE SessionStart block. Re-run 'techne init'
-                              #   after flipping; loads from the next session.
+  per_turn_recall: true       # default on (#109/#277, #1020): a UserPromptSubmit hook injects the
+                              #   durable facts most relevant to each prompt — the DYNAMIC per-turn
+                              #   complement to the STABLE SessionStart block. Without it, memory is
+                              #   used only when the agent decides to recall. Re-run 'techne init'
+                              #   after changing it; loads from the next session.
   per_turn_recall_limit: 5    # max knowledge rows injected per turn
-  per_turn_recall_chars: 450  # max characters per injected row (#826). The cut lands on a
+  per_turn_recall_chars: 1000 # max characters per injected row (#826, #1020). The cut lands on a
                               #   sentence or word boundary and a shortened row ends in '…',
                               #   so a truncated fact is distinguishable from a whole one.
                               #   Raising this raises per-prompt token cost on EVERY turn.
@@ -828,6 +832,25 @@ Semantic versioning. **Full release history: [`CHANGELOG.md`](CHANGELOG.md).**
 </details>
 
 ---
+
+## Who's who
+
+The docs and `CHANGELOG.md` cite people and agents by first name — enough that
+an outside reader hits them before knowing what they mean:
+
+- **Richard** (also "Rich") — tenishai's maintainer. Cited for design and
+  policy decisions ("Richard's call, 2026-08-17") and as a co-author on
+  design proposals under `docs/proposals/`.
+- **Raven** and **Poe** — named Claude (Opus 4.7/4.8) session identities that
+  paired with Richard on specific design docs, cited as authors in
+  `docs/proposals/` and `docs/roadmap.md`. Not products or tools of their
+  own — a way of tracking which session wrote which document.
+- **Prudence** — an automated code-review agent, part of tenishai's review
+  fleet (`tenishai/agents`, private). A citation like "Prudence, #872 r2" (see
+  `docs/arch/codex.md`, `CHANGELOG.md`) means a specific finding from a
+  specific automated review round on that pull request — evidence, not a
+  person's opinion. Prudence has two sibling review passes, Temperance and
+  Constance; together they're "the Fates."
 
 ## License
 

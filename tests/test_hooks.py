@@ -60,9 +60,15 @@ class TestShouldCapture:
         for tool in ("Edit", "Write", "MultiEdit"):
             assert should_capture(config, tool) is True, f"Expected {tool} to be captured"
 
-    def test_should_capture_default_config_bash_not_captured(self):
-        """Bash is NOT captured by default (capture_bash=False)."""
+    def test_should_capture_default_config_bash_captured(self):
+        """Bash IS captured by default since #1020 (capture_bash=True); the
+        read-only-command filter keeps navigation noise out."""
         config = _make_config()
+        assert should_capture(config, "Bash") is True
+
+    def test_should_capture_bash_disabled(self):
+        """Bash is not captured when capture_bash=False."""
+        config = _make_config(capture_bash=False)
         assert should_capture(config, "Bash") is False
 
     def test_should_capture_default_config_read_not_captured(self):
