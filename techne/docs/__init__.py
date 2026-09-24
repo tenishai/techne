@@ -67,6 +67,7 @@ _MANIFEST = (
     "four-functions",
     "investigating",
     "mcp-tools",
+    "operator-guide",
     "reflect-guide",
     "releasing",
     "self-care",
