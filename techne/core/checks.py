@@ -369,6 +369,18 @@ def init_remedy(config) -> str | None:
     return f"techne init --platform claude-code --posture {config.posture.mode}"
 
 
+def posture_switch_command(mode: str) -> str:
+    """The ``techne init`` line that CHANGES posture to ``mode``, on purpose.
+
+    init_remedy is for repairs and must preserve posture. This is the other case:
+    text telling the operator how to move posture (e.g. spool-primary to techne-only,
+    techne#1023). It lives here so the hint is still spelled in one module
+    (test_init_remedy_is_the_only_place_the_init_hint_is_spelled). Use it only where
+    the surrounding text says the posture will change.
+    """
+    return f"techne init --platform claude-code --posture {mode}"
+
+
 # ---------------------------------------------------------------------------
 # Built-in checks
 # ---------------------------------------------------------------------------

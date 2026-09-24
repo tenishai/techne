@@ -7,6 +7,14 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Changed
 
+- **`techne init` asks before turning off Claude Code auto-memory** (#1023). Running
+  both memory layers drifts and double-injects. In a terminal, a new user is asked;
+  on yes only `autoMemoryEnabled` in `~/.claude/settings.json` changes, re-read
+  immediately before the write. Non-interactive init only prints the recommendation.
+  Under the spool-primary posture nothing is offered (the offer keys on the
+  resolved posture, not on detected memory files); init instead says how to move
+  to techne-only, and that techne does not import Claude Code's existing memory.
+
 - **Recommended hooks are on by default** (#1020). `per_turn_recall`, `capture_bash`,
   `codex_grep_assist`, `codex_edit_rail` and `codex_reindex_on_edit` now default to
   `true`, and `per_turn_recall_chars` to 1000 (was 450). A first-time user should not

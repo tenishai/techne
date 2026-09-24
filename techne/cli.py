@@ -2328,6 +2328,55 @@ def _vector_next_steps(db_path: Path) -> list[str]:
     return []
 
 
+def _interactive() -> bool:
+    """Both ends a terminal: with `techne init > log` the prompt would go into the log
+    and init would look hung (#1030 r1)."""
+    import sys
+
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _offer_auto_memory_off(spool_primary: bool) -> None:
+    """Claude Code's auto-memory is a second memory layer beside techne (techne#1023).
+
+    Running both drifts and double-injects (knowledge #426), so a new user is asked
+    whether to turn it off. It is never switched off silently: it is another
+    product's setting. Keyed on the RESOLVED posture, not on whether memory files
+    were detected (#1030 r1): under spool-primary techne works WITH Claude Code's
+    memory, so nothing is offered and the message says how to move to techne-only.
+    """
+    from techne.core.checks import posture_switch_command
+    from techne.platforms.claude_code.hooks import auto_memory_enabled, disable_auto_memory
+
+    if not auto_memory_enabled():
+        return
+    click.echo("")
+    if spool_primary:
+        click.echo(
+            "Claude Code auto-memory is on, and techne is working alongside it "
+            "(spool-primary). techne does not take over Claude Code's memory: your "
+            "MEMORY.md files stay where they are, and techne writes memory of its own "
+            "only with `reflect.enabled: true` in ~/.techne/config.yaml. To use techne "
+            "alone: turn reflect on, set `autoMemoryEnabled: false` in "
+            f"~/.claude/settings.json, then run `{posture_switch_command('observe')}`."
+        )
+        return
+    why = (
+        "Claude Code auto-memory is on. It is a second memory layer beside techne: both "
+        "write and both inject, which drifts and duplicates context."
+    )
+    if not _interactive():
+        click.echo(why)
+        click.echo("Recommended: set `autoMemoryEnabled: false` in ~/.claude/settings.json.")
+        return
+    click.echo(why)
+    if click.confirm("Turn Claude Code auto-memory off (only that setting changes)?", default=True):
+        disable_auto_memory()
+        click.echo("Claude Code auto-memory: off (autoMemoryEnabled: false). Next session on.")
+    else:
+        click.echo("Left on. Change it with `autoMemoryEnabled` in ~/.claude/settings.json.")
+
+
 def _warm_vectors(config) -> list[str] | None:
     """Download the embedding model once and embed what is stored (techne#1021).
 
@@ -2528,6 +2577,11 @@ def init(ctx, platform, identity_dir, posture, install_skills, force_skills, set
     saved_path = techne_home() / "config.yaml"
     config.save(saved_path)
     click.echo(f"Config saved: {saved_path}")
+
+    # After the save, so an Abort (EOF, Ctrl-C) at the prompt cannot leave a
+    # registered install with no config.yaml (#1030 r1).
+    if platform == "claude-code":
+        _offer_auto_memory_off(spool_primary=resolved_mode == "spool-primary")
 
     # Platform-specific next-steps so the operator isn't left guessing.
     if platform == "standalone":
