@@ -50,6 +50,17 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- Reminder notes and coord message bodies are now redacted before storage (#1037).
+  `reminders.add()` and `coord.send()` wrote free text verbatim, so a token pasted
+  into `techne_reminder_add` or `techne_send` reached `techne.db` as-is, and a coord
+  body was then replayed to every live session by the inbox nudge. Both now call
+  `redact_credentials` at the write boundary, like the other free-text sinks. Rows
+  stored before this change are not rewritten.
+- `docs/librarian-guide.md` no longer says credentials are "stripped" unhedged; it now
+  says redaction is pattern-based and best-effort, matching `SECURITY.md` (#1043).
+  `SECURITY.md`'s egress scope now says which operator-config layers are locks and
+  which an agent can bypass, so a documented non-lock is not reported as a
+  vulnerability (#1043).
 - `research-readonly`'s standing fetch rule now covers both jobs it is spawned for
   (#1041). It read "stay on the URL you were given and its same-origin paths", which
   fit `investigate-url` but contradicted `docs/surveying.md` step 4, where the survey

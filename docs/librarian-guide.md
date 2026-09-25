@@ -54,7 +54,9 @@ techne librarian index-transcripts --dir ~/.claude/projects/<slug>   # a specifi
 ```
 
 - **Idempotent** — re-run anytime; only new/changed sessions are rewritten.
-- **Redacted** — credentials are stripped from content *and* titles before storage.
+- **Redacted** — credential-shaped strings in content *and* titles are replaced before
+  storage. Redaction is pattern-based and best-effort (`techne/core/redaction.py`): a token
+  format it does not recognise is stored as-is.
 - Each transcript's card gets a **thread index** gist automatically (a session spans many
   topics — "Session (date): thread A; thread B; …"), built from techne's thread detection.
   No summarization step needed for transcripts.
