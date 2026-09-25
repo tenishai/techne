@@ -339,7 +339,7 @@ populate command, and where the filler lives when it is not in this repo.
 |---|---|---|---|
 | **archivist** | on by default (`local`); the `[vectors]` extra adds vector search, then `techne vectors backfill` for rows already stored | `techne_store` from your agent, or `techne knowledge add` | **yes** — it is your own memory |
 | **librarian** | on by default — **FTS only, by construction** | `techne librarian index-transcripts` · `techne librarian index-markdown DIR` | **yes**, but nothing runs it for you — see below |
-| **architect** | on by default | `techne architect add` for one pattern · `techne architect ingest FILE.md` for a corpus | **yes** (`add` ships); the richer research procedures live in `tenishai/skills`, which is not public yet |
+| **architect** | on by default | `techne architect add` for one pattern · `techne architect ingest FILE.md` for a corpus | **yes** — `add` ships, and so do the richer procedures: `techne guide investigating` / `techne guide surveying`, with `investigate-url` / `survey-field` stub skills installed by `techne init --skills` |
 | **codex** | the `[codex]` extra | `techne codex index .` · `codex index-all` · `codex watch` | **yes** |
 
 ### Installing `[vectors]` does not backfill what you already stored
@@ -403,8 +403,10 @@ and that is the one case where the answer is genuinely "not from here".
 > - They are about to rely on `librarian_search` for coverage — **nothing in techne itself
 >   indexes transcripts**, so ask whether their deployment wires one; a partial index
 >   answers exactly like a complete one.
-> - They ask why the architect is empty on a fresh install — `techne architect add` ships;
->   the research procedures that fill it in bulk do not.
+> - They ask why the architect is empty on a fresh install — nothing populates it
+>   automatically. `techne architect add` ships as the manual feeder, and so do the
+>   richer research procedures (`techne guide investigating` / `techne guide
+>   surveying`), but the operator or agent still has to run one.
 
 ---
 

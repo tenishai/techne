@@ -509,10 +509,11 @@ techne architect add --name N --source URL [--surveyed YYYY-MM-DD] [--body T | -
                                            # add ONE pattern from its fields — the feeder
                                            # that ships. No markdown to hand-write, so no
                                            # format to get wrong; body also reads stdin.
-                                           # The richer procedures (/investigate-url,
-                                           # /survey-field) live in tenishai/skills,
-                                           # which is not public yet — `add` and
-                                           # `ingest` are the feeders that ship here.
+                                           # The richer procedures ship as techne's own
+                                           # guides — `techne guide investigating` /
+                                           # `techne guide surveying` — with thin
+                                           # `investigate-url` / `survey-field` stub
+                                           # skills installed by `techne init --skills`.
 techne architect ingest PATTERNS_MD [--verdict skip|skip-with-flag|patterns-only|full-eval]
                                            # seed from an architectural-patterns.md corpus.
                                            # --verdict records YOUR judgment of the
