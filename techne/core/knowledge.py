@@ -396,19 +396,30 @@ def _merge_in_conn(
 ) -> int:
     """Core of merge_into() on a caller-owned connection (no commit/close), for the
     promote dispatch (#108). Asserts every old is live, mints the merged row, repoints
-    the olds, cascades each. Caller owns the transaction."""
+    the olds, cascades each. Caller owns the transaction.
+
+    "Live" excludes `status = 'archived'` as well as superseded (review round 2 on
+    techne#1033): `delete()` can leave a retired-but-superseded_by-NULL predecessor
+    behind when it archives the head of a chain, and merging that row's content into
+    a freshly-minted `current` row would resurrect it under a different id — the
+    same resurrection this guard already blocks for a superseded row.
+    """
     seen: set[int] = set()
     for oid in old_ids:
         if oid in seen:
             raise ValueError(f"merge_into: duplicate old id {oid}")
         seen.add(oid)
-        row = conn.execute("SELECT superseded_by FROM knowledge WHERE id = ?", (oid,)).fetchone()
+        row = conn.execute(
+            "SELECT superseded_by, status FROM knowledge WHERE id = ?", (oid,)
+        ).fetchone()
         if row is None:
             raise ValueError(f"merge_into: knowledge entry {oid} not found")
         if row["superseded_by"] is not None:
             raise ValueError(
                 f"merge_into: entry {oid} is already superseded — merge live rows only"
             )
+        if row["status"] == "archived":
+            raise ValueError(f"merge_into: entry {oid} is archived — merge live rows only")
 
     cur = conn.execute(
         """INSERT INTO knowledge
@@ -683,9 +694,28 @@ def delete(db_path: Path, entry_id: int) -> bool:
         deleted link, `superseded_by` stays non-NULL, and nothing else changes.
       - If `entry_id` is the head of its chain (nothing superseded it), its
         predecessors have no successor to point at. They are archived
-        (`status = 'archived'`, techne#216) instead of left live — excluded from
-        egress and default recall, still visible to an explicit history search,
-        same as any other soft-archived row.
+        (`status = 'archived'`, techne#216) instead of left live.
+
+        THIS IS A NEW KIND OF ARCHIVED ROW (review round 2 on techne#1033), not
+        "same as any other soft-archived row": `archive_scan` only ever archives a
+        row that was already `uncertain` and had decayed below the confidence
+        floor, so a status-blind reader that missed the archived check did little
+        harm. A row archived here can be a previously `current`, `confidence='high'`
+        fact — exactly what the high-confidence readers below select. Every reader
+        that decides "is this a live fact worth injecting/promoting/comparing" on
+        `superseded_by IS NULL` alone had to be checked, not just the four that
+        already filtered `status`. Fixed to also exclude `status = 'archived'`:
+        `list_entries` (this module), `search`/`search_fts`/`search_vec` with
+        `include_archived=False` (search.py, unchanged — already correct),
+        Tier-0 egress (egress.py, unchanged — already correct), `get_resume_context`
+        (state.py — feeds `techne_resume`/`techne context`), `consolidate_clusters`
+        and `recombine_groups` (sleepdream.py — dream/consolidate candidate
+        selection), `select_conflict_candidates` and `conflict_check_emit`
+        (conflict.py), and `_merge_in_conn`'s live-row guard (this module — refuses
+        to merge an archived row, same as it already refuses a superseded one).
+        Left unchanged: `knowledge_export.query_live_knowledge` returns `status`
+        alongside each row, so a consumer can filter for itself — the same rationale
+        as `search()`'s `include_archived=True` default for explicit queries.
 
     Dependents of `entry_id` (edges where `entry_id` is the trigger) are flipped
     to `uncertain` before the edges are dropped, mirroring `supersede()`'s

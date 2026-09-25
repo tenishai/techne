@@ -23,14 +23,35 @@ import sqlite3
 
 import pytest
 
-from techne.core.database import connect
-from techne.core.knowledge import _add_dep_in_conn, delete, get, list_entries, store, supersede
+from techne.config import Config
+from techne.core.conflict import conflict_check_emit, select_conflict_candidates
+from techne.core.database import connect, init_db
+from techne.core.knowledge import (
+    _add_dep_in_conn,
+    delete,
+    get,
+    list_entries,
+    merge_into,
+    store,
+    supersede,
+)
+from techne.core.knowledge_export import query_live_knowledge
 from techne.core.search import search
+from techne.core.sleepdream import consolidate_clusters, recombine_groups
+from techne.core.state import get_resume_context
 
 
 @pytest.fixture
 def db(tmp_path):
     return tmp_path / "knowledge.db"
+
+
+@pytest.fixture
+def config(tmp_path):
+    cfg = Config()
+    cfg.db_path = tmp_path / "config.db"
+    init_db(cfg.db_path)
+    return cfg
 
 
 def _edge(db, dependent_id: int, trigger_id: int) -> None:
@@ -131,6 +152,100 @@ def test_delete_of_a_mid_chain_replacement_skips_it_for_the_predecessor(db):
     assert get(db, a)["superseded_by"] == c
     assert _status(db, a) == "current"  # untouched — it has a valid live successor
     assert [e["id"] for e in list_entries(db, type="fact")] == [c]
+
+
+def test_delete_of_a_replacement_does_not_resurrect_through_resume_context(db):
+    """Review round 2 on techne#1033 (Prudence's probe): an archived predecessor
+    must not render under "Durable facts:" via get_resume_context — the reader
+    that feeds techne_resume/techne context and actually injects into a client's
+    system prompt. confidence='high' matches get_resume_context's own filter and
+    Prudence's repro."""
+    old = store(db, "the service port is 8080", "fact", confidence="high")
+    new = supersede(db, old, "the service port is 9090")
+
+    assert [k["content"] for k in get_resume_context(db)["knowledge"]] == [
+        "the service port is 9090"
+    ]
+
+    assert delete(db, new) is True
+
+    contents = [k["content"] for k in get_resume_context(db)["knowledge"]]
+    assert "the service port is 8080" not in contents
+    assert "the service port is 9090" not in contents
+
+
+def test_delete_of_a_replacement_labels_predecessor_archived_in_export(db):
+    """query_live_knowledge (knowledge_export) is deliberately left status-blind
+    in its default query: it returns `status` on every row, so a consumer can
+    filter for itself, matching how explicit search() surfaces archived rows.
+    Pin that: the predecessor is present but visibly `archived`, not silently
+    indistinguishable from a `current` fact."""
+    old = store(db, "the service port is 8080", "fact")
+    new = supersede(db, old, "the service port is 9090")
+
+    assert delete(db, new) is True
+
+    rows = {r["id"]: r for r in query_live_knowledge(db)}
+    assert rows[old]["status"] == "archived"
+    assert new not in rows
+
+
+def test_merge_into_refuses_an_archived_entry(db):
+    """merge_into's live-row guard must treat an archived row the same as an
+    already-superseded one: minting a merged `current` row from an archived
+    predecessor's content would resurrect it under a new id."""
+    old = store(db, "the service port is 8080", "fact")
+    new = supersede(db, old, "the service port is 9090")
+    other = store(db, "an unrelated fact", "fact")
+
+    assert delete(db, new) is True
+
+    with pytest.raises(ValueError, match="archived"):
+        merge_into(db, [old, other], "merged content", type="fact", confidence="medium")
+
+
+def test_delete_of_a_replacement_excludes_predecessor_from_consolidate_clusters(config):
+    """consolidate_clusters' Tier-0 exact-duplicate bucket must not pull an
+    archived predecessor in alongside a coincidentally identical live row."""
+    old = store(config.db_path, "duplicate text", "fact")
+    new = supersede(config.db_path, old, "something else")
+    assert delete(config.db_path, new) is True
+    store(config.db_path, "duplicate text", "fact")  # unrelated live row, same content
+
+    clustered_ids = {i for c in consolidate_clusters(config) for i in c["target_ids"]}
+    assert old not in clustered_ids
+
+
+def test_delete_of_a_replacement_excludes_predecessor_from_recombine_groups(config):
+    old = store(config.db_path, "fact one", "fact", confidence="high", tags="shared")
+    new = supersede(config.db_path, old, "fact one revised")
+    assert delete(config.db_path, new) is True
+    store(config.db_path, "fact two", "fact", confidence="high", tags="shared")
+    store(config.db_path, "fact three", "fact", confidence="high", tags="shared")
+
+    grouped_ids = {i for g in recombine_groups(config) for i in g["group_ids"]}
+    assert old not in grouped_ids
+
+
+def test_delete_of_a_replacement_excludes_predecessor_from_conflict_candidates(db):
+    old = store(db, "we use postgres for storage", "fact", tags="datastore")
+    new = supersede(db, old, "we switched from postgres to sqlite")
+    assert delete(db, new) is True
+    focus = store(db, "postgres is our datastore of record", "fact", tags="datastore")
+
+    candidates = select_conflict_candidates(db, {"id": focus, "type": "fact", "tags": "datastore"})
+    assert old not in {c["id"] for c in candidates}
+
+
+def test_delete_of_a_replacement_excludes_predecessor_from_conflict_check_emit(config):
+    old = store(config.db_path, "we use postgres for storage", "fact", tags="datastore")
+    new = supersede(config.db_path, old, "we switched from postgres to sqlite")
+    assert delete(config.db_path, new) is True
+    store(config.db_path, "postgres is our datastore of record", "fact", tags="datastore")
+
+    items = conflict_check_emit(config)
+    touched = {i["focus_id"] for i in items} | {c for i in items for c in i["comparison_ids"]}
+    assert old not in touched
 
 
 def test_delete_of_a_trigger_marks_its_dependents_uncertain(db):
