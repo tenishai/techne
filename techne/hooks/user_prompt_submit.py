@@ -888,7 +888,10 @@ def main() -> None:
                     config.db_path,
                     source="per_turn_recall",
                     session_id=data.get("session_id"),
-                    trigger=prompt,
+                    # techne#1018 — log what was SEARCHED, so this row can rebuild
+                    # the turn. For a typed prompt that is the prompt itself; an
+                    # empty query is named, not left looking like a no-match.
+                    trigger=query or "[no query: the paste held only techne's own context]",
                     # `rows` IS WHAT WAS INJECTED (_injection_log.py:217, its own
                     # words). Logging withheld rows as delivered is not merely an
                     # inaccurate audit row: `_already_sent_this_session` reads
