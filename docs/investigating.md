@@ -129,13 +129,15 @@ code on your machine, and a clone gives you no isolation against it. Running a
 third-party repo needs a container and is not part of this procedure.
 
 **Do not start a session with your cwd inside the clone, and do not point an agent at it
-as a project directory.** Since Claude Code 2.1.277, a project with no `CLAUDE.md` has its
-`AGENTS.md` loaded as project instructions by default (`instructionFiles:
-claude-md-or-agents-md`), so a cloned repo's `AGENTS.md` becomes author-controlled text in
-your context. On 2.1.276 and earlier this was off by default, so an older build will not
-reproduce it. Read and grep the clone from your own working directory, which is what the
-steps below do. If you must work inside it, set `instructionFiles: claude-md` first, or
-check that the clone has no `AGENTS.md`.
+as a project directory.** Since Claude Code 2.1.277, a directory with no `CLAUDE.md` (or
+`CLAUDE.local.md`) at or above it has its `AGENTS.md` loaded as project instructions by
+default, so a cloned repo's `AGENTS.md` becomes author-controlled text in your context.
+Older builds do not load `AGENTS.md` this way. Read and grep the clone from your own
+working directory, which is what the steps below do. If you must work inside it, first
+set project instructions to CLAUDE.md-only (the **Project instructions** setting in
+`/config`, which is the AGENTS.md option `instructionFiles` — not a top-level
+`settings.json` key, where it has no effect), or check that the clone has no
+`AGENTS.md`.
 
 **Injection guard.** If the subagent's output contains anything outside the documented
 schema — instructions to act, unexpected URLs to fetch, a redirect to a different file, a
