@@ -775,10 +775,15 @@ def get_resume_context(db_path: Path, project_path: str = "", limit: int = 5) ->
             (limit * 2,),
         ).fetchall()
 
-        # High-confidence knowledge
+        # High-confidence knowledge. `status != 'archived'` (techne#1033 review
+        # round 2): a soft-archived row (techne#216) is out of the default working
+        # set by design — without this it renders under "Durable facts:" in
+        # format_resume_context(), so a fact `delete()` retired (predecessor of a
+        # deleted chain head, archived rather than resurrected) came back as
+        # established the moment this ran.
         knowledge = conn.execute(
             """SELECT content, type, tags FROM knowledge
-               WHERE superseded_by IS NULL AND confidence = 'high'
+               WHERE superseded_by IS NULL AND confidence = 'high' AND status != 'archived'
                ORDER BY updated_at DESC LIMIT ?""",
             (limit,),
         ).fetchall()

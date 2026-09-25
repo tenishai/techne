@@ -1,8 +1,8 @@
 ---
 card: arch-card:techne-reflect-pipeline
-updated: 2026-09-18
+updated: 2026-09-25
 anchor: techne/core/reflect.py sha=4e4d56bca215035a33f8a998c3c0ce6fa0ee2b56
-anchor: techne/core/sleepdream.py sha=fa629d589f34d30f5edb51fb7682b897bc3ead04
+anchor: techne/core/sleepdream.py sha=368ddc59434942008d52a0662021db8a4340be1e
 anchor: techne/lifecycle.py sha=011a4284a930a7df2d4b95f685e3d924ac92d3d3
 ---
 # reflect / consolidate / dream — self-maintenance
@@ -23,6 +23,7 @@ PIECES:
 - sleepdream.py (techne#108):
   - consolidate (sleep): find dup/overlapping live knowledge — Tier0 exact content_fingerprint buckets | Tier1 FTS self-sim top-neighbor | Tier2 vector dup-band (deferred) → action='merge'.
   - dream (recombine): non-obvious A+B→C across a shared-tag group → action='add', origin='dream', confidence='low' (abstention-first; most groups yield nothing).
+  - LIVE, for both, is `superseded_by IS NULL AND status != 'archived'` (techne#1033 review round 2), not `superseded_by IS NULL` alone: `knowledge.delete()` can archive a chain-head's predecessor (superseded_by NULL, status='archived') rather than resurrecting it, and a status-blind cluster/group source would otherwise merge or recombine that retired fact into a fresh `current` row — `merge_into`'s live-row guard was given the same `status != 'archived'` check for the same reason.
 API: MCP pairs techne_reflect_emit/ingest, techne_consolidate_emit/ingest, techne_faithfulness_emit/ingest, techne_dream_emit/ingest, techne_memory_claims_emit/ingest; CLI techne reflect/consolidate/dream. The /techne-promote skill drives this end-to-end each session.
 INVARIANTS:
 - reflection_queue.drained_at is NULLABLE, not a status enum: pending is the ABSENCE of a drain, so there is no second source of truth to disagree with the timestamp. Drain is guarded on `drained_at IS NULL` so a re-drain never rewrites the first payment.

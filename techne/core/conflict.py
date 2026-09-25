@@ -168,8 +168,10 @@ def select_conflict_candidates(
     3. Fallback when *candidate_row* has no tags: significant-word overlap in content,
        requiring at least *min_shared_keywords* shared tokens (default 1).
 
-    Excludes superseded rows and the candidate itself. Capped at *max_candidates*,
-    STRONGEST FIRST — see the ordering note below.
+    Excludes superseded rows, soft-archived rows (`status = 'archived'`, techne#216 —
+    techne#1033 review round 2: an archived row is out of the default working set and
+    must not be treated as a live peer to flag a conflict against), and the candidate
+    itself. Capped at *max_candidates*, STRONGEST FIRST — see the ordering note below.
 
     TWO DEFECTS THIS GUARDS, both on the path that builds the conflict-check prompt
     (techne#933). They compounded: weak matches did not merely add noise, they took
@@ -228,6 +230,7 @@ def select_conflict_candidates(
             """SELECT id, type, content, tags, confidence, event_at, created_at
                FROM knowledge
                WHERE superseded_by IS NULL
+                 AND status != 'archived'
                  AND type = ?
                  AND id != ?""",
             (candidate_type, candidate_id if candidate_id is not None else -1),
@@ -496,6 +499,11 @@ def conflict_check_emit(config: Config, *, max_items: int | None = None) -> list
 
     Each prompt should be answered with a JSON array verdict (see CONFLICT_PROMPT)
     and fed back via conflict_check_ingest.
+
+    "Live" excludes soft-archived rows (`status = 'archived'`, techne#1033 review
+    round 2) for the same reason `select_conflict_candidates` does: an archived row
+    is out of the default working set and must not be proposed as a live focus or
+    comparison peer.
     """
     if max_items is None:
         max_items = getattr(config, "conflict", None)
@@ -514,7 +522,7 @@ def conflict_check_emit(config: Config, *, max_items: int | None = None) -> list
             dict(r)
             for r in conn.execute(
                 """SELECT id, type, content, tags, confidence, event_at, created_at
-                   FROM knowledge WHERE superseded_by IS NULL"""
+                   FROM knowledge WHERE superseded_by IS NULL AND status != 'archived'"""
             )
         ]
 
