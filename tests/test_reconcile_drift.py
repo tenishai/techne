@@ -72,7 +72,9 @@ def test_fresh_db_is_current_version(db):
         # parent's replayed turns. Nullable and NOT backfilled -- the uuid was never
         # recorded and is not derivable from a stored row, so there is nothing to
         # backfill from and inventing values would be fabrication.
-        assert v == SCHEMA_VERSION == 27
+        # Bumped 27 -> 28 for techne#870: reflection_queue.parked_at/parked_reason,
+        # nullable and not backfilled -- every existing row is unparked, as before.
+        assert v == SCHEMA_VERSION == 28
         # Fresh DB already has the correct (tags/kind) triggers.
         sql = conn.execute(
             "SELECT sql FROM sqlite_master WHERE name='observations_ai'"

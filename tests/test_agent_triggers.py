@@ -1042,9 +1042,11 @@ def test_an_unbound_automatic_pass_is_the_default_posture(tmp_path, monkeypatch)
     # advice recommends — someone lowers the shipped default and the guide simultaneously
     # claims it defaults above what clients accept, reasons against 100,000, and advises
     # lowering it to a value it already holds, with the suite green.
-    assert ReflectConfig().emit_max_chars == 100_000, (
-        "reflect.emit_max_chars default moved — reflect-guide.md quotes 100,000 in three "
-        "places and reasons about refusals sitting inside it."
+    # Moved 100_000 -> 45_000 for techne#993, the change this comment predicted; the guide
+    # was rewritten with it and now quotes 45,000 and 45k, and 100,000 only as the old value.
+    assert ReflectConfig().emit_max_chars == 45_000, (
+        "reflect.emit_max_chars default moved — reflect-guide.md quotes 45,000 and 45k, and "
+        "reasons that it sits about 20% under the smallest recorded refusal (56,974)."
     )
     assert ReflectConfig().emit_max_threads == 25, (
         "reflect.emit_max_threads default moved — reflect-guide.md quotes 25 as the slice "

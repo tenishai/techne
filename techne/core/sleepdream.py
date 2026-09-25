@@ -35,6 +35,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
+import re
+from collections import Counter
 
 from techne.config import Config
 
@@ -43,7 +46,7 @@ from techne.core._resident import extract_json_object
 from techne.core.database import connect
 from techne.core.knowledge import VALID_CONFIDENCE, VALID_TYPES, content_fingerprint
 from techne.core.redaction import redact_credentials
-from techne.core.search import search_fts
+from techne.core.search import build_or_fts_query
 
 # Sentinel session the session-less passes FK their candidates to (knowledge_candidates
 # .source_session_id is NOT NULL). Additive: INSERT OR IGNORE, no migration.
@@ -92,15 +95,19 @@ def consolidate_clusters(
     Excludes `status = 'archived'` (techne#1033 review round 2): a soft-archived row
     is out of the default working set, and consolidating one into a merged `current`
     row (merge_into) would resurrect it under a new id.
+
+    Excludes `document_card` (techne#823): a card's identity is its `doc:` pointer,
+    not its gist, so cards with one gist cluster as perfect duplicates while pointing
+    at different documents. And a merge cannot even produce a card: the candidate is
+    written with empty tags, so `_card_type_or_fact` demotes the result to a `fact`
+    with no pointer. Measured 2026-08-29: a 9-way cluster over nine distinct `doc:`
+    ids, judged `keep` by hand, recurring on every drain since.
     """
     conn = connect(config.db_path)
     try:
         live = [
             dict(r)
-            for r in conn.execute(
-                "SELECT id, type, content, tags, confidence FROM knowledge "
-                "WHERE superseded_by IS NULL AND status != 'archived'"
-            )
+            for r in conn.execute(_LIVE_CLUSTERABLE_SQL)
         ]
     finally:
         conn.close()
@@ -130,24 +137,76 @@ def consolidate_clusters(
     # Tier 1 — FTS self-similarity: pair each row with its strongest non-self neighbor.
     # The agent's keep/merge verdict is the precision backstop, so over-proposing a weak
     # pair is cheap; we just cap the count. Rows already in a Tier-0 cluster are skipped.
+    #
+    # THE QUERY IS A DIGEST OF THE ROW, NOT THE ROW (techne#987). The whole content
+    # went through `search_fts`, whose terms are an implicit AND, so the only row
+    # holding every term was the row itself: 40 of 40 sampled live rows returned
+    # self-only, and the #70 OR fallback never ran because that AND pass was not
+    # empty. Tier 1 formed 2 clusters across 3,049 rows. The digest is the row's
+    # highest tf-idf terms that some OTHER live row also holds, OR-joined, so BM25
+    # ranks neighbours by the distinctive words they share.
+    df = Counter(t for r in live for t in set(_terms(r["content"])))
     clustered_ids = {i for c in clusters for i in c["target_ids"]}
-    for r in live:
-        if len(clusters) >= max_clusters:
-            break
-        if r["id"] in clustered_ids:
-            continue
-        hits = search_fts(config.db_path, r["content"], table="knowledge", limit=fts_neighbors + 1)
-        neighbors = [
-            h["id"]
-            for h in hits
-            if h.get("id") != r["id"] and h.get("id") in by_id and h["id"] not in clustered_ids
-        ]
-        if neighbors:
-            pair = [r["id"], neighbors[0]]
-            _add(pair, "fts")
-            clustered_ids.update(pair)
+    conn = connect(config.db_path)
+    try:
+        for r in live:
+            if len(clusters) >= max_clusters:
+                break
+            if r["id"] in clustered_ids:
+                continue
+            query = build_or_fts_query(" ".join(_digest(r["content"], df, len(live))))
+            if not query:
+                continue
+            hits = conn.execute(_NEIGHBOUR_SQL, (query, fts_neighbors + 1)).fetchall()
+            neighbors = [
+                h["id"]
+                for h in hits
+                if h["id"] != r["id"] and h["id"] in by_id and h["id"] not in clustered_ids
+            ]
+            if neighbors:
+                pair = [r["id"], neighbors[0]]
+                _add(pair, "fts")
+                clustered_ids.update(pair)
+    finally:
+        conn.close()
 
     return clusters[:max_clusters]
+
+
+#: Live knowledge that consolidation may cluster. The WHERE is shared with the Tier-1
+#: neighbour query so a neighbour slot is never spent on a row Tier 1 would discard.
+_CLUSTERABLE = (
+    "k.superseded_by IS NULL AND k.status != 'archived' AND k.type != 'document_card'"
+)
+_LIVE_CLUSTERABLE_SQL = (
+    f"SELECT k.id, k.type, k.content, k.tags, k.confidence FROM knowledge k WHERE {_CLUSTERABLE}"
+)
+_NEIGHBOUR_SQL = (
+    "SELECT k.id FROM knowledge_fts f JOIN knowledge k ON k.id = f.rowid "
+    f"WHERE knowledge_fts MATCH ? AND {_CLUSTERABLE} "
+    "ORDER BY bm25(knowledge_fts) LIMIT ?"
+)
+
+#: Terms per Tier-1 digest query (techne#987). Enough that two rows stating one
+#: procedure in different words still share several; few enough that one common
+#: word cannot outrank them.
+_DIGEST_TERMS = 8
+
+
+def _terms(content: str | None) -> list[str]:
+    """Lowercased word tokens, split roughly as FTS5's unicode61 splits them."""
+    return [t for t in re.findall(r"[^\W_]+", (content or "").lower()) if len(t) > 2]
+
+
+def _digest(content: str | None, df: Counter, n_docs: int) -> list[str]:
+    """The row's top tf-idf terms, keeping only terms at least one other row holds.
+
+    A term only this row holds scores the HIGHEST idf and can match nothing but the
+    row itself, so it would spend a digest slot on the self-hit #987 is about.
+    """
+    tf = Counter(_terms(content))
+    scored = {t: c * math.log(n_docs / df[t]) for t, c in tf.items() if df[t] >= 2}
+    return sorted(scored, key=lambda t: (-scored[t], t))[:_DIGEST_TERMS]
 
 
 def _already_proposed(conn, cluster_hash: str) -> bool:
@@ -278,6 +337,22 @@ def _insert_consolidation_candidate(
     )
 
 
+def _has_document_card(conn, target_ids: list[int]) -> bool:
+    """True when any of *target_ids* is a `document_card` row (techne#823)."""
+    ids = [int(i) for i in target_ids]
+    if not ids:
+        return False
+    placeholders = ",".join("?" * len(ids))
+    return (
+        conn.execute(
+            f"SELECT 1 FROM knowledge WHERE type = 'document_card' AND id IN ({placeholders}) "
+            "LIMIT 1",
+            ids,
+        ).fetchone()
+        is not None
+    )
+
+
 def consolidate_ingest(
     config: Config,
     target_ids: list[int],
@@ -297,7 +372,7 @@ def consolidate_ingest(
     stored prompt_hash always corresponds to its real target ids and can't silently defeat
     `_already_proposed`. Returns counts.
     """
-    counts = {"proposed": 0, "written": 0, "kept": 0, "errors": 0, "skipped": 0}
+    counts = {"proposed": 0, "written": 0, "kept": 0, "errors": 0, "skipped": 0, "refused": 0}
     ch = _cluster_hash(target_ids)  # recompute; the passed cluster_hash is advisory only
     verdict = parse_consolidation_response(response)
     _ensure_system_session(config.db_path)
@@ -311,7 +386,28 @@ def consolidate_ingest(
         if _already_proposed(conn, ch):
             counts["skipped"] += 1
             return counts
-        if verdict is None:
+        # THE BACKSTOP TO `consolidate_clusters` LEAVING CARDS OUT (techne#823). A
+        # direct ingest names its own target_ids, so the selection policy does not
+        # reach it. A merge over a `document_card` supersedes the card and mints a
+        # pointerless `fact` in its place, whichever documents the cards named, so it
+        # is refused whatever the model judged. Recorded as a discarded marker, like
+        # a keep, so the cluster is not offered again.
+        if verdict is not None and _has_document_card(conn, target_ids):
+            _insert_consolidation_candidate(
+                conn,
+                target_ids=target_ids,
+                cluster_hash=ch,
+                content="(refused — a target is a document_card, techne#823)",
+                ktype="fact",
+                confidence="low",
+                status="discarded",
+                decided_by="consolidate-guard",
+                decision_reason="refused: document_card target",
+                raw=raw_for_store,
+                model_used=model_used,
+            )
+            counts["refused"] += 1
+        elif verdict is None:
             _insert_consolidation_candidate(
                 conn,
                 target_ids=target_ids,
@@ -634,7 +730,7 @@ def dream_ingest(
     stored prompt_hash always corresponds to its real group ids and can't silently defeat
     _already_proposed_dream. Returns counts.
     """
-    counts = {"proposed": 0, "written": 0, "kept": 0, "errors": 0, "skipped": 0}
+    counts = {"proposed": 0, "written": 0, "kept": 0, "errors": 0, "skipped": 0, "refused": 0}
     gh = _cluster_hash(group_ids)  # recompute; caller-supplied hash is advisory only
     verdict = parse_dream_response(response)
     _ensure_system_session(config.db_path)

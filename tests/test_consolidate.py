@@ -349,3 +349,67 @@ def test_consolidate_ingest_logs_on_insert_failure(config, caplog):
     assert any(
         "consolidate_ingest" in r.message for r in caplog.records
     ), "log.exception must emit a record naming the function"
+
+
+# ---- techne#987: Tier 1 must find a reworded duplicate ---------------------
+
+
+def test_tier1_pairs_two_rows_stating_one_procedure_in_different_words(config):
+    """The property #987 asks for, not "clusters is non-empty" (Tier 0 alone passes
+    that). Neither row is byte-identical to the other, so only Tier 1 can pair them;
+    querying with the whole row made its only hit itself."""
+    db = config.db_path
+    a = store(db, "To verify a test actually pins a behavior rather than passing by "
+                  "accident, mutate the source on a copy and rerun the test; it must fail.",
+              type="procedure")
+    b = store(db, "To verify a new or changed test actually pins the behavior it claims, "
+                  "apply a mutation to a copy of the source and confirm the test fails.",
+              type="procedure")
+    store(db, "Richard's primary machine is dev04, an Intel Mac on macOS 15.", type="fact")
+    store(db, "Homebrew ships no Intel bottles, so brew upgrade may compile llvm for hours.",
+          type="fact")
+    store(db, "Backups are written as timestamped sets under the data dir backups folder.",
+          type="fact")
+
+    clusters = consolidate_clusters(config)
+    assert {"target_ids": sorted([a, b]), "via": "fts"} in [
+        {"target_ids": c["target_ids"], "via": c["via"]} for c in clusters
+    ], clusters
+
+
+# ---- techne#823: document_cards are pointers, not duplicates --------------
+
+
+def _card(db, gist, doc_id):
+    return store(db, gist, type="document_card", tags=f"doc:{doc_id},ver:v{doc_id}",
+                 source=f"/docs/{doc_id}.md")
+
+
+def test_document_cards_with_one_gist_are_not_clustered(config):
+    """Nine cards, one gist, nine documents was the 2026-08-29 cluster. Merging them
+    supersedes every pointer and mints one pointerless `fact`."""
+    db = config.db_path
+    cards = [_card(db, "Trivial: the session contains only an /exit command.", d)
+             for d in (108, 115, 125)]
+    clusters = consolidate_clusters(config)
+    assert not any(set(cards) & set(c["target_ids"]) for c in clusters), clusters
+
+
+def test_ingest_refuses_a_merge_over_document_cards(config):
+    """The backstop: a direct ingest names its own targets, so the selection policy does
+    not reach it. The merge is refused whatever the model judged, and remembered."""
+    db = config.db_path
+    a = _card(db, "Greeting probe: the user said hi.", 1174)
+    b = _card(db, "Greeting probe: the user said say hi.", 1211)
+
+    counts = consolidate_ingest(config, [a, b], "ignored", _MERGE_VERDICT)
+    assert counts["refused"] == 1 and counts["written"] == 0, counts
+    conn = connect(db)
+    try:
+        rows = conn.execute(
+            "SELECT status FROM knowledge_candidates WHERE origin = 'consolidate'"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert [r["status"] for r in rows] == ["discarded"]
+    assert get(db, a)["superseded_by"] is None and get(db, b)["superseded_by"] is None
