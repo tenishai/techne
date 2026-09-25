@@ -57,9 +57,11 @@ techne is a local memory store and MCP server for AI agents. In scope:
 - the shell guard (`techne.security.shell_guard`), a library for callers that
   run agent-issued commands:
   - `check_command`: a command string it accepts that a shell would still
-    read as chaining, redirection, or substitution. A single program that
-    starts others (`bash -c`, `xargs`, `find -exec`) is the caller's
-    allow-list's job, not this check's;
+    read as chaining, redirection, or command substitution. Single-command
+    expansion (globs, `~`, `$VAR`, `(` subshells, `!` history, `#`) is
+    accepted by design, since `run_guarded` passes it to the program
+    literally; and a single program that starts others (`bash -c`, `xargs`,
+    `find -exec`) is the caller's allow-list's job, not this check's;
   - `audit_install`: a `pip install` of a named package with a known
     vulnerability that it allows while `pip-audit` runs successfully.
     Install detection is shallow and fails open by design (other pip
