@@ -410,23 +410,22 @@ def retire(db_path: Path, old_id: int, survivor_id: int) -> int:
 
 
 # A replacement declared in prose (techne#887): the OPENING of an entry names the
-# entry it replaces. Strict on purpose, per the 2026-09-12 sweep on the live store:
+# entry it replaces. Strict on purpose. The 2026-09-12 sweep on the live store found
 # a bare LIKE '%supersede%' matched 266 rows, most of them entries discussing
-# supersession, "SHARPENS #N", or "supersedes my recommendation". Requiring a
-# numeric target straight after the verb, inside the first 400 characters, found
-# 41. "superseded by #N" is the opposite direction and does not match (`supersedes?`
-# needs whitespace next). Other repos' refs (`cabal#12`) do not match either.
+# supersession, "SHARPENS #N", or "supersedes my recommendation". So this needs the
+# verb, then a MARKED id straight after it (`#N`, `techne#N`, `knowledge #N`, or the
+# knowledge sigil), inside the first 400 characters. A bare number is not enough:
+# "corrects 2 errors" would name entry 2. "superseded by #N" is the opposite
+# direction and does not match (`supersedes?` needs `:` or whitespace next), and
+# other repos' refs (`cabal#12`) do not match either.
+_REF = r"(?:(?:(?:techne|knowledge)\s*)?#|\N{BRAIN})\s*(\d{1,9})\b"
 _DECLARATION = re.compile(
-    r"\b(?:supersedes?|corrects|correction\s+(?:to|of))\s+"
-    r"(?:(?:techne|knowledge)\s*)?#?(\d{1,9})\b",
+    r"\b(?:supersedes?|corrects|correction\s+(?:to|of))\s*:?\s+" + _REF,
     re.IGNORECASE,
 )
 # "SUPERSEDES techne#882 (dev02 runner), #887 (dev02 hardening) and #995": the
-# list form knowledge #1155 used. A continuation must carry a `#`.
-_DECLARATION_MORE = re.compile(
-    r"\s*(?:\([^)]*\)\s*)?(?:,|\band\b|&)\s*(?:(?:techne|knowledge)\s*)?#(\d{1,9})\b",
-    re.IGNORECASE,
-)
+# list form knowledge #1155 used. A continuation must be marked too.
+_DECLARATION_MORE = re.compile(r"\s*(?:\([^)]*\)\s*)?(?:,|\band\b|&)\s*" + _REF, re.IGNORECASE)
 DECLARATION_WINDOW = 400
 
 
