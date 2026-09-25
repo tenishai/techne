@@ -62,8 +62,9 @@ than vendoring one per host.
 
 On Claude Code you usually do not need to write it: `techne init --skills` and
 `techne skills install` install this stub (and the survey one) for you. Check
-`techne skills status` first; a stub you write by hand beside the installed one is
-reported as user-modified from then on.
+`techne skills status` first. If you write your own at the stub's path anyway, techne
+keeps it: `skills status` reports it as user-modified and `skills install` as a kept
+user copy, and neither replaces it without `--force`.
 
 Ask the operator before writing files into their config directory. This is a suggestion
 you offer, not something to do unprompted.

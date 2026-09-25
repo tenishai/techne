@@ -227,15 +227,13 @@ def skills_status(config: Config) -> list[SkillResult]:
 
 #: stub name -> (guide name, the argument label, extra allowed tools)
 GUIDE_STUBS = {
-    # Step 4.5's clone, and only that shape: a bare `git clone *` also matches
-    # `-c protocol.ext.allow=always 'ext::sh -c …'` and `--upload-pack=<cmd>`, which
-    # run commands locally, in the one skill built around untrusted input (Prudence,
-    # #1042). Any other clone prompts.
-    "investigate-url": (
-        "investigating",
-        "URL and context",
-        ("Bash(git clone --depth 1 --quiet https://github.com/*)",),
-    ),
+    # NO clone pre-approval, deliberately (Prudence, #1042 r1-r2). A permission rule
+    # is a prefix plus a wildcard, and git reads options AFTER the URL, so even
+    # `git clone --depth 1 --quiet https://github.com/*` admits a trailing
+    # `-c credential.helper=!…` or `--template=…`, both of which run commands. A deny
+    # list of git options would be a hand-kept list again. Step 4.5's clone prompts
+    # once per investigation, which is the moment the operator should see it.
+    "investigate-url": ("investigating", "URL and context", ()),
     "survey-field": ("surveying", "Field and context", ()),
 }
 
@@ -274,9 +272,10 @@ def _guide_description(guide: str) -> str:
         if line.startswith("description: "):
             desc = line[len("description: "):].strip()
             # Written plain when YAML reads it back unchanged, quoted otherwise. The
-            # test is the parser itself rather than a list of risky characters: a
-            # trailing colon, a leading dash or a leading `#` each break or empty a
-            # plain scalar, and a hand-kept list missed all three (Temperance, #1042).
+            # test is a YAML parser rather than a list of risky characters: a trailing
+            # colon, a leading dash or a leading `#` each break or empty a plain scalar,
+            # and a hand-kept list missed all three (Temperance, #1042). It is PyYAML's
+            # reading; Claude Code's frontmatter parser is assumed, not shown, to agree.
             import json
 
             import yaml

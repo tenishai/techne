@@ -80,12 +80,13 @@ def test_a_description_that_would_break_yaml_is_quoted(monkeypatch, desc):
     assert yaml.safe_load(f"description: {rendered}") == {"description": desc}
 
 
-def test_the_clone_permission_is_scoped_to_step_4_5():
-    """A bare `git clone *` would pre-approve `ext::` and `--upload-pack` forms."""
-    text = skills_mod.render_guide_stub("investigate-url")
-    assert "Bash(git clone --depth 1 --quiet https://github.com/*)" in text
-    assert "Bash(git clone *)" not in text
-    assert "git clone" not in skills_mod.render_guide_stub("survey-field")
+@pytest.mark.parametrize("name", sorted(skills_mod.GUIDE_STUBS))
+def test_no_stub_pre_approves_git(name):
+    """No git rule is safe to pre-approve here: a prefix rule cannot stop options git
+    reads after the URL (`-c credential.helper=!…`, `--template=…`), and this is the
+    skill built around untrusted input. The clone prompts instead (#1042 r2)."""
+    front = skills_mod.render_guide_stub(name).split("---\n")[1]
+    assert "Bash(git" not in front
 
 
 @pytest.mark.parametrize("name", sorted(skills_mod.GUIDE_STUBS))
