@@ -1064,8 +1064,17 @@ def test_v28_adds_the_parked_columns_to_an_existing_queue(tmp_path):
     init_db(db)
     conn = sqlite3.connect(db)
     try:
-        conn.execute("ALTER TABLE reflection_queue DROP COLUMN parked_at")
-        conn.execute("ALTER TABLE reflection_queue DROP COLUMN parked_reason")
+        # Rebuilt in its v27 shape rather than via DROP COLUMN: older SQLite (CI's)
+        # cannot re-parse a CREATE TABLE carrying inline comments after a drop.
+        conn.execute("DROP TABLE reflection_queue")
+        conn.execute(
+            "CREATE TABLE reflection_queue ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " session_id TEXT NOT NULL REFERENCES sessions(id),"
+            " thread_id TEXT NOT NULL UNIQUE REFERENCES threads(id) ON DELETE CASCADE,"
+            " enqueued_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+            " drained_at TIMESTAMP)"
+        )
         conn.execute("INSERT INTO sessions (id, project_path) VALUES ('s', '/p')")
         conn.execute(
             "INSERT INTO threads (id, session_id, thread_num, label, summary, status) "
