@@ -23,6 +23,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
+from techne.core.redaction import redact_credentials
+
 
 def _now_iso() -> str:
     """UTC now as an ISO text timestamp matching the TIMESTAMP column convention."""
@@ -37,7 +39,8 @@ def add(db_path: Path, note: str, due_at: str) -> int:
     db_path:
         Path to techne.db.
     note:
-        Human-readable reminder text.
+        Human-readable reminder text. Passed through ``redact_credentials``
+        before storage (techne#1037), like every other free-text sink.
     due_at:
         ISO text timestamp ("YYYY-MM-DD HH:MM:SS") when this reminder becomes
         due. Stored verbatim; callers are responsible for UTC consistency.
@@ -53,7 +56,7 @@ def add(db_path: Path, note: str, due_at: str) -> int:
     try:
         cur = conn.execute(
             "INSERT INTO reminders (note, due_at, status) VALUES (?, ?, 'active')",
-            (note, due_at),
+            (redact_credentials(note), due_at),
         )
         conn.commit()
         return cur.lastrowid  # type: ignore[return-value]

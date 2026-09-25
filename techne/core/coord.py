@@ -29,6 +29,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from techne.core.redaction import redact_credentials
+
 # A Claude Code session_id is a v4 UUID. Used to tell a real (possibly offline but
 # deliverable) session_id target from an unresolved display-name (a dead letter).
 _SESSION_ID_RE = re.compile(
@@ -352,6 +354,9 @@ def send(
     message to that message's conversation — it inherits the parent's ``thread_id``,
     or, if the parent had none, both are grouped under a new thread keyed on the
     parent's id. An explicit ``thread_id`` takes precedence over ``reply_to``.
+
+    ``body`` is passed through ``redact_credentials`` before storage (techne#1037):
+    it is free text, and every live session's inbox nudge replays it.
     """
     from techne.core.database import connect
 
@@ -388,7 +393,7 @@ def send(
         cur = conn.execute(
             "INSERT INTO coord_messages (from_session, from_name, recipient, thread_id, body, created_at)"
             " VALUES (?, ?, ?, ?, ?, ?)",
-            (from_session, from_name, recipient, thread_id, body, _now_iso()),
+            (from_session, from_name, recipient, thread_id, redact_credentials(body), _now_iso()),
         )
         conn.commit()
         return cur.lastrowid  # type: ignore[return-value]
