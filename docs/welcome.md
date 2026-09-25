@@ -40,9 +40,11 @@ and talks you through it.
 
 It answers the question a document cannot: not "what does techne have", but **what is
 switched off here, and what would turning it on buy you**, with the numbers from your
-own ledger attached. A fresh install reports **5 of 8 capabilities on** — the ones the
-[operator guide](./operator-guide.md#recommended-configuration) covers below — and 3
-still opt-in (`per_turn_seed`, `capture_read`, `startup_directive`). That is the honest
+own ledger attached. A fresh install reports **5 of the 8 hook capabilities on** — the
+ones the [operator guide](./operator-guide.md#recommended-configuration) covers below — and
+3 still opt-in (`per_turn_seed`, `capture_read`, `startup_directive`). It also checks
+three things no config flag shows: whether semantic search is installed, whether its model
+is downloaded, and whether Claude Code's own auto-memory is running beside techne. That is the honest
 starting point, and this guide exists to tell you whether the rest are worth it for you.
 
 It also reports the bundled workflows that aren't on your disk — something no config

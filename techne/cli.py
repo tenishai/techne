@@ -122,7 +122,7 @@ def main(ctx):
     ctx.obj.setdefault("config", Config.load())
 
 
-@main.command()
+@main.group(invoke_without_command=True)
 @click.option("--json", "as_json", is_flag=True, default=False, help="Emit the raw report.")
 @click.pass_context
 def capabilities(ctx, as_json):
@@ -132,6 +132,8 @@ def capabilities(ctx, as_json):
     this one renders it, the agent narrates it. Exists so "what is off on this
     box" is answerable without an agent in the loop.
     """
+    if ctx.invoked_subcommand is not None:
+        return
     import json as _json
 
     from techne.core.capabilities import capability_report
@@ -155,11 +157,18 @@ def capabilities(ctx, as_json):
     click.echo("")
 
     on = [c for c in report["capabilities"] if c["on"]]
-    off = [c for c in report["capabilities"] if not c["on"]]
+    off = [c for c in report["capabilities"] if not c["on"] and not c["acknowledged"]]
+    acked = [c for c in report["capabilities"] if not c["on"] and c["acknowledged"]]
     if on:
         click.echo(f"ON ({len(on)})")
         for c in on:
             click.echo(f"  ✓ {c['flag']}  — {c['title']}")
+        click.echo("")
+    if acked:
+        click.echo(f"OFF ON PURPOSE ({len(acked)})  — undo with: techne capabilities unack <flag>")
+        for c in acked:
+            reason = c["acknowledged"].get("reason")
+            click.echo(f"  - {c['flag']}  — {c['title']}" + (f"  ({reason})" if reason else ""))
         click.echo("")
     if off:
         click.echo(f"OFF ({len(off)})")
@@ -180,6 +189,61 @@ def capabilities(ctx, as_json):
         click.echo(f"  {mark} {w['name']}: {w['state']}{detail}")
     if report["install_hint"]:
         click.echo(f"\n{report['install_hint']}")
+    if off:
+        click.echo("\nLeaving one off on purpose? techne capabilities ack <flag>")
+
+
+def _capability_flags() -> list[str]:
+    from techne.core.capabilities import CAPABILITIES
+
+    return [c.flag for c in CAPABILITIES]
+
+
+@capabilities.command("ack")
+@click.argument("flag", type=click.Choice(_capability_flags()))
+@click.option("--reason", default="", help="Why it stays off, kept with the acknowledgement.")
+@click.pass_context
+def capabilities_ack(ctx, flag, reason):
+    """Mark FLAG as deliberately off (techne#1022).
+
+    It stays in the report, marked as your choice, and stops counting toward the
+    session-start invitation. It does not expire; `unack` reverses it.
+    """
+    from techne.core.capabilities import acknowledge
+    from techne.core.database import connect
+
+    config = ctx.obj["config"]
+    if not config.db_path.exists():
+        click.echo("techne not initialized. Run: techne init")
+        return
+    conn = connect(config.db_path)
+    try:
+        acknowledge(conn, config, flag, reason)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        conn.close()
+    click.echo(f"{flag}: acknowledged as deliberately off. Undo: techne capabilities unack {flag}")
+
+
+@capabilities.command("unack")
+@click.argument("flag", type=click.Choice(_capability_flags()))
+@click.pass_context
+def capabilities_unack(ctx, flag):
+    """Clear FLAG's acknowledgement, so it counts as off again."""
+    from techne.core.capabilities import clear_acknowledgement
+    from techne.core.database import connect
+
+    config = ctx.obj["config"]
+    if not config.db_path.exists():
+        click.echo("techne not initialized. Run: techne init")
+        return
+    conn = connect(config.db_path)
+    try:
+        cleared = clear_acknowledgement(conn, flag)
+    finally:
+        conn.close()
+    click.echo(f"{flag}: " + ("acknowledgement cleared." if cleared else "was not acknowledged."))
 
 
 @main.command()
@@ -2297,17 +2361,14 @@ def _vector_next_steps(db_path: Path) -> list[str]:
     download. (`vector_channel_status` is NOT usable here: it loads the model
     whenever a backend stamp exists, e.g. on a second `init`.)
     """
-    import re
-
+    from techne.core.capabilities import vectors_install_command
     from techne.core.embeddings import backend_available
 
     if not backend_available():
-        tag = f"v{__version__}" if re.fullmatch(r"\d+\.\d+\.\d+", __version__) else "<tag>"
         return [
             "  Semantic recall is OFF: no embedding backend is installed, so search is",
             "  keyword-only (FTS). Install the extra, then embed what is stored:",
-            f'    pipx install --force "techne[recommended] @ '
-            f'git+https://github.com/tenishai/techne.git@{tag}"',
+            f"    {vectors_install_command(__version__)}",
             "    techne vectors backfill",
         ]
 
