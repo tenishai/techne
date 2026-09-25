@@ -1360,10 +1360,11 @@ def main():
     # searches the bodies of the messages that block just delivered. Behind the
     # subagent gate above like the other rails (#930): a subagent's own tool
     # calls never reach here. The Agent result it hands back fires this hook in
-    # the parent session: the observation ledger holds those results as "Tool:
-    # Agent" rows with the completed hand-back as Output, which only this hook
-    # writes. Not checked: that agent_id is absent on that call, which the
-    # hooks docs imply ("only when the hook fires inside a subagent call").
+    # the parent session: dev04's observation ledger holds completed hand-backs
+    # as "Tool: Agent" rows under parent session ids. Supporting, not conclusive,
+    # since transcript import writes the same shape. Not checked: that agent_id
+    # is absent on that call, which the hooks docs imply ("only when the hook
+    # fires inside a subagent call").
     inbound_context = _inject_inbound_recall(
         config, session_id, tool_name, tool_output, coord_bodies
     )
