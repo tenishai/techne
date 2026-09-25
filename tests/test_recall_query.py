@@ -274,7 +274,7 @@ def test_the_hook_does_not_search_a_paste_of_only_its_own_output(monkeypatch):
 
 # --- techne#1045: a background-task notification is not a question ----------------
 
-# The shape Claude Code 2.1.27x delivers to UserPromptSubmit, copied from a
+# The shape Claude Code 2.1.282 delivers to UserPromptSubmit, copied from a
 # session transcript (attachment.commandMode == "task-notification").
 NOTIFICATION = (
     "<task-notification>\n"

@@ -793,11 +793,13 @@ def main() -> None:
     # techne#1045 — a background-task notification is not a question, so recall
     # does not search on it. Only recall is skipped: the deferred session context
     # above and the startup directive below still ride whichever turn comes first.
-    # Nothing goes to context_injections, because nothing was searched; the
-    # liveness outcome records the skip instead.
+    # No per_turn_recall row goes to context_injections, because nothing was
+    # searched; the liveness outcome records the skip instead.
     from techne.hooks._recall_query import is_task_notification
 
     notification = is_task_notification(prompt)
+    # Only a skip when recall would otherwise have run.
+    recall_skipped = config.hooks.per_turn_recall and notification
 
     # ------------------------------------------------------------------
     # Recall block (techne#109) — durable facts relevant to this prompt. Scope
@@ -974,7 +976,7 @@ def main() -> None:
         # "INJECTED NOTHING" IS A LEGAL OUTCOME, not a failure (#414) — a recall
         # that fired and matched nothing is a fact worth recording, and it is the
         # only thing that distinguishes a working-but-quiet rail from a dead one.
-        outcome = "noop:task-notification" if notification else "noop:nothing-to-inject"
+        outcome = "noop:task-notification" if recall_skipped else "noop:nothing-to-inject"
         _record(record_hook_run, config, degraded, outcome=outcome)
         sys.exit(0)
 
