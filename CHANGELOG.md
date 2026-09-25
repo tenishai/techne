@@ -25,6 +25,17 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Changed
 
+- **Per-turn recall searches pasted content on its question lines** instead of on
+  the whole prompt (#1018). A prompt with a `<pasted_content>` block, or longer
+  than `hooks.per_turn_recall_long_prompt_chars` (default 600) and carrying Claude
+  Code's `❯`/`⏺` transcript markers, is searched on its `❯`, `> ` and `?` lines;
+  the operator's text around the paste is used only when the paste holds no
+  question. Measured on 30 real turns with the question embedded in its
+  surrounding transcript: mean top-5 overlap with the typed question's results
+  rose from 0.09 (whole prompt) to 0.79. techne's own injected lines and
+  `<system-reminder>` blocks are stripped first, so a pasted recall block does not
+  re-select the rows it already names. Typed prompts of any length are searched
+  unchanged.
 - **`techne init` asks before turning off Claude Code auto-memory** (#1023). Running
   both memory layers drifts and double-injects. In a terminal, a new user is asked;
   on yes only `autoMemoryEnabled` in `~/.claude/settings.json` changes, re-read

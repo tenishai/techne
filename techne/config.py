@@ -305,6 +305,11 @@ class HookConfig:
     #: to observation and thread rows unconditionally — those are the tool ledger,
     #: and this knob deliberately does not move them.
     per_turn_recall_chars: int = 1000
+    #: techne#1018 — pasted content is searched on its question lines rather than
+    #: whole (see techne/hooks/_recall_query.py for the measurement). A pasted
+    #: block always counts; text with Claude Code's ❯/⏺ transcript markers counts
+    #: once it is longer than this. Typed prompts are searched as is.
+    per_turn_recall_long_prompt_chars: int = 600
     # techne#329 — log each per-turn recall attempt (trigger, hit ids, scores,
     # token cost) to the context_injections table so this READ path is auditable
     # (it left no trace before). The SessionStart tier-0 block is logged the same
@@ -1157,6 +1162,7 @@ class Config:
                 per_turn_recall=_g("per_turn_recall"),
                 per_turn_recall_limit=int(_g("per_turn_recall_limit")),
                 per_turn_recall_chars=int(_g("per_turn_recall_chars")),
+                per_turn_recall_long_prompt_chars=int(_g("per_turn_recall_long_prompt_chars")),
                 per_turn_recall_log=_g("per_turn_recall_log"),
                 per_turn_recall_floor_vec_distance=(
                     float(h["per_turn_recall_floor_vec_distance"])
@@ -1404,6 +1410,7 @@ class Config:
                 "per_turn_recall": self.hooks.per_turn_recall,
                 "per_turn_recall_limit": self.hooks.per_turn_recall_limit,
                 "per_turn_recall_chars": self.hooks.per_turn_recall_chars,
+                "per_turn_recall_long_prompt_chars": self.hooks.per_turn_recall_long_prompt_chars,
                 "per_turn_recall_log": self.hooks.per_turn_recall_log,
                 "per_turn_recall_floor_vec_distance": (
                     self.hooks.per_turn_recall_floor_vec_distance
