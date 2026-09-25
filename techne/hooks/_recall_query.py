@@ -174,3 +174,20 @@ def build_recall_query(prompt: str, long_prompt_chars: int) -> str:
     parts = list(dict.fromkeys(questions)) or ([wrapper] if wrapper else [])
     query = " ".join(parts).strip()
     return query or body[:long_prompt_chars]
+
+
+def build_inbound_query(text: str, max_chars: int) -> str:
+    """The query for inbound recall on a tool result (techne#1018 part 3).
+
+    Tool output is treated as pasted content always: stripped of techne's own
+    injected lines (a hand-back often quotes them), then searched on its
+    question lines, else on its opening text. Unlike `build_recall_query` the
+    result is capped at ``max_chars`` either way, because a fetched page can run
+    to 100 KB and there is no typed prompt here to pass through whole. That
+    policy was measured on pasted transcripts (see the module docstring), not on
+    hand-backs or pages; it is reused, not re-measured. "" when only techne's
+    own context was there.
+    """
+    body = strip_own_injections(text).strip()
+    questions = list(dict.fromkeys(_question_lines(body)))
+    return (" ".join(questions) or body)[:max_chars].strip()

@@ -222,7 +222,9 @@ def _startup_block(config, session_id: str | None) -> str | None:
 # re-ranking to backfill, which would change what the rail selects.
 
 
-def _apply_relevance_floor(rows: list[dict], config) -> list[dict]:
+def _apply_relevance_floor(
+    rows: list[dict], config, floors: dict | None = None, *, keep_unjudged: bool = True
+) -> list[dict]:
     """Drop hits that do not clear their channel's floor (techne#414).
 
     THE POINT IS THAT "INJECT NOTHING" BECOMES POSSIBLE. Measured across all 1,430
@@ -250,13 +252,19 @@ def _apply_relevance_floor(rows: list[dict], config) -> list[dict]:
     A row whose signal is unreadable is KEPT. A floor exists to reject hits it can
     judge, not to silently drop ones it cannot — dropping the unmeasurable would
     make the floor look effective by discarding its own blind spot.
+
+    EXCEPT ON THE INBOUND RAIL (techne#1018 part 4), which passes its own
+    ``floors`` and ``keep_unjudged=False``. That rail fires on text nobody asked a
+    question with, so its only licence to inject is a floor that vouched for the
+    row; a row the floor cannot judge has no such voucher and is dropped.
     """
     from techne.hooks._injection_log import _retrieval_signal
 
-    floors = {
-        "vec_distance": config.hooks.per_turn_recall_floor_vec_distance,
-        "bm25": config.hooks.per_turn_recall_floor_bm25,
-    }
+    if floors is None:
+        floors = {
+            "vec_distance": config.hooks.per_turn_recall_floor_vec_distance,
+            "bm25": config.hooks.per_turn_recall_floor_bm25,
+        }
     if not any(v is not None for v in floors.values()):
         return rows  # no floor configured — the shipped default
 
@@ -265,7 +273,8 @@ def _apply_relevance_floor(rows: list[dict], config) -> list[dict]:
         score, kind = _retrieval_signal(r)
         threshold = floors.get(kind) if kind else None
         if score is None or threshold is None:
-            kept.append(r)  # unjudgeable by this floor; keep rather than hide
+            if keep_unjudged:
+                kept.append(r)  # unjudgeable by this floor; keep rather than hide
             continue
         # Both scales are "higher = worse" at this point: vec distance grows with
         # dissimilarity, and BM25 rank is negative with more-negative = better.
@@ -559,8 +568,20 @@ def _truncate_for_injection(content: str, limit: int) -> tuple[str, bool]:
     return window[:limit].rstrip() + " …", True
 
 
+#: The per-turn block's header. Another rail passes its own through
+#: ``recall_block(header=...)``; each must start "## techne —", the prefix
+#: `_recall_query.strip_own_injections` removes from pasted and inbound text.
+_PER_TURN_HEADER = (
+    "## techne — durable facts relevant to this prompt",
+    "> Per-turn recall (techne#109); recalled memory, not ground truth — verify first.",
+)
+
+
 def _build_context(
-    rows: list[dict], char_limit: int = 1000, stats: dict | None = None
+    rows: list[dict],
+    char_limit: int = 1000,
+    stats: dict | None = None,
+    header: tuple[str, ...] = _PER_TURN_HEADER,
 ) -> str:
     """Render recalled knowledge rows into a compact additionalContext block.
 
@@ -575,10 +596,7 @@ def _build_context(
     reader does not read the fallback as EVIDENCE that it sometimes is, and
     weaken a guard on that basis. The tests already record this.
     """
-    header = [
-        "## techne — durable facts relevant to this prompt",
-        "> Per-turn recall (techne#109); recalled memory, not ground truth — verify first.",
-    ]
+    header = list(header)
     lines: list[str] = []
     truncated_any = False
     _cut_rows = 0
@@ -697,6 +715,206 @@ def _build_context(
     return "\n".join(header + [""] + lines)
 
 
+#: extension_state key prefix for the inbound rail's once-per-prompt slot
+#: (techne#1018 part 3). UserPromptSubmit writes ``{"delivered": false}`` on every
+#: prompt; post_tool_use flips it to true when it delivers. PostToolUse carries no
+#: turn id, so this marker is the only way that hook can tell one prompt from the
+#: next.
+INBOUND_TURN_PREFIX = "inbound_recall:turn"
+
+
+def inbound_recall_armed(config) -> bool:
+    """True when the inbound rail may run: switched on AND given a vector floor.
+
+    THE FLOOR IS PART OF THE SWITCH (techne#1018 part 4). The per-turn floor
+    shipped unset and measured at a 0% zero-hit rate (#414): with no floor, a
+    search always finds k rows. That is tolerable when someone asked a question,
+    and is noise on every hand-back and fetched page. So the flag alone arms
+    nothing, and `check_hooks` reports the rail DORMANT until both are set.
+    """
+    h = config.hooks
+    return bool(h.inbound_recall) and h.inbound_recall_floor_vec_distance is not None
+
+
+def _stamp_prompt_turn(db_path, session_id: str | None) -> None:
+    """Reset this session's inbound-recall slot for the new prompt. Best-effort.
+
+    A failure leaves the previous prompt's marker in place, so the rail stays
+    shut (or open) for one more prompt. Never worse than one extra or one missed
+    delivery, and never a lost turn.
+    """
+    if not session_id:
+        return
+    try:
+        import time
+
+        from techne.core.database import connect
+        from techne.core.extension_state import set_state
+
+        conn = connect(db_path)
+        try:
+            set_state(conn, f"{INBOUND_TURN_PREFIX}:{session_id}", {"delivered": False},
+                      commit=False)
+            # Pruned like the other per-session keys (post_tool_use's reminder and
+            # coord sets), so one row per session does not accumulate forever.
+            conn.execute(
+                "DELETE FROM extension_state WHERE name LIKE ? AND updated_at < ?",
+                (f"{INBOUND_TURN_PREFIX}:%", int(time.time()) - 7 * 24 * 60 * 60),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:  # noqa: BLE001 — never fail the turn over a marker
+        print(f"techne: inbound-recall turn marker skipped: {e}", file=sys.stderr)
+
+
+def recall_block(
+    config,
+    session_id: str | None,
+    query: str,
+    *,
+    source: str,
+    k: int,
+    floors: dict | None = None,
+    keep_unjudged: bool = True,
+    header: tuple[str, ...] = _PER_TURN_HEADER,
+    claim=None,
+    timeout_label: str = "user_prompt_submit",
+) -> tuple[str, list]:
+    """Search, filter, render and log one recall; return (block, rows).
+
+    ONE PIPELINE FOR EVERY RECALL RAIL (techne#1018 part 2). Per-turn recall and
+    the inbound rail in post_tool_use both come through here, so the pull-only
+    filter, the re-send suppression, the floor, the row cap and the log cannot
+    drift apart between them. ``source`` is the context_injections source, and
+    because `_already_sent_this_session` reads every source, a row either rail
+    delivered is suppressed on both for the rest of the compaction segment.
+
+    ``floors`` and ``keep_unjudged`` go to `_apply_relevance_floor`; None means
+    the per-turn floors. ``claim``, when given, is called once there is a block
+    to deliver and must return True for it to be delivered and logged.
+
+    ``rows`` is the post-cap selection, returned even when the block renders
+    empty. Raises on search failure; the caller decides what degraded means.
+    """
+    from techne.core.search import search
+    from techne.hooks._timeout import bounded_hook
+
+    with bounded_hook(config.hooks.timeout_s, label=timeout_label):
+        # OVER-FETCH, THEN SUPPRESS, so the session gets k FRESH rows rather
+        # than k-minus-the-duplicates (techne#576). Dropping without
+        # over-fetching would trade duplicate delivery for thinner
+        # delivery, which is not the trade the issue asks for — the rows
+        # being re-sent are legitimately high-scoring, they have just
+        # already been said.
+        # An empty query means the prompt was only techne's own injected
+        # context (a pasted recall block, say). Searching on it would
+        # re-select the rows it already names, so inject nothing.
+        rows = (
+            []
+            if not query
+            else search(
+                config.db_path,
+                query,
+                table="knowledge",
+                limit=k * _RESEND_OVERFETCH,
+                include_archived=False,
+                # techne#842 — ASK FOR ONE MORE CHARACTER THAN WE WILL
+                # RENDER, and the +1 is load-bearing rather than defensive.
+                # `_truncate_for_injection` decides "was this cut?" by
+                # `len(content) > limit`, so a row that `search()` already
+                # sliced to EXACTLY the cap reads as whole: `was_cut` stays
+                # False and both the announcing marker and the header notice
+                # are suppressed. That is the dishonest state techne#826
+                # exists to prevent, and threading the cap unchanged would
+                # have spread it from cap>=500 to EVERY cap. Measured before
+                # the +1: at caps 600, 500 and 200 the row ended mid-word
+                # with no marker.
+                #
+                # At cap+1 the renderer sees the overflow it needs: a row
+                # shorter than the cap still arrives whole and is correctly
+                # unmarked; a longer one arrives one char over and is cut and
+                # marked by the code that owns that decision.
+                row_chars=config.hooks.per_turn_recall_chars + 1,
+            )
+        )
+        rows = _drop_pull_only(config.db_path, rows)
+        already = _already_sent_this_session(config.db_path, session_id)
+        if already:
+            fresh = [r for r in rows if r.get("id") not in already]
+            # An all-duplicate turn legitimately yields NOTHING. That is a
+            # real outcome, not a failure — the log records an empty recall
+            # as signal, and #414 is the issue arguing "inject nothing"
+            # must be legal. Do NOT fall back to the duplicates here; that
+            # would restore exactly the waste this suppresses.
+            rows = fresh
+        # AFTER suppression, BEFORE the k-cut: a floored-out row should not
+        # consume one of the k slots that a clearing row could have used.
+        rows = _apply_relevance_floor(rows, config, floors, keep_unjudged=keep_unjudged)
+        rows = rows[:k]
+    # THE CAP IS PASSED THROUGH UNCLAMPED (techne#842). It was clamped to
+    # `_SEARCH_ROW_CEILING - 1` from #839 until #842: `search()` cut every
+    # knowledge row at a hidden 500, so a cap at or above that made
+    # `_truncate_for_injection` see a whole row and suppress both the marker
+    # and the header notice — the one state in which this rail was less
+    # honest than before techne#826. `search()` now takes `row_chars` and
+    # this rail asks for `cap + 1` (see the call above, where the +1 is
+    # explained), so the row arrives one character over whatever was asked
+    # for and that state is unreachable at any cap. The whole clamp
+    # paragraph that stood here is deleted rather than annotated: it
+    # described a mechanism that no longer exists, and a retraction bolted
+    # under a still-assertive paragraph leaves the wrong half quotable.
+    chars = config.hooks.per_turn_recall_chars
+    # techne#853 — the cap's effect is otherwise unobservable: this table
+    # recorded what was injected and never what was severed, so raising or
+    # lowering `per_turn_recall_chars` could not be evaluated from data.
+    trunc_stats: dict = {}
+    block = _build_context(rows, chars, trunc_stats, header) if rows else ""
+    # techne#1018 — a rail with a delivery cap claims its slot HERE, after it
+    # knows it has something to say and before the log, because the log is what
+    # `_already_sent_this_session` reads: a block logged and then dropped for a
+    # lost claim would suppress its rows without delivering them. A lost claim
+    # returns before logging, so nothing is recorded as sent.
+    if block and claim is not None and not claim():
+        return "", []
+    # techne#329 — make the READ path auditable (the audit that motivated
+    # this couldn't see the rail at all). Best-effort; the helper never
+    # raises. Log even an empty recall (fired but matched nothing = signal).
+    if config.hooks.per_turn_recall_log:
+        from techne.hooks._injection_log import log_context_injection
+
+        log_context_injection(
+            config.db_path,
+            source=source,
+            session_id=session_id,
+            # techne#1018 — log what was SEARCHED, so this row can rebuild
+            # the turn. For a typed prompt that is the prompt itself; an
+            # empty query is named, not left looking like a no-match.
+            trigger=query or "[no query: the paste held only techne's own context]",
+            # `rows` IS WHAT WAS INJECTED (_injection_log.py:217, its own
+            # words). Logging withheld rows as delivered is not merely an
+            # inaccurate audit row: `_already_sent_this_session` reads
+            # `hit_ids` back with no filter on whether anything was emitted,
+            # so a row logged-but-not-sent is SUPPRESSED for the rest of the
+            # session segment. Measured: at `per_turn_recall_chars: 0` turn
+            # one emits nothing and logs hit_ids=[1]; turn two with the cap
+            # raised to 200 then emits nothing either, because the row is
+            # already "sent". Editing config.yaml mid-session is a modelled
+            # operator behaviour (AGENTS.md lists it as a standing trigger),
+            # and a silent recall miss is this project's named failure class.
+            rows=rows if block else [],
+            # Mirrors `rows` above: a row that was withheld was not
+            # delivered, so it cannot have been truncated on delivery
+            # either. Reporting cuts for a block that never shipped would
+            # make `chars_dropped` count losses the reader never sustained.
+            rows_truncated=trunc_stats.get("rows_truncated") if block else 0,
+            chars_dropped=trunc_stats.get("chars_dropped") if block else 0,
+            injected_text=block,
+            k_requested=k,
+        )
+    return block, rows
+
+
 def main() -> None:
     # LIVENESS (techne#479). This hook hosts per_turn_recall — half the founding
     # incident techne#468 cites, and one of the two rails techne is FOR. Until
@@ -756,9 +974,18 @@ def main() -> None:
     # per_turn_recall is ON by default (#1020); per_turn_seed stays opt-in. Neither on → no-op.
     # No marker: see the note at the top of main().
     if not (
-        config.hooks.per_turn_recall or config.hooks.per_turn_seed or config.hooks.startup_directive
+        config.hooks.per_turn_recall
+        or config.hooks.per_turn_seed
+        or config.hooks.startup_directive
+        or inbound_recall_armed(config)
     ):
         sys.exit(0)
+
+    # techne#1018 — open this prompt's delivery slot for the inbound rail, which
+    # runs in PostToolUse and has no turn id of its own. Before recall, so a slow
+    # search cannot leave the previous prompt's claim standing.
+    if inbound_recall_armed(config):
+        _stamp_prompt_turn(config.db_path, data.get("session_id"))
 
     blocks: list[str] = []
 
@@ -810,121 +1037,20 @@ def main() -> None:
     # ------------------------------------------------------------------
     if config.hooks.per_turn_recall and not notification:
         try:
-            from techne.core.search import search
             from techne.hooks._recall_query import build_recall_query
-            from techne.hooks._timeout import bounded_hook
 
-            with bounded_hook(config.hooks.timeout_s, label="user_prompt_submit"):
-                k = config.hooks.per_turn_recall_limit
-                # techne#1018 — search on the question, not on whatever was
-                # pasted around it; a short typed prompt passes through as is.
-                query = build_recall_query(prompt, config.hooks.per_turn_recall_long_prompt_chars)
-                # OVER-FETCH, THEN SUPPRESS, so the session gets k FRESH rows rather
-                # than k-minus-the-duplicates (techne#576). Dropping without
-                # over-fetching would trade duplicate delivery for thinner
-                # delivery, which is not the trade the issue asks for — the rows
-                # being re-sent are legitimately high-scoring, they have just
-                # already been said.
-                # An empty query means the prompt was only techne's own injected
-                # context (a pasted recall block, say). Searching on it would
-                # re-select the rows it already names, so inject nothing.
-                rows = (
-                    []
-                    if not query
-                    else search(
-                        config.db_path,
-                        query,
-                        table="knowledge",
-                        limit=k * _RESEND_OVERFETCH,
-                        include_archived=False,
-                        # techne#842 — ASK FOR ONE MORE CHARACTER THAN WE WILL
-                        # RENDER, and the +1 is load-bearing rather than defensive.
-                        # `_truncate_for_injection` decides "was this cut?" by
-                        # `len(content) > limit`, so a row that `search()` already
-                        # sliced to EXACTLY the cap reads as whole: `was_cut` stays
-                        # False and both the announcing marker and the header notice
-                        # are suppressed. That is the dishonest state techne#826
-                        # exists to prevent, and threading the cap unchanged would
-                        # have spread it from cap>=500 to EVERY cap. Measured before
-                        # the +1: at caps 600, 500 and 200 the row ended mid-word
-                        # with no marker.
-                        #
-                        # At cap+1 the renderer sees the overflow it needs: a row
-                        # shorter than the cap still arrives whole and is correctly
-                        # unmarked; a longer one arrives one char over and is cut and
-                        # marked by the code that owns that decision.
-                        row_chars=config.hooks.per_turn_recall_chars + 1,
-                    )
-                )
-                rows = _drop_pull_only(config.db_path, rows)
-                already = _already_sent_this_session(config.db_path, data.get("session_id"))
-                if already:
-                    fresh = [r for r in rows if r.get("id") not in already]
-                    # An all-duplicate turn legitimately yields NOTHING. That is a
-                    # real outcome, not a failure — the log records an empty recall
-                    # as signal, and #414 is the issue arguing "inject nothing"
-                    # must be legal. Do NOT fall back to the duplicates here; that
-                    # would restore exactly the waste this suppresses.
-                    rows = fresh
-                # AFTER suppression, BEFORE the k-cut: a floored-out row should not
-                # consume one of the k slots that a clearing row could have used.
-                rows = _apply_relevance_floor(rows, config)
-                rows = rows[:k]
-            # THE CAP IS PASSED THROUGH UNCLAMPED (techne#842). It was clamped to
-            # `_SEARCH_ROW_CEILING - 1` from #839 until #842: `search()` cut every
-            # knowledge row at a hidden 500, so a cap at or above that made
-            # `_truncate_for_injection` see a whole row and suppress both the marker
-            # and the header notice — the one state in which this rail was less
-            # honest than before techne#826. `search()` now takes `row_chars` and
-            # this rail asks for `cap + 1` (see the call above, where the +1 is
-            # explained), so the row arrives one character over whatever was asked
-            # for and that state is unreachable at any cap. The whole clamp
-            # paragraph that stood here is deleted rather than annotated: it
-            # described a mechanism that no longer exists, and a retraction bolted
-            # under a still-assertive paragraph leaves the wrong half quotable.
-            chars = config.hooks.per_turn_recall_chars
-            # techne#853 — the cap's effect is otherwise unobservable: this table
-            # recorded what was injected and never what was severed, so raising or
-            # lowering `per_turn_recall_chars` could not be evaluated from data.
-            trunc_stats: dict = {}
-            recall_block = _build_context(rows, chars, trunc_stats) if rows else ""
-            if recall_block:
-                blocks.append(recall_block)
-            # techne#329 — make the READ path auditable (the audit that motivated
-            # this couldn't see the rail at all). Best-effort; the helper never
-            # raises. Log even an empty recall (fired but matched nothing = signal).
-            if config.hooks.per_turn_recall_log:
-                from techne.hooks._injection_log import log_context_injection
-
-                log_context_injection(
-                    config.db_path,
-                    source="per_turn_recall",
-                    session_id=data.get("session_id"),
-                    # techne#1018 — log what was SEARCHED, so this row can rebuild
-                    # the turn. For a typed prompt that is the prompt itself; an
-                    # empty query is named, not left looking like a no-match.
-                    trigger=query or "[no query: the paste held only techne's own context]",
-                    # `rows` IS WHAT WAS INJECTED (_injection_log.py:217, its own
-                    # words). Logging withheld rows as delivered is not merely an
-                    # inaccurate audit row: `_already_sent_this_session` reads
-                    # `hit_ids` back with no filter on whether anything was emitted,
-                    # so a row logged-but-not-sent is SUPPRESSED for the rest of the
-                    # session segment. Measured: at `per_turn_recall_chars: 0` turn
-                    # one emits nothing and logs hit_ids=[1]; turn two with the cap
-                    # raised to 200 then emits nothing either, because the row is
-                    # already "sent". Editing config.yaml mid-session is a modelled
-                    # operator behaviour (AGENTS.md lists it as a standing trigger),
-                    # and a silent recall miss is this project's named failure class.
-                    rows=rows if recall_block else [],
-                    # Mirrors `rows` above: a row that was withheld was not
-                    # delivered, so it cannot have been truncated on delivery
-                    # either. Reporting cuts for a block that never shipped would
-                    # make `chars_dropped` count losses the reader never sustained.
-                    rows_truncated=trunc_stats.get("rows_truncated") if recall_block else 0,
-                    chars_dropped=trunc_stats.get("chars_dropped") if recall_block else 0,
-                    injected_text=recall_block,
-                    k_requested=config.hooks.per_turn_recall_limit,
-                )
+            # techne#1018 — search on the question, not on whatever was
+            # pasted around it; a short typed prompt passes through as is.
+            query = build_recall_query(prompt, config.hooks.per_turn_recall_long_prompt_chars)
+            block, rows = recall_block(
+                config,
+                data.get("session_id"),
+                query,
+                source="per_turn_recall",
+                k=config.hooks.per_turn_recall_limit,
+            )
+            if block:
+                blocks.append(block)
         except Exception as e:  # noqa: BLE001  — catches HookTimeout too
             print(f"techne: per-turn recall degraded: {e}", file=sys.stderr)
             degraded = str(e)[:200]

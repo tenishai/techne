@@ -32,6 +32,20 @@ All notable changes to techne are documented here. Format loosely follows
   cannot be acknowledged.
 - `AGENTS.md` tells agents to call `techne_capabilities` when that line appears or on
   first use, explain each off item, offer to apply it, and never apply one silently.
+- Inbound recall, off by default (#1018 parts 2-4). Per-turn recall only runs on a
+  prompt, so a subagent hand-back, a fetched page or a peer's coord message that
+  arrives mid-turn got no recall. With `hooks.inbound_recall: true`, PostToolUse runs
+  the same recall pipeline on the results of the tools in `hooks.inbound_recall_tools`
+  (default: Agent, Task, WebFetch, `techne_inbox`, `techne_coord_threads`) and on the
+  coord message bodies it is about to inject. It injects at most
+  `hooks.inbound_recall_limit` rows (2), at most once per user prompt, logs as
+  `source="inbound_recall"`, and shares re-send suppression with per-turn recall.
+  Bash, Read, Edit, Grep and the other file tools are refused even if listed. The
+  rail stays dormant until `hooks.inbound_recall_floor_vec_distance` is set as well,
+  and `techne doctor` reports `hook:inbound_recall` as dormant for that reason; the
+  floor for inbound text has not been measured yet. The recall pipeline in
+  `user_prompt_submit` is now one function, `recall_block`, used by both rails, with
+  no change to per-turn behaviour.
 
 ### Fixed
 

@@ -868,7 +868,9 @@ def _inject_edit_blast_radius(config: Config, session_id: str, tool_name: str, t
         return None
 
 
-def _inject_coord_messages(config: Config, session_id: str) -> str | None:
+def _inject_coord_messages(
+    config: Config, session_id: str, bodies: list | None = None
+) -> str | None:
     """Return an additionalContext string for unread coordination messages from a
     peer session (techne#376) — the push half of "converse without prompting".
 
@@ -885,6 +887,10 @@ def _inject_coord_messages(config: Config, session_id: str) -> str | None:
     block labels it as data, not instructions, so a directive smuggled into a peer
     message isn't obeyed on sight (techne#376). Do NOT widen this across a trust
     boundary (multi-user/host) without reintroducing auth + sanitization.
+
+    ``bodies``, when given, receives the raw text of each message injected, for
+    the inbound recall rail (techne#1018). The rendered block cannot serve: its
+    "📬" lines are exactly what `strip_own_injections` removes.
     """
     try:
         from techne.core import coord
@@ -922,6 +928,8 @@ def _inject_coord_messages(config: Config, session_id: str) -> str | None:
             who = m.get("from_name") or (m["from_session"][:8] if m.get("from_session") else "peer")
             tag = " [coord]" if m.get("recipient") == coord.DEFAULT_CHANNEL else ""
             lines.append(f"📬 {who}{tag}: {m['body']}")
+            if bodies is not None:
+                bodies.append(m["body"])
         # The body is another agent's output — untrusted content in an instruction
         # position. Frame it as data so the reading agent doesn't obey directives
         # smuggled inside a peer message (techne#376 injection surface).
@@ -933,6 +941,220 @@ def _inject_coord_messages(config: Config, session_id: str) -> str | None:
         )
     except Exception as exc:  # noqa: BLE001 — coord must never break the hook
         print(f"techne: coord injection failed (non-fatal): {exc}", file=sys.stderr)
+        return None
+
+
+#: Tools the inbound rail refuses whatever `hooks.inbound_recall_tools` says
+#: (techne#1018). Their output is code, file contents and command noise, and
+#: they are most of the tool calls in a session, so allowing one would turn a
+#: rail meant for hand-backs into a search on nearly every call.
+_INBOUND_NEVER = frozenset(
+    {"Bash", "Edit", "MultiEdit", "Write", "NotebookEdit", "Read", "Grep", "Glob"}
+)
+
+
+def _message_bodies(obj) -> list[str]:
+    """Every ``body`` string in a parsed techne_inbox / techne_coord_threads result."""
+    out: list[str] = []
+    if isinstance(obj, dict):
+        for key, v in obj.items():
+            if key == "body" and isinstance(v, str):
+                out.append(v)
+            else:
+                out.extend(_message_bodies(v))
+    elif isinstance(obj, list):
+        for v in obj:
+            out.extend(_message_bodies(v))
+    return out
+
+
+def _inbound_text(tool_response) -> str:
+    """The text a tool result brought in, or "".
+
+    Shapes, from observations captured on dev04 (2026-09-25): an Agent result is
+    a dict whose ``content`` is a list of ``{"type": "text", "text": …}`` blocks
+    and whose ``prompt`` is OUR OWN brief to the subagent; WebFetch is a dict with
+    the page in ``result``; an MCP tool is a list of text blocks. ``prompt`` is
+    never read, so the hand-back is searched, not what we asked for.
+
+    techne's inbox and coord-thread reads return JSON whose useful text is the
+    message bodies; the session ids and timestamps around them would only dilute
+    the query, so a JSON result carrying bodies is reduced to them.
+    """
+    parts: list[str] = []
+    if isinstance(tool_response, str):
+        parts.append(tool_response)
+    elif isinstance(tool_response, dict):
+        content = tool_response.get("content")
+        if isinstance(content, list):
+            parts.extend(
+                b.get("text", "")
+                for b in content
+                if isinstance(b, dict) and b.get("type") == "text"
+            )
+        elif isinstance(content, str):
+            parts.append(content)
+        for key in ("result", "text", "output"):
+            if isinstance(tool_response.get(key), str):
+                parts.append(tool_response[key])
+    elif isinstance(tool_response, list):
+        for b in tool_response:
+            if isinstance(b, str):
+                parts.append(b)
+            elif isinstance(b, dict) and isinstance(b.get("text"), str):
+                parts.append(b["text"])
+    text = "\n".join(p for p in parts if p)
+    if text.lstrip().startswith(("{", "[")):
+        try:
+            bodies = _message_bodies(json.loads(text))
+        except ValueError:
+            bodies = []
+        if bodies:
+            return "\n".join(bodies)
+    return text
+
+
+#: Liveness key for the inbound rail. Its own marker, not post_tool_use's: that
+#: one is written once per tool call by the capture block, and a second write
+#: there would replace it (see the NO WRITE HERE note in main).
+INBOUND_HOOK_NAME = "inbound_recall"
+
+_INBOUND_HEADER = (
+    "## techne — durable facts relevant to this tool result",
+    "> Inbound recall (techne#1018), on a hand-back, fetched page or peer message; "
+    "recalled memory, not ground truth — verify first.",
+)
+
+
+def _inbound_slot(config: Config, session_id: str, *, take: bool) -> str:
+    """This prompt's inbound slot: "open", "used", or "no-marker".
+
+    With ``take`` an open slot is also claimed, atomically: BEGIN IMMEDIATE holds
+    the write lock across the read and the write, so two tool results finishing
+    together cannot both deliver. "no-marker" means UserPromptSubmit never
+    stamped this session (it is installed with ``hooks.per_turn_recall``); with
+    no turn boundary the once-per-prompt cap cannot be kept, so it counts as
+    closed.
+    """
+    from techne.core.database import connect
+    from techne.core.extension_state import get_state, set_state
+    from techne.hooks.user_prompt_submit import INBOUND_TURN_PREFIX
+
+    key = f"{INBOUND_TURN_PREFIX}:{session_id}"
+    conn = connect(config.db_path)
+    try:
+        if take:
+            conn.execute("BEGIN IMMEDIATE")
+        st = get_state(conn, key)
+        state = "no-marker" if st is None else ("used" if st.get("delivered", True) else "open")
+        if take and state == "open":
+            set_state(conn, key, {"delivered": True}, commit=False)
+            conn.commit()
+        elif take:
+            conn.rollback()
+        return state
+    finally:
+        conn.close()
+
+
+def _inject_inbound_recall(
+    config: Config, session_id: str, tool_name: str, tool_response, coord_bodies: list[str]
+) -> str | None:
+    """Recall on content that arrived through this tool round (techne#1018 part 3).
+
+    Per-turn recall rides UserPromptSubmit, so a hand-back or a peer message that
+    lands mid-turn gets none; measured on 2026-09-23, a hand-back delivered as its
+    own turn got recall and the same hand-back attached to a tool round did not.
+    This runs the SAME pipeline (`user_prompt_submit.recall_block`) on the tool's
+    text when the tool is allowlisted, and on the coord bodies this hook is about
+    to inject whatever the tool was.
+
+    Gates, cheapest first: the rail is armed (flag AND floor), there is text, the
+    prompt's slot is unclaimed. The query goes through `strip_own_injections`
+    first, so techne's own injected lines in a hand-back are not searched on. It
+    logs as ``inbound_recall``; `_already_sent_this_session` reads that source
+    too, so no row is delivered twice across the two rails in one compaction
+    segment.
+
+    Writes its own liveness marker, and only once it has something to judge (an
+    armed rail, or text on a disarmed one), so an ordinary tool call costs no
+    write. Never raises.
+    """
+    from techne.hooks._liveness import record_hook_run
+    from techne.hooks.user_prompt_submit import inbound_recall_armed
+
+    h = config.hooks
+    if not h.inbound_recall:
+        return None
+    sources: list[str] = []
+    if tool_name in h.inbound_recall_tools and tool_name not in _INBOUND_NEVER:
+        sources.append(_inbound_text(tool_response))
+    sources.extend(coord_bodies)
+    text = "\n".join(t for t in sources if t and t.strip())
+    if not text:
+        return None
+    if not inbound_recall_armed(config):
+        # Part 4: no floor, no recall. Named rather than silent, so an operator
+        # who switched the rail on can see why nothing arrives.
+        record_hook_run(
+            config.db_path,
+            INBOUND_HOOK_NAME,
+            outcome="noop:dormant-no-floor",
+            detail="set hooks.inbound_recall_floor_vec_distance to arm",
+        )
+        return None
+    try:
+        slot = _inbound_slot(config, session_id, take=False)
+        if slot != "open":
+            outcome = "noop:delivered-this-prompt" if slot == "used" else "noop:no-turn-marker"
+            record_hook_run(config.db_path, INBOUND_HOOK_NAME, outcome=outcome, detail=tool_name)
+            return None
+
+        from techne.core.search import take_vec_channel_error
+        from techne.hooks._recall_query import build_inbound_query
+        from techne.hooks.user_prompt_submit import recall_block
+
+        query = build_inbound_query(text, h.per_turn_recall_long_prompt_chars)
+        if not query:
+            record_hook_run(
+                config.db_path, INBOUND_HOOK_NAME, outcome="noop:only-own-context",
+                detail=tool_name,
+            )
+            return None
+        block, rows = recall_block(
+            config,
+            session_id,
+            query,
+            source="inbound_recall",
+            k=h.inbound_recall_limit,
+            floors={"vec_distance": h.inbound_recall_floor_vec_distance},
+            keep_unjudged=False,
+            header=_INBOUND_HEADER,
+            claim=lambda: _inbound_slot(config, session_id, take=True) == "open",
+            timeout_label="post_tool_use:inbound-recall",
+        )
+        vec_error = take_vec_channel_error()
+        if vec_error:
+            # Same reasoning as user_prompt_submit: a dead vector channel does not
+            # raise, and on this rail it means every row is unjudgeable and dropped.
+            record_hook_run(
+                config.db_path, INBOUND_HOOK_NAME, outcome="failed",
+                error={"stage": "vec_channel", "msg": vec_error[:200]},
+            )
+        else:
+            record_hook_run(
+                config.db_path,
+                INBOUND_HOOK_NAME,
+                outcome="ok" if block else "noop:nothing-to-inject",
+                detail=f"{tool_name}: {len(rows) if block else 0} rows",
+            )
+        return block or None
+    except Exception as e:  # noqa: BLE001 — catches HookTimeout; never break the tool call
+        print(f"techne: inbound recall skipped: {e}", file=sys.stderr)
+        record_hook_run(
+            config.db_path, INBOUND_HOOK_NAME, outcome="failed",
+            error={"stage": "recall", "msg": str(e)[:200]},
+        )
         return None
 
 
@@ -1129,9 +1351,21 @@ def main():
 
     # Unread inter-session coordination messages (techne#376) — same rail, so a
     # peer's message reaches the agent on its next tool call with no prompting.
-    coord_context = _inject_coord_messages(config, session_id)
+    coord_bodies: list[str] = []
+    coord_context = _inject_coord_messages(config, session_id, coord_bodies)
     if coord_context:
         context_parts.append(coord_context)
+
+    # Inbound recall (techne#1018) — LAST, after the coord block, because it also
+    # searches the bodies of the messages that block just delivered. Behind the
+    # subagent gate above like the other rails (#930): a subagent's own tool
+    # calls never reach here, and the Agent result it hands back fires this hook
+    # in the parent, which is the hand-back this rail exists for.
+    inbound_context = _inject_inbound_recall(
+        config, session_id, tool_name, tool_output, coord_bodies
+    )
+    if inbound_context:
+        context_parts.append(inbound_context)
 
     if context_parts:
         print(

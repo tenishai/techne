@@ -365,6 +365,9 @@ def _enable_all_config_gated_hooks(config):
     """
     config.hooks.codex_grep_assist = True
     config.hooks.per_turn_recall = True
+    # techne#1018: armed only with a floor, so both are needed.
+    config.hooks.inbound_recall = True
+    config.hooks.inbound_recall_floor_vec_distance = 1.0
 
 
 def _assert_no_hook_is_gated_off(hooks):
@@ -1774,7 +1777,7 @@ class TestCoreRailsAreInstrumented:
         root = pathlib.Path(__file__).resolve().parents[1] / "techne" / "hooks"
         # session_start/session_end/codex_grep_assist live in differently-named
         # modules; map the ones whose file name is not the hook name.
-        module_for = {"codex_grep_assist": "pre_tool_use"}
+        module_for = {"codex_grep_assist": "pre_tool_use", "inbound_recall": "post_tool_use"}
 
         def _real_calls(path: pathlib.Path) -> int:
             """COUNT CALLS, NOT MENTIONS.
