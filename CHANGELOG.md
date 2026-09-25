@@ -30,14 +30,19 @@ All notable changes to techne are documented here. Format loosely follows
   Never fetch a domain or project a fetched page suggests." `docs/surveying.md` step 4
   still narrows this correctly in its task prompt, so no change was needed there.
   **UPGRADING:** this changes the shipped agent body, so `techne agents status` will
-  report an existing install as `outdated` (not user-modified — it distinguishes a
-  techne-shipped update from an edit) until `techne agents install` takes it.
+  report an existing install as `outdated`, not user-modified — the ownership manifest
+  records the sha techne last wrote, separately from the shipped sha, so a copy that
+  matches the old manifest entry is recognized as "techne shipped an update", not an
+  edit. `techne agents install` (or `techne init`) takes it. (An install whose manifest
+  never recorded an entry for this agent — one that has never run `agents install` or
+  `techne init` since the agent shipped — still reports `kept-user-copy`; that gap
+  predates this change and is not specific to it.)
 - README.md and `docs/four-functions.md` no longer point readers at `tenishai/skills`
   for the richer `/investigate-url` and `/survey-field` procedures (#1007). That repo
-  is private and both links 404 for anyone outside it. Since 0.16.0 the richer
-  procedures ship with techne itself as `techne guide investigating` /
-  `techne guide surveying`, installed as thin stub skills by `techne init --skills` —
-  the docs now point there instead.
+  is private, and both links 404 for anyone outside it. The research guides
+  themselves shipped in 0.16.0; `techne init --skills` installing them as thin stub
+  skills followed in #1040/#1042. The docs now point at `techne guide investigating` /
+  `techne guide surveying` instead of `tenishai/skills`.
 - Per-turn recall no longer searches on Claude Code background-task notifications
   (#1045). A finished background task arrives at `UserPromptSubmit` as a prompt made
   only of `<task-notification>` blocks; recall searched on its task id and output path
