@@ -88,6 +88,10 @@ def consolidate_clusters(
     Returns ``[{"target_ids": [...], "rows": [row dicts], "via": "hash"|"fts"}]`` —
     each a set of ≥2 live rows the agent should judge for consolidation. Bounded by
     *max_clusters*; deterministic for Tier 0, FTS-order-dependent for Tier 1.
+
+    Excludes `status = 'archived'` (techne#1033 review round 2): a soft-archived row
+    is out of the default working set, and consolidating one into a merged `current`
+    row (merge_into) would resurrect it under a new id.
     """
     conn = connect(config.db_path)
     try:
@@ -95,7 +99,7 @@ def consolidate_clusters(
             dict(r)
             for r in conn.execute(
                 "SELECT id, type, content, tags, confidence FROM knowledge "
-                "WHERE superseded_by IS NULL"
+                "WHERE superseded_by IS NULL AND status != 'archived'"
             )
         ]
     finally:
@@ -430,7 +434,10 @@ def recombine_groups(config: Config, *, max_groups: int = 10, group_size: int = 
     ``[{"group_ids": sorted([...]), "rows": [row dicts], "via": "tag:<tag>"}]``.
 
     Noise controls applied here:
-    - Only high-confidence live rows (superseded_by IS NULL, confidence='high').
+    - Only high-confidence live rows (superseded_by IS NULL, confidence='high',
+      status != 'archived' — techne#1033 review round 2: a soft-archived row is out
+      of the default working set, and recombining it feeds a retired fact back into
+      a dream-derived candidate as though it were still current).
     - Skip meta/identity rows: tags containing memory-type:user, memory-type:feedback,
       or memory-type:project are excluded — recombining identity/feedback/project-state
       with factual knowledge produces noise, not insight.
@@ -448,7 +455,7 @@ def recombine_groups(config: Config, *, max_groups: int = 10, group_size: int = 
     try:
         raw = conn.execute(
             "SELECT id, type, content, tags, confidence, updated_at FROM knowledge "
-            "WHERE superseded_by IS NULL AND confidence='high' "
+            "WHERE superseded_by IS NULL AND confidence='high' AND status != 'archived' "
             "ORDER BY updated_at DESC"
         ).fetchall()
         rows_all = [dict(r) for r in raw]

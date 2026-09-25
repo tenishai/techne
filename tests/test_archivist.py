@@ -282,6 +282,39 @@ def test_push_knowledge_is_idempotent(config):
     assert n == 1
 
 
+def test_push_knowledge_skips_an_archived_predecessor(config):
+    """Review round 3 on techne#1033. `delete()` can archive a chain-head's
+    predecessor (superseded_by NULL, status='archived') rather than resurrecting
+    it locally. Without a matching filter here, `push_knowledge_to_archivist`
+    re-resurrects it one hop further out: query_live_knowledge returns the
+    archived row (superseded_by IS NULL), the payload built below carries no
+    `status`, and the sink's store() would write it into the team DB as a fresh
+    `current` row — publishing a retired fact as live on a surface that leaves
+    this machine, then returning it through federated recall.
+    """
+    from techne.core.database import init_db
+    from techne.core.knowledge import delete, store, supersede
+    from techne.core.stores import plain_connect
+
+    init_db(config.db_path)
+    config.archivist_db_path = str(config.data_dir / "team-archivist.db")
+    old = store(config.db_path, "retired fact alpha", type="fact", confidence="high")
+    new = supersede(config.db_path, old, "retired fact alpha, revised")
+    assert delete(config.db_path, new) is True
+
+    with use_registry({}):
+        register_base_archivist(config)
+        pushed = push_knowledge_to_archivist(config)
+
+    assert pushed == 0
+    conn = plain_connect(archivist_db(config))
+    try:
+        rows = conn.execute("SELECT content, status FROM knowledge").fetchall()
+    finally:
+        conn.close()
+    assert rows == []
+
+
 def test_archivist_connection_exists_only_for_a_separate_store(config, tmp_path):
     """None for BOTH `absent` and `local`, for different reasons: `absent` has no
     archivist, and `local` IS this instance's own knowledge — already tier 1, so

@@ -445,6 +445,21 @@ def push_knowledge_to_archivist(config) -> int:
         if k["type"] in REDIRECTED_TYPES:
             skipped += 1
             continue
+        # SKIP SOFT-ARCHIVED ROWS (techne#1033 review round 3). query_live_knowledge
+        # returns `status` on every row precisely so a consumer can filter for
+        # itself (see delete()'s docstring) — the export renderer does; this one
+        # didn't. Without this, a predecessor delete() archived (superseded_by
+        # NULL, status='archived', possibly still confidence='high') got pushed
+        # here as a fresh `current` row: store() on the sink side carries no
+        # status column, so the retired fact republished itself as live on the
+        # team store and came back through federated recall (fan_out_search) —
+        # the round-1 resurrection, moved onto the one path that leaves this
+        # machine. Filtered HERE, same rationale as REDIRECTED_TYPES above:
+        # query_live_knowledge is shared with the export path, which must keep
+        # returning the full set.
+        if k.get("status") == "archived":
+            skipped += 1
+            continue
         # `source` is the LOCAL provenance ('agent' | 'manual' |
         # 'reflect-promote:<session>:<id>') and the federated write used to discard
         # it. Carried across as `origin_source`, with the session recovered from the
