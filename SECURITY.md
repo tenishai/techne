@@ -4,11 +4,11 @@
 
 Please don't open a public issue for a security problem.
 
-Report it privately, either way:
+Report it privately to **security@tenish.ai**.
 
-- **Email:** security@tenish.ai
-- **GitHub:** the **Report a vulnerability** button on this repository's
-  **Security** tab (private vulnerability reporting).
+If this repository's **Security** tab shows a **Report a vulnerability**
+button, you can use that instead. GitHub offers it only on public
+repositories where it has been turned on.
 
 Include what you can of:
 
@@ -44,11 +44,18 @@ techne is a local memory store and MCP server for AI agents. In scope:
 
 - the stored memory: anything that lets one agent or project read or change
   another's memory without being configured to;
-- credential and secret handling: redaction before storage, and anything that
-  lets a secret reach the store, an export, or an injected prompt;
+- credential and secret handling: a secret in a format techne's redaction is
+  meant to recognise that still reaches the store, an export, or an injected
+  prompt. Redaction is pattern-based and best-effort, not a confidentiality
+  guarantee; a token shape it doesn't recognise yet is a hardening request,
+  not a vulnerability;
 - egress: configuration that is supposed to keep memory local but doesn't;
 - the hooks and the MCP server: anything a tool result, transcript, or
-  repository file can use to run code or change techne's configuration.
+  repository file can use to run code or change techne's configuration;
+- the shell guard (`techne.security.shell_guard`), a library for callers that
+  run agent-issued commands: a command that passes its anti-chaining check but
+  still runs more than one command, or an install that its pre-install audit
+  lets through while an auditor is configured.
 
 **Out of scope:** vulnerabilities in third-party dependencies (please report
 those upstream, and tell us if we ship an affected version), and problems that
