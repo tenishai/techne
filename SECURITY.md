@@ -51,7 +51,14 @@ techne is a local memory store and MCP server for AI agents. In scope:
   hardening request, not a vulnerability.
   The architect pattern store, the codex code-graph store, and short
   structured fields (source, tags, target) are not redacted by design;
-- egress: configuration that is supposed to keep memory local but doesn't;
+- egress: configuration that is supposed to keep memory local but doesn't.
+  Only `/etc/techne/config.operator.yaml` is a lock, and only while the process
+  reading it cannot write it. `$TECHNE_OPERATOR_CONFIG` and
+  `<techne_home>/config.operator.yaml` are conveniences an agent can bypass
+  (`env -u`, or a different `TECHNE_HOME`), and with no operator layer
+  `config.yaml` keeps full authority. An agent redirecting its own egress in
+  those setups is documented behaviour, not a vulnerability (see "Operator-owned
+  config" in the README);
 - the hooks and the MCP server: anything a tool result, transcript, or
   repository file can use to run code or change techne's configuration;
 - the shell guard (`techne.security.shell_guard`), a library for callers that

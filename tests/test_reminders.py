@@ -73,6 +73,29 @@ class TestAdd:
         assert match is not None
         assert match["status"] == "active"
 
+    def test_note_is_stored_redacted(self, db_path: Path) -> None:
+        """A credential-shaped string in the note never reaches the row (techne#1037)."""
+        from techne.core.database import connect
+
+        token = "ghp_" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4"
+        reminder_id = add(db_path, f"rotate {token} before friday", _iso(_utcnow()))
+        conn = connect(db_path)
+        try:
+            (stored,) = conn.execute(
+                "SELECT note FROM reminders WHERE id = ?", (reminder_id,)
+            ).fetchone()
+        finally:
+            conn.close()
+        assert token not in stored
+        assert stored == "rotate <redacted:github> before friday"
+
+    def test_plain_note_is_stored_unchanged(self, db_path: Path) -> None:
+        """Text with no credential shape is stored exactly as given."""
+        note = "check PR #1037 at 16:00 -- sk-short, ghp_ alone"
+        reminder_id = add(db_path, note, _iso(_utcnow()))
+        stored = next(r for r in list_due(db_path, _iso(_utcnow())) if r["id"] == reminder_id)
+        assert stored["note"] == note
+
 
 # ---------------------------------------------------------------------------
 # TestListDue

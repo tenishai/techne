@@ -82,6 +82,29 @@ def test_from_name_snapshot_stored(db_path):
     assert msg["from_session"] == A
 
 
+def test_body_is_stored_redacted(db_path):
+    """A credential-shaped string in a coord body never reaches the row (techne#1037)."""
+    from techne.core.database import connect
+
+    token = "sk-ant-api03-" + "abcdefghijklmnopqrstuvwxyz0123"
+    mid = coord.send(db_path, A, f"use {token} for the eval", from_name="claude_1")
+    conn = connect(db_path)
+    try:
+        (stored,) = conn.execute("SELECT body FROM coord_messages WHERE id = ?", (mid,)).fetchone()
+    finally:
+        conn.close()
+    assert token not in stored
+    assert stored == "use <redacted:sk-ant> for the eval"
+    # and the inbox, which the nudge replays to every live session, shows the redacted form
+    assert [m["body"] for m in coord.inbox(db_path, B)] == [stored]
+
+
+def test_plain_body_is_stored_unchanged(db_path):
+    body = "claiming fix/1037 -- sk-short, ghp_ alone, see #1043"
+    coord.send(db_path, A, body, from_name="claude_1")
+    assert [m["body"] for m in coord.inbox(db_path, B)] == [body]
+
+
 def test_mark_read_all(db_path):
     coord.send(db_path, A, "m1")
     coord.send(db_path, A, "m2")
