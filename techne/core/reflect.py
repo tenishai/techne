@@ -598,9 +598,15 @@ def enqueue_reflection_debt(
             "INSERT OR IGNORE INTO reflection_queue (session_id, thread_id) VALUES (?, ?)",
             [(session_id, t) for t in thread_ids],
         )
+        queued = cur.rowcount or 0
+        # EVERY ID HERE IS EMITTABLE, so a parked one is owed again (techne#870): this
+        # is the re-partition route back, which runs through session_end and lands
+        # here. The INSERT above ignores an existing row, so without this it would stay
+        # parked and out of the banner while emit renders it.
+        _unpark(c, thread_ids)
         if own_conn:
             c.commit()
-        return cur.rowcount or 0
+        return queued
     finally:
         if own_conn:
             c.close()
@@ -616,6 +622,13 @@ def pending_reflection_queue(db_path: Path, *, limit: int = 20) -> list[dict]:
     window becomes permanently invisible. This reads the ledger of what was
     actually owed instead of re-deriving it from recency.
 
+    PARKED ROWS ARE NOT RETURNED (techne#870). `techne reflect reconcile --apply`
+    parks the rows it has shown are below the observation threshold: no emit can
+    render them, so counting them here overstated the drainable backlog (measured:
+    28 reported, 18 drainable) and named an undrainable row as the place to start.
+    They are still undrained and still in the table; `parked_reflection_count`
+    reports them separately.
+
     Returns [{queue_id, session_id, thread_id, enqueued_at}]. Empty when clear.
     """
     conn = connect(db_path)
@@ -623,7 +636,7 @@ def pending_reflection_queue(db_path: Path, *, limit: int = 20) -> list[dict]:
         rows = conn.execute(
             """SELECT id, session_id, thread_id, enqueued_at
                  FROM reflection_queue
-                WHERE drained_at IS NULL
+                WHERE drained_at IS NULL AND parked_at IS NULL
              ORDER BY id
                 LIMIT ?""",
             (limit,),
@@ -637,6 +650,19 @@ def pending_reflection_queue(db_path: Path, *, limit: int = 20) -> list[dict]:
             }
             for r in rows
         ]
+    finally:
+        conn.close()
+
+
+def parked_reflection_count(db_path: Path) -> tuple[int, int]:
+    """(rows, sessions) that are undrained but parked as below-threshold (techne#870)."""
+    conn = connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT count(*) AS n, count(DISTINCT session_id) AS s FROM reflection_queue "
+            "WHERE drained_at IS NULL AND parked_at IS NOT NULL"
+        ).fetchone()
+        return row["n"] or 0, row["s"] or 0
     finally:
         conn.close()
 
@@ -964,20 +990,50 @@ def unemittable_queue_rows(config: Config, session_id: str) -> list[str]:
     `reconcile`, which is a different act from draining.
     """
     threads, observations = load_session_for_reflection(config, session_id)
-    emittable = set(emittable_thread_ids(config, session_id, threads, observations))
+    superseded, below = _split_unemittable(config, session_id, threads, observations)
+    stuck = set(superseded) | set(below)
+    return [t for t in _undrained_queue_rows(config, session_id) if t in stuck]
+
+
+def _undrained_queue_rows(config: Config, session_id: str) -> list[str]:
+    """Undrained queue rows for *session_id*, in queue order. Parked rows included:
+    parking is a statement about the debt figure, not about whether the row is owed."""
     conn = connect(config.db_path)
     try:
-        queued = [
+        return [
             r["thread_id"]
             for r in conn.execute(
                 "SELECT thread_id FROM reflection_queue "
-                "WHERE session_id = ? AND drained_at IS NULL",
+                "WHERE session_id = ? AND drained_at IS NULL ORDER BY id",
                 (session_id,),
             ).fetchall()
         ]
     finally:
         conn.close()
-    return [t for t in queued if t not in emittable]
+
+
+def _split_unemittable(
+    config: Config, session_id: str, threads: list[Thread], observations: list[dict]
+) -> tuple[list[str], list[str]]:
+    """(superseded, below_threshold) for *session_id*, from a detection the caller holds.
+
+    ONE DETECTION, NOT THREE (techne#805). `emit_reflection_pass` already holds
+    `threads, observations`; calling `unemittable_queue_rows` and
+    `superseded_queue_rows` from it re-ran detection twice more, and detection is the
+    expensive part. Both sets fall out of the same two facts: which queued ids are
+    emittable now, and which are in the current detection at all.
+    """
+    from techne.core.thread_orchestrator import persisted_thread_id
+
+    queued = _undrained_queue_rows(config, session_id)
+    if not queued:
+        return [], []
+    emittable = set(emittable_thread_ids(config, session_id, threads, observations))
+    current = {
+        tid for t in threads if (tid := persisted_thread_id(config.db_path, session_id, t))
+    }
+    stuck = [t for t in queued if t not in emittable]
+    return [t for t in stuck if t not in current], [t for t in stuck if t in current]
 
 
 def superseded_queue_rows(config: Config, session_id: str) -> list[str]:
@@ -1002,27 +1058,7 @@ def superseded_queue_rows(config: Config, session_id: str) -> list[str]:
     leaving the signal, and the reconciler reports what it removed either way.
     """
     threads, observations = load_session_for_reflection(config, session_id)
-    from techne.core.thread_orchestrator import persisted_thread_id
-
-    current = set()
-    for t in threads:
-        tid = persisted_thread_id(config.db_path, session_id, t)
-        if tid:
-            current.add(tid)
-
-    conn = connect(config.db_path)
-    try:
-        queued = [
-            r["thread_id"]
-            for r in conn.execute(
-                "SELECT thread_id FROM reflection_queue "
-                "WHERE session_id = ? AND drained_at IS NULL",
-                (session_id,),
-            ).fetchall()
-        ]
-    finally:
-        conn.close()
-    return [t for t in queued if t not in current]
+    return _split_unemittable(config, session_id, threads, observations)[0]
 
 
 def orphaned_queue_rows(config: Config, session_id: str) -> list[str]:
@@ -1061,6 +1097,37 @@ def orphaned_queue_rows(config: Config, session_id: str) -> list[str]:
     return sorted(renderable & set(marker.get("emitted", [])))
 
 
+def _parked_thread_ids(config: Config, session_id: str) -> set[str]:
+    """Undrained queue rows for *session_id* that `reconcile` has parked (techne#870)."""
+    conn = connect(config.db_path)
+    try:
+        return {
+            r["thread_id"]
+            for r in conn.execute(
+                "SELECT thread_id FROM reflection_queue "
+                "WHERE session_id = ? AND drained_at IS NULL AND parked_at IS NOT NULL",
+                (session_id,),
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+
+
+def _unpark(conn, thread_ids) -> int:
+    """Clear `parked_at` on *thread_ids*. Returns rows changed. Caller commits."""
+    thread_ids = list(thread_ids)
+    if not thread_ids:
+        return 0
+    placeholders = ",".join("?" * len(thread_ids))
+    cur = conn.execute(
+        f"""UPDATE reflection_queue SET parked_at = NULL, parked_reason = NULL
+             WHERE parked_at IS NOT NULL AND drained_at IS NULL
+               AND thread_id IN ({placeholders})""",
+        thread_ids,
+    )
+    return cur.rowcount or 0
+
+
 def reconcile_reflection_queue(config: Config, *, apply: bool = False) -> dict:
     """Find (and optionally remove) queue rows left behind by a replaced detection.
 
@@ -1093,8 +1160,13 @@ def reconcile_reflection_queue(config: Config, *, apply: bool = False) -> dict:
         exclusion it would need never applies. That is the safe direction, and
         `clear_declines` is the deliberate way back.
 
+    PARKS THE BELOW-THRESHOLD ROWS ON --apply, AND UN-PARKS ANY THAT RENDER AGAIN
+    (techne#870). A parked row is still undrained and still reported here as
+    `below_threshold`; it only leaves the banner's actionable figure. `parked` and
+    `unparked` count what this run changed, so both read 0 on a dry run.
+
     Returns {sessions, superseded, below_threshold, orphaned, declined, removed,
-    by_session}.
+    parked, unparked, by_session}.
     """
     conn = connect(config.db_path)
     try:
@@ -1109,12 +1181,22 @@ def reconcile_reflection_queue(config: Config, *, apply: bool = False) -> dict:
 
     by_session: dict[str, dict] = {}
     superseded_total = below_total = orphaned_total = declined_total = 0
+    park_total: list[str] = []
+    unpark_total: list[str] = []
     for sid in sessions:
-        stale = superseded_queue_rows(config, sid)
-        unemittable = unemittable_queue_rows(config, sid)
-        below = [t for t in unemittable if t not in set(stale)]
+        threads, observations = load_session_for_reflection(config, sid)
+        stale, below = _split_unemittable(config, sid, threads, observations)
         orphaned = orphaned_queue_rows(config, sid)
         declined = declined_queue_rows(config, sid)
+        # A PARKED ROW THAT RENDERS AGAIN IS OWED AGAIN (techne#870). Parking is a
+        # statement about the current threshold and the current partition, and both
+        # move: a lowered floor or a re-partition that hands observations back. Computed
+        # before the skip below, because a session whose only rows just became
+        # emittable has nothing else to report and would otherwise never un-park.
+        parked_now = _parked_thread_ids(config, sid)
+        unpark = sorted(parked_now - set(stale) - set(below))
+        park = [t for t in below if t not in parked_now]
+        unpark_total.extend(unpark)
         if not stale and not below and not orphaned and not declined:
             continue
         by_session[sid] = {
@@ -1123,6 +1205,7 @@ def reconcile_reflection_queue(config: Config, *, apply: bool = False) -> dict:
             "orphaned": orphaned,
             "declined": declined,
         }
+        park_total.extend(park)
         superseded_total += len(stale)
         below_total += len(below)
         orphaned_total += len(orphaned)
@@ -1144,6 +1227,28 @@ def reconcile_reflection_queue(config: Config, *, apply: bool = False) -> dict:
         finally:
             conn.close()
 
+    # PARK, DO NOT DRAIN (techne#870). The below-threshold rows stay in the table,
+    # undrained, as #646's evidence; `parked_at` only takes them out of the debt figure
+    # the banner calls actionable. Set here and nowhere else, because this is the one
+    # place that has DEMONSTRATED the classification against a fresh detection — the
+    # same standard that makes retiring the superseded subset legitimate.
+    parked = unparked = 0
+    if apply and (park_total or unpark_total):
+        conn = connect(config.db_path)
+        try:
+            for tid in park_total:
+                cur = conn.execute(
+                    "UPDATE reflection_queue SET parked_at = CURRENT_TIMESTAMP, "
+                    "parked_reason = 'below_threshold' "
+                    "WHERE thread_id = ? AND drained_at IS NULL AND parked_at IS NULL",
+                    (tid,),
+                )
+                parked += cur.rowcount or 0
+            unparked = _unpark(conn, unpark_total)
+            conn.commit()
+        finally:
+            conn.close()
+
     return {
         "sessions": len(by_session),
         "superseded": superseded_total,
@@ -1151,6 +1256,8 @@ def reconcile_reflection_queue(config: Config, *, apply: bool = False) -> dict:
         "orphaned": orphaned_total,
         "declined": declined_total,
         "removed": removed,
+        "parked": parked,
+        "unparked": unparked,
         "by_session": by_session,
     }
 
@@ -1160,30 +1267,34 @@ def reflection_debt_stats(config: Config) -> dict:
 
     Separate from candidate_stats (which counts PROPOSALS). This counts the LEDGER
     — the record #514 was filed on. `pending` is what the SessionStart banner
-    reports; `unemittable` is the #646 subset of it that no amount of reflecting
-    can clear.
+    reports; `parked` is the below-threshold subset `reconcile --apply` took out of
+    it (techne#870), counted apart rather than dropped.
     """
     conn = connect(config.db_path)
     try:
         row = conn.execute(
             "SELECT count(*) AS total, "
-            "       sum(drained_at IS NULL) AS pending, "
-            "       min(CASE WHEN drained_at IS NULL THEN enqueued_at END) AS oldest "
+            "       sum(drained_at IS NOT NULL) AS drained, "
+            "       sum(drained_at IS NULL AND parked_at IS NULL) AS pending, "
+            "       sum(drained_at IS NULL AND parked_at IS NOT NULL) AS parked, "
+            "       min(CASE WHEN drained_at IS NULL AND parked_at IS NULL "
+            "                THEN enqueued_at END) AS oldest "
             "  FROM reflection_queue"
         ).fetchone()
         sessions = [
             r["session_id"]
             for r in conn.execute(
-                "SELECT DISTINCT session_id FROM reflection_queue WHERE drained_at IS NULL"
+                "SELECT DISTINCT session_id FROM reflection_queue "
+                "WHERE drained_at IS NULL AND parked_at IS NULL"
             ).fetchall()
         ]
     finally:
         conn.close()
-    pending = row["pending"] or 0
     stats = {
         "total": row["total"] or 0,
-        "pending": pending,
-        "drained": (row["total"] or 0) - pending,
+        "pending": row["pending"] or 0,
+        "parked": row["parked"] or 0,
+        "drained": row["drained"] or 0,
         "sessions_pending": len(sessions),
         "oldest_pending": row["oldest"],
     }
@@ -1381,46 +1492,106 @@ def emit_reflection_pass(
     if limit is None:
         limit = config.reflect.emit_max_threads
     batch = batch[:limit]
-    # Trim by serialized size to a char budget (proxy for the transport token cap),
-    # keeping >=1 prompt so a lone huge thread still makes progress. Single O(n) pass
-    # — accumulate a prefix that fits — rather than re-dumping the whole batch per pop.
     max_chars = config.reflect.emit_max_chars
-    kept, running = [], 2  # 2 = the enclosing "[]"
-    for item in batch:
-        item_len = len(json.dumps(item)) + 1  # + separator headroom
-        if kept and running + item_len > max_chars:
-            break
-        kept.append(item)
-        running += item_len
-    batch = kept if kept else batch[:1]
 
-    # Cursor-relative truncation: `remaining` counts threads NOT YET emitted across all
-    # passes (total minus the cumulative emitted set), so a multi-pass drain reports its
-    # true shortfall and reaches 0 only when the whole session is done (techne#269).
-    newly = [_cursor_key(item) for item in batch]
-    # RECONCILE, DO NOT JUST APPEND (Prudence, #734 r1). Before this the cursor was only
-    # ever read and appended to, and THAT is what made every remaining #733 symptom
-    # permanent rather than transient:
-    #   * A key that no longer renders — a drifted `prompt_hash` from the None-thread_id
-    #     fallback, or a queue row rebuilt for a thread that is no longer emittable —
-    #     stayed in the set forever, so the set grew without bound (measured: 1,2,3,4,5,6
-    #     across six passes) and `len(emitted) > total` became permanent.
-    #   * The rebuild path could itself WRITE an over-full marker in the new format, so
-    #     it never took the rebuild path again and recorded `remaining: 0` while reading
-    #     pending — internally incoherent.
-    # Intersecting with what is renderable now makes the set describe REALITY at write
-    # time. A dropped key is re-offered next pass, which costs a prompt; leaving it in
-    # cost a cursor nobody could clear.
-    emitted_ids = sorted((already | set(newly)) & current_ids)
-    truncated = len(emitted_ids) < total
-    # CLAMPED. A negative `remaining` is what an unstable cursor key produced for two
-    # months, and it reaches the operator through the SessionStart banner (techne#733).
-    remaining = max(0, total - len(emitted_ids))
+    # #646: queue rows this session owes that no emit can render. Reported, never
+    # drained. Computed BEFORE the trim because its note is part of the payload the
+    # trim has to fit (techne#993), and from the detection this pass already holds
+    # rather than two more (techne#805).
+    superseded, below = _split_unemittable(config, session_id, threads, observations)
+    # A PARKED ROW THIS PASS CAN RENDER IS OWED AGAIN (techne#870) — the lowered-floor
+    # route back, which `enqueue_reflection_debt` never sees because nothing re-enqueues
+    # an ended session. Emit holds the fact, so emit clears it.
+    parked = _parked_thread_ids(config, session_id)
+    if parked - set(superseded) - set(below):
+        conn = connect(config.db_path)
+        try:
+            _unpark(conn, parked - set(superseded) - set(below))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _pass_result(kept: list[dict]) -> tuple[dict, list[str], int]:
+        """The result this pass would return for *kept*, with its cursor math.
+
+        A function so the trim below can measure the WHOLE payload for a candidate
+        prefix — envelope and notes included — before committing to it (techne#993).
+        """
+        # Cursor-relative truncation: `remaining` counts threads NOT YET emitted across
+        # all passes (total minus the cumulative emitted set), so a multi-pass drain
+        # reports its true shortfall and reaches 0 only when the whole session is done
+        # (techne#269).
+        newly = [_cursor_key(item) for item in kept]
+        # RECONCILE, DO NOT JUST APPEND (Prudence, #734 r1). Before this the cursor was
+        # only ever read and appended to, and THAT is what made every remaining #733
+        # symptom permanent rather than transient:
+        #   * A key that no longer renders — a drifted `prompt_hash` from the
+        #     None-thread_id fallback, or a queue row rebuilt for a thread that is no
+        #     longer emittable — stayed in the set forever, so the set grew without
+        #     bound (measured: 1,2,3,4,5,6 across six passes) and `len(emitted) > total`
+        #     became permanent.
+        #   * The rebuild path could itself WRITE an over-full marker in the new format,
+        #     so it never took the rebuild path again and recorded `remaining: 0` while
+        #     reading pending — internally incoherent.
+        # Intersecting with what is renderable now makes the set describe REALITY at
+        # write time. A dropped key is re-offered next pass, which costs a prompt;
+        # leaving it in cost a cursor nobody could clear.
+        ids = sorted((already | set(newly)) & current_ids)
+        # CLAMPED. A negative `remaining` is what an unstable cursor key produced for
+        # two months, and it reaches the operator through the SessionStart banner
+        # (techne#733).
+        left = max(0, total - len(ids))
+        res = {"session_id": session_id, "count": len(kept), "batch": kept}
+        if len(ids) < total:
+            res["truncated"] = True
+            res["remaining"] = left
+            res["note"] = (
+                f"Session has {total} threads; emitted {len(kept)} this pass (cap={limit}). "
+                f"{left} not yet emitted — re-emit with the same session_id (the "
+                "per-thread cursor auto-resumes from where this pass stopped) to drain "
+                "the rest."
+            )
+        if superseded or below:
+            res["unemittable_queued"] = len(superseded) + len(below)
+            res["unemittable_superseded"] = len(superseded)
+            res["unemittable_below_threshold"] = len(below)
+            # NUMBERS THE DATABASE PRODUCED, NOT PROSE (techne#805). The note used to
+            # say "either … or" and send the operator to `reconcile` to find out which,
+            # when this function already knew — and a substring pin on the prose was
+            # defeated by a rewrite that kept every token while asserting one
+            # population where there are two.
+            res["unemittable_note"] = (
+                f"{len(superseded) + len(below)} queued thread(s) for this session cannot "
+                f"be drained by reflecting: {len(superseded)} superseded (retire with "
+                f"`techne reflect reconcile --apply`), {len(below)} below "
+                "reflect.min_observations_per_thread "
+                f"({config.reflect.min_observations_per_thread}) (`reconcile --apply` "
+                "parks these so the banner stops counting them as owed). Do not delete "
+                "them by hand: the below-threshold rows are the only visible evidence of "
+                "tenishai/techne#646."
+            )
+        return res, ids, left
+
+    # Trim to a char budget MEASURED ON WHAT IS SENT (techne#993). This summed compact
+    # `json.dumps(item)` per item while the MCP server sends `json.dumps(result,
+    # indent=2)` — envelope, notes and all — so the bytes on the wire always exceeded
+    # the bytes budgeted, and results the trim had passed were refused by the client.
+    # Grow the prefix while the whole payload fits, keeping >=1 prompt so a lone huge
+    # thread still makes progress. Each step re-serializes the whole candidate
+    # result, so this is quadratic in the kept prefix, bounded by `limit` and the
+    # budget.
+    kept = batch[:1]
+    for n in range(2, len(batch) + 1):
+        if _sent_chars(_pass_result(batch[:n])[0]) > max_chars:
+            break
+        kept = batch[:n]
+    batch = kept
+    result, emitted_ids, remaining = _pass_result(batch)
     # A lone thread that alone exceeds the budget can't be delivered whole. Marking
     # the session emitted here would silently skip it — footgun 3, unchanged (Prudence,
     # #268). Detect it, leave the cursor UNADVANCED so the auto-trigger keeps surfacing
     # it, and flag the payload loudly.
-    oversized = len(batch) == 1 and len(json.dumps(batch)) > max_chars
+    oversized = len(batch) == 1 and _sent_chars(result) > max_chars
     # A COMPLETED-BUT-EMPTY PASS MUST STILL WRITE (Prudence, #734 r1). The old guard was
     # `bool(batch) and not oversized`, so once everything was emitted the marker could
     # never be rewritten — and a session carrying a legacy or over-full cursor then read
@@ -1480,15 +1651,6 @@ def emit_reflection_pass(
         finally:
             conn.close()
 
-    result = {"session_id": session_id, "count": len(batch), "batch": batch}
-    if truncated:
-        result["truncated"] = True
-        result["remaining"] = remaining
-        result["note"] = (
-            f"Session has {total} threads; emitted {len(batch)} this pass (cap={limit}). "
-            f"{remaining} not yet emitted — re-emit with the same session_id (the "
-            "per-thread cursor auto-resumes from where this pass stopped) to drain the rest."
-        )
     if oversized:
         result["oversized"] = True
         result["note"] = (
@@ -1499,27 +1661,16 @@ def emit_reflection_pass(
             "blocks every thread after it in the session — the session remains pending "
             "until per-thread chunking lands (#269 follow-up)."
         )
-    # #646: surface queue rows this session owes that no emit can render. Reported,
-    # never drained — see unemittable_queue_rows.
-    stuck = unemittable_queue_rows(config, session_id)
-    if stuck:
-        result["unemittable_queued"] = len(stuck)
-        # NAMES THE MEASURED CAUSE AND THE REMEDY (techne#795). This used to tell the
-        # operator every stuck row was below the observation threshold, which is true
-        # of only one of the two populations, and to attribute it to a cause techne#793
-        # measured and refuted.
-        result["unemittable_note"] = (
-            f"{len(stuck)} queued thread(s) for this session cannot be drained by "
-            "reflecting: either the thread is absent from the session's current "
-            "detection (superseded — retire these with `techne reflect reconcile`), or "
-            "it is still current but now below reflect.min_observations_per_thread "
-            f"({config.reflect.min_observations_per_thread}), so no prompt can render "
-            "for it. `techne reflect reconcile` prints the split, across all sessions. Do "
-            "not delete them by "
-            "hand: the below-threshold rows are the only visible evidence of "
-            "tenishai/techne#646."
-        )
     return result
+
+
+def _sent_chars(result: dict) -> int:
+    """Length of *result* as the MCP server serializes it (techne#993).
+
+    MUST MATCH `mcp_server.handle_request`'s `json.dumps(result, indent=2)`. A budget
+    measured on any other serialization is a budget for a string nobody sends.
+    """
+    return len(json.dumps(result, indent=2))
 
 
 def ingest_one_and_drain(

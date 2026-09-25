@@ -881,3 +881,215 @@ def test_a_stored_parent_link_survives_a_turn_that_cannot_rederive_it(tmp_path):
         "`excluded.parent_thread_id` is NULL here; it must be COALESCEd with the stored "
         "value, because there is no integrity reason to ever clear this column."
     )
+
+
+# ------------------------------------ #805 / #870: the split as numbers, and parking
+
+
+def _one_of_each(tmp_path):
+    """A session owing exactly one superseded row and one below-threshold row.
+
+    The superseded row is the ghost-partition shape used above. The below-threshold row
+    is the session's real thread, pushed under the floor by raising it after enqueue —
+    the lowered/raised-floor route #870 names, not the retracted #646 cause.
+    """
+    from techne.core.database import connect
+    from techne.core.reflect import enqueue_reflection_debt
+    from techne.core.state import start_session
+    from techne.lifecycle import run_session_end
+
+    cfg = _config(tmp_path, min_obs=2)
+    sid = start_session(cfg.db_path, project_path="/tmp/p", agent_identity="t")
+    _add(cfg, sid, 6, start_hour=12)
+    run_session_end(cfg, sid)
+    conn = connect(cfg.db_path)
+    try:
+        real = [r["thread_id"] for r in conn.execute(
+            "SELECT thread_id FROM reflection_queue WHERE session_id = ?", (sid,))]
+        conn.execute(
+            "INSERT INTO threads (id, session_id, thread_num, label, summary, status) "
+            "VALUES ('t-ghost-partition', ?, 99, 'ghost', 's', 'active')",
+            (sid,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    assert len(real) == 1, f"fixture expected one real queued thread, got {real}"
+    enqueue_reflection_debt(cfg.db_path, sid, thread_ids=["t-ghost-partition"])
+    cfg.reflect.min_observations_per_thread = 9999
+    return cfg, sid, real[0]
+
+
+def test_emit_reports_the_unemittable_split_as_numbers(tmp_path):
+    """techne#805: the note prints two numbers the database produced, not prose.
+
+    A substring pin on "superseded"/"below"/"reconcile" was defeated by a rewrite that
+    kept every token while asserting one population. A note that claims every row is
+    below-threshold cannot print `1 superseded` here."""
+    from techne.core.reflect import emit_reflection_pass
+
+    cfg, sid, _ = _one_of_each(tmp_path)
+    result = emit_reflection_pass(cfg, sid)
+
+    assert result["unemittable_queued"] == 2
+    assert result["unemittable_superseded"] == 1
+    assert result["unemittable_below_threshold"] == 1
+    note = result["unemittable_note"]
+    assert "1 superseded" in note and "1 below" in note, note
+
+
+def _pending_ids(cfg):
+    from techne.core.reflect import pending_reflection_queue
+
+    return {q["thread_id"] for q in pending_reflection_queue(cfg.db_path)}
+
+
+def test_reconcile_apply_parks_below_threshold_rows_out_of_the_debt(tmp_path):
+    """techne#870: a below-threshold row leaves the actionable debt but not the table.
+
+    Parking is not draining. The row keeps `drained_at` NULL, `reconcile` still reports
+    it as below_threshold, and a dry run changes nothing."""
+    from techne.core.database import connect
+    from techne.core.reflect import (
+        parked_reflection_count,
+        reconcile_reflection_queue,
+        reflection_debt_stats,
+    )
+
+    cfg, sid, real = _one_of_each(tmp_path)
+
+    dry = reconcile_reflection_queue(cfg, apply=False)
+    assert dry["below_threshold"] == 1 and dry["parked"] == 0
+    assert real in _pending_ids(cfg), "a dry run parked a row"
+
+    applied = reconcile_reflection_queue(cfg, apply=True)
+    assert applied["parked"] == 1
+    assert real not in _pending_ids(cfg), "a parked row is still counted as owed"
+    assert parked_reflection_count(cfg.db_path) == (1, 1)
+    stats = reflection_debt_stats(cfg)
+    assert stats["pending"] == 0 and stats["parked"] == 1 and stats["drained"] == 0
+
+    conn = connect(cfg.db_path)
+    try:
+        row = conn.execute(
+            "SELECT drained_at, parked_reason FROM reflection_queue WHERE thread_id = ?",
+            (real,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None and row["drained_at"] is None, "parking drained or deleted the row"
+    assert row["parked_reason"] == "below_threshold"
+
+    again = reconcile_reflection_queue(cfg, apply=True)
+    assert again["below_threshold"] == 1, "a parked row vanished from reconcile's report"
+    assert again["parked"] == 0
+
+
+def test_a_parked_row_unparks_when_it_renders_again(tmp_path):
+    """techne#870: parking is about the CURRENT threshold. Each route back un-parks:
+    reconcile re-checking, emit rendering the thread, and session_end re-enqueueing it."""
+    from techne.core.reflect import (
+        emit_reflection_pass,
+        enqueue_reflection_debt,
+        reconcile_reflection_queue,
+    )
+
+    def _parked(tmp):
+        cfg, sid, real = _one_of_each(tmp)
+        reconcile_reflection_queue(cfg, apply=True)
+        assert real not in _pending_ids(cfg)
+        cfg.reflect.min_observations_per_thread = 2  # the floor comes back down
+        return cfg, sid, real
+
+    cfg, _, real = _parked(tmp_path / "reconcile")
+    assert reconcile_reflection_queue(cfg, apply=True)["unparked"] == 1
+    assert real in _pending_ids(cfg)
+
+    cfg, sid, real = _parked(tmp_path / "emit")
+    emit_reflection_pass(cfg, sid)
+    assert real in _pending_ids(cfg), "emit rendered a parked thread and left it parked"
+
+    cfg, sid, real = _parked(tmp_path / "enqueue")
+    enqueue_reflection_debt(cfg.db_path, sid, thread_ids=[real])
+    assert real in _pending_ids(cfg), "re-enqueueing an emittable thread left it parked"
+
+
+def test_the_banner_counts_parked_rows_apart_from_the_debt(tmp_path):
+    """techne#870: the debt figure is what reflecting can drain, and it names a drainable
+    row as the place to start. Parked rows get their own line, not silence."""
+    from techne.core.reflect import reconcile_reflection_queue
+    from techne.hooks.session_start import _run_phases_2_to_9
+
+    cfg, _, _ = _one_of_each(tmp_path)
+    cfg.reflect.enabled = True
+    reconcile_reflection_queue(cfg, apply=True)
+
+    parts: list[str] = []
+    _run_phases_2_to_9(
+        cfg,
+        {"cwd": str(tmp_path), "session_id": "other-session"},
+        run_ts="2026-01-01T00:00:00+00:00",
+        db_path=cfg.db_path,
+        output_parts=parts,
+        failures=[],
+    )
+    text = "\n".join(parts)
+    assert "1 queued thread(s) across 1 session(s) are parked" in text, text
+    # --apply retired the superseded ghost, so the one undrained row is parked and
+    # nothing is drainable: no debt figure, and no row offered as the place to start.
+    assert "queued for reflection" not in text, text
+
+
+def test_v28_adds_the_parked_columns_to_an_existing_queue(tmp_path):
+    """The upgrade path, not just a fresh init (Temperance, #1054). A v27 store's queue
+    gains both columns with the declaration a fresh store has, existing rows come
+    through unparked, and a replay of the step is a no-op rather than a crash."""
+    import sqlite3
+
+    from techne.core.database import _migrate, init_db
+
+    def _decl(conn):
+        return {
+            r[1]: (r[2], r[3], r[4])
+            for r in conn.execute("PRAGMA table_info(reflection_queue)")
+            if r[1] in ("parked_at", "parked_reason")
+        }
+
+    init_db(tmp_path / "fresh.db")
+    fresh = sqlite3.connect(tmp_path / "fresh.db")
+    want = _decl(fresh)
+    fresh.close()
+
+    db = tmp_path / "v27.db"
+    init_db(db)
+    conn = sqlite3.connect(db)
+    try:
+        # Rebuilt in its v27 shape rather than via DROP COLUMN: older SQLite (CI's)
+        # cannot re-parse a CREATE TABLE carrying inline comments after a drop.
+        conn.execute("DROP TABLE reflection_queue")
+        conn.execute(
+            "CREATE TABLE reflection_queue ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " session_id TEXT NOT NULL REFERENCES sessions(id),"
+            " thread_id TEXT NOT NULL UNIQUE REFERENCES threads(id) ON DELETE CASCADE,"
+            " enqueued_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+            " drained_at TIMESTAMP)"
+        )
+        conn.execute("INSERT INTO sessions (id, project_path) VALUES ('s', '/p')")
+        conn.execute(
+            "INSERT INTO threads (id, session_id, thread_num, label, summary, status) "
+            "VALUES ('t', 's', 1, 'l', 's', 'active')"
+        )
+        conn.execute("INSERT INTO reflection_queue (session_id, thread_id) VALUES ('s', 't')")
+        conn.execute("DELETE FROM schema_version WHERE version = 28")
+        conn.commit()
+        assert _decl(conn) == {}
+
+        _migrate(conn, 27, 28)
+        assert _decl(conn) == want and len(want) == 2
+        assert conn.execute("SELECT parked_at FROM reflection_queue").fetchone()[0] is None
+
+        conn.execute("DELETE FROM schema_version WHERE version = 28")
+        _migrate(conn, 27, 28)  # a replayed step must not die on "duplicate column"
+    finally:
+        conn.close()

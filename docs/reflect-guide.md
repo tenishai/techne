@@ -124,8 +124,9 @@ tell afterwards whether a person or an agent's bulk drain made the call.
 running it. Each call delivers the next batch, advances a per-session cursor
 (`reflect:emitted:<session>`) *when it delivered something*, and tells you what is left in
 `truncated`, `remaining` and `note`. Two limits shape the slice, both configurable:
-`reflect.emit_max_threads` (25) and `reflect.emit_max_chars` (100,000), whichever binds
-first.
+`reflect.emit_max_threads` (25) and `reflect.emit_max_chars` (45,000), whichever binds
+first. The char budget is measured on the whole result as the MCP server sends it
+(indent=2 JSON, notes included), not on the prompts alone (techne#993).
 
 So draining a session is a **loop**, not a command:
 
@@ -182,18 +183,20 @@ reads only `/tmp/batch.json` cannot see any of the three signals this loop turns
 
 - The batch goes to **disk instead of into the model's context**, so the agent reads it
   thread by thread rather than carrying tens of kB of rendered prompts in-window.
-- **`emit_max_chars` is set above what the client will accept.** The 14 emit calls this
-  store has had refused by the client's tool-result cap ran 56,974–98,755 characters —
-  every one of them *inside* the 100,000 budget. A refusal is not silent data loss (the
+- **MCP results have a hard ceiling, and emit used to default above it.** The 14 emit calls
+  this store had refused by the client's tool-result cap ran 56,974–98,755 characters —
+  every one of them *inside* the old 100,000 budget, which was also measured on compact JSON
+  while the server sends indent=2 (techne#993). The default is now 45,000, measured on the
+  result as sent, about 20% under the smallest refusal. A refusal is not silent data loss (the
   harness spills the payload to a file and hands back the path), but it does cost you the
   round trip.
 
   What that sample can and cannot tell you is worth being precise about, because refusals
   are one-sided evidence. The smallest refusal bounds the ceiling **from above**: it is at
   or below 56,974 characters. Nothing here bounds it from *below* — that would take the
-  largest result the client *accepted*, which this store does not record. So the honest
-  advice is **set `emit_max_chars` under the smallest refusal you have observed, with
-  margin**, rather than any particular number.
+  largest result the client *accepted*, which this store does not record. So if refusals
+  still happen, the honest advice is **set `emit_max_chars` under the smallest refusal you
+  have observed, with margin**, rather than any particular number.
 
   And the budget is not an absolute bound in any case: the trim loop keeps the first item
   unconditionally, so a lone thread larger than the budget is still delivered whole.
@@ -206,7 +209,8 @@ reads only `/tmp/batch.json` cannot see any of the three signals this loop turns
 `emit` may report fewer prompts than the queue has rows, and say so:
 
 ```json
-{ "count": 0, "unemittable_queued": 7, "unemittable_note": "…tenishai/techne#646" }
+{ "count": 0, "unemittable_queued": 7, "unemittable_superseded": 2,
+  "unemittable_below_threshold": 5, "unemittable_note": "7 queued thread(s)… 2 superseded… 5 below…" }
 ```
 
 Those rows are **real debt whose prompt is impossible**, and they come in two kinds. The
@@ -220,7 +224,10 @@ distinction decides what you should do about them, so it is worth keeping straig
 - **Below threshold** — the id *is* current, but re-partitioning left the thread under
   `reflect.min_observations_per_thread`, so no prompt can render for it. **Leave these
   standing.** They are the population techne#646 exists to keep visible, and `reconcile`
-  deliberately does not touch them.
+  never deletes them. `reconcile --apply` *parks* them (techne#870): the row stays
+  undrained and in the table, but the SessionStart banner stops counting it as owed and
+  lists it on a separate line. A parked row un-parks by itself when its thread renders
+  again (a lowered floor, or a re-detection that hands it observations back).
 
 Two more populations are the opposite shape: their prompts render perfectly well, and
 what separates them is what happens on the next `emit`.
@@ -272,8 +279,9 @@ because `run_session_end` replaced the boundary table but not the thread table. 
 "evidence, not residue" instruction still holds — but only for the below-threshold kind.
 Blanket-draining is still wrong; retiring a provably-superseded row is not draining.
 
-So the headline debt number overstates payable work by however many superseded and
-below-threshold rows you have. Before a drain, run `reconcile` and read the split —
+So until `reconcile --apply` has run, the headline debt number overstates payable work by
+however many superseded and below-threshold rows you have. Before a drain, run `reconcile`
+and read the split —
 otherwise you are measuring against a target you cannot reach. Orphaned rows are the
 exception: they *are* payable, which is why they self-heal rather than being retired.
 
@@ -303,8 +311,8 @@ exception: they *are* payable, which is why they self-heal rather than being ret
 >   keep writing to the old destination with no error. Say it, and offer a restart.
 > - They are about to drain a large session through `techne_reflect_emit` — **offer the
 >   `-o` route instead**, and say why: the batch lands on disk rather than in context, and
->   `emit_max_chars` defaults *above* what clients accept, so emit results get refused at
->   sizes techne considers in-budget (lower it if that is happening).
+>   an MCP result the client refuses costs a round trip (lower `emit_max_chars` if refusals
+>   are still happening).
 > - They treat one `emit` call as having drained a session — **emit is a cursor**, not a
 >   dump: one bounded slice per call, so draining means looping until the batch comes back
 >   empty, or comes back `oversized`, which never empties and must stop instead.
@@ -322,14 +330,13 @@ exception: they *are* payable, which is why they self-heal rather than being ret
 > `raw_response` (`scope`/`type`/`content`/`tags`/`confidence`) →
 > `techne reflect ingest /tmp/b.json` → **emit again for the same session until the batch
 > comes back empty, or comes back `oversized`.** Emit delivers one bounded slice per call
-> (25 threads or 100k chars, whichever binds first) and advances a cursor;
+> (25 threads or 45k chars, whichever binds first) and advances a cursor;
 > `truncated` / `remaining` / `note` tell you what is left. Stopping after one pass silently
 > leaves most of a large session undrained — but `oversized` means a single thread exceeds
 > the budget and the cursor will NOT advance, so looping re-answers that same prompt
 > forever. On `oversized`, stop and tell the operator. Prefer the `-o` route over the MCP
-> tool: it keeps the batch on disk instead of in your context, and `emit_max_chars` defaults
-> above what clients accept, so MCP emit results can be refused at sizes techne considers
-> in-budget. The `-o` file holds only the batch array — `truncated`, `remaining` and
+> tool: it keeps the batch on disk instead of in your context, and an MCP emit result the
+> client refuses costs a round trip. The `-o` file holds only the batch array — `truncated`, `remaining` and
 > `oversized` do NOT appear in it; the CLI prints `note` to stderr, so read stderr too or
 > you will never see the signal that stops the loop.
 >

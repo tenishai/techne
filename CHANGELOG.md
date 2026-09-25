@@ -50,6 +50,29 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- `techne_reflect_emit` results fit under Claude Code's MCP result cap (#993). The size
+  trim summed compact JSON per item while the server sends the whole result as indent=2
+  JSON, and its 100,000-char default sat above the 25K-token cap: the store has recorded
+  refusals from 56,974 chars up, and #993 saw 70,004- and 100,849-char results refused. The trim now measures the
+  serialized result the server sends, and `reflect.emit_max_chars` defaults to 45,000.
+  CLI `emit -o` slices get smaller by the same amount.
+- Reflection debt no longer counts rows reflecting cannot drain (#870, #805). `techne
+  reflect reconcile --apply` now parks below-threshold rows (schema v28 adds
+  `reflection_queue.parked_at`/`parked_reason`): they stay undrained and in the table,
+  but leave the SessionStart debt figure and `reflect stats`' `pending`, and the banner
+  counts them on their own line. A parked row un-parks when its thread renders again,
+  through session-end re-enqueue, `emit`, or the next `reconcile`. `emit` reports the
+  split as numbers, `unemittable_superseded` and `unemittable_below_threshold`, and
+  works it out from the detection it already holds instead of running two more.
+- Consolidation Tier 1 finds reworded duplicates (#987). It queried FTS with each row's
+  whole content, an implicit AND that only the row itself matched, so it formed almost
+  no clusters. It now queries with the row's top tf-idf terms that some other live row
+  also holds. On a copy of the main store it pairs rows such as knowledge 13 with 210,
+  where before it returned self-only hits.
+- Consolidation no longer proposes merging `document_card` rows (#823). Cards are left
+  out of clustering, and `consolidate_ingest` refuses a merge naming a card (counted as
+  `refused`), since a merge supersedes the cards' `doc:` pointers and mints a
+  pointerless `fact`.
 - Reminder notes and coord message bodies are now redacted before storage (#1037).
   `reminders.add()` and `coord.send()` wrote free text verbatim, so a token pasted
   into `techne_reminder_add` or `techne_send` reached `techne.db` as-is, and a coord
