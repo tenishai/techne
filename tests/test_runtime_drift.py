@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -22,10 +23,7 @@ def marker(tmp_path, monkeypatch):
     return p
 
 
-MOD = "techne.core.runtime_drift"
-
-
-def _change(watch, path: Path) -> None:
+def _change(watch, name: str, path: Path) -> None:
     """Make `path` differ from the baseline `watch` recorded for it.
 
     Sets an explicit mtime relative to the RECORDED value rather than calling
@@ -33,13 +31,42 @@ def _change(watch, path: Path) -> None:
     wall-clock advancing far enough to be visible at filesystem granularity is a test
     that can pass or fail for reasons unrelated to the code.
     """
-    os.utime(path, (0, watch.baseline[MOD] + 10))
+    os.utime(path, (0, watch.baseline[name] + 10))
 
 
 def _move(path: Path) -> None:
     """A pull: the ref moves, so the reflog's mtime changes."""
     time.sleep(0.01)
     path.write_text(path.read_text() + "x")
+
+
+@pytest.fixture
+def tearable_module(tmp_path):
+    """A synthetic 'already loaded' module, backed by its own file under `tmp_path`.
+
+    NOT `techne.core.runtime_drift` itself (techne#1044). That file is on-disk once,
+    shared by every xdist worker process running this test file, and `_module_mtimes`
+    walks EVERY loaded `techne.*` module including it — so it is also in the baseline
+    of any OTHER test in this file that calls `begin()`, whether or not that test ever
+    names it. Four tests here used to `os.utime` it directly to simulate a tear. Under
+    `-n 4` a worker's call landed between a DIFFERENT worker's `begin()` and `poll()` on
+    the identical path, so that worker's own (untouched) test saw the real module torn
+    and failed — reproduced locally: pairing just `test_a_module_changing_under_us_is_a_tear`
+    with `test_a_deployment_that_touches_nothing_we_loaded_is_silent` under `-n 2` failed
+    about 13/20 runs. A synthetic module's file lives only under this test's own
+    `tmp_path`, so no other process can reach it.
+    """
+    name = "techne_test_tearable"
+    path = tmp_path / "tearable.py"
+    path.write_text("x = 1")
+    os.utime(path, (0, 1_000_000.0))
+    mod = types.ModuleType(name)
+    mod.__file__ = str(path)
+    sys.modules[name] = mod
+    try:
+        yield name, path
+    finally:
+        del sys.modules[name]
 
 
 def test_a_packaged_install_has_nothing_to_watch(tmp_path, monkeypatch):
@@ -71,47 +98,56 @@ def test_a_deployment_that_touches_nothing_we_loaded_is_silent(marker):
     assert rd.poll(watch) is None
 
 
-def test_a_module_changing_under_us_is_a_tear(marker):
+def test_a_module_changing_under_us_is_a_tear(marker, tearable_module):
     """The dangerous state, and the one only self-introspection can see: we keep serving
     the OLD definition of what we already loaded, while anything imported from here on
     comes from the NEW source. Reachable in practice — mcp_server.py carries 46
-    function-local `from techne…` imports."""
+    function-local `from techne…` imports.
+
+    Uses `tearable_module`, not `techne.core.runtime_drift` itself — see that fixture
+    (techne#1044) for why mutating the real module's file races other xdist workers.
+    """
+    name, path = tearable_module
     watch = rd.begin(None, ttl=0.0)
     _move(marker)
-    mod = Path(sys.modules["techne.core.runtime_drift"].__file__)
-    _change(watch, mod)
+    _change(watch, name, path)
 
     drift = rd.poll(watch)
     assert drift is not None
-    assert "techne.core.runtime_drift" in drift.torn
-    assert "techne.core.runtime_drift" in drift.message()
+    assert name in drift.torn
+    assert name in drift.message()
 
 
-def test_one_warning_per_deployment(marker):
+def test_one_warning_per_deployment(marker, tearable_module):
     """This condition does NOT self-clear — it persists for the life of the process. So
     unlike a SessionStart banner, repeating it would repeat FOREVER, on every tool call.
-    Same discipline as `capabilities.invitation`: say it once."""
+    Same discipline as `capabilities.invitation`: say it once.
+
+    Uses `tearable_module`, not the real `techne.core.runtime_drift` file — see that
+    fixture (techne#1044) for why.
+    """
+    name, path = tearable_module
     watch = rd.begin(None, ttl=0.0)
     _move(marker)
-    os.utime(Path(sys.modules["techne.core.runtime_drift"].__file__), None)
+    os.utime(path, None)
 
     assert rd.poll(watch) is not None
     assert rd.poll(watch) is None, "a repeated warning is how a true signal becomes noise"
 
 
-def test_a_second_pull_warns_again(marker):
+def test_a_second_pull_warns_again(marker, tearable_module):
     """Suppression is keyed on the marker mtime, NOT a one-shot flag. A second deploy
     during the same process is new information and must not be swallowed by the first
     one's suppression."""
+    name, path = tearable_module
     watch = rd.begin(None, ttl=0.0)
-    mod = Path(sys.modules["techne.core.runtime_drift"].__file__)
 
     _move(marker)
-    os.utime(mod, None)
+    os.utime(path, None)
     assert rd.poll(watch) is not None
 
     _move(marker)
-    os.utime(mod, None)
+    os.utime(path, None)
     assert rd.poll(watch) is not None, "a second deployment is not the first one repeated"
 
 
@@ -164,7 +200,7 @@ def test_a_module_without_a_file_is_skipped():
         del sys.modules["techne_namespace_like"]
 
 
-def test_one_warning_per_deployment_at_the_SHIPPED_ttl(marker):
+def test_one_warning_per_deployment_at_the_SHIPPED_ttl(marker, tearable_module):
     """Prudence r1, the finding I did not ask about — and the reason it survived.
 
     `test_one_warning_per_deployment` passes `ttl=0.0`, which makes the TTL branch
@@ -174,11 +210,15 @@ def test_one_warning_per_deployment_at_the_SHIPPED_ttl(marker):
     guard's precondition used as a way to switch the guard off, in my own test.
 
     So this one runs at `DEFAULT_TTL_SECONDS` and polls again immediately.
+
+    Uses `tearable_module`, not the real `techne.core.runtime_drift` file — see that
+    fixture (techne#1044) for why.
     """
+    name, path = tearable_module
     watch = rd.begin(None)
     assert watch.ttl == rd.DEFAULT_TTL_SECONDS
     _move(marker)
-    _change(watch, Path(sys.modules[MOD].__file__))
+    _change(watch, name, path)
 
     watch._checked_at = 0.0  # allow the first real poll
     assert rd.poll(watch) is not None
