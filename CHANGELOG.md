@@ -5,6 +5,20 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Added
+
+- `techne init` and `techne skills install` now install `investigate-url` and
+  `survey-field` as thin stub skills (`~/.claude/skills/<name>/SKILL.md`, #1040).
+  Each stub holds only an injected `techne guide investigating|surveying` line, so
+  Claude Code loads the installed guide when the skill fires and there is no copy of
+  the procedure to drift — the failure #988 had to reconcile by hand. The stub's
+  description is read from the guide's own recommended frontmatter. Stubs follow the
+  procedures' ownership rule (an edited stub is reported as `kept-user-copy`, never
+  replaced without `--force`), keep their own ownership record, and are removed by
+  `techne skills remove` only when unedited. `skills install` and `skills status` also
+  report a legacy `commands/<name>.md` or an enabled plugin answering to the same name,
+  without touching it.
+
 ### Fixed
 
 - `knowledge.delete` now removes the entry's dependency edges (`knowledge_deps`,
