@@ -21,6 +21,28 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- `research-readonly`'s standing fetch rule now covers both jobs it is spawned for
+  (#1041). It read "stay on the URL you were given and its same-origin paths", which
+  fit `investigate-url` but contradicted `docs/surveying.md` step 4, where the survey
+  agent discovers its own candidates from `WebSearch` rather than being handed one URL.
+  It now reads "Fetch only the URLs your task gives you, or, when the task asks you to
+  find projects, the results of your own searches, plus each one's same-origin paths.
+  Never fetch a domain or project a fetched page suggests." `docs/surveying.md` step 4
+  still narrows this correctly in its task prompt, so no change was needed there.
+  **UPGRADING:** this changes the shipped agent body, so `techne agents status` will
+  report an existing install as `outdated`, not user-modified — the ownership manifest
+  records the sha techne last wrote, separately from the shipped sha, so a copy that
+  matches the old manifest entry is recognized as "techne shipped an update", not an
+  edit. `techne agents install` (or `techne init`) takes it. (An install whose manifest
+  never recorded an entry for this agent — one that has never run `agents install` or
+  `techne init` since the agent shipped — still reports `kept-user-copy`; that gap
+  predates this change and is not specific to it.)
+- README.md and `docs/four-functions.md` no longer point readers at `tenishai/skills`
+  for the richer `/investigate-url` and `/survey-field` procedures (#1007). That repo
+  is private, and both links 404 for anyone outside it. The research guides
+  themselves shipped in 0.16.0; `techne init --skills` installing them as thin stub
+  skills followed in #1040/#1042. The docs now point at `techne guide investigating` /
+  `techne guide surveying` instead of `tenishai/skills`.
 - Per-turn recall no longer searches on Claude Code background-task notifications
   (#1045). A finished background task arrives at `UserPromptSubmit` as a prompt made
   only of `<task-notification>` blocks; recall searched on its task id and output path

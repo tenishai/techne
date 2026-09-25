@@ -546,7 +546,7 @@ TRIGGER_WITNESSES = {
     "They are restoring": "test_the_restore_trigger_is_still_all_or_nothing",
     "zero rows": "test_only_the_codex_distinguishes_an_empty_index_from_no_match",
     "rely on `librarian_search` for coverage": "test_nothing_automatically_indexes_transcripts",
-    "why the architect is empty": "test_the_architect_feeder_ships_and_the_research_skills_do_not",
+    "why the architect is empty": "test_the_architect_feeder_and_the_research_guides_both_ship",
     "`reflection_queue`": "test_the_unemittable_reporter_still_refuses_to_drain",
     "reflect.enabled: false": "test_disabling_reflect_silences_the_nudge_but_not_the_debt",
     "whether reflection is running": "test_an_unbound_automatic_pass_is_the_default_posture",
@@ -783,25 +783,32 @@ def test_nothing_automatically_indexes_transcripts(config_free_tmp_home):
     )
 
 
-def test_the_architect_feeder_ships_and_the_research_skills_do_not(config_free_tmp_home):
-    """The architect trigger makes two claims at once: `techne architect add` SHIPS, and the
-    procedures that fill the store in bulk DO NOT. Both are checked, because half of it
-    going stale would make the advice wrong in either direction."""
+def test_the_architect_feeder_and_the_research_guides_both_ship(config_free_tmp_home):
+    """The architect trigger makes two claims at once: `techne architect add` SHIPS, and so
+    do the richer research procedures, as `techne guide investigating` / `techne guide
+    surveying` with `investigate-url` / `survey-field` stub skills (#1007, #1040, #1042).
+    Both are checked, because half of it going stale would make the advice wrong in
+    either direction."""
     import click
 
     from techne.cli import main
+    from techne.docs import guide_names
+    from techne.platforms.claude_code.skills import GUIDE_STUBS
 
     assert "add" in main.commands["architect"].commands, (
         "`techne architect add` no longer ships — the trigger offers a command that is gone"
     )
     assert isinstance(main.commands["architect"], click.Group)
 
-    bundled = {f.stem for f in (REPO / "techne" / "skills").glob("*.md")}
-
-    assert not bundled & {"investigate-url", "survey-field"}, (
-        f"a research skill now ships with techne ({sorted(bundled)}) — four-functions.md "
-        "tells operators they live in tenishai/skills"
+    assert {"investigate-url", "survey-field"} <= GUIDE_STUBS.keys(), (
+        "the research-guide stubs no longer cover investigate-url/survey-field — "
+        "four-functions.md tells operators the richer procedures ship with techne"
     )
+    for stub_name, (guide_name, *_rest) in GUIDE_STUBS.items():
+        assert guide_name in guide_names(), (
+            f"GUIDE_STUBS[{stub_name!r}] names guide {guide_name!r}, which `techne guide` "
+            "does not know — the stub would load nothing"
+        )
 
 
 def test_every_indexed_document_still_carries_a_trigger_block():
