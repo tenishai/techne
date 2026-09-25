@@ -1679,6 +1679,43 @@ class TestCoreRailsAreInstrumented:
         )
         assert self._marker(config, "user_prompt_submit").get("outcome") == "noop:nothing-to-inject"
 
+    def test_user_prompt_submit_records_a_skipped_task_notification(self, config, monkeypatch):
+        """techne#1045: a task notification is skipped, not searched-and-empty. The
+        two outcomes must differ, or the audit cannot tell a quiet rail from a
+        deliberately silent one. The hook check reads LIVE either way; the outcome
+        string is what carries the difference."""
+        from techne.hooks import user_prompt_submit
+
+        config.hooks.per_turn_recall = True
+        prompt = "<task-notification>\n<task-id>t1</task-id>\n</task-notification>"
+        self._run_hook(user_prompt_submit, {"prompt": prompt}, config, monkeypatch)
+        assert self._marker(config, "user_prompt_submit").get("outcome") == "noop:task-notification"
+        verdict = next(r for r in run_checks(config) if r.name == "hook:user_prompt_submit")
+        assert verdict.verdict is Verdict.LIVE, (verdict.verdict, verdict.detail)
+
+    def test_a_skip_is_named_even_when_other_context_is_injected(self, config, monkeypatch):
+        """techne#1045 (Prudence r1 nit): with the seed nudge on, the turn emits and
+        records `ok`; the skip must still be readable from the detail."""
+        from techne.hooks import user_prompt_submit
+
+        config.hooks.per_turn_recall = True
+        config.hooks.per_turn_seed = True
+        prompt = "<task-notification>\n<task-id>t1</task-id>\n</task-notification>"
+        self._run_hook(user_prompt_submit, {"prompt": prompt}, config, monkeypatch)
+        marker = self._marker(config, "user_prompt_submit")
+        assert marker.get("outcome") == "ok"
+        assert "recall skipped: task-notification" in (marker.get("detail") or "")
+
+    def test_a_notification_with_recall_off_is_not_a_recall_skip(self, config, monkeypatch):
+        """techne#1045: with recall off there was nothing to skip."""
+        from techne.hooks import user_prompt_submit
+
+        config.hooks.per_turn_recall = False
+        config.hooks.startup_directive = True
+        prompt = "<task-notification>\n<task-id>t1</task-id>\n</task-notification>"
+        self._run_hook(user_prompt_submit, {"prompt": prompt}, config, monkeypatch)
+        assert self._marker(config, "user_prompt_submit").get("outcome") == "noop:nothing-to-inject"
+
     def test_user_prompt_submit_writes_nothing_when_the_rail_is_disabled(self, config, monkeypatch):
         """Both flags default OFF and this fires on EVERY prompt — a marker write
         for a rail the operator has not enabled would be a per-turn write for no
