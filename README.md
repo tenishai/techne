@@ -654,8 +654,9 @@ hooks:
                               #   cap reported itself as whole. Both are fixed; 500 is now
                               #   only the default when nothing is asked for.
   per_turn_recall_long_prompt_chars: 600 # pasted content is searched on its question lines
-                              #   (#1018); a paste block always counts, transcript text once
-                              #   it is longer than this. Typed prompts are searched as is.
+                              #   (#1018); a paste block always counts, text with lines
+                              #   starting ❯ and ⏺ once it is longer than this. Typed
+                              #   prompts are searched as is.
   timeout_s: 5.0              # wall-clock budget for a hook (grep-assist / per-turn recall degrade to no-op if slow)
 
 conflict:                     # the contradiction rail — which candidate rows reach your model

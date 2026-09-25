@@ -8,9 +8,12 @@ Measured 2026-09-24 on 30 real per_turn_recall turns (method and results in
 PR #1038 and knowledge 3426): each typed question was embedded in the transcript
 around it and wrapped as a paste, and the top five knowledge rows were compared
 with what the typed question alone returned. Searching the whole paste kept
-0.09 of them; searching its question lines kept 0.79. Adding the operator's
-generic wrapper ("what does this mean?") to the question lines dropped that to
-0.60, so the wrapper is used only when the paste holds no question.
+0.09 of them. This module's policy (question lines, with the operator's wrapper
+only when the paste holds no question) kept 0.79; adding the generic wrapper
+("what does this mean?") to the question lines as well dropped that to 0.60.
+On the motivating case (bac6ba10's licensing question, ~3 KB of pasted
+transcript) knowledge 225 and 935 went from absent to ranks 4 and 5, the ranks
+the typed question gets.
 
 Typed prompts are returned unchanged, however long: nothing measured says the
 question-line query serves them better. Only pasted content is rewritten, and
@@ -30,8 +33,10 @@ _PASTE_TAG = re.compile(r'<(/?)pasted_content id="[^"]*">')
 _SYSTEM_REMINDER = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
 
 # What techne's rails render into context, by shape. tests/test_recall_query.py
-# renders the rails themselves and checks each shape here still matches, so a
-# rail whose output changes, or a new rail, fails a test instead of leaking in.
+# renders the recall and codex rails with their real code; the session-start,
+# coord and reminder output is built inline in their hooks, so those samples are
+# written in the rendered shape and each marker is checked against the source.
+# Every entry below must match some sample, or a test fails.
 #   a recalled or Key Knowledge row: "- ⟦techne#N⟧ [type] …"
 _OWN_ROW = re.compile(r"^- ⟦techne#\d+⟧ \[")
 #   a rail's block header: the block runs to the next "## " header or the next
@@ -56,9 +61,10 @@ _OWN_LINE_PREFIXES = (
     "Unread message(s) from a peer Claude session",  # the coord preamble
 )
 
-# A Claude Code transcript carries both turn markers: ❯ opens a user turn, ⏺ an
-# assistant one. A shell prompt (starship, pure, spaceship) also draws ❯, but a
-# shell never prints ⏺, so text counts as transcript only when it has both.
+# A Claude Code transcript starts its lines with turn markers: ❯ opens a user
+# turn, ⏺ an assistant one. A shell prompt (starship, pure, spaceship) also draws
+# ❯, but a shell never prints ⏺, so text counts as transcript only when some line
+# starts with each.
 _USER_TURN = "❯"
 _ASSISTANT_TURN = "⏺"
 
@@ -124,11 +130,15 @@ def build_recall_query(prompt: str, long_prompt_chars: int) -> str:
     """Return the text per-turn recall should search on.
 
     A typed prompt is returned unchanged. Pasted content (a <pasted_content>
-    block, or text longer than ``long_prompt_chars`` carrying both transcript
-    markers) is stripped of techne's own injected lines and searched on its
-    question lines; failing those, on the operator's text around the paste;
-    failing that, on its opening ``long_prompt_chars`` characters. An empty
-    result means the paste held only techne's own injected context.
+    block, or text longer than ``long_prompt_chars`` with a line starting with
+    each transcript marker) is stripped of techne's own injected lines and
+    searched on its question lines; failing those, on the operator's text around
+    the paste; failing that, on its opening ``long_prompt_chars`` characters.
+
+    An operator wrapper longer than ``long_prompt_chars`` is treated as pasted
+    too: its question lines join the query, and it is never used whole. An empty
+    result means the paste held only techne's own injected context and there was
+    no usable wrapper; with a short wrapper, the wrapper is searched instead.
     """
     split = _split_paste(prompt)
     if split is None and not (len(prompt) > long_prompt_chars and _is_transcript(prompt)):

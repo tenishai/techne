@@ -27,13 +27,14 @@ All notable changes to techne are documented here. Format loosely follows
 
 - **Per-turn recall searches pasted content on its question lines** instead of on
   the whole prompt (#1018). Pasted content means a `<pasted_content>` block, or
-  text longer than `hooks.per_turn_recall_long_prompt_chars` (default 600) that
-  carries both of Claude Code's transcript markers, `❯` and `⏺` (a shell prompt
-  draws `❯` but never `⏺`). It is searched on its `❯` user turns and its lines
-  ending in `?`. The operator's text around the paste is used only when the
-  paste holds no question. Measured on 30 real turns with the question embedded
-  in its surrounding transcript: mean top-5 overlap with the typed question's
-  results rose from 0.09 (whole prompt) to 0.79. Inside pasted content, techne's
+  text longer than `hooks.per_turn_recall_long_prompt_chars` (default 600) with
+  lines starting with each of Claude Code's transcript markers, `❯` and `⏺` (a
+  shell prompt draws `❯` but never `⏺`). It is searched on its `❯` user turns
+  and its lines ending in `?`. The operator's text around the paste is used only
+  when the paste holds no question, and a wrapper over the limit contributes only
+  its own question lines. Measured on 30 real turns with the question embedded in
+  its surrounding transcript: mean top-5 overlap with the typed question's
+  results rose from 0.09 (whole prompt) to 0.79 under this policy. Inside pasted content, techne's
   own rail output is stripped first (recalled rows, the session-start banner,
   codex blocks, coord and reminder lines, `<system-reminder>` blocks), so a
   pasted recall block does not re-select the rows it already names. Typed

@@ -68,6 +68,23 @@ def test_long_transcript_text_without_paste_tags_uses_its_question_lines():
     assert build_recall_query(prompt, LIMIT) == QUESTION
 
 
+def test_a_long_wrapper_contributes_only_its_question_lines():
+    long_wrapper = ("context I am adding by hand. " * 30) + "\ndoes the ruling still hold?"
+    prompt = long_wrapper + "\n" + _paste(f"{NOISE}\n❯ {QUESTION}")
+    assert build_recall_query(prompt, LIMIT) == f"does the ruling still hold? {QUESTION}"
+
+
+def test_a_long_wrapper_with_no_question_is_not_the_fallback():
+    long_wrapper = "context I am adding by hand. " * 30
+    prompt = long_wrapper + "\n" + _paste(NOISE)
+    assert build_recall_query(prompt, LIMIT) == NOISE.strip()[:LIMIT]
+
+
+def test_a_short_wrapper_is_searched_when_the_paste_is_only_techne_output():
+    prompt = "what does this mean for us\n" + _paste("- ⟦techne#225⟧ [fact] Max OAuth only")
+    assert build_recall_query(prompt, LIMIT) == "what does this mean for us"
+
+
 def test_a_quoted_line_in_a_paste_is_not_a_question():
     prompt = _paste(f"> see the runbook for the flip steps\n{NOISE}\n❯ {QUESTION}")
     assert build_recall_query(prompt, LIMIT) == QUESTION
@@ -160,6 +177,19 @@ def test_the_session_banner_headers_match_what_session_start_emits():
     ):
         assert header in source, f"session_start no longer emits {header!r}"
     assert "## Key Knowledge" in (HOOKS.parent / "core" / "egress.py").read_text()
+
+
+def test_the_hand_written_rail_samples_match_their_source():
+    """Samples not rendered by real code are pinned to the literals that build them."""
+    health = (HOOKS.parent / "core" / "health.py").read_text()
+    assert 'mark = "✅" if' in health and 'f"\\n## techne {mark}"' in health
+    post = (HOOKS / "post_tool_use.py").read_text()
+    for literal in (
+        'f"📬 {who}',
+        'f"⏰ Reminder: ',
+        '"Unread message(s) from a peer Claude session',
+    ):
+        assert literal in post, f"post_tool_use no longer renders {literal!r}"
 
 
 def test_a_paste_of_only_techne_output_searches_nothing():
