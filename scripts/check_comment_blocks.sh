@@ -3,7 +3,7 @@
 # terse — facts, issue refs, the tradeoff in a line or two. Reasoning goes in the
 # issue and the PR, which are dated and can go stale harmlessly.
 #
-# Counts `#`, `//` and `/* */` runs. NOT docstrings — measured, see tenishai/agents-archive#88.
+# Counts `#` and `//` runs, and `/* */` in .ts/.js/.go. NOT docstrings — see tenishai/agents-archive#88.
 # Refuses rather than warns; a warning is what scrolls past.
 # Escape deliberately:  ALLOW_LONG_COMMENT=1 git commit ...
 set -uo pipefail
@@ -14,14 +14,17 @@ MAX="${COMMENT_BLOCK_MAX:-12}"
 rc=0
 while IFS= read -r f; do
   [[ -z "$f" ]] && continue
-  n=$(git diff --cached -U0 -- "$f" | awk '
+  # /* */ is a comment only in the C-like languages; in .sh/.py it is a glob or text.
+  case "$f" in *.ts|*.js|*.go) cstyle=1 ;; *) cstyle=0 ;; esac
+  n=$(git diff --cached -U0 -- "$f" | awk -v cstyle="$cstyle" '
     /^\+\+\+/ { next }
+    /^@@/ { run = 0; inblk = 0; next }
     /^\+/ {
       line = substr($0, 2); s = line
       sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s)
       is_c = 0
       if (inblk)            { is_c = 1; if (index(s, "*/")) inblk = 0 }
-      else if (s ~ /^\/\*/) { is_c = 1; if (!index(s, "*/")) inblk = 1 }
+      else if (cstyle && s ~ /^\/\*/) { is_c = 1; if (!index(s, "*/")) inblk = 1 }
       else if (s ~ /^(#|\/\/)/) is_c = 1
       if (is_c) { run++; if (run > worst) worst = run } else run = 0
       next
