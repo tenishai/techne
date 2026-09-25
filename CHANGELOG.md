@@ -44,8 +44,9 @@ All notable changes to techne are documented here. Format loosely follows
   rail stays dormant until `hooks.inbound_recall_floor_vec_distance` is set as well,
   and `techne doctor` reports `hook:inbound_recall` as dormant for that reason; the
   floor for inbound text has not been measured yet. The recall pipeline in
-  `user_prompt_submit` is now one function, `recall_block`, used by both rails, with
-  no change to per-turn behaviour.
+  `user_prompt_submit` is now one function, `recall_block`, used by both rails. The
+  one change to per-turn recall: the query builder now runs just before the hook's
+  timeout block rather than inside it.
 
 ### Fixed
 

@@ -1359,8 +1359,11 @@ def main():
     # Inbound recall (techne#1018) — LAST, after the coord block, because it also
     # searches the bodies of the messages that block just delivered. Behind the
     # subagent gate above like the other rails (#930): a subagent's own tool
-    # calls never reach here, and the Agent result it hands back fires this hook
-    # in the parent, which is the hand-back this rail exists for.
+    # calls never reach here. The Agent result it hands back fires this hook in
+    # the parent session: the observation ledger holds those results as "Tool:
+    # Agent" rows with the completed hand-back as Output, which only this hook
+    # writes. Not checked: that agent_id is absent on that call, which the
+    # hooks docs imply ("only when the hook fires inside a subagent call").
     inbound_context = _inject_inbound_recall(
         config, session_id, tool_name, tool_output, coord_bodies
     )

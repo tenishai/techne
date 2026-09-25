@@ -668,7 +668,7 @@ def _build_context(
             #
             # AND THIS COMMENT DISAGREES WITH THE ONE AT THE LOG SITE BELOW,
             # which wins (Prudence, #869 r3). At `char_limit <= 0` every row is
-            # withheld, so `lines` is empty, so `recall_block` is "", so the
+            # withheld, so `lines` is empty, so the recall block is "", so the
             # caller forces BOTH counters to 0 — measured end-to-end with a
             # 3,000-char row withheld in full: `('per_turn_recall', '[]', 0, 0)`.
             # The number computed here never reaches the table, so the claim
@@ -739,9 +739,9 @@ def inbound_recall_armed(config) -> bool:
 def _stamp_prompt_turn(db_path, session_id: str | None) -> None:
     """Reset this session's inbound-recall slot for the new prompt. Best-effort.
 
-    A failure leaves the previous prompt's marker in place, so the rail stays
-    shut (or open) for one more prompt. Never worse than one extra or one missed
-    delivery, and never a lost turn.
+    A failure leaves the previous prompt's marker in place. If that prompt
+    already delivered, this one gets no inbound delivery; if it did not, this one
+    can still deliver once. Either way the cap holds and the turn is not lost.
     """
     if not session_id:
         return
@@ -981,12 +981,6 @@ def main() -> None:
     ):
         sys.exit(0)
 
-    # techne#1018 — open this prompt's delivery slot for the inbound rail, which
-    # runs in PostToolUse and has no turn id of its own. Before recall, so a slow
-    # search cannot leave the previous prompt's claim standing.
-    if inbound_recall_armed(config):
-        _stamp_prompt_turn(config.db_path, data.get("session_id"))
-
     blocks: list[str] = []
 
     # techne#562 — claim this session's deferred SessionStart context, if any.
@@ -1028,6 +1022,14 @@ def main() -> None:
     notification = is_task_notification(prompt)
     # Only a skip when recall would otherwise have run.
     recall_skipped = config.hooks.per_turn_recall and notification
+
+    # techne#1018 — open this prompt's delivery slot for the inbound rail, which
+    # runs in PostToolUse and has no turn id of its own. Not on a task
+    # notification, which is not a prompt: reopening there would let one prompt
+    # and N finished background tasks draw N+1 deliveries. Before recall, so a
+    # slow search cannot leave the previous prompt's claim standing.
+    if inbound_recall_armed(config) and not notification:
+        _stamp_prompt_turn(config.db_path, data.get("session_id"))
 
     # ------------------------------------------------------------------
     # Recall block (techne#109) — durable facts relevant to this prompt. Scope

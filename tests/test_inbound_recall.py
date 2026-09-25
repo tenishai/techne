@@ -314,6 +314,13 @@ def test_coord_message_bodies_are_searched_once(home, monkeypatch, capsys, fake_
     assert _tool(monkeypatch, capsys, "Bash", "ls output") is None
     assert fake_search["queries"] == ["claiming worktree wt-x"]
 
+    # A second message in the same prompt is injected by the coord rail, but
+    # the inbound slot is used, so it is not searched.
+    coord.send(config.db_path, "sess-peer", "second note", to="coord", from_name="peer")
+    ctx = _tool(monkeypatch, capsys, "Bash", "ls output")
+    assert "second note" in ctx and "techne —" not in ctx
+    assert fake_search["queries"] == ["claiming worktree wt-x"]
+
 
 def test_a_subagent_tool_call_gets_nothing(home, monkeypatch, capsys, fake_search):
     """#930: a subagent's own tool calls are gated before every rail."""
@@ -383,3 +390,47 @@ def test_a_lost_claim_delivers_and_logs_nothing(home, fake_search):
     )
     assert (block, rows) == ("", [])
     assert _log() == []
+
+
+def test_a_task_notification_does_not_reopen_the_slot(home, monkeypatch, capsys, fake_search):
+    """A finished background task reaches UserPromptSubmit but is not a prompt."""
+    _config(home, **{**ARMED, "inbound_recall_limit": 1})
+    fake_search["hits"] = [(_seed("row a"), 0.5, "vec"), (_seed("row b"), 0.6, "vec")]
+    _prompt(monkeypatch, capsys)
+    assert _tool(monkeypatch, capsys, "WebFetch", {"result": "page one"}) is not None
+    _prompt(monkeypatch, capsys, "<task-notification><task-id>x</task-id></task-notification>")
+    assert _tool(monkeypatch, capsys, "WebFetch", {"result": "page two"}) is None
+
+
+def test_concurrent_claims_deliver_exactly_once(home, monkeypatch):
+    """Two tool results finishing together: BEGIN IMMEDIATE lets one claim win.
+
+    The read is slowed so every thread would see the slot open without the lock;
+    with it, the others wait on the write lock and then see it used."""
+    import threading
+    import time
+
+    from techne.core import extension_state
+
+    config = _config(home, **ARMED)
+    user_prompt_submit._stamp_prompt_turn(config.db_path, SID)
+    real_get = extension_state.get_state
+
+    def _slow_get(conn, name):
+        out = real_get(conn, name)
+        time.sleep(0.05)
+        return out
+
+    monkeypatch.setattr(extension_state, "get_state", _slow_get)
+    results, barrier = [], threading.Barrier(8)
+
+    def _claim():
+        barrier.wait()
+        results.append(post_tool_use._inbound_slot(config, SID, take=True))
+
+    threads = [threading.Thread(target=_claim) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(results) == ["open"] + ["used"] * 7
