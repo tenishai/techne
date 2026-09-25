@@ -63,12 +63,39 @@ def test_the_description_is_the_one_the_guide_recommends(name):
     assert recommended in skills_mod.render_guide_stub(name)
 
 
-def test_a_description_that_would_break_yaml_is_quoted(monkeypatch):
+@pytest.mark.parametrize(
+    "desc", ["Use when: always", "Use when:", "- a list item", "#hashtag", "a # comment"]
+)
+def test_a_description_that_would_break_yaml_is_quoted(monkeypatch, desc):
+    """Each of these breaks a plain scalar or silently changes its value. The rule is
+    the parser's own round-trip, so the list here is a sample, not the definition."""
+    import yaml
+
     monkeypatch.setattr(
         "techne.docs.bundled_guide",
-        lambda name: "## Make this a skill on your platform\ndescription: Use when: always\n",
+        lambda name: f"## Make this a skill on your platform\ndescription: {desc}\n",
     )
-    assert skills_mod._guide_description("investigating") == '"Use when: always"'
+    rendered = skills_mod._guide_description("investigating")
+    assert rendered != desc
+    assert yaml.safe_load(f"description: {rendered}") == {"description": desc}
+
+
+def test_the_clone_permission_is_scoped_to_step_4_5():
+    """A bare `git clone *` would pre-approve `ext::` and `--upload-pack` forms."""
+    text = skills_mod.render_guide_stub("investigate-url")
+    assert "Bash(git clone --depth 1 --quiet https://github.com/*)" in text
+    assert "Bash(git clone *)" not in text
+    assert "git clone" not in skills_mod.render_guide_stub("survey-field")
+
+
+@pytest.mark.parametrize("name", sorted(skills_mod.GUIDE_STUBS))
+def test_the_rendered_frontmatter_parses(name):
+    import yaml
+
+    front = skills_mod.render_guide_stub(name).split("---\n")[1]
+    data = yaml.safe_load(front)
+    assert data["name"] == name
+    assert data["description"]
 
 
 def test_install_then_reinstall_is_idempotent(env):

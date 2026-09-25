@@ -208,9 +208,10 @@ def skills_status(config: Config) -> list[SkillResult]:
 #
 # WHY A STUB AND NOT THE GUIDE. `investigate-url` and `survey-field` are the guides
 # behind `techne guide investigating|surveying` (#754). A host copy of the procedure
-# drifts in both directions and nothing notices — that was #988, which cost a union
-# reconcile of two 16-28 KB documents. A stub holds nothing that can go stale: its
-# body is one injected command that prints the installed guide when the skill loads.
+# drifts in both directions and nothing notices — that was #988, which cost a
+# by-hand union reconcile of both guides against their host copies. A stub holds
+# nothing that can go stale: its body is one injected command that prints the
+# installed guide when the skill loads.
 #
 # WHY INJECTED. Claude Code runs a skill line of the form !`command` at load time and
 # puts the output in its place, so the procedure is in context before the model reads
@@ -226,7 +227,15 @@ def skills_status(config: Config) -> list[SkillResult]:
 
 #: stub name -> (guide name, the argument label, extra allowed tools)
 GUIDE_STUBS = {
-    "investigate-url": ("investigating", "URL and context", ("Bash(git clone *)",)),
+    # Step 4.5's clone, and only that shape: a bare `git clone *` also matches
+    # `-c protocol.ext.allow=always 'ext::sh -c …'` and `--upload-pack=<cmd>`, which
+    # run commands locally, in the one skill built around untrusted input (Prudence,
+    # #1042). Any other clone prompts.
+    "investigate-url": (
+        "investigating",
+        "URL and context",
+        ("Bash(git clone --depth 1 --quiet https://github.com/*)",),
+    ),
     "survey-field": ("surveying", "Field and context", ()),
 }
 
@@ -264,13 +273,19 @@ def _guide_description(guide: str) -> str:
     for line in section[1].splitlines():
         if line.startswith("description: "):
             desc = line[len("description: "):].strip()
-            # A plain YAML scalar cannot hold ": " or " #"; quote rather than let a
-            # future guide edit silently truncate the frontmatter.
-            if ": " in desc or " #" in desc or desc[:1] in "\"'[{&*!|>%@`":
-                import json
+            # Written plain when YAML reads it back unchanged, quoted otherwise. The
+            # test is the parser itself rather than a list of risky characters: a
+            # trailing colon, a leading dash or a leading `#` each break or empty a
+            # plain scalar, and a hand-kept list missed all three (Temperance, #1042).
+            import json
 
-                desc = json.dumps(desc, ensure_ascii=False)
-            return desc
+            import yaml
+
+            try:
+                plain_ok = yaml.safe_load(f"description: {desc}") == {"description": desc}
+            except yaml.YAMLError:
+                plain_ok = False
+            return desc if plain_ok else json.dumps(desc, ensure_ascii=False)
     raise ValueError(f"guide {guide!r} recommends no stub description")
 
 
@@ -319,7 +334,11 @@ def _enabled_plugins() -> dict:
 def guide_stub_collisions(name: str) -> list[str]:
     """Other things answering to *name* on this host — the #988 failure was two
     copies of one procedure under one name, with nothing saying which one ran.
-    Reported, never removed: they may be the user's."""
+    Reported, never removed: they may be the user's.
+
+    A floor, not a guarantee: it sees a legacy command file and a user-scope plugin
+    whose NAME matches. A differently named plugin that ships a skill of this name,
+    or a project-scope `.claude/skills/<name>`, is not detected."""
     found = []
     legacy = skills_dir() / f"{name}.md"
     if legacy.exists():
