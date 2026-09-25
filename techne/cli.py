@@ -218,7 +218,9 @@ def capabilities_ack(ctx, flag, reason):
         return
     conn = connect(config.db_path)
     try:
-        acknowledge(conn, flag, reason)
+        acknowledge(conn, config, flag, reason)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     finally:
         conn.close()
     click.echo(f"{flag}: acknowledged as deliberately off. Undo: techne capabilities unack {flag}")

@@ -28,7 +28,8 @@ All notable changes to techne are documented here. Format loosely follows
 - `techne capabilities ack <flag> [--reason ...]` and `unack <flag>` record a deliberate
   opt-out (the MCP tool takes `acknowledge=` / `unacknowledge=`). An acknowledged item
   stays in the report, marked as the operator's choice, and stops counting toward the
-  session-start line. Acknowledgements do not expire.
+  session-start line. Acknowledgements do not expire, and a flag that is on
+  cannot be acknowledged.
 - `AGENTS.md` tells agents to call `techne_capabilities` when that line appears or on
   first use, explain each off item, offer to apply it, and never apply one silently.
 

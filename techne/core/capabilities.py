@@ -278,13 +278,21 @@ def acknowledgements(conn: sqlite3.Connection) -> dict[str, dict]:
     return get_state(conn, ACK_STATE_KEY) or {}
 
 
-def acknowledge(conn: sqlite3.Connection, flag: str, reason: str = "") -> dict:
-    """Record that `flag` is off on purpose. Raises KeyError for an unknown flag."""
+def acknowledge(conn: sqlite3.Connection, config: Config, flag: str, reason: str = "") -> dict:
+    """Record that `flag` is off on purpose.
+
+    Raises KeyError for an unknown flag, and ValueError when the flag is ON: "off
+    on purpose" would be false today, and a stored ack would quietly exempt the
+    flag from the invitation if it were ever switched off later.
+    """
     from techne import __version__
     from techne.core.extension_state import set_state
 
-    if flag not in {c.flag for c in CAPABILITIES}:
+    cap = next((c for c in CAPABILITIES if c.flag == flag), None)
+    if cap is None:
         raise KeyError(flag)
+    if capability_state(cap, config) is True:
+        raise ValueError(f"{flag} is on; nothing to acknowledge")
     acks = acknowledgements(conn)
     acks[flag] = {
         "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),

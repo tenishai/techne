@@ -382,7 +382,7 @@ def test_acknowledged_opt_out_stops_counting_but_stays_visible(config):
     _all_off(config)
     conn = connect(config.db_path)
     try:
-        acknowledge(conn, "per_turn_seed", "too chatty for me")
+        acknowledge(conn, config, "per_turn_seed", "too chatty for me")
         text = invitation(config, conn)
     finally:
         conn.close()
@@ -402,7 +402,7 @@ def test_invitation_is_silent_when_every_off_item_is_acknowledged(config, monkey
     try:
         for cap in HOOK_CAPS:
             if not getattr(config.hooks, cap.flag):
-                acknowledge(conn, cap.flag)
+                acknowledge(conn, config, cap.flag)
         assert invitation(config, conn) is None
     finally:
         conn.close()
@@ -413,7 +413,7 @@ def test_acknowledgements_do_not_expire_across_versions(config, monkeypatch):
     _all_off(config)
     conn = connect(config.db_path)
     try:
-        acknowledge(conn, "capture_read")
+        acknowledge(conn, config, "capture_read")
         invitation(config, conn)
         import techne
 
@@ -427,7 +427,7 @@ def test_acknowledgements_do_not_expire_across_versions(config, monkeypatch):
 def test_clearing_an_acknowledgement_counts_it_again(config):
     conn = connect(config.db_path)
     try:
-        acknowledge(conn, "capture_read")
+        acknowledge(conn, config, "capture_read")
         assert clear_acknowledgement(conn, "capture_read") is True
         assert clear_acknowledgement(conn, "capture_read") is False
     finally:
@@ -440,7 +440,7 @@ def test_acknowledging_an_unknown_flag_is_refused(config):
     conn = connect(config.db_path)
     try:
         with pytest.raises(KeyError):
-            acknowledge(conn, "per_turn_recal")
+            acknowledge(conn, config, "per_turn_recal")
     finally:
         conn.close()
 
@@ -481,3 +481,35 @@ def test_mcp_tool_records_and_clears_an_acknowledgement(config):
     assert "error" in tool({"acknowledge": "capture_read"}, config)
     assert not config.db_path.exists(), "an ack must not create a store"
     assert "error" in tool({"acknowledge": "capture_read", "unacknowledge": "capture_read"}, config)
+
+
+def test_acknowledging_a_flag_that_is_on_is_refused(config, monkeypatch):
+    """"Off on purpose" about a flag that is ON is false, and a stored ack would
+    quietly exempt it from the invitation if it were switched off later (Prudence,
+    #1048). Refused on every surface, and nothing is stored."""
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.mcp_server import TOOL_HANDLERS
+
+    config.hooks.per_turn_recall = True
+    _set_probes(monkeypatch, single_memory_layer=True)
+    conn = connect(config.db_path)
+    try:
+        with pytest.raises(ValueError, match="per_turn_recall is on; nothing to acknowledge"):
+            acknowledge(conn, config, "per_turn_recall")
+        with pytest.raises(ValueError, match="is on"):
+            acknowledge(conn, config, "single_memory_layer")
+    finally:
+        conn.close()
+
+    res = CliRunner().invoke(
+        main, ["capabilities", "ack", "per_turn_recall"], obj={"config": config}
+    )
+    assert res.exit_code == 1
+    assert "per_turn_recall is on; nothing to acknowledge" in res.output
+    assert "deliberately off" not in res.output
+
+    out = TOOL_HANDLERS["techne_capabilities"]({"acknowledge": "per_turn_recall"}, config)
+    assert out == {"error": "per_turn_recall is on; nothing to acknowledge"}
+    assert _row(capability_report(config), "per_turn_recall")["acknowledged"] is None

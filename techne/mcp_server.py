@@ -2026,7 +2026,11 @@ def _techne_capabilities(args: dict, config: Config) -> dict:
     conn = connect(config.db_path)
     try:
         if ack:
-            changed = {"acknowledged": ack, **acknowledge(conn, ack, args.get("reason") or "")}
+            try:
+                recorded = acknowledge(conn, config, ack, args.get("reason") or "")
+            except ValueError as exc:
+                return {"error": str(exc)}
+            changed = {"acknowledged": ack, **recorded}
         else:
             changed = {"unacknowledged": unack, "cleared": clear_acknowledgement(conn, unack)}
     finally:
