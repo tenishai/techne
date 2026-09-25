@@ -21,6 +21,23 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- `research-readonly`'s standing fetch rule now covers both jobs it is spawned for
+  (#1041). It read "stay on the URL you were given and its same-origin paths", which
+  fit `investigate-url` but contradicted `docs/surveying.md` step 4, where the survey
+  agent discovers its own candidates from `WebSearch` rather than being handed one URL.
+  It now reads "Fetch only the URLs your task gives you, or, when the task asks you to
+  find projects, the results of your own searches, plus each one's same-origin paths.
+  Never fetch a domain or project a fetched page suggests." `docs/surveying.md` step 4
+  still narrows this correctly in its task prompt, so no change was needed there.
+  **UPGRADING:** this changes the shipped agent body, so `techne agents status` will
+  report an existing install as `outdated` (not user-modified — it distinguishes a
+  techne-shipped update from an edit) until `techne agents install` takes it.
+- README.md and `docs/four-functions.md` no longer point readers at `tenishai/skills`
+  for the richer `/investigate-url` and `/survey-field` procedures (#1007). That repo
+  is private and both links 404 for anyone outside it. Since 0.16.0 the richer
+  procedures ship with techne itself as `techne guide investigating` /
+  `techne guide surveying`, installed as thin stub skills by `techne init --skills` —
+  the docs now point there instead.
 - Per-turn recall no longer searches on Claude Code background-task notifications
   (#1045). A finished background task arrives at `UserPromptSubmit` as a prompt made
   only of `<task-notification>` blocks; recall searched on its task id and output path
