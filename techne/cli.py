@@ -4442,10 +4442,10 @@ def architect_dedup(ctx, url, as_json):
             if i["skip_reason"]:
                 line += f" reason={i['skip_reason']}"
             click.echo(line)
-        # The pair can come from DIFFERENT investigations: `ingest` overwrites
-        # surveyed_at unconditionally but preserves verdict unless --verdict is
-        # passed, so a re-ingested row shows today's date beside a months-old
-        # judgment (techne#711). Do not read the two as one event.
+        # The date is when the KEPT verdict was reached, not when anyone last
+        # looked: since techne#711 surveyed_at and verdict move together, and an
+        # ingest without --verdict moves neither, so a re-surveyed URL keeps its
+        # old date (patterns._TAKES_NEW_SURVEY; last-looked is techne#741).
         click.echo("\nSeen before. Ask before re-investigating.")
 
     raise SystemExit(0 if res["seen"] else 1)
