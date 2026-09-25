@@ -799,39 +799,50 @@ def main() -> None:
     if config.hooks.per_turn_recall:
         try:
             from techne.core.search import search
+            from techne.hooks._recall_query import build_recall_query
             from techne.hooks._timeout import bounded_hook
 
             with bounded_hook(config.hooks.timeout_s, label="user_prompt_submit"):
                 k = config.hooks.per_turn_recall_limit
+                # techne#1018 — search on the question, not on whatever was
+                # pasted around it; a short typed prompt passes through as is.
+                query = build_recall_query(prompt, config.hooks.per_turn_recall_long_prompt_chars)
                 # OVER-FETCH, THEN SUPPRESS, so the session gets k FRESH rows rather
                 # than k-minus-the-duplicates (techne#576). Dropping without
                 # over-fetching would trade duplicate delivery for thinner
                 # delivery, which is not the trade the issue asks for — the rows
                 # being re-sent are legitimately high-scoring, they have just
                 # already been said.
-                rows = search(
-                    config.db_path,
-                    prompt,
-                    table="knowledge",
-                    limit=k * _RESEND_OVERFETCH,
-                    include_archived=False,
-                    # techne#842 — ASK FOR ONE MORE CHARACTER THAN WE WILL
-                    # RENDER, and the +1 is load-bearing rather than defensive.
-                    # `_truncate_for_injection` decides "was this cut?" by
-                    # `len(content) > limit`, so a row that `search()` already
-                    # sliced to EXACTLY the cap reads as whole: `was_cut` stays
-                    # False and both the announcing marker and the header notice
-                    # are suppressed. That is the dishonest state techne#826
-                    # exists to prevent, and threading the cap unchanged would
-                    # have spread it from cap>=500 to EVERY cap. Measured before
-                    # the +1: at caps 600, 500 and 200 the row ended mid-word
-                    # with no marker.
-                    #
-                    # At cap+1 the renderer sees the overflow it needs: a row
-                    # shorter than the cap still arrives whole and is correctly
-                    # unmarked; a longer one arrives one char over and is cut and
-                    # marked by the code that owns that decision.
-                    row_chars=config.hooks.per_turn_recall_chars + 1,
+                # An empty query means the prompt was only techne's own injected
+                # context (a pasted recall block, say). Searching on it would
+                # re-select the rows it already names, so inject nothing.
+                rows = (
+                    []
+                    if not query
+                    else search(
+                        config.db_path,
+                        query,
+                        table="knowledge",
+                        limit=k * _RESEND_OVERFETCH,
+                        include_archived=False,
+                        # techne#842 — ASK FOR ONE MORE CHARACTER THAN WE WILL
+                        # RENDER, and the +1 is load-bearing rather than defensive.
+                        # `_truncate_for_injection` decides "was this cut?" by
+                        # `len(content) > limit`, so a row that `search()` already
+                        # sliced to EXACTLY the cap reads as whole: `was_cut` stays
+                        # False and both the announcing marker and the header notice
+                        # are suppressed. That is the dishonest state techne#826
+                        # exists to prevent, and threading the cap unchanged would
+                        # have spread it from cap>=500 to EVERY cap. Measured before
+                        # the +1: at caps 600, 500 and 200 the row ended mid-word
+                        # with no marker.
+                        #
+                        # At cap+1 the renderer sees the overflow it needs: a row
+                        # shorter than the cap still arrives whole and is correctly
+                        # unmarked; a longer one arrives one char over and is cut and
+                        # marked by the code that owns that decision.
+                        row_chars=config.hooks.per_turn_recall_chars + 1,
+                    )
                 )
                 rows = _drop_pull_only(config.db_path, rows)
                 already = _already_sent_this_session(config.db_path, data.get("session_id"))
@@ -877,7 +888,10 @@ def main() -> None:
                     config.db_path,
                     source="per_turn_recall",
                     session_id=data.get("session_id"),
-                    trigger=prompt,
+                    # techne#1018 — log what was SEARCHED, so this row can rebuild
+                    # the turn. For a typed prompt that is the prompt itself; an
+                    # empty query is named, not left looking like a no-match.
+                    trigger=query or "[no query: the paste held only techne's own context]",
                     # `rows` IS WHAT WAS INJECTED (_injection_log.py:217, its own
                     # words). Logging withheld rows as delivered is not merely an
                     # inaccurate audit row: `_already_sent_this_session` reads
