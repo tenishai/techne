@@ -168,7 +168,8 @@ CAPABILITIES: tuple[Capability, ...] = (
         buys=(
             "Recall matches on meaning as well as exact words, so a question worded "
             "differently from how a fact was stored still finds it. No embedding "
-            "backend is installed, so every search is keyword-only."
+            "backend is installed, so every search is keyword-only. Costs a larger "
+            "install and a one-time model download."
         ),
         enable="{vectors_install}\ntechne vectors backfill",
         probe="vectors_backend",
@@ -190,7 +191,8 @@ CAPABILITIES: tuple[Capability, ...] = (
         buys=(
             "Claude Code's own auto-memory is on beside techne. Both write and both "
             "inject, so the same fact can arrive twice and the two copies drift apart. "
-            "Turning auto-memory off leaves techne as the one memory."
+            "Turning auto-memory off leaves techne as the one memory. Existing "
+            "MEMORY.md files stay on disk, but nothing loads them into context after."
         ),
         enable=(
             'in {claude_settings} set:\n  "autoMemoryEnabled": false\n'

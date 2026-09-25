@@ -2019,6 +2019,8 @@ def _techne_capabilities(args: dict, config: Config) -> dict:
     target = ack or unack
     if target not in flags:
         return {"error": f"no capability named {target!r}", "flags": flags}
+    if not config.db_path.exists():
+        return {"error": "techne not initialized. Run: techne init"}
     from techne.core.database import connect
 
     conn = connect(config.db_path)

@@ -477,4 +477,7 @@ def test_mcp_tool_records_and_clears_an_acknowledgement(config):
     assert _row(out, "capture_read")["acknowledged"] is None
 
     assert "error" in tool({"acknowledge": "nope"}, config)
+    config.db_path = config.data_dir / "never-initialised.db"
+    assert "error" in tool({"acknowledge": "capture_read"}, config)
+    assert not config.db_path.exists(), "an ack must not create a store"
     assert "error" in tool({"acknowledge": "capture_read", "unacknowledge": "capture_read"}, config)

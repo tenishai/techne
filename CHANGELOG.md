@@ -22,8 +22,8 @@ All notable changes to techne are documented here. Format loosely follows
   gaps that no hook flag shows, by probing the machine (#1022): no embedding backend
   installed (`vectors_backend`), backend installed but its model not downloaded
   (`vectors_model`), and Claude Code auto-memory running beside techne
-  (`single_memory_layer`, skipped under `spool-primary`). Each carries what it costs
-  and the exact command or setting that fixes it, and counts toward the session-start
+  (`single_memory_layer`, skipped under `spool-primary`). Each carries what it buys, what it
+  costs, and the exact command or setting that fixes it, and counts toward the session-start
   "N capabilities are off" line.
 - `techne capabilities ack <flag> [--reason ...]` and `unack <flag>` record a deliberate
   opt-out (the MCP tool takes `acknowledge=` / `unacknowledge=`). An acknowledged item
