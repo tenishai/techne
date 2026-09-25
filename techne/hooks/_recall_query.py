@@ -32,6 +32,13 @@ import re
 _PASTE_TAG = re.compile(r'<(/?)pasted_content id="[^"]*">')
 _SYSTEM_REMINDER = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
 
+# techne#1045 — Claude Code delivers a finished background task as a turn whose
+# whole prompt is <task-notification>…</task-notification> (task id, tool-use id,
+# output path, status, summary). It reaches UserPromptSubmit like a typed prompt,
+# but nobody asked anything: searching on it injected unrelated rows on 36% of
+# per-turn recall turns (496 of 1,377 over 14 days on dev04).
+_TASK_NOTIFICATION = re.compile(r"<task-notification>.*?</task-notification>", re.DOTALL)
+
 # What techne's rails render into context, by shape. tests/test_recall_query.py
 # renders the recall and codex rails with their real code; the session-start,
 # coord and reminder output is built inline in their hooks, so those samples are
@@ -86,6 +93,16 @@ def strip_own_injections(text: str) -> str:
             continue
         kept.append(line)
     return "\n".join(kept)
+
+
+def is_task_notification(prompt: str) -> bool:
+    """True when the prompt is only Claude Code task notifications, one or more.
+
+    A prompt with any other text alongside a notification is not one: whatever
+    the operator typed still deserves recall.
+    """
+    stripped, n = _TASK_NOTIFICATION.subn("", prompt)
+    return n > 0 and not stripped.strip()
 
 
 def _question_lines(text: str) -> list[str]:
