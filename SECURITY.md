@@ -46,9 +46,9 @@ techne is a local memory store and MCP server for AI agents. In scope:
   another's memory without being configured to;
 - credential and secret handling: a secret in a format techne's redaction is
   meant to recognise that still reaches the memory store, an export, or an
-  injected prompt. Redaction is
-  pattern-based and best-effort, not a confidentiality guarantee; a token
-  shape it doesn't recognise yet is a hardening request, not a vulnerability.
+  injected prompt. Redaction is pattern-based and best-effort, not a
+  confidentiality guarantee; a token shape it doesn't recognise yet is a
+  hardening request, not a vulnerability.
   The architect pattern store, the codex code-graph store, and short
   structured fields (source, tags, target) are not redacted by design;
 - egress: configuration that is supposed to keep memory local but doesn't;
