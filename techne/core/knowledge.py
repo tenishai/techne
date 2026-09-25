@@ -713,9 +713,20 @@ def delete(db_path: Path, entry_id: int) -> bool:
         selection), `select_conflict_candidates` and `conflict_check_emit`
         (conflict.py), and `_merge_in_conn`'s live-row guard (this module — refuses
         to merge an archived row, same as it already refuses a superseded one).
-        Left unchanged: `knowledge_export.query_live_knowledge` returns `status`
-        alongside each row, so a consumer can filter for itself — the same rationale
-        as `search()`'s `include_archived=True` default for explicit queries.
+
+        `knowledge_export.query_live_knowledge` itself is left unchanged and keeps
+        returning the full set with `status` alongside each row — it has two
+        consumers, and they don't agree on what "filter for itself" means. The
+        export renderer (`knowledge_export.py`) does read `status` and labels the
+        row. `push_knowledge_to_archivist` (archivist.py, review round 3 on
+        techne#1033) did not: it iterated every row, skipped only
+        `REDIRECTED_TYPES`, and `store()`d an archived predecessor into the team DB
+        as a fresh `current` row — publishing the round-1 resurrection onto the one
+        path that leaves this machine, then returning it through federated recall
+        (`fan_out_search`). Fixed at the push call site next to the
+        `REDIRECTED_TYPES` skip, for the same reason that skip lives there and not
+        in `query_live_knowledge`: this function is shared with the export path and
+        must keep returning the full set.
 
     Dependents of `entry_id` (edges where `entry_id` is the trigger) are flipped
     to `uncertain` before the edges are dropped, mirroring `supersede()`'s
