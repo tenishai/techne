@@ -5,8 +5,11 @@ WHY THESE SHIP WITH THE TOOL AND THE RESEARCH SKILLS DO NOT. `self-care` and
 `self-care` sweeps the outbox, prunes backups/snapshots and VACUUMs; `promote`
 drives `reflect emit`/`ingest`. A procedure written against 0.12 can be WRONG for
 0.14, so shipping them in a separate marketplace repo guarantees drift from the
-tool they operate. `investigate-url` and `survey-field` have no such coupling and
-correctly live in tenishai/skills.
+tool they operate. `investigate-url` and `survey-field` ship with techne too, but not
+through this installer: since 0.16.0 (#754) they are bundled guides read by
+`techne guide investigating` / `techne guide surveying`, and a host gets a thin stub
+that runs the guide, never a copy (#988). They are not in SKILL_NAMES because a stub
+has nothing to drift, so there is nothing for the hash check below to watch.
 
 VENDOR NEUTRALITY IS PRESERVED, not violated (techne#499): techne owns the
 PROCEDURE as a portable ``SKILL.md``-shaped markdown file; this module renders it
