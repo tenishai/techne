@@ -403,8 +403,10 @@ and that is the one case where the answer is genuinely "not from here".
 > - They are about to rely on `librarian_search` for coverage — **nothing in techne itself
 >   indexes transcripts**, so ask whether their deployment wires one; a partial index
 >   answers exactly like a complete one.
-> - They ask why the architect is empty on a fresh install — `techne architect add` ships;
->   the research procedures that fill it in bulk do not.
+> - They ask why the architect is empty on a fresh install — nothing populates it
+>   automatically. `techne architect add` ships as the manual feeder, and so do the
+>   richer research procedures (`techne guide investigating` / `techne guide
+>   surveying`), but the operator or agent still has to run one.
 
 ---
 
