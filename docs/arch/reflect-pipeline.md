@@ -2,7 +2,7 @@
 card: arch-card:techne-reflect-pipeline
 updated: 2026-09-25
 anchor: techne/core/reflect.py sha=68c8ad7744b962dac0b9ac08e961352d4dc98e7f
-anchor: techne/core/sleepdream.py sha=fb6c11fe5120ca8c6f19857b0f53b9b59c2197c8
+anchor: techne/core/sleepdream.py sha=906e716619d349eb9dc6007e5693dee2d9e4aab8
 anchor: techne/lifecycle.py sha=011a4284a930a7df2d4b95f685e3d924ac92d3d3
 ---
 # reflect / consolidate / dream — self-maintenance

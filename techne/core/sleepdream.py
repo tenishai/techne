@@ -730,7 +730,7 @@ def dream_ingest(
     stored prompt_hash always corresponds to its real group ids and can't silently defeat
     _already_proposed_dream. Returns counts.
     """
-    counts = {"proposed": 0, "written": 0, "kept": 0, "errors": 0, "skipped": 0, "refused": 0}
+    counts = {"proposed": 0, "written": 0, "kept": 0, "errors": 0, "skipped": 0}
     gh = _cluster_hash(group_ids)  # recompute; caller-supplied hash is advisory only
     verdict = parse_dream_response(response)
     _ensure_system_session(config.db_path)
