@@ -5,6 +5,24 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `knowledge.delete` now removes the entry's dependency edges (`knowledge_deps`,
+  either direction) and repoints or soft-archives any entry that named it as its
+  replacement (`superseded_by`), in one transaction, before deleting the row. Both
+  foreign keys have no ON DELETE clause and every connection enforces them, so
+  deleting a referenced entry failed with `FOREIGN KEY constraint failed`. Seen live
+  when an agent's seeder retired a stale seed entry that a dream-promote had drawn
+  an edge to: the delete raised at every boot and the agent crash-looped for two days.
+  A predecessor is repointed at the deleted entry's own successor when it has one, or
+  archived (`status = 'archived'`) when the deleted entry was the head of its chain —
+  either way it stays out of default recall, egress, `get_resume_context`, and
+  consolidate/recombine/conflict selection rather than resurfacing as current. The
+  deleted entry's own dependents are flipped to `uncertain`, same as `supersede()`.
+  `techne knowledge list` (`list_entries`) now also hides `status = 'archived'` rows
+  from its default view, consistent with how archived rows are already hidden from
+  default recall and egress.
+
 ### Changed
 
 - **`techne init` asks before turning off Claude Code auto-memory** (#1023). Running
