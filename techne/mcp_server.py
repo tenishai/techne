@@ -950,9 +950,32 @@ TOOLS = [
             "conversation, lead with what is off and what it would buy THEM, and quote "
             "the evidence counts — they are real numbers from their ledger. Also reports "
             "bundled workflows that are ABSENT FROM DISK, which no config flag can "
-            "reveal. Not a feature list; do not read it out verbatim."
+            "reveal. Not a feature list; do not read it out verbatim. Offer to apply "
+            "each OFF item and apply nothing without the operator's yes. When the "
+            "operator leaves an item off ON PURPOSE, pass acknowledge=<flag> so it "
+            "stops counting toward the session-start invitation; acknowledgements do "
+            "not expire, and unacknowledge=<flag> clears one."
         ),
-        "inputSchema": {"type": "object", "properties": {}},
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "acknowledge": {
+                    "type": "string",
+                    "description": (
+                        "A capability `flag` the operator has decided to leave off. "
+                        "Only after they say so, never on your own judgment."
+                    ),
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "With acknowledge: the operator's reason, in a few words.",
+                },
+                "unacknowledge": {
+                    "type": "string",
+                    "description": "A capability `flag` whose acknowledgement to clear.",
+                },
+            },
+        },
     },
     {
         "name": "techne_recall",
@@ -1977,9 +2000,42 @@ def _techne_capabilities(args: dict, config: Config) -> dict:
     Claude-only skill (techne#499). It also needs no new install step — techne
     already registers its MCP server.
     """
-    from techne.core.capabilities import capability_report
+    from techne.core.capabilities import (
+        CAPABILITIES,
+        acknowledge,
+        capability_report,
+        clear_acknowledgement,
+    )
 
-    return capability_report(config)
+    ack, unack = args.get("acknowledge"), args.get("unacknowledge")
+    if not ack and not unack:
+        return capability_report(config)
+    if ack and unack:
+        return {"error": "pass acknowledge or unacknowledge, not both"}
+
+    # Opt-outs (techne#1022) ride this tool rather than a second one: the agent
+    # records one in the same conversation where the report was offered.
+    flags = [c.flag for c in CAPABILITIES]
+    target = ack or unack
+    if target not in flags:
+        return {"error": f"no capability named {target!r}", "flags": flags}
+    if not config.db_path.exists():
+        return {"error": "techne not initialized. Run: techne init"}
+    from techne.core.database import connect
+
+    conn = connect(config.db_path)
+    try:
+        if ack:
+            try:
+                recorded = acknowledge(conn, config, ack, args.get("reason") or "")
+            except ValueError as exc:
+                return {"error": str(exc)}
+            changed = {"acknowledged": ack, **recorded}
+        else:
+            changed = {"unacknowledged": unack, "cleared": clear_acknowledgement(conn, unack)}
+    finally:
+        conn.close()
+    return {**capability_report(config), "change": changed}
 
 
 #: How many nodes a blast-radius response returns by default. 50 x ~350 chars keeps a

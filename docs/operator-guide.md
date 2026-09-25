@@ -38,6 +38,20 @@ on, what's off, and (for what's off) the actual numbers from your ledger that
 make the case for turning it on. Run `techne capabilities --json` for the same
 report as data.
 
+The report also checks three things that are not hook flags, by looking at the
+machine: `vectors_backend` (is an embedding backend installed, or is search
+keyword-only), `vectors_model` (is its model downloaded), and
+`single_memory_layer` (is Claude Code's auto-memory running beside techne; not
+checked under `spool-primary`). Each comes with the command or setting that
+fixes it.
+
+**Leaving something off on purpose** is a legitimate choice, so you can say so:
+`techne capabilities ack per_turn_seed --reason "too chatty"`. The item stays in
+the report, marked as your choice, and stops counting toward the session-start
+"N capabilities are off" line. Acknowledgements don't expire; `techne
+capabilities unack <flag>` takes one back. An agent can record the same thing
+through the `techne_capabilities` tool, but only after you've said so.
+
 **Turning any of this off** is one line in `~/.techne/config.yaml`:
 
 ```yaml

@@ -33,20 +33,26 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from datetime import datetime, timezone
+from typing import Any, Callable
 
-from techne.config import Config, techne_home
+from techne.config import CLAUDE_CODE, Config, techne_home
 
 #: extension_state key holding the last version we invited this install to ask
 #: about. One-shot per version change — see `invitation`.
 INVITE_STATE_KEY = "capabilities:last_invited_version"
+
+#: extension_state key holding the operator's deliberate opt-outs, as
+#: {flag: {"at", "version", "reason"}} (techne#1022). See `acknowledge`.
+ACK_STATE_KEY = "capabilities:acknowledged"
 
 
 @dataclass
 class Capability:
     """One switchable thing, described so a non-author can act on it."""
 
-    #: Attribute on config.hooks. The report reads it; nothing here writes config.
+    #: Attribute on config.hooks, or for a probe entry just its id. The report
+    #: reads it; nothing here writes config.
     flag: str
     title: str
     #: Plain language, present tense, what the USER gets. Not what the code does.
@@ -56,6 +62,11 @@ class Capability:
     enable: str
     #: Which store counts make this capability's case. See `_evidence_for`.
     evidence_key: str = ""
+    #: Set when the state is not a hooks flag but has to be LOOKED at — an
+    #: installed package, a cached model, another product's setting (techne#1022).
+    #: Names an entry in `_PROBES`. Its `enable` is a command or a settings edit,
+    #: not a `hooks:` line, and may carry `{vectors_install}` / `{claude_settings}`.
+    probe: str = ""
 
 
 #: The switchable surface, in the order a person should hear about it — highest
@@ -148,7 +159,173 @@ CAPABILITIES: tuple[Capability, ...] = (
         enable="hooks:\n  startup_directive: true",
         evidence_key="",
     ),
+    # --- probe entries (techne#1022) ---------------------------------------
+    # After the hook flags, not ranked among them: these are missing PIECES
+    # rather than features to weigh, and each says plainly what it costs.
+    Capability(
+        flag="vectors_backend",
+        title="Search by meaning, not only by keyword",
+        buys=(
+            "Recall matches on meaning as well as exact words, so a question worded "
+            "differently from how a fact was stored still finds it. No embedding "
+            "backend is installed, so every search is keyword-only. Costs a larger "
+            "install and a one-time model download."
+        ),
+        enable="{vectors_install}\ntechne vectors backfill",
+        probe="vectors_backend",
+    ),
+    Capability(
+        flag="vectors_model",
+        title="The embedding model, downloaded",
+        buys=(
+            "The embedding backend is installed but its model is not on disk, so "
+            "search is still keyword-only. Session start never downloads it (a cold "
+            "download could hang startup), so it stays this way until fetched once."
+        ),
+        enable="techne vectors backfill   # needs network once; downloads, then embeds",
+        probe="vectors_model",
+    ),
+    Capability(
+        flag="single_memory_layer",
+        title="techne as the only memory layer",
+        buys=(
+            "Claude Code's own auto-memory is on beside techne. Both write and both "
+            "inject, so the same fact can arrive twice and the two copies drift apart. "
+            "Turning auto-memory off leaves techne as the one memory. Existing "
+            "MEMORY.md files stay on disk, but nothing loads them into context after."
+        ),
+        enable=(
+            'in {claude_settings} set:\n  "autoMemoryEnabled": false\n'
+            "and leave CLAUDE_CODE_DISABLE_AUTO_MEMORY unset (a value of 0 forces it on)"
+        ),
+        probe="single_memory_layer",
+    ),
 )
+
+
+def vectors_install_command(version: str | None = None) -> str:
+    """The one spelling of "install the embedding extra" (also used by `init`)."""
+    import re
+
+    if version is None:
+        from techne import __version__ as version
+
+    tag = f"v{version}" if re.fullmatch(r"\d+\.\d+\.\d+", version) else "<tag>"
+    return (
+        f'pipx install --force "techne[recommended] @ '
+        f'git+https://github.com/tenishai/techne.git@{tag}"'
+    )
+
+
+# Probes answer "is the recommended state in place?": True, False, or None when
+# the entry does not apply here or the state cannot be measured. None drops the
+# entry from the report and the invitation — "not cached" for a cache we could not
+# read is a guess dressed as a fact (see `embeddings.model_cached`).
+
+
+def _probe_vectors_backend(config: Config) -> bool | None:
+    from techne.core.embeddings import backend_available
+
+    return backend_available()
+
+
+def _probe_vectors_model(config: Config) -> bool | None:
+    from techne.core.embeddings import backend_available, model_cached
+
+    if not backend_available():
+        return None  # vectors_backend already says so; one gap, one entry
+    return model_cached(config)
+
+
+def _probe_single_memory_layer(config: Config) -> bool | None:
+    # Under spool-primary techne works WITH Claude Code's memory on purpose
+    # (techne#107), so auto-memory being on there is the chosen setup, not a gap.
+    if config.platform != CLAUDE_CODE or config.posture.mode == "spool-primary":
+        return None
+    from techne.platforms.claude_code.hooks import auto_memory_enabled
+
+    return not auto_memory_enabled()
+
+
+_PROBES: dict[str, Callable[[Config], bool | None]] = {
+    "vectors_backend": _probe_vectors_backend,
+    "vectors_model": _probe_vectors_model,
+    "single_memory_layer": _probe_single_memory_layer,
+}
+
+
+def capability_state(cap: Capability, config: Config) -> bool | None:
+    """On, off, or None (not applicable / cannot tell) for one entry."""
+    if not cap.probe:
+        return bool(getattr(config.hooks, cap.flag, False))
+    try:
+        return _PROBES[cap.probe](config)
+    except Exception:  # noqa: BLE001 — one unreadable probe must not sink the report
+        return None
+
+
+# --- acknowledgements (techne#1022) -------------------------------------------
+#
+# An operator who leaves something off ON PURPOSE should stop being counted as
+# unconfigured. Acknowledgements do not expire (decided for #1022): an opt-out is
+# a decision, and re-asking on a later version would be the nag this avoids.
+
+
+def acknowledgements(conn: sqlite3.Connection) -> dict[str, dict]:
+    """The operator's deliberate opt-outs, keyed by flag."""
+    from techne.core.extension_state import get_state
+
+    return get_state(conn, ACK_STATE_KEY) or {}
+
+
+def acknowledge(conn: sqlite3.Connection, config: Config, flag: str, reason: str = "") -> dict:
+    """Record that `flag` is off on purpose.
+
+    Raises KeyError for an unknown flag, and ValueError when the flag is ON: "off
+    on purpose" would be false today, and a stored ack would quietly exempt the
+    flag from the invitation if it were ever switched off later.
+    """
+    from techne import __version__
+    from techne.core.extension_state import set_state
+
+    cap = next((c for c in CAPABILITIES if c.flag == flag), None)
+    if cap is None:
+        raise KeyError(flag)
+    if capability_state(cap, config) is True:
+        raise ValueError(f"{flag} is on; nothing to acknowledge")
+    acks = acknowledgements(conn)
+    acks[flag] = {
+        "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "version": __version__,
+        "reason": reason,
+    }
+    set_state(conn, ACK_STATE_KEY, acks)
+    return acks[flag]
+
+
+def clear_acknowledgement(conn: sqlite3.Connection, flag: str) -> bool:
+    """Forget an opt-out. True if there was one to forget."""
+    from techne.core.extension_state import set_state
+
+    acks = acknowledgements(conn)
+    if acks.pop(flag, None) is None:
+        return False
+    set_state(conn, ACK_STATE_KEY, acks)
+    return True
+
+
+def _read_acknowledgements(config: Config) -> dict[str, dict]:
+    """Read-only, and {} on any failure: the report reads, it never writes."""
+    try:
+        conn = sqlite3.connect(f"file:{config.db_path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return {}
+    try:
+        return acknowledgements(conn)
+    except sqlite3.Error:
+        return {}
+    finally:
+        conn.close()
 
 
 @dataclass
@@ -317,6 +494,14 @@ def _enable_snippet(cap: Capability, config: Config, on: bool) -> str:
     """
     if on:
         return ""
+    if cap.probe:
+        from techne.platforms.claude_code.paths import claude_config_dir
+
+        body = cap.enable.format(
+            vectors_install=vectors_install_command(),
+            claude_settings=claude_config_dir() / "settings.json",
+        )
+        return f"# {cap.flag} is currently NOT IN PLACE — to set it up:\n{body}"
     path = config.loaded_from or (techne_home() / "config.yaml")
     return f"# {cap.flag} is currently OFF — to turn it on, add to {path}:\n{cap.enable}"
 
@@ -326,14 +511,17 @@ def capability_report(config: Config) -> dict:
     from techne import __version__
 
     facts = store_facts(config)
-    hooks = config.hooks
+    acks = _read_acknowledgements(config)
     caps: list[dict] = []
     for cap in CAPABILITIES:
-        on = bool(getattr(hooks, cap.flag, False))
+        on = capability_state(cap, config)
+        if on is None:
+            continue  # not applicable here, or not measurable — say nothing
         row = asdict(cap)
         row["on"] = on
         row["enable"] = _enable_snippet(cap, config, on)
         row["evidence"] = "" if on else _evidence_for(cap.evidence_key, facts)
+        row["acknowledged"] = acks.get(cap.flag)
         caps.append(row)
 
     off = [c for c in caps if not c["on"]]
@@ -345,6 +533,7 @@ def capability_report(config: Config) -> dict:
         "store": asdict(facts),
         "capabilities": caps,
         "off_count": len(off),
+        "unacknowledged_off_count": sum(1 for c in off if not c["acknowledged"]),
         "workflows": workflows,
         "workflows_missing": [w["name"] for w in missing],
         "install_hint": (
@@ -359,7 +548,13 @@ def capability_report(config: Config) -> dict:
             "exactly, and quote the `enable` text INTACT — it is the change to MAKE, "
             "not the current state, and stripping its comment line has already led a "
             "reader to take the `true` in it as status. A capability that is ON has no "
-            "enable text at all. If workflows_missing is non-empty say so plainly; a config flag "
+            "enable text at all. An entry with a `probe` is not a config flag: its enable "
+            "text is a command or a settings edit. Offer to apply each OFF item, one at a "
+            "time, and apply nothing without the operator's yes. An OFF item with "
+            "`acknowledged` set is a deliberate opt-out: do not pitch it again. If the "
+            "operator declines an item on purpose, record it with "
+            "techne_capabilities(acknowledge=<flag>) so it stops counting. "
+            "If workflows_missing is non-empty say so plainly; a config flag "
             "cannot reveal a procedure that is absent from disk. Do not oversell: if "
             "a capability's evidence is empty, its case is weak on this install, and "
             "saying less is better than inventing a reason."
@@ -388,7 +583,11 @@ def invitation(config: Config, conn: sqlite3.Connection) -> str | None:
     if state.get("version") == __version__:
         return None
 
-    off = [c for c in CAPABILITIES if not getattr(config.hooks, c.flag, False)]
+    # A deliberate opt-out (see `acknowledge`) is not news, so it is not counted.
+    acks = acknowledgements(conn)
+    off = [
+        c for c in CAPABILITIES if capability_state(c, config) is False and c.flag not in acks
+    ]
     missing = [w for w in workflow_state(config) if w["state"] == "absent"]
     # Record the version REGARDLESS of whether we speak, so an install that is
     # fully configured today is not re-evaluated (and potentially nagged) on
