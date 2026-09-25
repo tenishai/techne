@@ -8,7 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from techne.hooks._recall_query import build_recall_query, strip_own_injections
+from techne.hooks._recall_query import (
+    build_recall_query,
+    is_task_notification,
+    strip_own_injections,
+)
 
 LIMIT = 600
 QUESTION = "is it legit for us to build that on a max account?"
@@ -238,6 +242,11 @@ def _logged_triggers() -> list[str]:
 
     con = sqlite3.connect(Config.load().db_path)
     try:
+        # The log table is created on first write; a hook that searched nothing
+        # may never have written one.
+        tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "context_injections" not in tables:
+            return []
         return [
             r[0]
             for r in con.execute(
@@ -261,3 +270,54 @@ def test_the_hook_does_not_search_a_paste_of_only_its_own_output(monkeypatch):
     prompt = _paste("- ⟦techne#225⟧ [fact] Anthropic subscription is Max OAuth")
     assert _run_hook(monkeypatch, prompt) == []
     assert _logged_triggers()[-1].startswith("[no query")
+
+
+# --- techne#1045: a background-task notification is not a question ----------------
+
+# The shape Claude Code 2.1.27x delivers to UserPromptSubmit, copied from a
+# session transcript (attachment.commandMode == "task-notification").
+NOTIFICATION = (
+    "<task-notification>\n"
+    "<task-id>bl1x8z5uc</task-id>\n"
+    "<tool-use-id>toolu_01R6JLMHwaRafpJZnYsPPcjy</tool-use-id>\n"
+    "<output-file>/private/tmp/claude-501/proj/sess/tasks/bl1x8z5uc.output</output-file>\n"
+    "<status>completed</status>\n"
+    '<summary>Background command "Reindex the techne codex graph" completed '
+    "(exit code 0)</summary>\n"
+    "</task-notification>"
+)
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [NOTIFICATION, f"  {NOTIFICATION}\n", f"{NOTIFICATION}\n{NOTIFICATION}"],
+    ids=["one", "padded", "two"],
+)
+def test_a_prompt_of_only_notifications_is_one(prompt):
+    assert is_task_notification(prompt)
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        QUESTION,
+        f"{NOTIFICATION}\n{QUESTION}",
+        "why does <task-notification> fire recall?",
+        "<task-notification>\n<task-id>x</task-id>",  # unclosed: not Claude Code's shape
+        "",
+    ],
+    ids=["typed", "notification-plus-question", "typed-mention", "unclosed", "empty"],
+)
+def test_anything_else_is_not(prompt):
+    assert not is_task_notification(prompt)
+
+
+@pytest.mark.usefixtures("home")
+def test_the_hook_does_not_search_a_task_notification(monkeypatch):
+    assert _run_hook(monkeypatch, NOTIFICATION) == []
+    assert _logged_triggers() == [], "nothing was searched, so nothing is logged as a recall"
+
+
+@pytest.mark.usefixtures("home")
+def test_the_hook_still_searches_a_question_sent_with_a_notification(monkeypatch):
+    assert _run_hook(monkeypatch, f"{NOTIFICATION}\n{QUESTION}") != []

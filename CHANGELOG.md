@@ -21,6 +21,13 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- Per-turn recall no longer searches on Claude Code background-task notifications
+  (#1045). A finished background task arrives at `UserPromptSubmit` as a prompt made
+  only of `<task-notification>` blocks; recall searched on its task id and output path
+  and injected unrelated rows. On one install that was 36% of recall injections over
+  14 days. Such a turn now skips recall and records `noop:task-notification`; a prompt
+  with typed text alongside a notification is still searched, and the deferred session
+  context and startup directive are unaffected.
 - `knowledge.delete` now removes the entry's dependency edges (`knowledge_deps`,
   either direction) and repoints or soft-archives any entry that named it as its
   replacement (`superseded_by`), in one transaction, before deleting the row. Both

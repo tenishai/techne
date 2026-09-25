@@ -790,13 +790,22 @@ def main() -> None:
     degraded: str | None = None
     rows: list = []
 
+    # techne#1045 — a background-task notification is not a question, so recall
+    # does not search on it. Only recall is skipped: the deferred session context
+    # above and the startup directive below still ride whichever turn comes first.
+    # Nothing goes to context_injections, because nothing was searched; the
+    # liveness outcome records the skip instead.
+    from techne.hooks._recall_query import is_task_notification
+
+    notification = is_task_notification(prompt)
+
     # ------------------------------------------------------------------
     # Recall block (techne#109) — durable facts relevant to this prompt. Scope
     # to knowledge (not raw observations), exclude soft-archived rows. Any
     # failure (DB unreachable, slow SQLite → HookTimeout) degrades to no recall
     # block WITHOUT aborting — the seed block can still emit.
     # ------------------------------------------------------------------
-    if config.hooks.per_turn_recall:
+    if config.hooks.per_turn_recall and not notification:
         try:
             from techne.core.search import search
             from techne.hooks._recall_query import build_recall_query
@@ -965,7 +974,8 @@ def main() -> None:
         # "INJECTED NOTHING" IS A LEGAL OUTCOME, not a failure (#414) — a recall
         # that fired and matched nothing is a fact worth recording, and it is the
         # only thing that distinguishes a working-but-quiet rail from a dead one.
-        _record(record_hook_run, config, degraded, outcome="noop:nothing-to-inject")
+        outcome = "noop:task-notification" if notification else "noop:nothing-to-inject"
+        _record(record_hook_run, config, degraded, outcome=outcome)
         sys.exit(0)
 
     # ------------------------------------------------------------------
