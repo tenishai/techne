@@ -102,13 +102,13 @@ def test_add_core_refusal_prints_cleanly(cfg, monkeypatch):
 
 
 def test_cli_supersede_with_content_writes_a_revision(cfg):
-    old = store(cfg.db_path, "runner is dev02", type="decision", tags="ci", confidence="high")
-    res = CliRunner().invoke(main, ["knowledge", "supersede", str(old), "runner is mash1"])
+    old = store(cfg.db_path, "runner is host-a", type="decision", tags="ci", confidence="high")
+    res = CliRunner().invoke(main, ["knowledge", "supersede", str(old), "runner is host-c"])
     assert res.exit_code == 0, res.output
     new = _row(cfg.db_path, old)["superseded_by"]
     assert new is not None and f"#{new}" in res.output
     new_row = _row(cfg.db_path, new)
-    assert new_row["content"] == "runner is mash1"
+    assert new_row["content"] == "runner is host-c"
     assert (new_row["type"], new_row["tags"], new_row["confidence"]) == ("decision", "ci", "high")
 
 
@@ -122,10 +122,10 @@ def test_cli_supersede_content_is_redacted(cfg):
 
 
 def test_cli_supersede_by_retires_into_existing_entry(cfg):
-    old = store(cfg.db_path, "runner is dev02")
-    dep = store(cfg.db_path, "dev02 has 2 cores")
+    old = store(cfg.db_path, "runner is host-a")
+    dep = store(cfg.db_path, "host-a has 2 cores")
     _add_dep(cfg.db_path, dep, old)
-    new = store(cfg.db_path, "SUPERSEDES #1: runner is mash1")
+    new = store(cfg.db_path, "SUPERSEDES #1: runner is host-c")
     before = _count(cfg.db_path)
     res = CliRunner().invoke(main, ["knowledge", "supersede", str(old), "--by", str(new)])
     assert res.exit_code == 0, res.output
@@ -183,12 +183,12 @@ def _mcp_store(cfg, args):
 
 
 def test_mcp_store_supersedes_retires_the_named_entries(cfg):
-    a = store(cfg.db_path, "runner dev02")
-    b = store(cfg.db_path, "runner prinkle")
+    a = store(cfg.db_path, "runner host-a")
+    b = store(cfg.db_path, "runner host-b")
     dep = store(cfg.db_path, "derived from a")
     _add_dep(cfg.db_path, dep, a)
     result = _mcp_store(
-        cfg, {"content": "runner fleet is mash1", "type": "decision", "supersedes": [a, b]}
+        cfg, {"content": "runner fleet is host-c", "type": "decision", "supersedes": [a, b]}
     )
     assert "isError" not in result, result
     payload = json.loads(result["content"][0]["text"])
@@ -252,7 +252,7 @@ def test_store_supersedes_rejects_a_bool():
     "text,expected",
     [
         (
-            "SUPERSEDES techne#882 (dev02 runner), #887 (dev02 hardening) and #995 (second)",
+            "SUPERSEDES techne#882 (host-a runner), #887 (host-a hardening) and #995 (second)",
             [882, 887, 995],
         ),
         ("CORRECTION to knowledge #12: the value is 4", [12]),
@@ -315,8 +315,8 @@ def test_find_skips_a_superseded_or_archived_declarer(cfg):
 
 def test_doctor_lists_declared_supersessions_without_failing_on_them(cfg):
     db = cfg.db_path
-    a = store(db, "runner is dev02")
-    b = store(db, f"SUPERSEDES #{a}: runner is mash1")
+    a = store(db, "runner is host-a")
+    b = store(db, f"SUPERSEDES #{a}: runner is host-c")
     res = CliRunner().invoke(main, ["doctor", "--no-liveness"])
     assert f"techne knowledge supersede {a} --by {b}" in res.output
     assert res.exit_code == 0, "advisory: a prose match may name an issue, not a row"

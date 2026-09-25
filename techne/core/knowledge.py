@@ -423,7 +423,7 @@ _DECLARATION = re.compile(
     r"\b(?:supersedes?|corrects|correction\s+(?:to|of))\s*:?\s+" + _REF,
     re.IGNORECASE,
 )
-# "SUPERSEDES techne#882 (dev02 runner), #887 (dev02 hardening) and #995": the
+# "SUPERSEDES techne#882 (old runner), #887 (its hardening) and #995": the
 # list form knowledge #1155 used. A continuation must be marked too.
 _DECLARATION_MORE = re.compile(r"\s*(?:\([^)]*\)\s*)?(?:,|\band\b|&)\s*" + _REF, re.IGNORECASE)
 DECLARATION_WINDOW = 400
