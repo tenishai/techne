@@ -1038,3 +1038,49 @@ def test_the_banner_counts_parked_rows_apart_from_the_debt(tmp_path):
     # --apply retired the superseded ghost, so the one undrained row is parked and
     # nothing is drainable: no debt figure, and no row offered as the place to start.
     assert "queued for reflection" not in text, text
+
+
+def test_v28_adds_the_parked_columns_to_an_existing_queue(tmp_path):
+    """The upgrade path, not just a fresh init (Temperance, #1054). A v27 store's queue
+    gains both columns with the declaration a fresh store has, existing rows come
+    through unparked, and a replay of the step is a no-op rather than a crash."""
+    import sqlite3
+
+    from techne.core.database import _migrate, init_db
+
+    def _decl(conn):
+        return {
+            r[1]: (r[2], r[3], r[4])
+            for r in conn.execute("PRAGMA table_info(reflection_queue)")
+            if r[1] in ("parked_at", "parked_reason")
+        }
+
+    init_db(tmp_path / "fresh.db")
+    fresh = sqlite3.connect(tmp_path / "fresh.db")
+    want = _decl(fresh)
+    fresh.close()
+
+    db = tmp_path / "v27.db"
+    init_db(db)
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("ALTER TABLE reflection_queue DROP COLUMN parked_at")
+        conn.execute("ALTER TABLE reflection_queue DROP COLUMN parked_reason")
+        conn.execute("INSERT INTO sessions (id, project_path) VALUES ('s', '/p')")
+        conn.execute(
+            "INSERT INTO threads (id, session_id, thread_num, label, summary, status) "
+            "VALUES ('t', 's', 1, 'l', 's', 'active')"
+        )
+        conn.execute("INSERT INTO reflection_queue (session_id, thread_id) VALUES ('s', 't')")
+        conn.execute("DELETE FROM schema_version WHERE version = 28")
+        conn.commit()
+        assert _decl(conn) == {}
+
+        _migrate(conn, 27, 28)
+        assert _decl(conn) == want and len(want) == 2
+        assert conn.execute("SELECT parked_at FROM reflection_queue").fetchone()[0] is None
+
+        conn.execute("DELETE FROM schema_version WHERE version = 28")
+        _migrate(conn, 27, 28)  # a replayed step must not die on "duplicate column"
+    finally:
+        conn.close()

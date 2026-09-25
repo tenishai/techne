@@ -1577,8 +1577,9 @@ def emit_reflection_pass(
     # indent=2)` — envelope, notes and all — so the bytes on the wire always exceeded
     # the bytes budgeted, and results the trim had passed were refused by the client.
     # Grow the prefix while the whole payload fits, keeping >=1 prompt so a lone huge
-    # thread still makes progress. One dump per kept item; the batch is already
-    # capped at `limit`.
+    # thread still makes progress. Each step re-serializes the whole candidate
+    # result, so this is quadratic in the kept prefix, bounded by `limit` and the
+    # budget.
     kept = batch[:1]
     for n in range(2, len(batch) + 1):
         if _sent_chars(_pass_result(batch[:n])[0]) > max_chars:

@@ -1,7 +1,7 @@
 ---
 card: arch-card:techne-reflect-pipeline
 updated: 2026-09-25
-anchor: techne/core/reflect.py sha=a5a04397c5190ef5e831f7d6a15a2bdaa5f6c32d
+anchor: techne/core/reflect.py sha=68c8ad7744b962dac0b9ac08e961352d4dc98e7f
 anchor: techne/core/sleepdream.py sha=fb6c11fe5120ca8c6f19857b0f53b9b59c2197c8
 anchor: techne/lifecycle.py sha=011a4284a930a7df2d4b95f685e3d924ac92d3d3
 ---
@@ -28,7 +28,7 @@ API: MCP pairs techne_reflect_emit/ingest, techne_consolidate_emit/ingest, techn
 INVARIANTS:
 - reflection_queue.drained_at is NULLABLE, not a status enum: pending is the ABSENCE of a drain, so there is no second source of truth to disagree with the timestamp. Drain is guarded on `drained_at IS NULL` so a re-drain never rewrites the first payment.
 - THE FK GRAPH AROUND threads(id), WHICH IS WHAT #797 TURNED ON. FOUR columns reference it and only ONE cascades: reflection_queue.thread_id (CASCADE), threads.parent_thread_id, knowledge_candidates.source_thread_id and observations.thread_id (all NO ACTION). The CASCADE on reflection_queue is REQUIRED and load-bearing — pruning a superseded thread retires its queue row for free, which is how #646's stale rows are cleared. THE OTHER THREE ARE WHY re-detection NO LONGER DELETES A SESSION'S WHOLE THREAD SET. This line used to say it did, and that a plain reference would make the queue block re-detection; the second half is still true, but the first half described behaviour that raised `IntegrityError: FOREIGN KEY constraint failed` on any store with history and took run_session_end down with it (#793 put it on the per-turn path; the defect was latent in redetect_threads long before). `lifecycle.persist_detection` now PRUNES: it deletes only session threads that are (1) absent from the detection about to be saved, (2) unreferenced by any of the three NO ACTION columns, and (3) not carrying a DRAINED queue row. Condition (1) also preserves reflection-debt AGE — the cascade would take a still-current thread's PENDING row and the re-enqueue would re-date it, and nothing restores enqueued_at. Threads the prune SPARES keep their stale queue rows; `techne reflect reconcile` retires those. tests/test_detection_replace.py derives the guard list from `PRAGMA foreign_key_list` so a fifth referencing column is caught when it is added rather than when it breaks.
-- THE EMIT BUDGET IS MEASURED ON WHAT THE MCP SERVER SENDS (techne#993): `_sent_chars` is `len(json.dumps(result, indent=2))` over the whole result, envelope and notes included, matching `mcp_server.handle_request`. It summed compact per-item JSON before, and the 100,000 default was the client's 25K-token cap itself; it is now 45,000.
+- THE EMIT BUDGET IS MEASURED ON WHAT THE MCP SERVER SENDS (techne#993): `_sent_chars` is `len(json.dumps(result, indent=2))` over the whole result, envelope and notes included, matching `mcp_server.handle_request`. It summed compact per-item JSON before, and the 100,000 default sat above the client's 25K-token cap (the smallest recorded refusal was 56,974 chars); it is now 45,000.
 - Every consolidate cluster has a stable cluster_hash (prompt_hash col) → a cluster already proposed (pending, promoted, OR kept-distinct) is never re-judged (_already_proposed) — stops the anti-bloat feature from bloating its own review queue.
 - _FAITHFULNESS_GATED_ACTIONS={'merge','supersede'}: promoting a merge/supersede candidate needs a prior faithfulness check (raises FaithfulnessGateError unless force=True); keep this gate in sync with faithfulness_emit's SQL filter.
 

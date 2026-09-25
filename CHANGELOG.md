@@ -52,8 +52,8 @@ All notable changes to techne are documented here. Format loosely follows
 
 - `techne_reflect_emit` results fit under Claude Code's MCP result cap (#993). The size
   trim summed compact JSON per item while the server sends the whole result as indent=2
-  JSON, and its 100,000-char default was the 25K-token cap itself, so emit results of
-  56,974–100,849 chars were refused and spilled to a file. The trim now measures the
+  JSON, and its 100,000-char default sat above the 25K-token cap: the store has recorded
+  refusals from 56,974 chars up, and #993 saw 70,004- and 100,849-char results refused. The trim now measures the
   serialized result the server sends, and `reflect.emit_max_chars` defaults to 45,000.
   CLI `emit -o` slices get smaller by the same amount.
 - Reflection debt no longer counts rows reflecting cannot drain (#870, #805). `techne

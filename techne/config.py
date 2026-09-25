@@ -619,8 +619,8 @@ class ReflectConfig:
     # thread exceeding this can't be delivered whole (see _techne_reflect_emit).
     # 45,000, not the old 100,000 (techne#993): Claude Code refuses MCP results over
     # 25,000 tokens, and the smallest refusal on record was a 56,974-char emit
-    # result (docs/reflect-guide.md), so 100K was the limit itself, not a proxy for
-    # it. 45K sits about 20% under that refusal.
+    # result (docs/reflect-guide.md), so 100K sat above the cap, not under it. 45K
+    # sits about 20% under that refusal.
     emit_max_chars: int = 45_000
 
 
