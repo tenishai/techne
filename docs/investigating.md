@@ -163,8 +163,8 @@ curl -fsSL "https://raw.githubusercontent.com/<owner>/<repo>/main/README.md" \
 where it ends**, because two different mechanisms produce a clean `curl`:
 
 1. **Fetch-tool context bleed.** The summarizer inherits the caller's session context and
-   emits it verbatim, appended to whatever it fetched. Leakage, not invention. This one is
-   reproduced (techne#715): a subagent fetched `example.org`, which is pure boilerplate,
+   emits it verbatim, appended to whatever it fetched. Leakage, not invention. This one
+   was reproduced on 2026-07-15: a subagent fetched `example.org`, which is pure boilerplate,
    and the result carried the session's own date-change reminder word for word plus an
    MCP server-instructions block — text that exists nowhere on that page.
 2. **Your own tooling injecting into the subagent.** A hook that writes
@@ -260,15 +260,18 @@ with a verdict and possibly a reason means it was surveyed and nothing was lifte
 reason is the point, so show it and ask before spending a subagent to re-derive it.
 
 A third case is worth saying out loud: an investigation with a verdict that is **not** a
-skip and no pattern rows is a bad ingest. Say so before spending a subagent, because the
-last run's work was lost, not judged.
+skip and no pattern rows. The usual cause is an ingest whose patterns never landed, but
+other writers can leave that state too, so treat it as a question rather than a
+conclusion and say so before spending a subagent.
 
-A URL can produce both. Do not read the verdict and the date on one line as a single
-event — `ingest` overwrites the date unconditionally while preserving an existing
-verdict, so a re-ingested row shows today beside a months-old judgment. A pattern's own
-`created_at` is the trustworthy per-pattern date. Re-ingesting *this* investigation will
-move that row's date too; say so in your report so it does not read as the prior survey
-having happened today.
+A URL can produce both. The date on an `investigated …` line is when the **kept verdict**
+was reached, not when anyone last looked: the date and the verdict move together or not
+at all (techne#711), and an ordinary `ingest` without `--verdict` moves neither, so a
+re-survey that restated nothing leaves the old date in place. Only `--verdict`, or a new
+survey replacing a skip, moves it — and the replacement has to arrive as patterns, since a
+skip re-ingested as another skip freezes even with `--verdict`. A frozen date on a URL
+you did re-survey is expected, not a sign the survey was lost; a separate last-looked
+date is tracked as techne#741.
 
 Then load the problem-area map with `techne architect topic`. The corpus is organized by
 *problem solved*, not by source; you need the buckets before you can judge whether a
