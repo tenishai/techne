@@ -60,6 +60,12 @@ procedure from the installed techne every time it fires, so it cannot go stale. 
 the same reason techne ships one copy of each guide and renders it per platform rather
 than vendoring one per host.
 
+On Claude Code you usually do not need to write it: `techne init --skills` and
+`techne skills install` install this stub (and the survey one) for you. Check
+`techne skills status` first. If you write your own at the stub's path anyway, techne
+keeps it: `skills status` reports it as user-modified and `skills install` as a kept
+user copy, and neither replaces it without `--force`.
+
 Ask the operator before writing files into their config directory. This is a suggestion
 you offer, not something to do unprompted.
 

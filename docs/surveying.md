@@ -36,8 +36,9 @@ Run `techne guide surveying` and follow the procedure it prints.
 The reasoning is the same as in the investigating guide: a copy is a second spelling that
 drifts silently, a stub re-reads the current procedure every time. On Claude Code the stub
 can load the procedure itself with an injected `techne guide surveying` line; the
-investigating guide shows the form and the two rules that come with it. Ask before writing
-into the operator's config directory.
+investigating guide shows the form and the two rules that come with it. On Claude Code,
+`techne init --skills` installs this stub for you; check `techne skills status` before
+writing one. Ask before writing into the operator's config directory.
 
 ## What a survey is for
 

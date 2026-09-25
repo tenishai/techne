@@ -2528,9 +2528,21 @@ def init(ctx, platform, identity_dir, posture, install_skills, force_skills, set
         # markdown into ~/.claude for an install that is about to fail.
         if install_skills:
             from techne.platforms.claude_code.agents import register_agents
-            from techne.platforms.claude_code.skills import register_skills
+            from techne.platforms.claude_code.skills import (
+                register_guide_stubs,
+                register_skills,
+            )
 
             for r in register_skills(config, force=force_skills):
+                line = f"Skill {r.name}: {r.action}"
+                if r.detail:
+                    line += f" — {r.detail}"
+                click.echo(line)
+
+            # The research guides' stubs (techne#1040). Without them the guides reach
+            # a host only if an agent notices the offer inside the guide, and #988 was
+            # what happened instead: hand-kept copies that drifted both ways.
+            for r in register_guide_stubs(config, force=force_skills):
                 line = f"Skill {r.name}: {r.action}"
                 if r.detail:
                     line += f" — {r.detail}"
@@ -3203,12 +3215,23 @@ def skills(ctx):
 @skills.command("status")
 @click.pass_context
 def skills_status_cmd(ctx):
-    """Report each procedure as current / outdated / user-modified / absent."""
-    from techne.platforms.claude_code.skills import skills_dir, skills_status
+    """Report each procedure and guide stub as current / outdated / user-modified / absent."""
+    from techne.platforms.claude_code.skills import (
+        guide_stubs_dir,
+        guide_stubs_status,
+        skills_dir,
+        skills_status,
+    )
 
     config = ctx.obj["config"]
     click.echo(f"Skills directory: {skills_dir()}")
     for r in skills_status(config):
+        line = f"  {r.name}: {r.action}"
+        if r.detail:
+            line += f" — {r.detail}"
+        click.echo(line)
+    click.echo(f"Guide stubs directory: {guide_stubs_dir()}")
+    for r in guide_stubs_status(config):
         line = f"  {r.name}: {r.action}"
         if r.detail:
             line += f" — {r.detail}"
@@ -3224,11 +3247,11 @@ def skills_status_cmd(ctx):
 )
 @click.pass_context
 def skills_install(ctx, force):
-    """Write the bundled procedures into the platform's command directory."""
-    from techne.platforms.claude_code.skills import register_skills
+    """Write the bundled procedures, and the research-guide stubs, for the platform."""
+    from techne.platforms.claude_code.skills import register_guide_stubs, register_skills
 
     config = ctx.obj["config"]
-    for r in register_skills(config, force=force):
+    for r in [*register_skills(config, force=force), *register_guide_stubs(config, force=force)]:
         line = f"{r.name}: {r.action} -> {r.path}"
         if r.detail:
             line += f"\n  {r.detail}"
@@ -3239,10 +3262,10 @@ def skills_install(ctx, force):
 @click.pass_context
 def skills_remove(ctx):
     """Remove only the copies techne wrote and still owns."""
-    from techne.platforms.claude_code.skills import unregister_skills
+    from techne.platforms.claude_code.skills import unregister_guide_stubs, unregister_skills
 
     config = ctx.obj["config"]
-    results = unregister_skills(config)
+    results = [*unregister_skills(config), *unregister_guide_stubs(config)]
     if not results:
         click.echo("nothing installed by techne")
     for r in results:
