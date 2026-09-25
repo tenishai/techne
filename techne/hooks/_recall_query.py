@@ -24,7 +24,9 @@ from __future__ import annotations
 import re
 
 # Claude Code wraps a paste as <pasted_content id="…">…</pasted_content id="…">.
-_PASTE_TAG = re.compile(r"<(/?)pasted_content\b[^>]*>")
+# Claude Code always writes the id; requiring it keeps a typed mention of the tag
+# ("why does <pasted_content> parsing…") from splitting the prompt.
+_PASTE_TAG = re.compile(r'<(/?)pasted_content id="[^"]*">')
 _SYSTEM_REMINDER = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
 
 # What techne's rails render into context, by shape. tests/test_recall_query.py
@@ -35,8 +37,13 @@ _OWN_ROW = re.compile(r"^- ⟦techne#\d+⟧ \[")
 #   a rail's block header: the block runs to the next "## " header or the next
 #   transcript turn (❯/⏺), taking its notices, rows and trailers with it
 _OWN_HEADERS = (
-    "## techne",  # session-start banner, per-turn recall, seed, drain, reflection notices
-    "## Codex — ",  # codex edit rail and grep assist
+    # Exactly what the rails render, so a pasted document heading such as
+    # "## techne install notes" or "## Codex — notes I wrote" is kept.
+    "## techne —",  # per-turn recall, seed, drain, reflection notices
+    "## techne ⚠️",  # session-start banner and its failure notices
+    "## techne ✅",  # session-start banner, healthy (core/health.py)
+    "## Codex — editing `",  # codex edit rail
+    "## Codex — symbols matching `",  # codex grep assist
     "## Coordination (techne#",  # session-start coord banner
     "## Active Threads",
     "## Recent Threads",

@@ -24,6 +24,7 @@ def _paste(body: str, pid: str = "ab12") -> str:
 
 TYPED = [
     QUESTION,
+    "why does <pasted_content> parsing strip my text in the hook?",
     "why did you cite ⟦techne#225⟧ for the licensing question on the max account?",
     "## techne install notes\nthe venv is stale again, what do I rebuild?",
     "> quoting the doc: recall is a rail\nis that still the plan?",
@@ -76,6 +77,15 @@ def test_a_paste_with_no_question_or_wrapper_falls_back_to_its_opening():
     assert build_recall_query(_paste(NOISE), LIMIT) == NOISE.strip()[:LIMIT]
 
 
+@pytest.mark.parametrize(
+    "heading",
+    ["## techne install notes", "## Codex — notes I wrote", "## techne setup"],
+)
+def test_a_pasted_document_heading_is_not_mistaken_for_a_rail(heading):
+    prompt = _paste(f"{heading}\nwhat is the blast radius of search?")
+    assert build_recall_query(prompt, LIMIT) == "what is the blast radius of search?"
+
+
 def test_nested_paste_tags_never_reach_the_query():
     # With a question, and without one (the fallback searches the body itself).
     with_q = build_recall_query(_paste("outer " + _paste("what is x?", pid="b") + " tail"), LIMIT)
@@ -110,6 +120,14 @@ def _rail_outputs() -> dict[str, str]:
             "## techne — pending reflection\n> Session abcd has unreflected work?\n\n"
             "## Key Knowledge\n- ⟦techne#237⟧ [fact] who is the user?\n"
         ),
+        "session_banner_healthy": "## techne ✅\n> 51966 obs · is it current?\n",
+        # session_start.py builds these inline in main(), so they are written out
+        # here in the shape it renders (session_start.py:433-460).
+        "threads": (
+            "## Active Threads\n\n**Session work (Bash)** [claude-code]\n"
+            "Resume: is the floor measured yet?\n\n"
+            "## Recent Threads (48h)\n\n- **licensing** [claude-code] — should we build on Max?\n"
+        ),
     }
 
 
@@ -121,6 +139,14 @@ def test_pasted_rail_output_is_stripped(rail):
     assert "?" not in leftover, f"{rail} left a question line behind: {leftover!r}"
     query = build_recall_query(_paste(f"{block}\n⏺ I updated the licensing check."), LIMIT)
     assert query == "⏺ I updated the licensing check."
+
+
+def test_every_own_header_is_bound_by_a_rail_sample():
+    from techne.hooks._recall_query import _OWN_HEADERS
+
+    lines = [ln for out in _rail_outputs().values() for ln in out.splitlines()]
+    for header in _OWN_HEADERS:
+        assert any(ln.startswith(header) for ln in lines), f"no rail sample renders {header!r}"
 
 
 def test_the_session_banner_headers_match_what_session_start_emits():
