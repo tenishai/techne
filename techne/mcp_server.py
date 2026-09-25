@@ -141,6 +141,8 @@ def handle_request(request: dict, config: Config) -> dict:
         if handler:
             try:
                 result = handler(arguments, config)
+                # `reflect._sent_chars` budgets emit against this exact serialization
+                # (techne#993). Change one, change both.
                 content = [{"type": "text", "text": json.dumps(result, indent=2)}]
                 # techne#696 — a SEPARATE content block, never a key inside `result`.
                 # The drift notice is about the SERVER, not about what the tool

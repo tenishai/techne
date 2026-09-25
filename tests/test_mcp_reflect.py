@@ -138,7 +138,10 @@ def test_emit_trims_batch_by_serialized_size(config, monkeypatch):
     import techne.core.reflect as reflect_mod
 
     _seed(config, "sz", n=6)
-    config.reflect.emit_max_chars = 400  # tiny budget forces the size trim
+    # Tiny budget forces the size trim. 1,200 rather than the 400 this used before
+    # techne#993: the budget now covers the whole indent=2 result, envelope and
+    # truncation note included, and 400 no longer fits even one item plus the note.
+    config.reflect.emit_max_chars = 1200
     big = "x" * 150
     fake = [
         {"thread_id": f"t{i}", "session_id": "sz", "prompt_hash": f"h{i}", "prompt": big}
@@ -149,12 +152,43 @@ def test_emit_trims_batch_by_serialized_size(config, monkeypatch):
     out = _techne_reflect_emit({"session_id": "sz"}, config)
     assert 1 <= out["count"] < 6  # trimmed below the 6 available threads
     assert out["truncated"] is True
-    assert len(json.dumps(out["batch"])) <= 400  # the returned payload actually fits
+    # What the MCP server actually sends fits, not just the batch array (techne#993).
+    assert len(json.dumps(out, indent=2)) <= 1200
     conn = connect(config.db_path)
     try:
         assert get_state(conn, "reflect:emitted:sz") is not None  # delivered → marked
     finally:
         conn.close()
+
+
+def test_emit_budget_holds_for_the_text_the_mcp_server_sends(config, monkeypatch):
+    """techne#993: the trim measured compact `json.dumps(item)` per item while the server
+    sends `json.dumps(result, indent=2)`, envelope and notes included, so results the trim
+    passed overflowed the client's cap. Measured here on the text `handle_request` puts
+    on the wire, not on anything emit returns.
+
+    Many short items, so indent=2's per-key newlines and indentation are a large share
+    of each item: a budget computed on compact JSON keeps roughly half again too many."""
+    import techne.core.reflect as reflect_mod
+    from techne.mcp_server import handle_request
+
+    _seed(config, "wire", n=6)
+    config.reflect.emit_max_chars = 1500
+    fake = [
+        {"thread_id": f"t{i}", "session_id": "wire", "prompt_hash": f"h{i}", "prompt": "p" * 40}
+        for i in range(20)
+    ]
+    monkeypatch.setattr(reflect_mod, "emit_reflection_batch", lambda *a, **k: list(fake))
+
+    resp = handle_request(
+        {"id": 1, "method": "tools/call",
+         "params": {"name": "techne_reflect_emit", "arguments": {"session_id": "wire"}}},
+        config,
+    )
+    sent = resp["result"]["content"][0]["text"]
+    out = json.loads(sent)
+    assert out["truncated"] is True and 1 <= out["count"] < 20
+    assert len(sent) <= 1500, f"sent {len(sent)} chars against a 1500-char budget"
 
 
 def test_emit_oversized_single_thread_is_flagged_and_unmarked(config, monkeypatch):

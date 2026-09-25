@@ -6,7 +6,7 @@ from pathlib import Path
 
 from techne.core import migrator
 
-SCHEMA_VERSION = 27
+SCHEMA_VERSION = 28
 
 # THE ONE ON-DISK TIMESTAMP SHAPE (#515). Every TEXT timestamp column is compared
 # LEXICALLY by SQLite, so the storage format IS the ordering primitive — a second
@@ -590,7 +590,13 @@ CREATE TABLE IF NOT EXISTS reflection_queue (
     session_id TEXT NOT NULL REFERENCES sessions(id),
     thread_id TEXT NOT NULL UNIQUE REFERENCES threads(id) ON DELETE CASCADE,
     enqueued_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    drained_at TIMESTAMP
+    drained_at TIMESTAMP,
+    -- techne#870 (v28): set by `techne reflect reconcile --apply` on a row it has
+    -- shown is below min_observations_per_thread. Still undrained and kept as the
+    -- #646 evidence, but out of the banner's actionable debt. Cleared when the
+    -- thread renders again. Plain nullable on both paths, per techne#938.
+    parked_at TIMESTAMP,
+    parked_reason TEXT
 );
 -- Partial index: the only hot query is "what is still pending, oldest first".
 CREATE INDEX IF NOT EXISTS idx_reflection_queue_pending
@@ -1640,4 +1646,22 @@ END;
                 "ON observations(source_uuid) WHERE source_uuid IS NOT NULL"
             )
         conn.execute("INSERT INTO schema_version (version) VALUES (27)")
+
+    if from_version < 28 and to_version >= 28:
+        # techne#870: a third state for a reflection_queue row, between owed and
+        # drained. Additive and nullable, so no backfill: every existing row is
+        # unparked, which is exactly what it was before this column existed. A
+        # numbered step rather than SCHEMA_SQL alone because the connect()-time
+        # reconciler skips an already-reconciled store (#140), and the readers of
+        # this column would fail on such a store with "no such column".
+        # Guarded on the table existing, like v27: old fixtures may predate it.
+        has_queue = bool(
+            conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='reflection_queue'"
+            ).fetchone()
+        )
+        if has_queue:
+            _add_column_if_missing(conn, "reflection_queue", "parked_at", "TIMESTAMP")
+            _add_column_if_missing(conn, "reflection_queue", "parked_reason", "TEXT")
+        conn.execute("INSERT INTO schema_version (version) VALUES (28)")
     conn.commit()

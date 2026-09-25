@@ -3378,6 +3378,11 @@ def reflect(ctx):
     )
     if d["oldest_pending"]:
         click.echo(f"  oldest owed: {d['oldest_pending']}")
+    if d["parked"]:
+        click.echo(
+            f"  parked: {d['parked']} below-threshold row(s), not counted as owed "
+            "(`techne reflect reconcile` re-checks them)"
+        )
 
 
 @reflect.command("review")
@@ -3718,7 +3723,7 @@ def reflect_undecline(ctx, session_id, thread_ids):
     "--apply",
     "apply_",
     is_flag=True,
-    help="Actually remove the superseded rows (default: dry run).",
+    help="Remove the superseded rows and park the below-threshold ones (default: dry run).",
 )
 @click.pass_context
 def reflect_reconcile(ctx, apply_):
@@ -3727,7 +3732,8 @@ def reflect_reconcile(ctx, apply_):
     Splits undrainable debt into the two populations #646 conflated: rows whose
     thread no longer exists in the current detection (superseded — safe to retire)
     and rows whose thread is current but has fallen below
-    `min_observations_per_thread` (kept, that is the real signal).
+    `min_observations_per_thread` (kept, that is the real signal). --apply parks
+    the second kind so the SessionStart banner stops counting it as owed (#870).
 
     Dry run unless --apply.
     """
@@ -3758,6 +3764,23 @@ def reflect_reconcile(ctx, apply_):
             f"{report['below_threshold']} row(s) left in place: their thread is current but "
             "now below reflect.min_observations_per_thread — that is tenishai/techne#646's "
             "real signal, not residue.",
+        )
+        # PARKED, NOT DRAINED (tenishai/techne#870): the rows stay as evidence and only
+        # leave the SessionStart banner's actionable debt figure.
+        if apply_:
+            click.echo(
+                f"Parked {report['parked']} newly (any parked earlier stay parked): still "
+                "queued, no longer counted as owed by the SessionStart banner.",
+            )
+        else:
+            click.echo(
+                "Re-run with --apply to park them: still queued, no longer counted as owed "
+                "by the SessionStart banner.",
+            )
+    if report["unparked"]:
+        click.echo(
+            f"Un-parked {report['unparked']} row(s) that render again (the floor moved or "
+            "the thread regained observations); they are owed again.",
         )
     if report["orphaned"]:
         click.echo(

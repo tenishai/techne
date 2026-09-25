@@ -519,7 +519,11 @@ def _run_phases_2_to_9(
     # ------------------------------------------------------------------
     try:
         if config.reflect.enabled:
-            from techne.core.reflect import pending_reflection, pending_reflection_queue
+            from techne.core.reflect import (
+                parked_reflection_count,
+                pending_reflection,
+                pending_reflection_queue,
+            )
 
             pend = pending_reflection(config)
             if pend:
@@ -557,6 +561,19 @@ def _run_phases_2_to_9(
                     "ANY session can drain these — answering a rendered prompt needs the "
                     "thread's observations, not the original session's context. Call "
                     f'techne_reflect_emit(session_id="{oldest["session_id"]}") to start.'
+                )
+                output_parts.append("")
+            # techne#870: rows `reflect reconcile --apply` showed no emit can render.
+            # Counted apart from the debt above, never dropped: a figure that drains
+            # cannot include rows that cannot, and hiding them loses #646's evidence.
+            n_parked, s_parked = parked_reflection_count(config.db_path)
+            if n_parked:
+                output_parts.append(
+                    ("" if queued else "\n## techne — reflection debt (queued)\n")
+                    + f"> {n_parked} queued thread(s) across {s_parked} session(s) are "
+                    "parked: below reflect.min_observations_per_thread, so reflecting "
+                    "cannot drain them, and no debt figure counts them. `techne reflect "
+                    "reconcile --apply` re-checks and un-parks any that render again."
                 )
                 output_parts.append("")
     except Exception as exc:  # noqa: BLE001

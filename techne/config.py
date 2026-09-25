@@ -614,10 +614,14 @@ class ReflectConfig:
     # explicit limit. Bounds the payload so a large session can't produce a batch
     # that exceeds the MCP transport's token cap (see _techne_reflect_emit).
     emit_max_threads: int = 25
-    # Serialized-size ceiling (chars) for a reflect emit batch — a conservative
-    # proxy for the transport's token cap. The batch is trimmed to fit; a lone
+    # Serialized-size ceiling (chars) for a reflect emit result, measured on the
+    # indent=2 JSON the MCP server sends. The batch is trimmed to fit; a lone
     # thread exceeding this can't be delivered whole (see _techne_reflect_emit).
-    emit_max_chars: int = 100_000
+    # 45,000, not the old 100,000 (techne#993): Claude Code refuses MCP results over
+    # 25,000 tokens, and the smallest refusal on record was a 56,974-char emit
+    # result (docs/reflect-guide.md), so 100K sat above the cap, not under it. 45K
+    # sits about 20% under that refusal.
+    emit_max_chars: int = 45_000
 
 
 @dataclass
@@ -1311,7 +1315,7 @@ class Config:
                 write_to=write_to,
                 log_raw_response=bool(r.get("log_raw_response", True)),
                 emit_max_threads=int(r.get("emit_max_threads", 25)),
-                emit_max_chars=int(r.get("emit_max_chars", 100_000)),
+                emit_max_chars=int(r.get("emit_max_chars", 45_000)),
             )
 
         if "architect" in raw and isinstance(raw["architect"], dict):
