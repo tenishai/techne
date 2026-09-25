@@ -18,6 +18,19 @@ All notable changes to techne are documented here. Format loosely follows
   `techne skills remove` only when unedited. `skills install` and `skills status` also
   report a legacy `commands/<name>.md` or an enabled plugin answering to the same name,
   without touching it.
+- `techne capabilities` (and the `techne_capabilities` MCP tool) now reports three
+  gaps that no hook flag shows, by probing the machine (#1022): no embedding backend
+  installed (`vectors_backend`), backend installed but its model not downloaded
+  (`vectors_model`), and Claude Code auto-memory running beside techne
+  (`single_memory_layer`, skipped under `spool-primary`). Each carries what it costs
+  and the exact command or setting that fixes it, and counts toward the session-start
+  "N capabilities are off" line.
+- `techne capabilities ack <flag> [--reason ...]` and `unack <flag>` record a deliberate
+  opt-out (the MCP tool takes `acknowledge=` / `unacknowledge=`). An acknowledged item
+  stays in the report, marked as the operator's choice, and stops counting toward the
+  session-start line. Acknowledgements do not expire.
+- `AGENTS.md` tells agents to call `techne_capabilities` when that line appears or on
+  first use, explain each off item, offer to apply it, and never apply one silently.
 
 ### Fixed
 

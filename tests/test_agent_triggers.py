@@ -322,6 +322,11 @@ COMMAND_TREE_AT_LAST_REVIEW = {
     "backup",
     "bindings",
     "capabilities",
+    # Reviewed for #1022: `ack`/`unack` rewrite one extension_state marker (the
+    # operator's deliberate opt-outs). No transcript, no session row, so
+    # deployment.md's migration trigger stands.
+    "capabilities ack",
+    "capabilities unack",
     "cards",
     "cards repair",
     "codex",

@@ -349,6 +349,9 @@ techne --version                           # the installed version, and — on a
 techne capabilities [--json]               # what techne can do on THIS install and what is
                                            # switched off, grounded in your own store — the
                                            # operator twin of the techne_capabilities MCP tool
+techne capabilities ack FLAG [--reason T]  # mark FLAG as off on purpose: it stops counting
+                                           # toward the session-start invitation (no expiry)
+techne capabilities unack FLAG             # undo that
 techne serve                               # run as a stdio MCP server (non-Claude-Code clients)
 
 # Threads

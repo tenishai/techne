@@ -132,6 +132,18 @@ takes effect from the *next* session (Claude Code loads hooks at session
 start). Two more capabilities exist and stay opt-in — offer them, do not
 default them on: `per_turn_seed`, `startup_directive`.
 
+**Offer the recommended setup; never apply it silently.** When the session-start
+line "N capabilities are off on this install… Ask me what techne can do." appears
+(the operator sees it and may relay it to you), or the first time you work with
+techne on an install, call `techne_capabilities`. For each OFF item that is not
+`acknowledged`: say what it would change and what it costs, then offer to apply
+it. Apply nothing without the operator's yes. Some items are not config flags
+(`vectors_backend`, `vectors_model`, `single_memory_layer`); their `enable` text
+is a command or a settings edit. If the operator declines an item on purpose,
+record it with `techne_capabilities(acknowledge=<flag>, reason=...)` so it stops
+counting toward that line. Acknowledgements do not expire; `unacknowledge`
+reverses one.
+
 **Operator conventions, apply unprompted:**
 
 - **Recall.** Call `techne_recall` before answering from belief. Do not rely on
