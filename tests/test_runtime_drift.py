@@ -46,9 +46,11 @@ def tearable_module(tmp_path):
 
     NOT `techne.core.runtime_drift` itself (techne#1044). That file is on-disk once,
     shared by every xdist worker process running this test file, and `_module_mtimes`
-    walks EVERY loaded `techne.*` module including it — so it is also in the baseline
-    of any OTHER test in this file that calls `begin()`, whether or not that test ever
-    names it. Four tests here used to `os.utime` it directly to simulate a tear. Under
+    walks every loaded module whose name STARTS WITH `techne` (no dot required —
+    `techne_ghost_module` and this fixture's own name match too) including it — so it
+    is also in the baseline of any OTHER test in this file that calls `begin()`,
+    whether or not that test ever names it. Four tests here used to `os.utime` it
+    directly to simulate a tear. Under
     `-n 4` a worker's call landed between a DIFFERENT worker's `begin()` and `poll()` on
     the identical path, so that worker's own (untouched) test saw the real module torn
     and failed — reproduced locally: pairing just `test_a_module_changing_under_us_is_a_tear`
@@ -126,7 +128,7 @@ def test_one_warning_per_deployment(marker, tearable_module):
     Uses `tearable_module`, not the real `techne.core.runtime_drift` file — see that
     fixture (techne#1044) for why.
     """
-    name, path = tearable_module
+    _, path = tearable_module
     watch = rd.begin(None, ttl=0.0)
     _move(marker)
     os.utime(path, None)
@@ -139,7 +141,7 @@ def test_a_second_pull_warns_again(marker, tearable_module):
     """Suppression is keyed on the marker mtime, NOT a one-shot flag. A second deploy
     during the same process is new information and must not be swallowed by the first
     one's suppression."""
-    name, path = tearable_module
+    _, path = tearable_module
     watch = rd.begin(None, ttl=0.0)
 
     _move(marker)
