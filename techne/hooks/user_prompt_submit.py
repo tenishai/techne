@@ -794,7 +794,8 @@ def main() -> None:
     # does not search on it. Only recall is skipped: the deferred session context
     # above and the startup directive below still ride whichever turn comes first.
     # No per_turn_recall row goes to context_injections, because nothing was
-    # searched; the liveness outcome records the skip instead.
+    # searched; the liveness marker records the skip instead, as the outcome when
+    # nothing else is injected and in the `ok` detail when something is.
     from techne.hooks._recall_query import is_task_notification
 
     notification = is_task_notification(prompt)
@@ -994,7 +995,10 @@ def main() -> None:
                 }
             )
         )
-        _record(record_hook_run, config, degraded, outcome="ok", detail=f"{len(rows)} rows")
+        detail = f"{len(rows)} rows"
+        if recall_skipped:
+            detail = "0 rows (recall skipped: task-notification)"
+        _record(record_hook_run, config, degraded, outcome="ok", detail=detail)
     except Exception as e:  # noqa: BLE001
         print(f"techne: per-turn hook emit failed: {e}", file=sys.stderr)
         record_hook_run(

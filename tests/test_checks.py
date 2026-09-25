@@ -1693,6 +1693,19 @@ class TestCoreRailsAreInstrumented:
         verdict = next(r for r in run_checks(config) if r.name == "hook:user_prompt_submit")
         assert verdict.verdict is Verdict.LIVE, (verdict.verdict, verdict.detail)
 
+    def test_a_skip_is_named_even_when_other_context_is_injected(self, config, monkeypatch):
+        """techne#1045 (Prudence r1 nit): with the seed nudge on, the turn emits and
+        records `ok`; the skip must still be readable from the detail."""
+        from techne.hooks import user_prompt_submit
+
+        config.hooks.per_turn_recall = True
+        config.hooks.per_turn_seed = True
+        prompt = "<task-notification>\n<task-id>t1</task-id>\n</task-notification>"
+        self._run_hook(user_prompt_submit, {"prompt": prompt}, config, monkeypatch)
+        marker = self._marker(config, "user_prompt_submit")
+        assert marker.get("outcome") == "ok"
+        assert "recall skipped: task-notification" in (marker.get("detail") or "")
+
     def test_a_notification_with_recall_off_is_not_a_recall_skip(self, config, monkeypatch):
         """techne#1045: with recall off there was nothing to skip."""
         from techne.hooks import user_prompt_submit
