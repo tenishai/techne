@@ -612,7 +612,16 @@ def list_entries(
     limit: int = 50,
     include_superseded: bool = False,
 ) -> list[dict]:
-    """List knowledge entries with optional filters."""
+    """List knowledge entries with optional filters.
+
+    ``include_superseded=False`` (the default) is the "what's currently live"
+    view, so it also excludes soft-archived rows (``status = 'archived'``,
+    techne#216) alongside superseded ones — otherwise a predecessor archived by
+    `delete()` (review finding on techne#1033: a deleted replacement must not
+    resurrect the entry it replaced) would still show up here as if current.
+    ``include_superseded=True`` returns everything, archived or not, matching
+    how it already returns superseded rows.
+    """
     conn = connect(db_path)
     try:
         query = (
@@ -622,7 +631,7 @@ def list_entries(
         params: list = []
 
         if not include_superseded:
-            query += " AND superseded_by IS NULL"
+            query += " AND superseded_by IS NULL AND status != 'archived'"
         if type:
             query += " AND type = ?"
             params.append(type)
@@ -662,19 +671,61 @@ def delete(db_path: Path, entry_id: int) -> bool:
     from this entry) and `knowledge.superseded_by` (an older entry this one
     replaced). A bare DELETE fails on either with `FOREIGN KEY constraint failed`,
     which is how a seeder retiring one stale entry crash-looped an agent at boot
-    (2026-09-24). The edges go with the entry; the entries it replaced are unlinked
-    rather than deleted (they stay superseded-in-fact but no longer name a row that
-    is gone). One transaction, so a failure part-way leaves nothing half-removed.
+    (2026-09-24).
+
+    The predecessors this entry replaced (rows with `superseded_by = entry_id`)
+    are never resurrected — `superseded_by IS NULL` is how the rest of techne
+    (list_entries, FTS/vector recall, egress) recognises a live row, so simply
+    nulling it would bring a retired fact back as current (review finding on
+    techne#1033):
+      - If `entry_id` itself has a live successor (it was later superseded), its
+        predecessors are repointed at that successor — the chain just skips the
+        deleted link, `superseded_by` stays non-NULL, and nothing else changes.
+      - If `entry_id` is the head of its chain (nothing superseded it), its
+        predecessors have no successor to point at. They are archived
+        (`status = 'archived'`, techne#216) instead of left live — excluded from
+        egress and default recall, still visible to an explicit history search,
+        same as any other soft-archived row.
+
+    Dependents of `entry_id` (edges where `entry_id` is the trigger) are flipped
+    to `uncertain` before the edges are dropped, mirroring `supersede()`'s
+    `_cascade_uncertain` (techne#117): deleting a trigger is a stronger retirement
+    than superseding it, so it must not leave dependents looking more trustworthy
+    than a supersede would have.
+
+    Left alone deliberately, none of it a foreign key: `knowledge_vec` (swept
+    later by `_purge_orphaned_vec`), `knowledge_candidates.promoted_to_id` /
+    `.target_ids`, and `context_injections.hit_ids` (audit history).
+
+    One transaction, so a failure part-way leaves nothing half-removed.
     """
     conn = connect(db_path)
     try:
         conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT superseded_by FROM knowledge WHERE id = ?", (entry_id,)
+        ).fetchone()
+        if row is not None:
+            successor_id = row["superseded_by"]
+            if successor_id is not None:
+                conn.execute(
+                    "UPDATE knowledge SET superseded_by = ?, updated_at = CURRENT_TIMESTAMP "
+                    "WHERE superseded_by = ?",
+                    (successor_id, entry_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE knowledge SET superseded_by = NULL, status = 'archived', "
+                    "updated_at = CURRENT_TIMESTAMP WHERE superseded_by = ?",
+                    (entry_id,),
+                )
+        # Dependency cascade (techne#117), same as supersede(): flip live dependents
+        # of entry_id to `uncertain` BEFORE the edges that record the relationship
+        # are dropped below.
+        _cascade_uncertain(conn, entry_id)
         conn.execute(
             "DELETE FROM knowledge_deps WHERE dependent_id = ? OR trigger_id = ?",
             (entry_id, entry_id),
-        )
-        conn.execute(
-            "UPDATE knowledge SET superseded_by = NULL WHERE superseded_by = ?", (entry_id,)
         )
         cur = conn.execute("DELETE FROM knowledge WHERE id = ?", (entry_id,))
         conn.commit()
