@@ -340,6 +340,44 @@ class HookConfig:
     #: Set it knowing that. Live traffic is ~99% vec_distance, so it rarely applies.
     per_turn_recall_floor_vec_distance: float | None = None
     per_turn_recall_floor_bm25: float | None = None
+    #: INBOUND RECALL (techne#1018 parts 3-4). Per-turn recall fires only on a
+    #: prompt, so content that arrives mid-turn through a tool round — a subagent
+    #: hand-back, a fetched page, a peer's coord message — reaches the agent with
+    #: no recall at all. When ON, PostToolUse runs the same recall pipeline on
+    #: that content and injects at most `inbound_recall_limit` rows, at most once
+    #: per user prompt.
+    #:
+    #: DEFAULT OFF, AND ON IS NOT ENOUGH: the rail stays dormant until
+    #: `inbound_recall_floor_vec_distance` is set too. A search with no floor
+    #: always returns k rows (#414 measured a 0% zero-hit rate on per-turn
+    #: recall), which on text nobody asked a question with is noise on every
+    #: qualifying tool call. The floor has not been measured for inbound text,
+    #: so it ships unset and the rail ships dormant.
+    inbound_recall: bool = False
+    #: Tools whose results are searched. Content-bearing tools only: subagent
+    #: hand-backs (Agent, and Task on older clients), WebFetch, and techne's
+    #: own inbox and coord-thread reads. Bash, Edit, Grep, Read and the other
+    #: file tools are refused even if listed here (see post_tool_use); their
+    #: output is code and command noise, and they fire on most tool calls.
+    inbound_recall_tools: list[str] = field(
+        default_factory=lambda: [
+            "Agent",
+            "Task",
+            "WebFetch",
+            "mcp__techne__techne_inbox",
+            "mcp__techne__techne_coord_threads",
+        ]
+    )
+    #: Rows per inbound delivery. 2, not per-turn's 5: this lands mid-turn, on
+    #: top of whatever the tool itself returned.
+    inbound_recall_limit: int = 2
+    #: THE INBOUND RAIL'S OWN FLOOR, deliberately not `per_turn_recall_floor_*`.
+    #: Inbound text is a web page or a report, not a question, so its distance
+    #: distribution is not the per-turn one, and sharing a knob would mean
+    #: arming this rail changes what per-turn recall injects. Vector distance
+    #: only: a row with no vector distance (an FTS-only hit) cannot be judged by
+    #: it and is dropped on this rail rather than kept. Unset = rail dormant.
+    inbound_recall_floor_vec_distance: float | None = None
     #: DEFER THE SESSION-START CONTEXT TO THE FIRST PROMPT (techne#562).
     #: MEASURED 2026-08-18: 132,177 of 177,302 session_start tokens — 74.5% — went
     #: to sessions that produced ZERO observations. 278 blind sessions vs 82 seeing.
@@ -1149,6 +1187,11 @@ class Config:
             def _g(key):  # the config value, else the HookConfig default (#1028 r1)
                 return h.get(key, getattr(_hd, key))
 
+            def _str_list(v):
+                if not isinstance(v, list) or not all(isinstance(t, str) for t in v):
+                    raise ValueError("hooks.inbound_recall_tools must be a list of tool names.")
+                return list(v)
+
             cfg.hooks = HookConfig(
                 post_tool_use=_g("post_tool_use"),
                 capture_bash=_g("capture_bash"),
@@ -1173,6 +1216,14 @@ class Config:
                 per_turn_recall_floor_bm25=(
                     float(h["per_turn_recall_floor_bm25"])
                     if h.get("per_turn_recall_floor_bm25") is not None
+                    else None
+                ),
+                inbound_recall=_g("inbound_recall"),
+                inbound_recall_tools=_str_list(_g("inbound_recall_tools")),
+                inbound_recall_limit=int(_g("inbound_recall_limit")),
+                inbound_recall_floor_vec_distance=(
+                    float(h["inbound_recall_floor_vec_distance"])
+                    if h.get("inbound_recall_floor_vec_distance") is not None
                     else None
                 ),
                 defer_session_start_context=_g("defer_session_start_context"),
@@ -1417,6 +1468,10 @@ class Config:
                     self.hooks.per_turn_recall_floor_vec_distance
                 ),
                 "per_turn_recall_floor_bm25": self.hooks.per_turn_recall_floor_bm25,
+                "inbound_recall": self.hooks.inbound_recall,
+                "inbound_recall_tools": list(self.hooks.inbound_recall_tools),
+                "inbound_recall_limit": self.hooks.inbound_recall_limit,
+                "inbound_recall_floor_vec_distance": self.hooks.inbound_recall_floor_vec_distance,
                 "defer_session_start_context": self.hooks.defer_session_start_context,
                 "per_turn_seed": self.hooks.per_turn_seed,
                 "startup_directive": self.hooks.startup_directive,

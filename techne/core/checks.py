@@ -396,6 +396,13 @@ _HOOK_EXPECTATIONS = {
         "fires on a symbol-shaped Grep or Bash search, when enabled",
     ),
     "post_compact": (timedelta(days=7), "fires after a compaction"),
+    # techne#1018. Written by post_tool_use, only on a hand-back, fetched page or
+    # coord message, so it is judged on the clock like codex_grep_assist rather
+    # than against sessions: plenty of sessions have none of those.
+    "inbound_recall": (
+        timedelta(days=7),
+        "recall on hand-backs, fetched pages and coord messages, when armed",
+    ),
     # INSTRUMENTED as of techne#479. These were listed here while carrying no
     # record_hook_run call at all, deliberately — so they read UNOBSERVABLE
     # rather than being absent, because leaving them out made a DEAD CAPTURE
@@ -503,6 +510,19 @@ _HOOK_CONFIG_GATE = {
         "hooks.per_turn_recall / hooks.per_turn_seed",
         lambda c: c.hooks.per_turn_recall or c.hooks.per_turn_seed,
     ),
+    # Armed only with BOTH set (techne#1018 part 4): the flag alone leaves the
+    # rail dormant for want of a floor, and that is what this reports.
+    "inbound_recall": (
+        "hooks.inbound_recall + hooks.inbound_recall_floor_vec_distance",
+        lambda c: c.hooks.inbound_recall and c.hooks.inbound_recall_floor_vec_distance is not None,
+        lambda c: (
+            "disabled by config: hooks.inbound_recall is on but "
+            "hooks.inbound_recall_floor_vec_distance is unset, and the rail will not run "
+            "without a floor"
+            if c.hooks.inbound_recall
+            else "disabled by config: hooks.inbound_recall"
+        ),
+    ),
 }
 
 
@@ -564,7 +584,10 @@ def check_hooks(config) -> list[CheckResult]:
             gate = _HOOK_CONFIG_GATE.get(hook)
             if gate and not gate[1](config):
                 # CONFIG FIRST. Without this a rail turned off after use keeps a
-                # recent-looking marker and reads healthy forever.
+                # recent-looking marker and reads healthy forever. A gate with a
+                # third element names its own reason (a rail that is on but
+                # unarmed is not "= false").
+                why = gate[2](config) if len(gate) > 2 else None
                 results.append(
                     CheckResult(
                         name=f"hook:{hook}",
@@ -572,8 +595,8 @@ def check_hooks(config) -> list[CheckResult]:
                         kind=Kind.TEMPORAL,
                         verdict=Verdict.DORMANT,
                         last_fired=last,
-                        evidence=f"config {gate[0]} = false",
-                        detail=f"disabled by config: {gate[0]}",
+                        evidence=f"config {gate[0]}: {why}" if why else f"config {gate[0]} = false",
+                        detail=why or f"disabled by config: {gate[0]}",
                     )
                 )
                 continue
