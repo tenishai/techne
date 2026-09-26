@@ -39,6 +39,15 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Added
 
+- **`techne init --allow-worktree`** (#436). Registers even when techne runs from a git
+  worktree (a bare repo's worktree may be your only checkout), with a stderr warning
+  naming the worktree and what breaks when it is pruned. A flag only; there is no env
+  var form.
+- **The transparent-prefix table is executed against the real utilities** (#740).
+  `tests/test_transparent_prefix_oracle.py` runs 30 spellings of `timeout`, `stdbuf`,
+  `ionice`, `setsid`, `nice` and `nohup` and checks both that the utility execs the
+  wrapped command and that `_skip_transparent_prefixes` lands on it. Missing utilities
+  skip, so the Linux CI runner is where the GNU-only rows run.
 - `techne knowledge supersede OLD_ID CONTENT` writes a new revision and retires the
   old entry; `techne knowledge supersede OLD_ID --by ID` retires it into an entry that
   already exists, without writing a row (#877, #887). Until now the only route was the
@@ -135,7 +144,27 @@ All notable changes to techne are documented here. Format loosely follows
   and lists retired-only targets separately. On MCP, an unconfigured retired-only
   target's error says its patterns are retired and lists the targets that hold active
   ones; a configured one returns no rows with a notice saying the same.
-
+- **The evidence gate reads the whole Bash command, not its first line** (#713, first
+  finding). `actions` held only line 1, so a multi-line command opening with `cd <repo>`
+  hid a `gh pr merge` on line 2 and `ran_action` reported it unbacked. The command is now
+  cut at the first output marker, so output from a captured row never enters an action,
+  and heredoc bodies are stripped because they are data. The `tests_green` union and
+  heredoc-written files are not changed here.
+- **`techne session-end` no longer records a clean exit for a session that died long
+  ago** (#986). Past the sweep's 6-hour idle window it stamps `ended_at` from last
+  activity with source `derived`, and leaves an existing end at or after last activity
+  alone. The Stop hook still stamps now/`clean`.
+- **SessionStart reads `source`** (#906). On `resume`, `clear` and `compact` the model
+  gets a one-line reactivation notice instead of the full banner; the operator's banner
+  is unchanged. After `clear` the model gets threads and knowledge back through
+  `techne_resume` and peer sessions through `techne_inbox`, both named in the line.
+  `startup`, a missing source or an unknown one keep the full banner.
+- **Reflect keeps the error at the end of a long observation** (#907). Up to 3
+  failure-shaped lines (120 chars each) from the part past the 200-char head are
+  appended, so a Bash error is in the prompt instead of only the command echo.
+- **Session-id prefixes match literally** (#902). `threads show`, `threads redetect`
+  and `reflect undecline` share one lookup that escapes `%` and `_`; `undecline
+  --session '%'` used to retract every decline in the newest session.
 - **`techne doctor` reports the deployed runtime even when run from a repo checkout**
   (#690). `runtime:revision` only inspects the checkout `techne` was imported from, which
   from a working copy is DORMANT by design, so a deployment 20 commits behind main stayed

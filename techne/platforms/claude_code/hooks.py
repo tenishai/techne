@@ -683,12 +683,18 @@ def _group_contains_techne(group: dict) -> bool:
     return False
 
 
-def register_hooks(config: Config):
+def register_hooks(config: Config, *, allow_worktree: bool = False):
     """Register techne hooks in Claude Code settings.json.
 
     Writes the current Claude Code hook shape:
     ``{<Event>: [{"matcher": "", "hooks": [{"type": "command", "command": "..."}]}]}``.
     Empty matcher means "every tool / every fire of this event".
+
+    ``allow_worktree`` is `techne init --allow-worktree` and nothing else (issue
+    #436). It exists because the guard below catches every linked worktree, so an
+    operator whose only checkout is a bare-repo worktree had no way to install at
+    all. A flag, never an env var: an env-based bypass is how CLAUDE_CONFIG_DIR
+    became production-reachable by accident (techne#113).
     """
     # Refuse to bake a worktree path into the config. If techne is installed from
     # a git worktree, its editable pointer — and everything we're about to wire —
@@ -715,13 +721,23 @@ def register_hooks(config: Config):
         ("preflight guard", PREFLIGHT_GUARD),
     ):
         wt = _under_worktree(candidate)
-        if wt is not None:
+        if wt is not None and allow_worktree:
+            print(
+                f"techne: WARNING — registering anyway (--allow-worktree). The {label} "
+                f"({candidate}) is inside the git worktree {wt}. If that worktree is "
+                "pruned or moved, the MCP server and every techne hook stop working "
+                "until you reinstall and re-run `techne init`.",
+                file=sys.stderr,
+            )
+        elif wt is not None:
             raise RuntimeError(
                 f"techne's {label} ({candidate}) is inside a git worktree ({wt}). "
                 "Wiring that into ~/.claude would break the MCP server and every "
                 "techne hook the moment the worktree is pruned. Reinstall from your "
                 "canonical checkout, then re-run `techne init`:\n"
-                f"  {sys.executable} -m pip install -e <canonical-techne-checkout>"
+                f"  {sys.executable} -m pip install -e <canonical-techne-checkout>\n"
+                "If a worktree is your only checkout, `techne init --allow-worktree` "
+                "registers it anyway."
             )
 
     # Generate the interpreter launcher before baking paths into settings.json

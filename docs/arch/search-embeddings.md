@@ -3,7 +3,7 @@ card: arch-card:techne-search-embeddings
 updated: 2026-09-25
 anchor: techne/core/embeddings.py sha=a862f5bf3aa89e88180b39ec734cd64c0458a422
 anchor: techne/core/search.py sha=7c2455a834637821b10b46e43d5fb434b594363f
-anchor: techne/platforms/claude_code/hooks.py sha=93a0efdcb8eb8969a2eb0bc8df8cc04914536cc8
+anchor: techne/platforms/claude_code/hooks.py sha=ed7125159e939df81839a8455f34e67f388a73f0
 ---
 # search / embeddings — hybrid FTS + vector recall
 
