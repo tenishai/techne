@@ -24,8 +24,10 @@ from the `techne.core.threads` shim package, which re-exports it from
 `thread_orchestrator.py` — so reflect.py transitively reaches the module that
 imports litellm. That composition is the documented operator-model/headless route
 (reflect-pipeline.md), not a hole this test misses: it is a SEPARATE code path
-from the resident emit/ingest one, selected only when `config.model` names a real
-API model. Catching that at the AST level would mean forbidding the import
+from the resident emit/ingest one, gated in `reflect_on_session` on `generate_fn is
+None and not config.reflect.model` — so it takes effect only when `reflect.model`
+is set (or a `generate_fn` is injected directly), never from `config.model` alone.
+Catching that at the AST level would mean forbidding the import
 entirely, which would break the legitimate headless path. What this test can and
 does prevent is the *rail module itself* silently starting to `import litellm` —
 the case #499 asked for.
