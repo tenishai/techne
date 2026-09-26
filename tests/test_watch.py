@@ -399,6 +399,80 @@ def test_watch_raises_startup_config_error_when_watchdog_missing(
         watch(config, install_signal_handlers=False)
 
 
+# ---- inotify limits are EX_CONFIG too (techne#529) -------------------------
+#
+# watchdog 6.0 raises OSError(ENOSPC|EMFILE) from Inotify._raise_error when a
+# host inotify sysctl is exhausted. That surfaces at observer.start() here (the
+# emitter creates its inotify fd and watches when it starts), or at schedule()
+# on an already-running observer. A restart allocates nothing new, so both must
+# take the EX_CONFIG path rather than the generic one systemd respawns forever.
+
+
+def _failing_observer(where: str, err: OSError):
+    class _Obs:
+        def schedule(self, *_a, **_k):
+            if where == "schedule":
+                raise err
+
+        def start(self):
+            if where == "start":
+                raise err
+
+    return _Obs
+
+
+@pytest.mark.parametrize("where", ["schedule", "start"])
+@pytest.mark.parametrize(
+    ("err", "sysctl"),
+    [
+        (OSError(28, "inotify watch limit reached"), "fs.inotify.max_user_watches"),
+        (OSError(24, "inotify instance limit reached"), "fs.inotify.max_user_instances"),
+    ],
+)
+def test_inotify_exhaustion_raises_startup_config_error(
+    monkeypatch, tmp_path, db_path, session_id, where, err, sysctl
+) -> None:
+    import errno
+    import sys
+
+    from techne.exit_codes import StartupConfigError
+    from techne.watch import watch
+
+    assert err.errno in (errno.ENOSPC, errno.EMFILE)
+    monkeypatch.setattr(sys, "platform", "linux")
+    config = WatchConfig(db_path=db_path, paths=[tmp_path], session_id=session_id)
+    with pytest.raises(StartupConfigError, match=rf"{sysctl}=\d+.*restarting will not help"):
+        watch(config, observer_cls=_failing_observer(where, err), install_signal_handlers=False)
+
+
+def test_other_oserrors_and_non_linux_are_not_reclassified(
+    monkeypatch, tmp_path, db_path, session_id
+) -> None:
+    """Only the two inotify limits, and only on Linux: EACCES is not a sysctl, and
+    EMFILE from kqueue on BSD is the process fd limit, not an inotify knob."""
+    import sys
+
+    from techne.exit_codes import StartupConfigError
+    from techne.watch import watch
+
+    config = WatchConfig(db_path=db_path, paths=[tmp_path], session_id=session_id)
+    monkeypatch.setattr(sys, "platform", "linux")
+    with pytest.raises(PermissionError):
+        watch(
+            config,
+            observer_cls=_failing_observer("start", PermissionError(13, "denied")),
+            install_signal_handlers=False,
+        )
+    monkeypatch.setattr(sys, "platform", "freebsd14")
+    with pytest.raises(OSError) as info:
+        watch(
+            config,
+            observer_cls=_failing_observer("start", OSError(24, "too many open files")),
+            install_signal_handlers=False,
+        )
+    assert not isinstance(info.value, StartupConfigError)
+
+
 def test_startup_config_error_stays_a_runtime_error() -> None:
     """The compatibility half of the change.
 

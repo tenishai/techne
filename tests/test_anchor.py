@@ -15,7 +15,7 @@ from techne.core.database import SCHEMA_VERSION, connect
 
 
 def _run(cwd, *args):
-    subprocess.run(args, cwd=cwd, check=True, capture_output=True, text=True)
+    return subprocess.run(args, cwd=cwd, check=True, capture_output=True, text=True)
 
 
 @pytest.fixture
@@ -176,6 +176,60 @@ def test_classify_unknown_on_ls_files_failure(git_repo, monkeypatch):
     state, detail = anchor.classify(str(f), r["content_hash"], r["git_sha"])
     assert state == "unknown"
     assert detail
+
+
+def _rebased_away_anchor(repo, f):
+    """Pin an anchor at a commit, then reset it out of HEAD's history (the
+    rebase/force-push shape) while leaving the anchored file byte-identical."""
+    base = _run(repo, "git", "rev-parse", "HEAD").stdout.strip()
+    (repo / "other.py").write_text("x = 1\n")
+    _run(repo, "git", "add", "other.py")
+    _run(repo, "git", "commit", "-q", "-m", "to be rebased away")
+    r = resolve_anchor(str(f))
+    _run(repo, "git", "reset", "-q", "--hard", base)
+    return r
+
+
+def test_classify_diverged_when_anchor_commit_left_history(git_repo):
+    """techne#391: bytes match, but the pinned commit is no longer an ancestor
+    of HEAD — the hash match alone must not read as `unchanged`."""
+    repo, f = git_repo
+    r = _rebased_away_anchor(repo, f)
+    state, detail = classify(str(f), r["content_hash"], r["git_sha"])
+    assert state == "diverged"
+    assert detail == r["git_sha"][:12]
+
+
+def test_classify_unchanged_when_anchor_commit_is_ancestor(git_repo):
+    repo, f = git_repo
+    r = resolve_anchor(str(f))
+    (repo / "later.py").write_text("y = 2\n")
+    _run(repo, "git", "add", "later.py")
+    _run(repo, "git", "commit", "-q", "-m", "later")
+    assert classify(str(f), r["content_hash"], r["git_sha"]) == ("unchanged", "")
+
+
+def test_classify_unseen_sha_is_not_diverged(git_repo):
+    """A sha this clone never fetched (memory from another machine) is "cannot
+    tell" — it must not downgrade content the hash check verified."""
+    _repo, f = git_repo
+    r = resolve_anchor(str(f))
+    assert classify(str(f), r["content_hash"], "deadbeef" * 5) == ("unchanged", "")
+
+
+def test_annotate_freshness_diverged_tag(tmp_path, git_repo):
+    repo, f = git_repo
+    db = tmp_path / "techne.db"
+    (repo / "other.py").write_text("x = 1\n")
+    base = _run(repo, "git", "rev-parse", "HEAD").stdout.strip()
+    _run(repo, "git", "add", "other.py")
+    _run(repo, "git", "commit", "-q", "-m", "to be rebased away")
+    kid = knowledge.store(db, "fact", anchor=str(f))
+    _run(repo, "git", "reset", "-q", "--hard", base)
+    rows = [{"source_table": "knowledge", "id": kid, "content": "fact"}]
+    annotate_freshness(db, rows)
+    assert rows[0]["freshness"]["state"] == "diverged"
+    assert "re-read before quoting" in rows[0]["freshness"]["tag"]
 
 
 def test_classify_unknown_no_repo(tmp_path):

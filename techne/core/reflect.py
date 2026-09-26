@@ -142,6 +142,13 @@ the identifiers change. If you cite an identifier, count or version, ask whether
 the claim survives it changing; if it does not, state the rule and drop the
 identifier.
 
+VERIFY BEFORE YOU WRITE "high". The observations above are an index, not
+evidence: only the first part of the thread, each line clipped to its head.
+Before marking an item "high" when it names a number, an issue or PR, a state,
+or a mechanism, confirm it against the source (the issue, the PR, git log, the
+store). If you cannot confirm it, mark it "medium" and say in the content what
+is unconfirmed, or leave it out.
+
 Prefer fewer, sharper items over many vague ones. Hard cap: {max_items} items.
 
 Output the JSON array and nothing else.

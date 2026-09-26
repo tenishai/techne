@@ -68,7 +68,7 @@ def _open_remote_readonly(db_path: Path) -> sqlite3.Connection:
 
 **D — Merge + rank.** Pool local + deduped-remote, run `_rerank(pooled, …)`. Per-type normalization does the cross-store work; recency + decay are the tiebreaks. Return top-N.
 
-**E — Where contradictions land (sovereignty).** `recall` **returns** the conflict prompts as `federation_conflicts` — it does **not** write. A separate `techne_federation_conflict_ingest` tool (the agent answers the prompt with its own model, same emit/ingest shape as #213) stages a **pending** candidate into the **local** `knowledge_candidates` with `origin='federation-conflict'`:
+**E — Where contradictions land (sovereignty).** `recall` **returns** the conflict prompts as `federation_conflicts` — it does **not** write. (Since techne#863 only on request: by default recall returns a `federation_conflicts_pending` count, and `include_federation_conflicts=true` returns the items.) A separate `techne_federation_conflict_ingest` tool (the agent answers the prompt with its own model, same emit/ingest shape as #213) stages a **pending** candidate into the **local** `knowledge_candidates` with `origin='federation-conflict'`:
 - SUPERSEDE + local older (team has the newer fact, later `event_at`) → stage a `retire` candidate targeting the **local** row.
 - SUPERSEDE + local newer (team is stale) → stage a `discarded` informational marker; **no push to the team store** (we don't write foreign stores).
 - The foreign id (`"team-archivist:42"`) + content ride in `decision_reason`; `target_ids` holds **local ids only** (so `promote_candidate` is unmodified and there's no foreign-id lookup).

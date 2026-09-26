@@ -459,9 +459,18 @@ _SWEEP_AGED = """
        -- the same second now collide routinely — and they do, because a drain
        -- stamps a whole batch with one `now`. The clause was depending on
        -- precision it never declared, supplied by a different module.
+       -- ONLY A ROW WITH A synced_at CAN HOLD THIS SLOT (#547). For a NULL
+       -- synced_at the NOT EXISTS below is vacuously true (nothing compares
+       -- greater than NULL), so without `o.synced_at IS NOT NULL` every NULL row
+       -- was protected forever. It protected nothing worth keeping: this slot
+       -- exists for MAX(synced_at), and MAX ignores NULL. Presence is the first
+       -- tombstone's job, and a NULL row that is its target's newest row still
+       -- survives through it. Pinned by
+       -- test_null_synced_at_rows_are_sweepable_but_the_lane_keeps_its_tombstones.
        AND id NOT IN (
              SELECT o.id FROM outbox o
               WHERE o.status = 'synced'
+                AND o.synced_at IS NOT NULL
                 AND NOT EXISTS (
                       SELECT 1 FROM outbox n
                        WHERE n.target = o.target AND n.status = 'synced'

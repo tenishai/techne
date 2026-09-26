@@ -29,9 +29,12 @@ PollingObserver against a tmp_path.
 
 from __future__ import annotations
 
+import contextlib
+import errno
 import fnmatch
 import logging
 import signal
+import sys
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -204,6 +207,40 @@ def run_full_walk(config: WatchConfig) -> int:
 
 # ---- main event loop ------------------------------------------------------
 
+#: errno -> the sysctl that bounds it. Linux inotify only: watchdog 6.0 raises
+#: ``OSError(ENOSPC, "inotify watch limit reached")`` / ``OSError(EMFILE,
+#: "inotify instance limit reached")`` from ``Inotify._raise_error`` (techne#529).
+_INOTIFY_LIMITS = {
+    errno.ENOSPC: ("fs.inotify.max_user_watches", 524288),
+    errno.EMFILE: ("fs.inotify.max_user_instances", 512),
+}
+
+
+@contextlib.contextmanager
+def _inotify_limits_are_config():
+    """Re-raise an exhausted inotify limit as ``StartupConfigError`` (techne#529).
+
+    The limit is a host sysctl; restarting the unit allocates no more watches, so it
+    belongs on the EX_CONFIG path with the missing-watchdog case, not the generic one
+    that systemd respawns forever. Wraps BOTH ``schedule()`` and ``start()``: in
+    watchdog 6.0 the inotify fd and watches are created when an emitter starts, which
+    is ``observer.start()`` here, but ``schedule()`` on an already-running observer
+    starts its emitter inline. Any other OSError propagates unchanged, and so does
+    everything off Linux: EMFILE from kqueue on BSD is the process fd limit, and
+    naming an inotify sysctl there would send the operator to the wrong knob.
+    """
+    try:
+        yield
+    except OSError as exc:
+        limit = _INOTIFY_LIMITS.get(exc.errno) if sys.platform.startswith("linux") else None
+        if limit is None:
+            raise
+        sysctl, suggested = limit
+        raise StartupConfigError(
+            f"inotify limit exhausted ({sysctl}): {exc.strerror or exc}. "
+            f"Raise it with `sysctl {sysctl}={suggested}`; restarting will not help."
+        ) from exc
+
 
 def watch(
     config: WatchConfig,
@@ -251,13 +288,15 @@ def watch(
     for path in config.paths:
         if path.exists():
             target = path if path.is_dir() else path.parent
-            observer.schedule(_Handler(), str(target), recursive=True)
+            with _inotify_limits_are_config():
+                observer.schedule(_Handler(), str(target), recursive=True)
 
     # Initial full walk so pre-existing files are captured before any edits.
     initial = run_full_walk(config)
     log.info("initial_walk path_count=%d files=%d", len(config.paths), initial)
 
-    observer.start()
+    with _inotify_limits_are_config():
+        observer.start()
 
     stop_event = threading.Event()
 

@@ -1,7 +1,7 @@
 ---
 card: arch-card:techne-bindings
-updated: 2026-08-22
-anchor: techne/core/bindings.py sha=6ff3bae55c7ed353a2dad7cf5631e7fd1ec4acc5
+updated: 2026-09-25
+anchor: techne/core/bindings.py sha=47aa93e2a473d961ef02c6b4a50a757272809d09
 ---
 # bindings — the connection seam, one question over four domains (techne#552 part 4)
 
@@ -26,5 +26,5 @@ INVARIANTS:
 - **BOTH `store` TOPOLOGIES RESOLVE THROUGH THEIR OWN RESOLVER.** `archivist_binding` answers `store` for `archivist_db_path` OR a `connections` entry. Delegating the binding while re-deriving the PATH — which only knew the first — made a connection-bound team install report `unavailable` for a present, working store. Recall never saw it (`mcp_server` setdefaults, so the operator's entry wins), so the divergence lived only in the surface built to diagnose bindings. Relative connection paths go through federation's `_resolve_conn_db_path` (techne#332), not `Path()`.
 - **ONLY GENUINE FAULTS REACH AN `except`.** `resolve_repo_db_for_query` RETURNS None for both healthy codex absences, so its handler catches only real failures and must report `unavailable`, not `absent`. Reporting the healthy state advised `techne codex index` for a fault that command does not fix.
 - **CODEX REPORTS `absent` RATHER THAN ANSWERING ABOUT ANOTHER REPO.** db-per-repo (techne#209) means the binding is a property of WHERE YOU ARE; an unindexed repo has no codex, which is a fact rather than a fault. Resolving to some other repo's index would answer confidently about the wrong code.
-- **ONE BROKEN RESOLVER MUST NOT TAKE DOWN THE REPORT.** Its value is completeness — an operator comparing four domains needs four rows, one of which may say it could not be read. NOTE there are TWO handlers with different guarantees (the inner one in `_codex`, the outer in `all_bindings`) and a guard must raise where nothing else will catch it: a first test monkeypatched inside `_codex`, exercised the inner catch, and left the outer one unguarded.
+- **ONE BROKEN RESOLVER MUST NOT TAKE DOWN THE REPORT.** Its value is completeness — an operator comparing four domains needs four rows, one of which may say it could not be read. NOTE there are TWO handlers with different guarantees (the inner one in `_codex`, the outer `_resolve_or_fault`, shared by `all_bindings` AND `domain_binding` since techne#727 — before that a single-domain call such as `archivist_search` raised the techne#346 refusal that `techne bindings` reported as a row) and a guard must raise where nothing else will catch it: a first test monkeypatched inside `_codex`, exercised the inner catch, and left the outer one unguarded.
 CONSUMERS: `techne bindings` (cli.py). Does NOT touch `_techne_recall`.
