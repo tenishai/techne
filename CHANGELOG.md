@@ -108,15 +108,16 @@ All notable changes to techne are documented here. Format loosely follows
 - **The evidence gate reads the whole Bash command, not its first line** (#713, first
   finding). `actions` held only line 1, so a multi-line command opening with `cd <repo>`
   hid a `gh pr merge` on line 2 and `ran_action` reported it unbacked. The command is now
-  cut at the first output marker, so output never enters an action. The `tests_green`
+  cut at the first output marker, so output from a captured row never enters an action. The `tests_green`
   union and heredoc-written files are not changed here.
 - **`techne session-end` no longer records a clean exit for a session that died long
   ago** (#986). Past the sweep's 6-hour idle window it stamps `ended_at` from last
   activity with source `derived`, and leaves an existing end at or after last activity
   alone. The Stop hook still stamps now/`clean`.
 - **SessionStart reads `source`** (#906). On `resume`, `clear` and `compact` the model
-  gets a one-line reactivation notice instead of the full banner; the operator's banner
-  is unchanged. `startup`, a missing source or an unknown one keep the full banner.
+  gets a one-line reactivation notice pointing at `techne_resume` instead of the full
+  banner; the operator's banner is unchanged. After `clear` the model has no banner
+  content until it calls `techne_resume`. `startup`, a missing source or an unknown one keep the full banner.
 - **Reflect keeps the error at the end of a long observation** (#907). Up to 3
   failure-shaped lines (120 chars each) from the part past the 200-char head are
   appended, so a Bash error is in the prompt instead of only the command echo.

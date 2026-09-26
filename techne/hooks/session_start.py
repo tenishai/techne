@@ -149,9 +149,15 @@ DEFERRED_CONTEXT_KEY = "session_start:deferred"
 #: fires the hook for `startup`, `resume`, `clear` and `compact` alike; re-adding the
 #: full banner right after a compaction undoes part of what the compaction reclaimed,
 #: and `clear` is the operator asking for a clean slate. These get REACTIVATION_LINE
-#: instead. Safe because the per-turn UserPromptSubmit rail restates active memory
-#: every turn without depending on this banner, and PostCompact restores the
-#: checkpoint. An absent or unknown source keeps the full banner.
+#: instead, and what replaces the banner differs per source — stated, not assumed:
+#: `resume` restores the prior transcript, which already carries the banner it was
+#: given; `compact` keeps the compaction summary and PostCompact restores the
+#: checkpoint; `clear` gets NOTHING back by design, so coordination, threads, recent
+#: sessions, knowledge and the model's copy of drift are gone until the agent calls
+#: techne_resume, which the line names. Per-turn recall, when on, is topic recall
+#: and does not restore those blocks. The operator's banner (drift included) is
+#: unchanged for all three. An absent, unknown or non-string source keeps the full
+#: banner.
 REACTIVATION_SOURCES = frozenset({"resume", "clear", "compact"})
 REACTIVATION_LINE = (
     "techne memory is active for this session ({source}). Per-turn recall continues; "
@@ -672,9 +678,10 @@ def _run_phases_2_to_9(
         # journal shows is a SEPARATE carrier (`hook_system_message`) from the
         # `additionalContext` being deferred (`hook_additional_context`). The human
         # still sees session state at startup; only the model's copy waits.
-        reactivation = source in REACTIVATION_SOURCES
+        reactivation = isinstance(source, str) and source in REACTIVATION_SOURCES
         if reactivation:
-            # The operator's banner is unchanged; only the model's copy shrinks. Not
+            # The operator's banner is unchanged; the model's copy is replaced whole
+            # (see REACTIVATION_SOURCES for what each source has instead). Not
             # stashed either: deferring the full summary would re-inject it on the
             # next prompt, which is the re-injection this avoids.
             summary = REACTIVATION_LINE.format(source=source)
