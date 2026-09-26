@@ -101,8 +101,10 @@ line-length = 100
 
 [tool.ruff.lint]
 # B006 added as a regression guard (#720): zero findings on main when measured,
-# so this is a no-op that starts failing the build the first time a mutable
-# default argument appears, rather than a backlog to clear. E722 (bare except)
+# so this is a no-op that starts REPORTING the first time a mutable default
+# argument appears, rather than a backlog to clear. Reporting, not failing: CI
+# runs ruff with `|| true` (test.yml), same as the rest of this list -- see the
+# HEALTH line in ARCHITECTURE.md. E722 (bare except)
 # and F821 (undefined name) were also proposed by #720 but are already covered
 # by the "E"/"F" category prefixes above — verified by forcing both to fire
 # against a scratch file under this exact select list.
