@@ -153,6 +153,7 @@ def end_session(
     *,
     source: str = "manual",
     summary_llm_source: str | None = None,
+    derive_if_idle_hours: int | None = None,
 ):
     """Mark a session ended and store its summary.
 
@@ -175,12 +176,40 @@ def end_session(
     conn = connect(db_path)
     try:
         llm_src = summary_llm_source if source == "llm" else None
+        # "Now" and "clean" are right for the Stop hook, which fires as the session
+        # ends. They are wrong for a replay of a session that went quiet long ago
+        # (issue #986): `techne session-end` on a session dead for 30 days recorded a
+        # clean exit 30 days late. A caller that can be replaying passes
+        # `derive_if_idle_hours`; past that silence the end is DERIVED from last
+        # activity, the same value and stamp `close_abandoned_sessions` writes.
+        ended_sql = "ended_at = CURRENT_TIMESTAMP, ended_at_source = 'clean'"
+        ended_args: tuple = ()
+        if derive_if_idle_hours is not None:
+            row = conn.execute(
+                f"""SELECT {_LAST_SEEN_SQL} AS last_seen,
+                           replace(substr(s.ended_at, 1, 19), 'T', ' ') AS ended,
+                           datetime('now', ?) AS cutoff
+                      FROM sessions s
+                      LEFT JOIN observations o
+                             ON o.session_id = s.id AND {_OBS_TS_IS_DATE}
+                     WHERE s.id = ?
+                     GROUP BY s.id""",
+                (f"-{int(derive_if_idle_hours)} hours", session_id),
+            ).fetchone()
+            if row is not None and row["last_seen"] < row["cutoff"]:
+                if row["ended"] is not None and row["ended"] >= row["last_seen"]:
+                    # Already carries an end at or after its last activity (a real
+                    # Stop, or an earlier derive). Moving it would replace a true
+                    # value with a lower bound, or push it forward to "now".
+                    ended_sql, ended_args = "ended_at = ended_at", ()
+                else:
+                    ended_sql = "ended_at = ?, ended_at_source = 'derived'"
+                    ended_args = (row["last_seen"],)
         conn.execute(
-            f"""UPDATE sessions SET ended_at = CURRENT_TIMESTAMP,
-                    ended_at_source = 'clean', {column} = ?,
+            f"""UPDATE sessions SET {ended_sql}, {column} = ?,
                     summary_llm_source = COALESCE(?, summary_llm_source)
                 WHERE id = ?""",
-            (redact_credentials(summary) if summary else None, llm_src, session_id),
+            (*ended_args, redact_credentials(summary) if summary else None, llm_src, session_id),
         )
         conn.commit()
     finally:
@@ -247,6 +276,16 @@ def get_session(db_path: Path, session_id: str) -> dict | None:
 # Generous on purpose: the cost of waiting is a NULL that resolves an hour later,
 # and the cost of being wrong is stamping a live session as ended.
 ABANDONED_SESSION_IDLE_HOURS = 6
+
+#: A session's last known activity: its newest date-shaped observation, else its
+#: start. Shared by the sweep and `end_session`'s replay path so the two cannot
+#: derive different ends for the same row. Needs `sessions s` LEFT JOIN
+#: `observations o ON o.session_id = s.id AND {_OBS_TS_IS_DATE}`, grouped by s.id.
+_LAST_SEEN_SQL = (
+    "COALESCE(MAX(replace(substr(o.timestamp, 1, 19), 'T', ' ')), "
+    "replace(substr(s.started_at, 1, 19), 'T', ' '))"
+)
+_OBS_TS_IS_DATE = "o.timestamp LIKE '____-__-__%'"
 
 
 def close_abandoned_sessions(
@@ -333,13 +372,10 @@ def close_abandoned_sessions_in_conn(
     # need a real number, and selecting first also makes the target set
     # inspectable when something looks wrong.
     targets = conn.execute(
-        """
+        f"""
         WITH activity AS (
             SELECT s.id AS sid,
-                   COALESCE(
-                       MAX(replace(substr(o.timestamp, 1, 19), 'T', ' ')),
-                       replace(substr(s.started_at, 1, 19), 'T', ' ')
-                   ) AS last_seen
+                   {_LAST_SEEN_SQL} AS last_seen
               FROM sessions s
               LEFT JOIN observations o
                      ON o.session_id = s.id
@@ -352,7 +388,7 @@ def close_abandoned_sessions_in_conn(
                     -- (a NULL, the status quo) but it fails INVISIBLY, so the
                     -- date-shaped rows are the only ones consulted and a session
                     -- with nothing usable falls back to started_at via COALESCE.
-                   AND o.timestamp LIKE '____-__-__%'
+                   AND {_OBS_TS_IS_DATE}
              GROUP BY s.id
         )
         SELECT s.id, a.last_seen

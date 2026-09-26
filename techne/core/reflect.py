@@ -14,6 +14,7 @@ thread detection and session teardown must complete regardless.
 import hashlib
 import json
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
@@ -31,6 +32,47 @@ from techne.core.threads import Thread, _make_generate_fn
 
 MAX_OBS_FOR_PROMPT = 40
 MAX_OBS_CONTENT_CHARS = 200
+
+# Failure lines rescued from the part of an observation the 200-char head drops
+# (issue #907). A Bash row's head is the command echo; the error that makes it worth
+# reflecting on is at the end. Deliberately broad vocabulary, deliberately small cap:
+# the rescue must not become a second uncapped channel into a 40-observation prompt.
+# Vocabulary after JayPokale/Chisle's output compressor.
+_FAILURE_LINE_RE = re.compile(
+    r"error|err!|fail(?:ed|ure|ing|s)?\b|exception|traceback|panic|fatal|denied|refused"
+    r"|timed out|assert(?:ion)?|segfault|\bnpe\b|undefined reference|cannot find"
+    r"|not found|warning",
+    re.IGNORECASE,
+)
+MAX_SALVAGED_LINES = 3
+MAX_SALVAGED_LINE_CHARS = 120
+
+
+def _clip_observation(content: str) -> str:
+    """One observation, flattened to a line and cut to budget, failures kept.
+
+    Salvage runs BEFORE the newline flatten because it needs line structure, and
+    keeps the LAST matching lines: the failure that ended a run prints after the
+    ones it tolerated.
+    """
+    if len(content) <= MAX_OBS_CONTENT_CHARS:
+        return content.replace("\n", " ")
+    head = content[:MAX_OBS_CONTENT_CHARS].replace("\n", " ") + "…"
+    hits = [
+        ln.strip()
+        for ln in content[MAX_OBS_CONTENT_CHARS:].split("\n")
+        if ln.strip() and _FAILURE_LINE_RE.search(ln)
+    ]
+    # Dedupe keeping each line's LAST position, so a failure repeated at the very
+    # end is not dropped in favour of an earlier copy.
+    kept = list(dict.fromkeys(reversed(hits)))[:MAX_SALVAGED_LINES][::-1]
+    if not kept:
+        return head
+    rescued = " ⏎ ".join(
+        ln if len(ln) <= MAX_SALVAGED_LINE_CHARS else ln[:MAX_SALVAGED_LINE_CHARS] + "…"
+        for ln in kept
+    )
+    return f"{head} [failure lines from the elided tail: {rescued}]"
 
 # Actions that require a faithfulness check before promotion (techne#252, 2026-07-06).
 # Must stay in sync with faithfulness_emit's SQL filter (action IN ('merge','supersede')).
@@ -128,9 +170,7 @@ def _render_observations(observations: list[dict]) -> str:
         # which observations are decision-/fact-shaped and worth extracting (techne#19).
         kind = o.get("kind") or ""
         label = f"{tool}|{kind}" if kind else tool
-        content = (o.get("content") or "").replace("\n", " ")
-        if len(content) > MAX_OBS_CONTENT_CHARS:
-            content = content[:MAX_OBS_CONTENT_CHARS] + "…"
+        content = _clip_observation(o.get("content") or "")
         lines.append(f"- [{label}] {content}")
     if len(observations) > MAX_OBS_FOR_PROMPT:
         lines.append(f"… ({len(observations) - MAX_OBS_FOR_PROMPT} more elided)")
