@@ -650,3 +650,44 @@ def test_a_failed_file_is_counted_not_swallowed(tmp_path, monkeypatch):
     src = RepoSource(db, repo, languages=["python"])
     src.initial_walk()
     assert src.last_failed == 0, "a clean walk must not report phantom failures"
+
+
+# ---------------------------------------------------------------------------
+# Declared kinds are actually written (issue #859)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not _HAS_GRAMMARS, reason="tree-sitter grammars not installed")
+def test_every_declared_codex_kind_is_emitted(tmp_path):
+    """Index fixtures holding one of each kind and assert every kind in CODEX_KINDS
+    lands in `symbols`. The entry condition used to test three capture names, so a
+    TypeScript `interface` was matched by the .scm and then discarded; nothing
+    noticed because no test asked whether a declared kind was ever written."""
+    from techne.codex.source import CODEX_KINDS
+    from techne.core.stores import plain_connect
+
+    db = _make_db(tmp_path)
+    _make_source(db, FIXTURES).initial_walk()
+    conn = plain_connect(db)
+    try:
+        kinds = {r[0] for r in conn.execute("SELECT DISTINCT kind FROM symbols")}
+        iface = conn.execute(
+            "SELECT id, signature FROM symbols WHERE kind = 'interface'"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert set(CODEX_KINDS) <= kinds, f"never written: {set(CODEX_KINDS) - kinds}"
+    assert [(r[0], r[1]) for r in iface] == [
+        ("sample.ts::Salutation::interface::15", "interface Salutation")
+    ]
+
+
+@pytest.mark.skipif(not _HAS_GRAMMARS, reason="tree-sitter grammars not installed")
+def test_typescript_interface_is_searchable_by_name(tmp_path):
+    """The user-visible half of issue #859: `codex search` finds an interface."""
+    from techne.core.codegraph import search_symbols
+
+    db = _make_db(tmp_path)
+    _make_source(db, FIXTURES, languages=["typescript"]).initial_walk()
+    hits = search_symbols(db, "Salutation")
+    assert [(h["name"], h["kind"]) for h in hits] == [("Salutation", "interface")]
