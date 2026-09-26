@@ -207,6 +207,34 @@ def test_the_threads_lane_gets_the_same_grace(cfg):
     assert "1 threads pending" in res.detail, res.detail
 
 
+def test_the_pending_clause_leaves_the_942_wording_alone(cfg):
+    """Pre-pass finding: the pending block once sat between `if total:` and its
+    `else`, so the no-knowledge coverage text followed the PENDING test instead."""
+    from techne.core.checks import check_vector_coverage
+
+    # Knowledge present, nothing pending: no sibling coverage text.
+    _knowledge_complete(cfg)
+    ids = _observations(cfg, 2)
+    _rowids(cfg, "observations", ids)
+    _rowids(cfg, "threads")
+    res = check_vector_coverage(cfg)
+    assert "embedded;" not in res.detail and "observations 2/2" not in res.detail, res.detail
+    assert "pending" not in res.detail
+
+
+def test_no_knowledge_with_a_pending_tail_keeps_its_coverage_text(cfg):
+    from techne.core.checks import Verdict, check_vector_coverage
+
+    ids = _observations(cfg, 2, age_minutes=0)
+    _rowids(cfg, "knowledge")
+    _rowids(cfg, "observations", ids[:1])
+    _rowids(cfg, "threads")
+    res = check_vector_coverage(cfg)
+    assert "observations 1/2 embedded" in res.detail, res.detail
+    assert "1 observations pending" in res.detail, res.detail
+    assert res.verdict is Verdict.LIVE
+
+
 # --- #948 -------------------------------------------------------------------
 
 

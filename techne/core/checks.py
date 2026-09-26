@@ -2951,13 +2951,6 @@ def check_vector_coverage(config) -> CheckResult:
     if total:
         for tbl, gap in sibling_gaps.items():
             detail += f", {gap} {tbl} unembedded"
-    if sibling_pending:
-        minutes = int(_VECTOR_TAIL_GRACE.total_seconds() // 60)
-        detail += (
-            "; "
-            + ", ".join(f"{n} {tbl}" for tbl, n in sibling_pending.items())
-            + f" pending (under {minutes} min old — embedded at the next session start)"
-        )
     else:
         # With no knowledge, the siblings ARE the vector channel, so report their
         # coverage outright rather than only their gaps (techne#942).
@@ -2965,6 +2958,13 @@ def check_vector_coverage(config) -> CheckResult:
             f"{tbl} {emb}/{tot} embedded" for tbl, (emb, tot) in sibling_counts.items() if tot
         ]
         detail += f"; {', '.join(present)}" if present else "; nothing to embed yet"
+    if sibling_pending:
+        minutes = int(_VECTOR_TAIL_GRACE.total_seconds() // 60)
+        detail += (
+            "; "
+            + ", ".join(f"{n} {tbl}" for tbl, n in sibling_pending.items())
+            + f" pending (under {minutes} min old — embedded at the next session start)"
+        )
 
     healthy = missing == 0 and stale == 0 and orphans == 0 and not sibling_gaps
     return CheckResult(
@@ -2975,7 +2975,8 @@ def check_vector_coverage(config) -> CheckResult:
         evidence=(
             f"live knowledge={total}, embedded={embedded}, stale={stale}, "
             f"superseded={superseded}, superseded-but-embedded={orphans}, "
-            f"dangling={dangling}, unembedded-within-grace={sibling_pending or 0}"
+            f"dangling={dangling}, unembedded-within-grace="
+            f"{sum(sibling_pending.values())}"
         ),
         detail=detail,
         remedy=None if healthy else "techne vectors backfill",
