@@ -6,9 +6,12 @@ absolute floor cannot separate a real regression from cross-machine drift at the
 same magnitude. `retrieval_gold.yaml` says so in as many words: the paraphrase
 recall@10 floor of 0.8 is chosen so that "a single gold slipping rank 10->11
 (r@10 1.0->0.833) still passes", a tolerance reserved for near-tie BLAS
-reordering across machines. Commit 275035a spent that tolerance deterministically
--- it took paraphrase r@10 from 1.0 to 0.833 by evicting one gold -- and the gate
-went GREEN. A human re-running the leg against the base commit is what caught it.
+reordering across machines. A draft of #827's fix (`_fts_floor` sized at
+`limit // 3`) spent that tolerance deterministically -- it took paraphrase r@10
+from 1.0 to 0.833 by evicting one gold -- and the gate went GREEN. It never
+reached `main`: PR #829's own body records the measurement and its review rounds
+ablated the draft before merge. The commit that shipped, 33473a4, sizes
+`_fts_floor` at 1, which holds r@10 at 1.0.
 
 THIS IS THAT HUMAN, AUTOMATED. It compares two dumps rather than one dump against
 a fixed number, which removes the blind spot instead of narrowing it.
@@ -23,7 +26,7 @@ run and a HEAD run ON THE SAME RUNNER is the code change, and needs no epsilon.
 
 PER-TASK IS WHERE THE TEETH ARE. The kill-gates score class means over six tasks,
 so one gold collapsing 1.0 -> 0.0 moves the mean by 0.167 and hides. Per-task rows
-see it at full amplitude, which is how this catches 275035a's shape.
+see it at full amplitude, which is how this catches that shape.
 """
 
 from __future__ import annotations

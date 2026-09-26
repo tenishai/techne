@@ -128,9 +128,12 @@ the reasoning behind each line: [docs/operator-guide.md](docs/operator-guide.md)
 config: run `techne capabilities` first — it reports what is actually on for
 THIS install, grounded in the store — then set only what is off under `hooks:`
 in `~/.techne/config.yaml`, run `techne init`, and tell the operator the change
-takes effect from the *next* session (Claude Code loads hooks at session
-start). Two more capabilities exist and stay opt-in — offer them, do not
-default them on: `per_turn_seed`, `startup_directive`.
+takes effect at the *next* session for `per_turn_recall` and `codex_grep_assist`
+(they decide which hooks are registered in Claude Code's `settings.json`, loaded
+at session start) but immediately, on the next tool call, for `capture_bash`,
+`codex_edit_rail` and `codex_reindex_on_edit`. Two more capabilities exist and
+stay opt-in — offer them, do not default them on: `per_turn_seed`,
+`startup_directive`.
 
 **Offer the recommended setup; never apply it silently.** When the session-start
 line "N capabilities are off on this install… Ask me what techne can do." appears

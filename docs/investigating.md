@@ -342,6 +342,17 @@ exact cohort with `topic <slug>`, and compare head to head. Keep it only if it d
 something better or genuinely new. Compose with related patterns by name rather than
 restating them.
 
+**Before dropping a candidate, name the technique, not the product.** State in one
+sentence what the technique does independent of the product it sits in — then, and only
+then, ask whether the corpus already has it. Carry that sentence into the skip reason.
+A skip reason may not be a statement about the product's shape relative to ours: "not a
+reviewer", "does not map to our model", "contradicts our scope" are not reasons on their
+own. Four out of eight misses in a 2026-09-13 re-audit were coherent, mature systems
+whose good ideas arrived wrapped in a shape that didn't match ours, and got discarded
+along with the wrapper — e.g. `kubernetes-sigs/agent-sandbox` was dropped as
+multi-tenant-only when the technique underneath (expiry as observable retained state)
+was tenancy-neutral.
+
 Then choose the verdict. Expect to drop about two thirds.
 
 ### 4.5 Verify each survivor against source — clone, don't guess
@@ -384,7 +395,13 @@ across the tree before calling it missing.
 ### 5. Write
 
 - **skip** — nothing.
-- **skip-with-flag** — record the URL, today's date, and the one-line reason.
+- **skip-with-flag** — record the URL, today's date, and the one-line reason. The reason
+  must contain at least one of: a `[[wikilink]]` to the pattern that covers it; a
+  `file:line` you actually read; or an explicit availability/feasibility fact (dead repo,
+  no extension point, cannot verify from public material, licence-gated). A reason with
+  none of these has not been filtered yet — a 2026-09-13 audit of 111 skip-with-flag rows
+  found every confirmed miss came from the uncited bucket, while every row citing a
+  pattern held up on re-audit.
 - **patterns-only** — `techne architect add` per keeper, or `ingest` for several at once.
 - **full-eval** — the patterns, plus an evaluation document: what exists today (**read the
   source, do not recall it**), what they have, the gap, and a recommendation that names a
