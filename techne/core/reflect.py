@@ -27,6 +27,7 @@ from techne.core._resident import prompt_hash as _prompt_hash
 from techne.core.database import connect
 from techne.core.knowledge import VALID_TYPES as KNOWLEDGE_TYPES
 from techne.core.redaction import redact_credentials
+from techne.core.sleepdream import RESIDENT_PRODUCER
 from techne.core.threads import Thread, _make_generate_fn
 
 MAX_OBS_FOR_PROMPT = 40
@@ -1727,7 +1728,7 @@ def ingest_one_and_drain(
     prompt_hash: str,
     raw_response: str,
     *,
-    model_used: str = "agent-assisted",
+    model_used: str = RESIDENT_PRODUCER,
     obs_key: str | None = None,
 ) -> dict:
     """Ingest one answered prompt AND mark its reflection debt paid.
@@ -1850,7 +1851,7 @@ def ingest_reflection_batch(config: Config, items: list[dict]) -> dict:
             it.get("thread_id", "") or "",
             it.get("prompt_hash", ""),
             raw,
-            model_used=it.get("model_used", "agent-assisted"),
+            model_used=it.get("model_used", RESIDENT_PRODUCER),
             obs_key=it.get("obs_key"),
         )
         totals["drained"] += counts.pop("reflection_debt_drained", 0)
@@ -1884,7 +1885,7 @@ def ingest_reflection_response(
     prompt_hash: str,
     raw_response: str,
     *,
-    model_used: str = "agent-assisted",
+    model_used: str = RESIDENT_PRODUCER,
 ) -> dict:
     """Process one agent-produced raw response (the JSON array parse_response
     expects) into knowledge_candidates — and live knowledge when

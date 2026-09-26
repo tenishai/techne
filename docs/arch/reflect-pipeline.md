@@ -1,7 +1,7 @@
 ---
 card: arch-card:techne-reflect-pipeline
 updated: 2026-09-25
-anchor: techne/core/reflect.py sha=72bbf2939df4e341db7361bc9d3cc2796b009f9a
+anchor: techne/core/reflect.py sha=5e2bb25ea8bd9c732e784abb4c62263f09282c85
 anchor: techne/core/sleepdream.py sha=906e716619d349eb9dc6007e5693dee2d9e4aab8
 anchor: techne/lifecycle.py sha=56700a634d5720088d1a8f613bbf27afc7cb7477
 ---
@@ -33,6 +33,7 @@ INVARIANTS:
 - THE EMIT BUDGET IS MEASURED ON WHAT THE MCP SERVER SENDS (techne#993): `_sent_chars` is `len(json.dumps(result, indent=2))` over the whole result, envelope and notes included, matching `mcp_server.handle_request`. It summed compact per-item JSON before, and the 100,000 default sat above the client's 25K-token cap (the smallest recorded refusal was 56,974 chars); it is now 45,000.
 - Every consolidate cluster has a stable cluster_hash (prompt_hash col) → a cluster already proposed (pending, promoted, OR kept-distinct) is never re-judged (_already_proposed) — stops the anti-bloat feature from bloating its own review queue.
 - _FAITHFULNESS_GATED_ACTIONS={'merge','supersede'}: promoting a merge/supersede candidate needs a prior faithfulness check (raises FaithfulnessGateError unless force=True); keep this gate in sync with faithfulness_emit's SQL filter.
+- reflect.py's two public entry points, ingest_one_and_drain and ingest_reflection_response, plus ingest_reflection_batch's forwarding call into ingest_one_and_drain, now import `RESIDENT_PRODUCER` from sleepdream.py instead of re-typing `"agent-assisted"` at three sites (#712). They were the one place the literal drifted from the constant unnoticed — `reflect` is one of the rails `check_model_bound_rails` enumerates, but #709's guard only pinned consolidate_ingest/dream_ingest/conflict_check_ingest/federation_conflict_ingest. The two public entry points are now in `test_resident_ingest_still_labels_rows_agent_assisted`'s tuple too. THE THIRD SITE NEEDED A DIFFERENT GUARD: `ingest_reflection_batch`'s forward is a `dict.get(..., RESIDENT_PRODUCER)` fallback, invisible to `inspect.signature` (that test's mechanism), so `test_batch_ingest_labels_an_unset_item_agent_assisted` pins it behaviorally instead — a batch item with no `model_used` key must still write a row labelled `agent-assisted`. Mutating the fallback fails that test while leaving the signature-based one green.
 
 **THE AUTOMATIC PATH RECORDS A LIVENESS MARKER NOW (techne#555).** `reflect_on_session` catches every LLM failure, counts it in `result["errors"]`, and lets teardown proceed — correct, because teardown must not fail on reflection. But a counter nobody reads is not a signal: MEASURED 2026-08-21, this rail had produced ZERO candidates since 2026-06-20 (every one of the 444 in the store came from the RESIDENT emit→ingest route, `model_used='agent-assisted'`), because `config.model` is an Anthropic id and the operator holds no Console API key. `AuthenticationError` on every session, for two months, while `check_maintenance_rails` read the rail LIVE off the resident route's output. It now writes `rail:reflect:last_run` via `custodian.record_rail_marker` on EVERY outcome — ok / partial / error / noop — carrying the exception TYPE, because "AuthenticationError" says *needs a credential it was never given* where a generic failure says only *broken*. Never raises into teardown.
 
