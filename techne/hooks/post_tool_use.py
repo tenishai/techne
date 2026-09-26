@@ -15,6 +15,7 @@ import json
 import sys
 import time
 from datetime import datetime, timezone
+from typing import NamedTuple
 
 from techne.config import Config
 
@@ -771,24 +772,85 @@ def _edit_rail_mark_surfaced(config: Config, session_id: str, symbol_id: str) ->
         pass
 
 
+class EditRailOutcome(NamedTuple):
+    """What the edit rail did, as a return contract (issue #721).
+
+    ``text`` is the injected block, or None. ``declined_because`` names why the
+    rail stayed silent, and is None exactly when ``text`` is set. A test asserts
+    the reason, not ``is None``: thirteen paths return no text, so ``is None``
+    asserted against all of them at once and passed with a guard deleted.
+    """
+
+    text: str | None
+    declined_because: str | None = None
+
+
+#: Every reason `_edit_rail_outcome` can decline with. Pinned by a test so a new
+#: decline path has to be named here rather than reuse an old name.
+EDIT_RAIL_DECLINE_REASONS = frozenset(
+    {
+        "flag_off",
+        "not_an_edit",
+        "no_file_path",
+        "no_repo",
+        "repo_not_indexed",
+        "linked_worktree",
+        "outside_repo",
+        "no_edited_line",
+        "no_enclosing_symbol",
+        "module_symbol",
+        "already_surfaced",
+        "below_min_deps",
+        "error",
+    }
+)
+
+
+def _edit_rail_is_noise(dep: dict, exclude_globs: list[str]) -> bool:
+    """True for a blast-radius node the rail should not inject (issue #406): the
+    synthetic per-file ``<module>`` node (it stands for "this file imports it", not
+    a dependent symbol), or a node in a test file per ``exclude_globs``, matched
+    against the repo-relative path and its basename."""
+    from fnmatch import fnmatchcase
+
+    if dep.get("kind") == "module":
+        return True
+    path = str(dep.get("file") or "").replace("\\", "/")
+    base = path.rsplit("/", 1)[-1]
+    return any(fnmatchcase(path, g) or fnmatchcase(base, g) for g in exclude_globs)
+
+
 def _inject_edit_blast_radius(config: Config, session_id: str, tool_name: str, tool_input: dict):
+    """The edit rail's hook-facing entry: the injected text, or None. The reason
+    for a None lives on `_edit_rail_outcome`, which is what tests call."""
+    return _edit_rail_outcome(config, session_id, tool_name, tool_input).text
+
+
+def _edit_rail_outcome(
+    config: Config, session_id: str, tool_name: str, tool_input: dict
+) -> EditRailOutcome:
     """Edit rail (techne#335): after an Edit/MultiEdit, map the edit to its
     enclosing symbol and surface that symbol's transitive dependents ("what
     breaks if I change this") inline — but only when the symbol has at least
-    ``codex_edit_rail_min_deps`` dependents (threshold-gated to skip leaf edits).
+    ``codex_edit_rail_min_deps`` real dependents (threshold-gated to skip leaf
+    edits). Synthetic ``<module>`` nodes and test-file nodes are dropped before
+    the threshold, the cap and the log (issue #406); they took ~70% of the slots.
 
-    Opt-in (default OFF) and strictly best-effort: any failure — no indexed repo,
-    unmappable edit, slow query — degrades to None so the hook exit stays 0.
-    Logs to context_injections (source=codex_edit_rail) so utilization is
-    measurable against the other injection paths (#329/#684).
+    Strictly best-effort: any failure degrades to a decline so the hook exit
+    stays 0. Logs to context_injections (source=codex_edit_rail) so utilization
+    is measurable against the other injection paths (#329/#684).
     """
+
+    def _decline(reason: str) -> EditRailOutcome:
+        return EditRailOutcome(None, reason)
+
     if not config.hooks.codex_edit_rail:
-        return None
+        return _decline("flag_off")
     if tool_name not in ("Edit", "MultiEdit"):
-        return None
+        return _decline("not_an_edit")
     file_path = tool_input.get("file_path")
     if not file_path:
-        return None
+        return _decline("no_file_path")
     try:
         from pathlib import Path
 
@@ -799,12 +861,13 @@ def _inject_edit_blast_radius(config: Config, session_id: str, tool_name: str, t
         from techne.hooks._timeout import bounded_hook
 
         p = Path(file_path)
-        db_path = resolve_repo_db_for_query(config, p)
-        if db_path is None:
-            return None  # repo not indexed → no-op
+        # Root first, so "not in a repo" and "repo not indexed" stay two reasons.
         root = find_repo_root(p)
         if root is None:
-            return None
+            return _decline("no_repo")
+        db_path = resolve_repo_db_for_query(config, p)
+        if db_path is None:
+            return _decline("repo_not_indexed")
         # DECLINE INSIDE A LINKED WORKTREE (Prudence, #719). `resolve_repo_db_for_query`
         # now answers with the PRIMARY's index, deliberately — but this rail pairs that
         # graph with a LINE NUMBER from the file in front of us. A PR-branch line looked
@@ -813,42 +876,48 @@ def _inject_edit_blast_radius(config: Config, session_id: str, tool_name: str, t
         # confident answer about the wrong code, which is the same rule the codex
         # binding applies when it refuses to resolve to another repo's index.
         if root != primary_repo_root(p):
-            return None
+            return _decline("linked_worktree")
         try:
             rel = str(p.relative_to(root))
         except ValueError:
-            return None
+            return _decline("outside_repo")
 
         line = _edited_line(p, tool_input)
         if line is None:
-            return None
+            return _decline("no_edited_line")
 
         with bounded_hook(config.hooks.timeout_s, label="post_tool_use:codex-symbol"):
             symbol = symbol_at(db_path, rel, line)
-            if symbol is None or symbol.get("kind") == "module":
-                # No enclosing symbol, or only the whole module — a module's
-                # "dependents" is every importer, too coarse to be useful inline.
-                return None
+            if symbol is None:
+                return _decline("no_enclosing_symbol")
+            if symbol.get("kind") == "module":
+                # Only the whole module — a module's "dependents" is every
+                # importer, too coarse to be useful inline.
+                return _decline("module_symbol")
             # Per-symbol-per-session throttle (techne#342): once a symbol's blast
             # radius has been surfaced this session, re-edits of it stay silent so
             # repeats don't spam context or inflate the #338 utilization counts.
             # Checked before the reachable() query so repeats are also cheap.
             if _edit_rail_already_surfaced(config, session_id, symbol["id"]):
-                return None
+                return _decline("already_surfaced")
             deps = reachable(db_path, symbol["id"], direction="in")
 
-        if len(deps) < config.hooks.codex_edit_rail_min_deps:
-            return None  # low-risk edit — stay silent (NOT marked surfaced)
+        # Filter BEFORE the threshold and the cap (issue #406): measured, ten slots
+        # of noise truncated the real depth-2 dependents the rail exists to show.
+        globs = config.hooks.codex_edit_rail_exclude_globs
+        real = [d for d in deps if not _edit_rail_is_noise(d, globs)]
+        if len(real) < config.hooks.codex_edit_rail_min_deps:
+            return _decline("below_min_deps")  # NOT marked surfaced
 
-        total = len(deps)
-        shown = annotate_freshness(db_path, deps[: config.hooks.codex_edit_rail_limit])
+        total = len(real)
+        shown = annotate_freshness(db_path, real[: config.hooks.codex_edit_rail_limit])
         text = _build_edit_rail_context(symbol, shown, total)
 
         # Instrumentation: record the injection alongside the other read-paths so
         # the #329 audit can compare them. Logs to the main techne.db, not codex.db.
-        # total_hits carries the pre-cap blast-radius size (techne#343) so the audit
-        # sees a 252-dependent hub differs from a 10-dependent leaf, even though
-        # only `limit` rows are shown.
+        # total_hits keeps the raw pre-cap, pre-filter walk size (techne#343, #406)
+        # so the audit's radius stays comparable with rows logged before the
+        # filter; hit_count and hit_ids are the real dependents actually shown.
         log_context_injection(
             config.db_path,
             source="codex_edit_rail",
@@ -856,16 +925,16 @@ def _inject_edit_blast_radius(config: Config, session_id: str, tool_name: str, t
             trigger=symbol["id"],
             rows=shown,
             injected_text=text,
-            total_hits=total,
+            total_hits=len(deps),
             k_requested=config.hooks.codex_edit_rail_limit,
         )
         # Mark surfaced only after a real injection — symbols that fell below the
         # threshold are NOT recorded, so they're re-evaluated on a later edit.
         _edit_rail_mark_surfaced(config, session_id, symbol["id"])
-        return text
+        return EditRailOutcome(text)
     except Exception as e:  # noqa: BLE001 — the rail must never break the tool call
         print(f"techne: codex edit-rail skipped: {e}", file=sys.stderr)
-        return None
+        return _decline("error")
 
 
 def _inject_coord_messages(

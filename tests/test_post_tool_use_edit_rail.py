@@ -234,3 +234,174 @@ def test_non_edit_tool_emits_nothing(home, monkeypatch, capsys):
     }
     out = _run(monkeypatch, capsys, payload)
     assert _edit_rail_context(out) is None
+
+
+# ---------------------------------------------------------------------------
+# issue #406 — synthetic <module> and test nodes never reach the payload
+# ---------------------------------------------------------------------------
+
+
+def _seed_noise(db, *, n_modules: int, n_tests: int):
+    """Dependents of `handle` that the rail must drop: synthetic per-file module
+    nodes (an importer's module scope calling it) and test functions."""
+    for i in range(n_modules):
+        sid = f"m{i}.py::<module>::module::0"
+        add_symbol(db, id=sid, file=f"m{i}.py", name="<module>", kind="module", span="0:9")
+        add_edge(db, sid, "handle", "call")
+    for i in range(n_tests):
+        sid = f"tests/test_core{i}.py::test_handle{i}::function::1"
+        add_symbol(db, id=sid, file=f"tests/test_core{i}.py", name=f"test_handle{i}",
+                   kind="function", span="1:2")
+        add_edge(db, sid, "handle", "call")
+
+
+def test_payload_excludes_module_and_test_nodes(home, monkeypatch, capsys):
+    """Given a blast radius mixing real, <module> and test nodes, the rail injects
+    and logs only the real ones; total_hits keeps the raw walk size."""
+    from techne.config import Config
+    from techne.core.stores import plain_connect
+
+    _write_config(home, codex_edit_rail=True, codex_edit_rail_min_deps=3)
+    repo, db = _make_indexed_repo(home)
+    _seed_handle_with_deps(repo, db, 3)
+    _seed_noise(db, n_modules=4, n_tests=6)
+    ctx = _edit_rail_context(_run(monkeypatch, capsys, _edit_payload(repo)))
+    assert ctx is not None
+    assert "3 dependent" in ctx
+    assert "<module>" not in ctx and "test_handle" not in ctx
+
+    conn = plain_connect(Config.load().db_path)
+    try:
+        row = conn.execute(
+            "SELECT hit_ids, hit_count, total_hits FROM context_injections"
+            " WHERE source='codex_edit_rail'"
+        ).fetchone()
+    finally:
+        conn.close()
+    hit_ids = json.loads(row["hit_ids"])
+    assert sorted(hit_ids) == [f"c{i}.py::caller{i}::function::1" for i in range(3)]
+    assert row["hit_count"] == 3
+    assert row["total_hits"] == 13  # 3 real + 4 module + 6 test, pre-filter
+
+
+def test_noise_does_not_count_toward_min_deps(home, monkeypatch, capsys):
+    """Two real dependents plus ten noise nodes is still below min_deps=3."""
+    from techne.hooks.post_tool_use import _edit_rail_outcome
+
+    _write_config(home, codex_edit_rail=True, codex_edit_rail_min_deps=3)
+    repo, db = _make_indexed_repo(home)
+    _seed_handle_with_deps(repo, db, 2)
+    _seed_noise(db, n_modules=5, n_tests=5)
+    from techne.config import Config
+
+    out = _edit_rail_outcome(Config.load(), "sess-1", "Edit", _edit_payload(repo)["tool_input"])
+    assert out == (None, "below_min_deps")
+
+
+def test_noise_no_longer_displaces_deeper_real_dependents(home, monkeypatch, capsys):
+    """The measured failure in issue #406: noise at depth 1 filled the cap and cut
+    the real depth-2 dependents. With limit=2, both depth-2 callers must show."""
+    _write_config(home, codex_edit_rail=True, codex_edit_rail_min_deps=2,
+                  codex_edit_rail_limit=2)
+    repo, db = _make_indexed_repo(home)
+    _seed_handle_with_deps(repo, db, 0)
+    _seed_noise(db, n_modules=3, n_tests=3)
+    # One real direct caller `mid`, and two real callers of `mid` at depth 2.
+    add_symbol(db, id="mid.py::mid::function::1", file="mid.py", name="mid",
+               kind="function", span="1:2")
+    add_edge(db, "mid.py::mid::function::1", "handle", "call")
+    for n in ("zeta", "omega"):
+        add_symbol(db, id=f"{n}.py::{n}::function::1", file=f"{n}.py", name=n,
+                   kind="function", span="1:2")
+        add_edge(db, f"{n}.py::{n}::function::1", "mid", "call")
+    ctx = _edit_rail_context(_run(monkeypatch, capsys, _edit_payload(repo)))
+    assert ctx is not None
+    assert "d1  mid" in ctx
+    assert "3 dependent" in ctx and "and 1 more" in ctx
+
+
+def test_exclude_globs_are_config(home, monkeypatch, capsys):
+    """An empty glob list keeps test nodes (module nodes are always dropped)."""
+    _write_config(home, codex_edit_rail=True, codex_edit_rail_min_deps=3,
+                  codex_edit_rail_exclude_globs=[])
+    repo, db = _make_indexed_repo(home)
+    _seed_handle_with_deps(repo, db, 0)
+    _seed_noise(db, n_modules=2, n_tests=3)
+    ctx = _edit_rail_context(_run(monkeypatch, capsys, _edit_payload(repo)))
+    assert ctx is not None
+    assert "test_handle0" in ctx and "<module>" not in ctx
+
+
+# ---------------------------------------------------------------------------
+# issue #721 — the decline reason is in the return contract
+# ---------------------------------------------------------------------------
+
+
+def test_each_decline_path_names_its_reason(home):
+    """Every reachable decline returns its own reason, each witnessed next to a
+    success on the same setup so a reason cannot be satisfied by accident."""
+    from techne.config import Config
+    from techne.hooks.post_tool_use import EDIT_RAIL_DECLINE_REASONS, _edit_rail_outcome
+
+    _write_config(home, codex_edit_rail=True, codex_edit_rail_min_deps=3)
+    repo, db = _make_indexed_repo(home)
+    _seed_handle_with_deps(repo, db, 4)
+    cfg = Config.load()
+    ti = _edit_payload(repo)["tool_input"]
+
+    def reason(session="fresh", tool="Edit", tool_input=ti, config=cfg):
+        return _edit_rail_outcome(config, session, tool, tool_input).declined_because
+
+    plain = home / "plain"
+    (plain / ".git").mkdir(parents=True)
+    (plain / "core.py").write_text("def handle():\n    x = 1\n")
+    outside = home / "loose.py"
+    outside.write_text("x = 1\n")
+    cfg_off = Config.load()
+    cfg_off.hooks.codex_edit_rail = False
+    cfg_hi = Config.load()
+    cfg_hi.hooks.codex_edit_rail_min_deps = 5
+
+    got = {
+        "flag_off": reason(config=cfg_off),
+        "not_an_edit": reason(tool="Read"),
+        "no_file_path": reason(tool_input={}),
+        "no_repo": reason(tool_input=dict(ti, file_path=str(outside))),
+        "repo_not_indexed": reason(tool_input=dict(ti, file_path=str(plain / "core.py"))),
+        "no_edited_line": reason(tool_input=dict(ti, new_string="absent from file")),
+        "below_min_deps": reason(config=cfg_hi),
+    }
+    assert got == {k: k for k in got}
+    # The positive control, then the throttle on the same symbol.
+    first = _edit_rail_outcome(cfg, "s-once", "Edit", ti)
+    assert first.text and first.declined_because is None
+    assert reason(session="s-once") == "already_surfaced"
+    assert set(got) | {"already_surfaced"} <= EDIT_RAIL_DECLINE_REASONS
+
+
+def test_symbol_decline_reasons(home, monkeypatch):
+    """no_enclosing_symbol / module_symbol / error, via a stubbed symbol lookup."""
+    from techne.config import Config
+    from techne.hooks.post_tool_use import _edit_rail_outcome
+
+    _write_config(home, codex_edit_rail=True, codex_edit_rail_min_deps=1)
+    repo, db = _make_indexed_repo(home)
+    _seed_handle_with_deps(repo, db, 1)
+    cfg = Config.load()
+    ti = _edit_payload(repo)["tool_input"]
+    assert _edit_rail_outcome(cfg, "a", "Edit", ti).declined_because is None
+
+    monkeypatch.setattr("techne.core.codegraph.symbol_at", lambda *a, **k: None)
+    assert _edit_rail_outcome(cfg, "b", "Edit", ti).declined_because == "no_enclosing_symbol"
+    monkeypatch.setattr(
+        "techne.core.codegraph.symbol_at",
+        lambda *a, **k: {"id": "core.py::<module>::module::0", "name": "<module>",
+                         "kind": "module"},
+    )
+    assert _edit_rail_outcome(cfg, "c", "Edit", ti).declined_because == "module_symbol"
+
+    def _boom(*a, **k):
+        raise RuntimeError("db gone")
+
+    monkeypatch.setattr("techne.core.codegraph.symbol_at", _boom)
+    assert _edit_rail_outcome(cfg, "d", "Edit", ti).declined_because == "error"

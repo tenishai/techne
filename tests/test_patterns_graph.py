@@ -761,6 +761,29 @@ def test_widening_the_target_set_did_not_weaken_the_pr130_guard():
     assert _apply_targets(
         "**Where to apply in techne**: similar to liminal's gate.", allowed=TARGETS
     ) == ["techne"]
+    # Issue #693: the multi-target form must not reopen the guard. Each of these is
+    # a trap a "capture every known target on the line" parser would fall into.
+    assert _apply_targets(
+        "**Where to apply in techne**, similar to liminal's gate.", allowed=TARGETS
+    ) == ["techne"]
+    assert _apply_targets("Where to apply in techne (vs cabal)", allowed=TARGETS) == ["techne"]
+    assert _apply_targets("this is used in techne (vs cabal)", allowed=TARGETS) == []
+    assert _apply_targets("**Where to apply**: techne/cabal", allowed=TARGETS) == []
+
+
+def test_a_heading_naming_several_targets_links_all_of_them():
+    """Issue #693: `Where to apply in techne / cabal / liminal` captured only
+    `techne`. The row looked linked while two-thirds of what the body states was
+    dropped, which hid the defect inside the rows that "work"."""
+    cases = {
+        "**Where to apply in techne / cabal / liminal**: x": ["techne", "cabal", "liminal"],
+        "**Where to apply in techne, cabal and argus**: x": ["techne", "cabal", "argus"],
+        "**Where to apply in techne, cabal, and argus**: x": ["techne", "cabal", "argus"],
+        "**Where to apply in Cabal & limenal**: x": ["cabal", "liminal"],
+        "**Where to apply in cabal / widgets / techne**: x": ["cabal", "techne"],
+    }
+    for body, want in cases.items():
+        assert _apply_targets(body, allowed=TARGETS) == want, body
 
 
 # ---------------------------------------------------------------------------
@@ -1204,3 +1227,54 @@ def test_architect_targets_names_what_the_store_holds(tmp_path, monkeypatch, db)
     assert "NOT CONFIGURED" in result.output
     # It must hand the operator the line to paste, not just the diagnosis.
     assert 'pattern_targets: ["cabal", "techne"]' in result.output
+
+
+def test_a_target_with_only_retired_patterns_reads_the_same_on_both_surfaces(
+    tmp_path, monkeypatch, db
+):
+    """Issue #1016: with every cabal pattern superseded, MCP said "unknown target"
+    and sent the operator to `architect targets`, which listed cabal as present and
+    NOT CONFIGURED. Both surfaces now key on active patterns, and each says the
+    target's patterns are retired rather than implying it was never there."""
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.core.patterns import add_apply, target_counts
+
+    a = _mk(db, "Alpha", "x")
+    b = _mk(db, "Beta", "y")
+    c = _mk(db, "Gamma", "z")
+    for pid in (a, b):
+        add_apply(db, pattern_id=pid, target="cabal")
+    add_apply(db, pattern_id=c, target="liminal")
+    conn = plain_connect(db)
+    try:
+        conn.execute("UPDATE patterns SET status = 'superseded' WHERE id IN (?, ?)", (a, b))
+        conn.commit()
+    finally:
+        conn.close()
+
+    assert target_counts(db) == [
+        {"target": "liminal", "active": 1, "retired": 0},
+        {"target": "cabal", "active": 0, "retired": 2},
+    ]
+
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.yaml").write_text("architect:\n  pattern_targets: [techne]\n")
+    monkeypatch.setenv("TECHNE_HOME", str(home))
+    monkeypatch.setattr("techne.core.architect.architect_db", lambda _c: db)
+
+    from techne.config import Config
+    from techne.mcp_server import _pattern_search
+
+    err = _pattern_search({"target": "cabal"}, Config.load())["error"]
+    assert "all 2 pattern(s) tagged with it are retired" in err
+    assert "Targets with active patterns in the store: liminal" in err
+
+    out = CliRunner().invoke(main, ["architect", "targets"]).output
+    active_block = out.split("in the store (active patterns):")[1].split("retired only")[0]
+    assert "liminal" in active_block and "cabal" not in active_block
+    assert "cabal                2 retired" in out
+    # the paste line must not tell the operator to configure a retired-only target
+    assert 'pattern_targets: ["liminal", "techne"]' in out

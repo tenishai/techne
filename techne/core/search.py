@@ -5,6 +5,7 @@ import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from collections.abc import Callable
 from typing import Literal
 
 from techne.core import embeddings as embeddings_mod
@@ -524,33 +525,23 @@ def search_fts(
     candidate_limit = limit * expansion_ratio
 
     try:
-        results = _fts_match_rows(
-            conn,
-            fts_query,
-            table,
-            candidate_limit,
-            include_archived=include_archived,
-            include_uncertain=include_uncertain,
-            row_chars=row_chars,
-        )
-
         # #70: bare space-separated terms are FTS5 implicit-AND, so a multi-word
         # or natural-language query (recall topics especially) returns nothing
         # unless one row contains *every* term. When the AND pass is empty, retry
         # with an OR-of-terms query; BM25 still ranks rows matching more (and
         # rarer) terms highest, so precision degrades gracefully.
-        if not results:
-            or_query = build_or_fts_query(query)
-            if or_query:
-                results = _fts_match_rows(
-                    conn,
-                    or_query,
-                    table,
-                    candidate_limit,
-                    include_archived=include_archived,
-                    include_uncertain=include_uncertain,
-                    row_chars=row_chars,
-                )
+        results = fts_with_or_fallback(
+            query,
+            lambda match: _fts_match_rows(
+                conn,
+                match,
+                table,
+                candidate_limit,
+                include_archived=include_archived,
+                include_uncertain=include_uncertain,
+                row_chars=row_chars,
+            ),
+        )
 
         # For multi-table ("all"), pre-sort by raw rank for a deterministic input
         # order; the reranker normalises BM25 PER TABLE (techne#56) and then
@@ -605,20 +596,14 @@ def search_knowledge_conn(
     table='knowledge' only — this function is intentionally knowledge-scoped.
     For multi-table hybrid search use ``search()`` or ``search_fts()``.
     """
-    fts_query = prepare_fts_query(query)
-    if fts_query is None:
-        return []
-
     candidate_limit = limit * 2  # expansion_ratio=2 (matches search_fts default)
-    results = _fts_match_rows(conn, fts_query, "knowledge", candidate_limit, include_archived=False)
-
-    # #70: OR fallback when AND-pass returns nothing (same logic as search_fts)
-    if not results:
-        or_query = build_or_fts_query(query)
-        if or_query:
-            results = _fts_match_rows(
-                conn, or_query, "knowledge", candidate_limit, include_archived=False
-            )
+    # #70: OR fallback when AND-pass returns nothing (same helper as search_fts)
+    results = fts_with_or_fallback(
+        query,
+        lambda match: _fts_match_rows(
+            conn, match, "knowledge", candidate_limit, include_archived=False
+        ),
+    )
 
     # Enrich with event_at from the base knowledge table. _fts_match_rows omits
     # event_at from its knowledge SELECT (adding it there would change recency
@@ -2071,3 +2056,24 @@ def build_or_fts_query(query: str) -> str:
     if len(terms) < 2:
         return ""
     return " OR ".join(f'"{t}"' for t in terms)
+
+
+def fts_with_or_fallback(query: str, run: Callable[[str], list]) -> list:
+    """The #70 control flow, in one place (issue #559): guard the query (#143),
+    run the implicit-AND pass, and only when that returns nothing run the
+    OR-of-terms pass. ``run`` takes an FTS5 MATCH string and owns its SQL, which
+    differs per caller (table, columns, joins, status filters), so only the
+    control flow is shared here.
+
+    Returns ``[]`` for an empty or all-punctuation query without calling ``run``.
+    A single-term query never re-runs: AND and OR are the same query.
+    """
+    fts = prepare_fts_query(query)
+    if fts is None:
+        return []
+    results = run(fts)
+    if not results:
+        or_query = build_or_fts_query(query)
+        if or_query:
+            results = run(or_query)
+    return results

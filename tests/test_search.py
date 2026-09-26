@@ -1344,3 +1344,33 @@ def test_the_ledger_tables_keep_the_default_cap(tmp_path):
         f"observation row is {len(rows[0]['content'])} chars — the ledger must keep "
         "the default regardless of row_chars"
     )
+
+
+def test_fts_with_or_fallback_control_flow():
+    """Issue #559: the #70 control flow lives in one helper. AND first; OR only when
+    AND is empty and there are two or more terms; nothing run for an unsearchable
+    query (the #143 MATCH '' guard)."""
+    from techne.core.search import fts_with_or_fallback
+
+    calls: list[str] = []
+
+    def run_empty_then(rows):
+        def run(match):
+            calls.append(match)
+            return [] if len(calls) == 1 else rows
+        return run
+
+    assert fts_with_or_fallback("alpha beta", run_empty_then(["hit"])) == ["hit"]
+    assert calls == ['"alpha" "beta"', '"alpha" OR "beta"']
+
+    calls.clear()
+    assert fts_with_or_fallback("alpha beta", lambda m: calls.append(m) or ["and"]) == ["and"]
+    assert calls == ['"alpha" "beta"']  # AND matched: no second pass
+
+    calls.clear()
+    assert fts_with_or_fallback("alpha", run_empty_then(["x"])) == []
+    assert calls == ['"alpha"']  # one term: AND == OR, no re-query
+
+    calls.clear()
+    assert fts_with_or_fallback("  \\ ", run_empty_then(["x"])) == []
+    assert calls == []  # unsearchable: run never called

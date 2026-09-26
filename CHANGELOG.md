@@ -96,6 +96,44 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- **The codex edit rail stops injecting import and test nodes** (#406). Synthetic
+  `<module>` nodes and test-file nodes are dropped before the `min_deps` threshold, the
+  `limit` cap and the log. Measured on 2026-08-02, 92 of 117 injections hit the cap of
+  10 and ~70% of those slots were this noise, which pushed real depth-2 dependents out.
+  Test paths come from the new `hooks.codex_edit_rail_exclude_globs`; `total_hits`
+  still logs the raw walk size so the audit's radius stays comparable.
+- **The edit rail names why it stayed silent** (#721). `_edit_rail_outcome` returns
+  `EditRailOutcome(text, declined_because)`, one reason per decline path (flag off,
+  not an edit, no repo, repo not indexed, linked worktree, below `min_deps`, and so
+  on). `assert ... is None` passed for thirteen reasons at once; a test can now assert
+  the one it means.
+- **`codex_blast_radius` says which index it answered from** (#730). Every return
+  carries `domain` / `binding` / `state` / `target`, as `codex_search` already did.
+  From a linked worktree it reads the primary's index, and before this only
+  `codex_search` said so. `walked` / `truncated` are unchanged beside it.
+- **TypeScript interfaces are indexed** (#859). The symbol entry test named three
+  captures and the kind pick named four, so every `interface_declaration` match was
+  discarded. `CODEX_KINDS` now lists every kind the indexer writes, and a test indexes
+  one of each. An existing index picks interfaces up when its `.ts` files are
+  re-indexed: run `techne codex index --force <repo>`.
+- **`architect sweep-legacy-verdicts` can spare real full-evals** (#549). New
+  `--spare-with-eval-doc DIR` (spare a row whose URL slug has a
+  `<slug>-evaluation*.md`) and `--skip-url URL`, both repeatable. The dry run labels
+  each row `legacy` or `spare`, and `--apply` is refused without a spare option,
+  because measured on 2026-08-11 every `--before` date that reached the legacy rows
+  also reached real operator judgments.
+- **`Where to apply in techne / cabal / liminal` links all three targets** (#693).
+  `_APPLY_RE` captured only the first target, so the row looked linked while the rest
+  were dropped. It now takes a continuation joined by `/`, `,`, `and` or `&`; a
+  trailing comparison (`in techne, similar to liminal's gate`) still stops at the
+  first target. On the live corpus this adds 53 links to 44 patterns and loses none;
+  run `techne architect backfill` to write them.
+- **A target whose patterns are all retired reads the same on both surfaces**
+  (#1016). `techne architect targets` counted every `pattern_applies` row while
+  `pattern_search` served active patterns only. `targets` now counts active patterns
+  and lists retired-only targets separately, and the MCP error says the target's
+  patterns are retired and lists the targets that do hold active patterns.
+
 - **`techne doctor` reports the deployed runtime even when run from a repo checkout**
   (#690). `runtime:revision` only inspects the checkout `techne` was imported from, which
   from a working copy is DORMANT by design, so a deployment 20 commits behind main stayed
@@ -207,6 +245,11 @@ All notable changes to techne are documented here. Format loosely follows
   default recall and egress.
 
 ### Changed
+
+- **One helper owns the #70 AND-then-OR fallback** (#559).
+  `search.fts_with_or_fallback(query, run)` holds the control flow; the four FTS
+  callers (`search_fts`, the knowledge connection search, `search_symbols`,
+  `search_patterns`) keep their own SQL in `run`. No behaviour change.
 
 - **Per-turn recall searches pasted content on its question lines** instead of on
   the whole prompt (#1018). Pasted content means a `<pasted_content>` block, or

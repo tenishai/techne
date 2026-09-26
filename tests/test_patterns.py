@@ -1173,3 +1173,77 @@ def _pattern_ids(db):
         return conn.execute("SELECT id, name FROM patterns").fetchall()
     finally:
         conn.close()
+
+
+# --- issue #549: date alone cannot express the legacy set ---------------------
+
+
+def test_sweep_spares_rows_with_an_eval_doc_or_a_skip_url(db, tmp_path):
+    """Measured: real operator full-evals sat among the legacy rows in both June
+    and July, so every --before value destroyed some. The predicate is "no eval
+    doc", which the sweep can now evaluate."""
+    evals = tmp_path / "evaluations"
+    evals.mkdir()
+    (evals / "goose-evaluation.md").write_text("x")
+    (evals / "precisionmembench-evaluation-2026-07-01.md").write_text("x")
+    (evals / "claude-pulse-someowner-evaluation.md").write_text("x")
+    (evals / "notes.md").write_text("not an eval doc")  # must not spare `notes`
+    for url in (
+        "https://github.com/a/goose",
+        "https://github.com/t/precisionMemBench",
+        "https://github.com/n/claude-pulse",
+        "https://github.com/x/dolt",
+        "https://github.com/x/notes",
+        "https://github.com/x/legacy",
+    ):
+        upsert_investigation(db, url=url, surveyed_at="2026-06-15", verdict="full-eval")
+
+    res = sweep_legacy_verdicts(
+        db,
+        before="2026-07-01",
+        dry_run=False,
+        spare_urls=["https://github.com/x/dolt"],
+        eval_doc_dirs=[evals],
+    )
+    assert sorted(res["urls"]) == ["https://github.com/x/legacy", "https://github.com/x/notes"]
+    assert res["applied"] == 2
+    assert sorted((r["url"].rsplit("/", 1)[1], r["reason"]) for r in res["spared"]) == [
+        ("claude-pulse", "eval-doc"),
+        ("dolt", "skip-url"),
+        ("goose", "eval-doc"),
+        ("precisionMemBench", "eval-doc"),
+    ]
+    assert _verdict_for(db, "https://github.com/a/goose") == "full-eval"
+    assert _verdict_for(db, "https://github.com/x/dolt") == "full-eval"
+    assert _verdict_for(db, "https://github.com/x/legacy") == "unknown"
+
+
+def test_sweep_cli_refuses_a_date_only_apply_and_labels_the_dry_run(db, tmp_path, monkeypatch):
+    from click.testing import CliRunner
+
+    from techne.cli import main
+
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr("techne.core.architect.architect_db", lambda _c: db)
+    upsert_investigation(db, url="https://github.com/x/real", surveyed_at="2026-06-15",
+                         verdict="full-eval")
+    upsert_investigation(db, url="https://github.com/x/legacy", surveyed_at="2026-06-15",
+                         verdict="full-eval")
+    run = CliRunner().invoke
+
+    refused = run(main, ["architect", "sweep-legacy-verdicts", "--before", "2026-07-01",
+                         "--apply"])
+    assert refused.exit_code != 0 and "--spare-with-eval-doc" in refused.output
+    assert _verdict_for(db, "https://github.com/x/legacy") == "full-eval"  # nothing written
+
+    dry = run(main, ["architect", "sweep-legacy-verdicts", "--before", "2026-07-01",
+                     "--skip-url", "https://github.com/x/real"])
+    assert dry.exit_code == 0, dry.output
+    assert "legacy  https://github.com/x/legacy" in dry.output
+    assert "spare   https://github.com/x/real  (skip-url)" in dry.output
+
+    done = run(main, ["architect", "sweep-legacy-verdicts", "--before", "2026-07-01",
+                      "--skip-url", "https://github.com/x/real", "--apply"])
+    assert done.exit_code == 0, done.output
+    assert _verdict_for(db, "https://github.com/x/real") == "full-eval"
+    assert _verdict_for(db, "https://github.com/x/legacy") == "unknown"
