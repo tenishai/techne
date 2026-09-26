@@ -1677,6 +1677,29 @@ def test_cli_round_trip_drains_the_queue_and_advances_the_cursor(tmp_path):
     )
 
 
+def test_batch_ingest_labels_an_unset_item_agent_assisted(tmp_path):
+    """ingest_reflection_batch's forwarding call into ingest_one_and_drain (#712) is
+    the one RESIDENT_PRODUCER site `test_resident_ingest_still_labels_rows_agent_assisted`
+    cannot pin, because it is a `dict.get(..., RESIDENT_PRODUCER)` fallback rather than a
+    function default `inspect.signature` can see. This is the behavioral guard for that
+    site: a batch item carrying no `model_used` key must still write a row labelled
+    `agent-assisted`. Mutating the fallback to a different literal fails this test while
+    leaving the signature-based guard green, which is exactly why both are needed."""
+    from techne.core.reflect import emit_reflection_pass, ingest_reflection_batch
+
+    config = _mk_config(tmp_path, enabled=True)
+    session_id = _mk_db_backed_session(config)
+    batch = emit_reflection_pass(config, session_id)["batch"]
+    assert batch, "precondition: emit produced a prompt"
+    for item in _fill_raw_responses(batch):
+        assert "model_used" not in item, "precondition: no item names its own producer"
+
+    ingest_reflection_batch(config, batch)
+    rows = list_candidates(config.db_path, status="all")
+    assert rows, "precondition: the batch wrote at least one candidate"
+    assert all(r["model_used"] == "agent-assisted" for r in rows)
+
+
 def test_cli_ingest_does_not_drain_an_unanswered_thread(tmp_path):
     """A blank raw_response is a deliberate skip, not work done.
 
