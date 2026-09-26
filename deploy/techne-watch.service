@@ -49,10 +49,11 @@ RestartSec=5s
 
 # Exit 78 is sysexits.h EX_CONFIG: `techne watch` uses it for a startup
 # precondition that restarting cannot satisfy — the `[watch]` extra not
-# being installed, or an exhausted inotify sysctl (fs.inotify.max_user_watches
-# / max_user_instances; the message names the one to raise). Without this line the unit respawns every RestartSec
+# being installed, or an exhausted inotify sysctl
+# (fs.inotify.max_user_watches or max_user_instances; the message names the
+# one to raise). Without this line the unit respawns every RestartSec
 # forever and fills the journal with a traceback that reads like a runtime
-# fault, when the fix is `pip install techne[watch]`.
+# fault, when the fix is one install or one sysctl.
 # This value is the contract in techne/exit_codes.py; change both or neither.
 RestartPreventExitStatus=78
 
