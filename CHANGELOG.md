@@ -115,9 +115,8 @@ All notable changes to techne are documented here. Format loosely follows
 - **The banner's ref age survives `git gc`** (#571): it is read from origin/main's
   reflog, which `pack-refs --prune` keeps, before the loose ref's mtime.
 - **A registry-coverage test that could fail** (#701), replacing one that derived its
-  expectation from the registry it was checking; plus three comment/test cleanups from
-  #569's review (#572).
-
+  expectation from the registry it was checking; plus the comment and test cleanups
+  deferred from #569's review (#572).
 - `techne knowledge add` and `knowledge list` take their `--type` choices from core's
   valid types (#877). They offered `pattern`, which core always refuses (patterns live
   in the Architect store), and omitted `document` and `document_card`, which it

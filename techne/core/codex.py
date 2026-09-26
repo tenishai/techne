@@ -683,9 +683,9 @@ def migrate_legacy_codex_db(config: Config) -> Path | None:
     path (techne#209). Idempotent; returns the destination path if it migrated,
     else ``None`` (nothing to do).
 
-    NOT auto-invoked while consumers still read the legacy path — wiring it in
-    is the job of the consumer-rewiring phase, so the move happens together with
-    the switch to per-repo resolution rather than out from under a live reader.
+    Invoked through :func:`ensure_legacy_migrated`, once per process ×
+    data_dir, from every per-repo resolution path (CLI, hooks, MCP). A legacy
+    db with NO tables is deleted rather than migrated (techne#875).
 
     WAL safety: checkpoints (TRUNCATE) before moving so no committed pages are
     stranded in a ``-wal`` sidecar, then moves the main db and clears any stale

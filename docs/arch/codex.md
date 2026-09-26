@@ -1,7 +1,7 @@
 ---
 card: arch-card:techne-codex
 updated: 2026-09-25
-anchor: techne/core/codex.py sha=6a3ba20de51e86a3acd9d482b2477e760c39c45a
+anchor: techne/core/codex.py sha=90226f1ce088e4a7764d5d13a2e8acb00ed7ee00
 anchor: techne/codex/source.py sha=e1bc518b637fd8f2511d0e283869de11dd899544
 anchor: techne/codex/import_resolve.py sha=d02ae2cd30fea01c0b27861dc8c8330ef4b81c72
 ---
