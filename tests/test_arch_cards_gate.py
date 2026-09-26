@@ -426,3 +426,24 @@ def test_env_failure_prints_no_anchor_trailer_even_if_kind_is_lost(monkeypatch, 
     assert rc == 2
     assert "ERROR" in out
     assert "bump its recorded `anchor:` sha" not in out
+
+
+def test_real_repo_cards_are_fresh() -> None:
+    """The gate looks covered — 20/20 above — but every one of those cases points
+    ARCH_CARDS_ROOT at a tmp_path throwaway repo. Nothing in this file, or anywhere
+    else in the suite, ever runs the checker against THIS repo's own cards (#706).
+
+    That gap is not hypothetical: on #705 a full `pytest` run stayed green (358
+    passed) with `docs/arch/search-embeddings.md` stale, and only `git push`
+    (pre-push hook / CI) caught it. Omitting ARCH_CARDS_ROOT makes the checker fall
+    back to its own default — this repo (`repo_root()` resolves off `__file__`, not
+    cwd) — so this is the real gate, not another fixture.
+    """
+    env = {k: v for k, v in os.environ.items() if k != "ARCH_CARDS_ROOT"}
+    r = subprocess.run(
+        [sys.executable, str(SCRIPT)], env=env, capture_output=True, text=True
+    )
+    assert r.returncode == 0, (
+        "scripts/check_arch_cards.py failed against the REAL repo tree — bump the "
+        f"anchor sha in the named card:\n{r.stdout}{r.stderr}"
+    )

@@ -806,6 +806,22 @@ jobs:
         working-directory: techne
         run: python3.13 scripts/check_arch_cards.py
 
+      # (#834) A stray `git worktree add` with an unset path variable collapsed to
+      # its two-arg form and committed a mode-160000 gitlink to a PR branch, caught
+      # only by reading `git push` output — this repo has no submodules, so ANY
+      # 160000 entry is a mistake by definition. Same posture as the gate above:
+      # reports, does not block (no branch protection on this plan).
+      - name: Stray gitlink guard
+        working-directory: techne
+        run: |
+          set -uo pipefail
+          gitlinks=$(git ls-files -s | grep '^160000' || true)
+          if [ -n "$gitlinks" ]; then
+            echo "::error::stray gitlink(s) (mode 160000) committed — a worktree was likely added with a missing/misused path argument (techne#834)"
+            echo "$gitlinks"
+            exit 1
+          fi
+
   # CRASH-RECOVERY GATE (#388). The `crash` suite SIGKILLs a child mid-write and
   # then proves the store: uncommitted work leaves no trace, committed work
   # survives, a hot WAL replays, an interrupted migration does not stamp its
