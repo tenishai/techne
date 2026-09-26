@@ -679,7 +679,22 @@ def tag_pattern(
     If *superseded_by* is given, routes to the atomic `supersede()` (status is
     forced to 'superseded' and the `supersedes` edge written); a *topic* supplied
     alongside is applied too. Otherwise updates whichever of topic/status/absorbed
-    are provided. Returns True if a row changed. Raises ValueError on unknown id."""
+    are provided. Returns True if a row changed. Raises ValueError on unknown id.
+
+    `status='superseded'` without *superseded_by* is refused (techne#880). It made a
+    row `stats()` counts as superseded but `topic_show` lists under no parent, so
+    the summary said a pattern was superseded and nothing could say by what. The
+    status is a consequence of a supersession, not an independent fact, so the only
+    way to reach it is the atomic path. `status='active'` alongside *superseded_by*
+    is refused for the same reason: it asks for both states at once."""
+    if status == "superseded" and superseded_by is None:
+        raise ValueError(
+            "a pattern is superseded BY another: use --superseded-by <new-id> "
+            "(it sets the status too); a bare --status superseded leaves the row "
+            "with no successor (techne#880)"
+        )
+    if status == "active" and superseded_by is not None:
+        raise ValueError("--status active contradicts --superseded-by; pass one or the other")
     conn = plain_connect(db_path)
     try:
         if conn.execute("SELECT 1 FROM patterns WHERE id = ?", (pattern_id,)).fetchone() is None:

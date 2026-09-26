@@ -212,8 +212,16 @@ def _techne_store(args: dict, config: Config) -> dict:
         confidence=args.get("confidence", "medium"),
         source=args.get("source", "agent"),
         anchor=args.get("anchor"),
+        supersedes=args.get("supersedes"),
     )
-    return {"id": entry_id, "stored": True}
+    result = {"id": entry_id, "stored": True}
+    if args.get("supersedes") is not None:
+        # Echo what was retired so the caller need not re-read to confirm it
+        # (techne#887). store() is all-or-nothing, so reaching here means all were.
+        from techne.core.knowledge import _normalize_ids
+
+        result["superseded"] = _normalize_ids(args["supersedes"])
+    return result
 
 
 def _techne_observe(args: dict, config: Config) -> dict:
@@ -794,7 +802,10 @@ TOOLS = [
             "user feedback or a correction, or finish reasoning you'd hate to redo — to "
             "store a durable personal-memory entry (fact, decision, evaluation, procedure). "
             "Store the conclusion, not the transcript. Architectural patterns go to the "
-            "Architect store via `techne architect ingest`, not here (techne#137)."
+            "Architect store via `techne architect ingest`, not here (techne#137). When "
+            "this entry replaces or corrects an existing one, pass its id in `supersedes`: "
+            'writing "SUPERSEDES #N" in the content does nothing, and #N keeps surfacing '
+            "as current (techne#887)."
         ),
         "inputSchema": {
             "type": "object",
@@ -820,6 +831,17 @@ TOOLS = [
                         "Captures the file's content hash + git HEAD sha so recall can "
                         "grade staleness (unchanged/modified/moved/deleted). Omit for "
                         "behavioral/relational memory — those are never staleness-checked."
+                    ),
+                },
+                "supersedes": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": (
+                        "Ids of existing knowledge entries this one replaces. Each is "
+                        "retired into the new entry in the same write: recall stops "
+                        "returning it, it is kept (not deleted), and entries that "
+                        "depended on it are marked uncertain. If any id is unknown or "
+                        "already superseded, nothing is stored."
                     ),
                 },
             },

@@ -890,12 +890,46 @@ def test_tag_status_rejects_a_value_outside_the_two_the_counts_report(cli_config
     assert rejected.exit_code != 0, "a status the counts cannot report must not be accepted"
     assert "archived" in rejected.output
 
-    # The two legitimate values still work — the gate must not be a blanket refusal.
-    for good in ("superseded", "active"):
-        ok = CliRunner().invoke(main, ["architect", "tag", pid, "--status", good])
-        assert ok.exit_code == 0, f"--status {good} must still be accepted: {ok.output}"
+    # The legitimate value still works — the gate must not be a blanket refusal.
+    # (`superseded` is legitimate only with --superseded-by since techne#880; the
+    # test below covers it.)
+    ok = CliRunner().invoke(main, ["architect", "tag", pid, "--status", "active"])
+    assert ok.exit_code == 0, f"--status active must still be accepted: {ok.output}"
 
     # And the store is left holding only values the summary counts.
     rows = _query(architect_db(cli_config), "SELECT DISTINCT status FROM patterns")
     statuses = {row[0] for row in rows}
     assert statuses <= {"active", "superseded"}, statuses
+
+
+def test_tag_status_superseded_needs_a_successor(cli_config, tmp_path):
+    """techne#880: a bare `--status superseded` wrote a row `stats()` counts as
+    superseded and `topic_show` lists under no parent, so the summary said a pattern
+    was superseded and nothing could say by what. Refused now; --superseded-by is
+    the one way in, and it still sets the status."""
+    md = tmp_path / "p.md"
+    md.write_text(
+        "## Alpha\n\n- **Source**: https://example.com/a\n- **Surveyed**: 2026-09-02\n\nbody\n"
+        "## Beta\n\n- **Source**: https://example.com/b\n- **Surveyed**: 2026-09-02\n\nbody\n"
+    )
+    CliRunner().invoke(main, ["architect", "ingest", str(md)])
+    rows = dict(_query(architect_db(cli_config), "SELECT name, id FROM patterns"))
+    old, new = rows["Alpha"], rows["Beta"]
+
+    bare = CliRunner().invoke(main, ["architect", "tag", old, "--status", "superseded"])
+    assert bare.exit_code != 0, bare.output
+    assert "--superseded-by" in bare.output
+    contradictory = CliRunner().invoke(
+        main, ["architect", "tag", old, "--status", "active", "--superseded-by", new]
+    )
+    assert contradictory.exit_code != 0, contradictory.output
+    assert _query(
+        architect_db(cli_config), f"SELECT status, superseded_by FROM patterns WHERE id = '{old}'"
+    ) == [("active", None)]
+
+    for extra in ([], ["--status", "superseded"]):
+        ok = CliRunner().invoke(main, ["architect", "tag", old, "--superseded-by", new, *extra])
+        assert ok.exit_code == 0, ok.output
+    assert _query(
+        architect_db(cli_config), f"SELECT status, superseded_by FROM patterns WHERE id = '{old}'"
+    ) == [("superseded", new)]

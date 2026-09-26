@@ -547,6 +547,47 @@ def _render_liveness(config) -> tuple[int, int]:
     return failing, drift_failures
 
 
+_DECLARED_SUPERSESSIONS_SHOWN = 20
+
+
+def _render_declared_supersessions(db_path) -> int:
+    """Print entries whose prose says they replace a still-live entry (techne#887).
+
+    ADVISORY, NOT COUNTED toward doctor's exit code. The finding is detectable but
+    not always remediable: `techne#N` in prose can name a GitHub issue, not a
+    knowledge row, and a false match could only be cleared by retiring a row that
+    should stay live. A condition you can detect but not remedy belongs in the
+    detail, never the verdict (docs/arch/liveness.md). Returns the count found.
+    """
+    from techne.core.knowledge import find_declared_supersessions
+
+    click.echo()
+    click.echo("Supersessions declared in prose but never recorded (advisory):")
+    try:
+        pairs = find_declared_supersessions(db_path)
+    except Exception as exc:  # a probe failure is reported, never swallowed
+        click.echo(f"  ? could not scan: {exc}")
+        return 0
+    if not pairs:
+        click.echo("  ✓ none")
+        return 0
+    click.echo(
+        f"  ⚠ {len(pairs)} live entr{'y' if len(pairs) == 1 else 'ies'} named as replaced "
+        "by a newer entry. Check each, then run the command, in this order:"
+    )
+    for p in pairs[:_DECLARED_SUPERSESSIONS_SHOWN]:
+        click.echo(
+            f"    techne knowledge supersede {p['target']} --by {p['declarer']}"
+            f"   # {p['target_preview']}"
+        )
+    if len(pairs) > _DECLARED_SUPERSESSIONS_SHOWN:
+        click.echo(f"    … and {len(pairs) - _DECLARED_SUPERSESSIONS_SHOWN} more")
+    click.echo(
+        "  (a `#N` in prose may name an issue, not a knowledge entry; not counted as a failure)"
+    )
+    return len(pairs)
+
+
 @main.command()
 @click.option("--vacuum", is_flag=True, help="Reclaim freelist space (VACUUM) after the checks.")
 @click.option(
@@ -575,6 +616,10 @@ def doctor(ctx, vacuum, liveness):
 
     Exits non-zero if duplicate-row debt is found OR any subsystem is not
     confirmed working, so it is safe to run in CI / a scheduled audit.
+
+    Also lists entries whose prose declares they replace a still-live entry
+    (techne#887), with the `techne knowledge supersede` command for each.
+    Advisory: it never changes the exit code and never writes.
     """
     import sqlite3
     import sys
@@ -616,6 +661,8 @@ def doctor(ctx, vacuum, liveness):
             issues += 1
         else:
             click.echo(f"  ✓ {table}: {total} rows, no duplicates")
+
+    _render_declared_supersessions(config.db_path)
 
     # Freelist: dedup/deletes free pages but SQLite only returns them to the OS on VACUUM.
     page_size = conn.execute("PRAGMA page_size").fetchone()[0]
@@ -1043,10 +1090,24 @@ def knowledge(ctx):
     pass
 
 
-@knowledge.command("list")
-@click.option(
-    "--type", "ktype", type=click.Choice(["fact", "decision", "pattern", "evaluation", "procedure"])
+# The --type choices are DERIVED from core's VALID_TYPES (techne#877). They were a
+# hardcoded list that offered `pattern`, which store() always refuses (techne#137:
+# patterns live in architect.db), and omitted `document`/`document_card`, which it
+# accepts. Neither list was the truth; now there is only one.
+_KNOWLEDGE_TYPE_HELP = (
+    "Knowledge type. Architectural patterns are not stored here: "
+    "use `techne architect ingest` (techne#137)."
 )
+
+
+def _knowledge_types() -> click.Choice:
+    from techne.core.knowledge import VALID_TYPES
+
+    return click.Choice(list(VALID_TYPES))
+
+
+@knowledge.command("list")
+@click.option("--type", "ktype", type=_knowledge_types(), help=_KNOWLEDGE_TYPE_HELP)
 @click.option("--tags", default="")
 @click.option("--limit", default=50)
 @click.pass_context
@@ -1068,8 +1129,9 @@ def knowledge_list(ctx, ktype, tags, limit):
 @click.option(
     "--type",
     "ktype",
-    type=click.Choice(["fact", "decision", "pattern", "evaluation", "procedure"]),
+    type=_knowledge_types(),
     default="fact",
+    help=_KNOWLEDGE_TYPE_HELP,
 )
 @click.option("--tags", default="")
 @click.option("--confidence", type=click.Choice(["high", "medium", "low"]), default="medium")
@@ -1079,10 +1141,64 @@ def knowledge_add(ctx, content, ktype, tags, confidence):
     config = ctx.obj["config"]
     from techne.core.knowledge import store
 
-    entry_id = store(
-        config.db_path, content, type=ktype, tags=tags, confidence=confidence, source="manual"
-    )
+    # Core's refusals carry the useful message (which store to use instead); print
+    # it as a CLI error, not a traceback (techne#877).
+    try:
+        entry_id = store(
+            config.db_path, content, type=ktype, tags=tags, confidence=confidence, source="manual"
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from None
     click.echo(f"Stored knowledge entry #{entry_id}")
+
+
+@knowledge.command("supersede")
+@click.argument("old_id", type=int)
+@click.argument("content", required=False)
+@click.option(
+    "--by",
+    "survivor_id",
+    type=int,
+    default=None,
+    help="Retire OLD_ID into this EXISTING live entry instead of writing new content.",
+)
+@click.pass_context
+def knowledge_supersede(ctx, old_id, content, survivor_id):
+    """Retire a knowledge entry so recall stops treating it as current (techne#887).
+
+    Two forms, one of them per call:
+
+    \b
+      techne knowledge supersede OLD_ID "new content"
+          Write a new revision. It inherits OLD_ID's type, tags and
+          confidence, and its decay clock starts fresh.
+      techne knowledge supersede OLD_ID --by NEW_ID
+          NEW_ID already says what OLD_ID should have said (often it
+          declares "SUPERSEDES #OLD_ID" in prose, which recall never
+          reads). Points OLD_ID at it; no new row is written.
+
+    Either way OLD_ID is kept, not deleted, and entries that depended on it
+    are marked uncertain until reconfirmed. `techne doctor` lists entries that
+    declare a replacement in prose that was never recorded.
+    """
+    if (content is None) == (survivor_id is None):
+        raise click.UsageError("give either CONTENT or --by NEW_ID, not both and not neither")
+    config = ctx.obj["config"]
+    if not config.db_path.exists():
+        click.echo("techne not initialized. Run: techne init")
+        return
+
+    from techne.core.knowledge import retire, supersede
+
+    try:
+        if survivor_id is not None:
+            retire(config.db_path, old_id, survivor_id)
+            click.echo(f"Knowledge entry #{old_id} is now superseded by #{survivor_id}")
+        else:
+            new_id = supersede(config.db_path, old_id, content, source="manual")
+            click.echo(f"Knowledge entry #{old_id} is now superseded by new entry #{new_id}")
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from None
 
 
 @knowledge.command("export")
@@ -4874,7 +4990,7 @@ def architect_topic(ctx, name, as_of):
     "--status",
     type=click.Choice(["active", "superseded"]),
     default=None,
-    help="Set status directly.",
+    help="Set status directly. `superseded` also needs --superseded-by (techne#880).",
 )
 @click.option(
     "--superseded-by",

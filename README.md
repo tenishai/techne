@@ -367,8 +367,11 @@ techne threads redetect SESSION_ID [--sync]
 techne history [--days N] [--limit N]
 
 # Knowledge
-techne knowledge list [--type fact|decision|pattern|evaluation|procedure] [--tags T] [--limit N]
+techne knowledge list [--type fact|decision|evaluation|procedure|document|document_card] [--tags T] [--limit N]
 techne knowledge add CONTENT [--type T] [--tags T] [--confidence high|medium|low]
+techne knowledge supersede OLD_ID CONTENT  # new revision; OLD_ID stops being recalled
+techne knowledge supersede OLD_ID --by ID  # retire OLD_ID into an existing entry
+                                           # (patterns go to `techne architect ingest`)
 
 # Identity
 techne identity show [--prefix PREFIX]

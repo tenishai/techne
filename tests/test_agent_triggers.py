@@ -361,6 +361,9 @@ COMMAND_TREE_AT_LAST_REVIEW = {
     "knowledge archive-scan",
     "knowledge export",
     "knowledge list",
+    # techne#877/#887 — retires a knowledge row (superseded_by), never touches
+    # transcripts or backups, so the deployment.md absences still hold.
+    "knowledge supersede",
     "knowledge unarchive",
     "librarian",
     "librarian card",
