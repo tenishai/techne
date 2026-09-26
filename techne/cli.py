@@ -4558,39 +4558,82 @@ def architect_reverdict(ctx, url, verdict, surveyed_by, lens):
     "Scopes the sweep to the pre-fix corpus so a real full-eval is never clobbered.",
 )
 @click.option(
+    "--spare-with-eval-doc",
+    "eval_doc_dirs",
+    multiple=True,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Spare any row whose URL slug has a `<slug>-evaluation*.md` in this "
+    "directory: an eval doc means the full-eval was a real judgment. Repeatable.",
+)
+@click.option(
+    "--skip-url",
+    "skip_urls",
+    multiple=True,
+    help="Spare this exact URL. Repeatable.",
+)
+@click.option(
     "--apply",
     "apply_",
     is_flag=True,
     default=False,
-    help="Actually write. Without this it only reports what it would change.",
+    help="Actually write. Without this it only reports what it would change. "
+    "Refused unless --spare-with-eval-doc or --skip-url is given.",
 )
 @click.pass_context
-def architect_sweep_legacy_verdicts(ctx, before, apply_):
+def architect_sweep_legacy_verdicts(ctx, before, eval_doc_dirs, skip_urls, apply_):
     """Retire pre-techne#428 auto-assigned 'full-eval' verdicts to 'unknown'.
 
     Every full-eval written before techne#428 was assigned by the ingester purely
-    because the markdown carried patterns, so none of them is an operator
-    judgment. This rewrites your corpus — it is dry-run unless you pass --apply.
+    because the markdown carried patterns — except the ones an operator judged,
+    which no --before date separates from the rest (issue #549). Name them with
+    --spare-with-eval-doc and/or --skip-url. This rewrites your corpus — it is
+    dry-run unless you pass --apply, and --apply needs a spare mechanism.
     """
     config = ctx.obj["config"]
     from techne.core.architect import architect_db
     from techne.core.patterns import sweep_legacy_verdicts
 
+    # REFUSE A DATE-ONLY APPLY (issue #549). Measured: every --before value that
+    # reaches the legacy rows also reaches real operator full-evals, so date alone
+    # always destroys judgments. The dry run stays open so the operator can look.
+    if apply_ and not (eval_doc_dirs or skip_urls):
+        raise click.UsageError(
+            "--apply needs --spare-with-eval-doc DIR and/or --skip-url URL: --before "
+            "alone cannot tell a legacy full-eval from a real one (issue #549)."
+        )
     try:
-        res = sweep_legacy_verdicts(architect_db(config), before=before, dry_run=not apply_)
+        res = sweep_legacy_verdicts(
+            architect_db(config),
+            before=before,
+            dry_run=not apply_,
+            spare_urls=skip_urls,
+            eval_doc_dirs=eval_doc_dirs,
+        )
     except ValueError as e:
         raise click.BadParameter(str(e), param_hint="--before") from e
 
-    click.echo(json.dumps({k: v for k, v in res.items() if k != "urls"}, indent=2))
+    summary = {k: v for k, v in res.items() if k not in ("urls", "spared")}
+    summary["spared"] = len(res["spared"])
+    click.echo(json.dumps(summary, indent=2))
 
-    # PRINT THE URLS. A bare `matched: 202` looks equally correct whether the
-    # scope is right or has swallowed every post-fix judgment, so a count-only
-    # preview is not protection — it hides exactly the evidence you would need to
-    # catch a wrong --before before --apply makes it permanent (Prudence, PR #432).
+    # PRINT THE URLS, LABELLED. A bare `matched: 202` looks equally correct whether
+    # the scope is right or has swallowed every post-fix judgment, so a count-only
+    # preview is not protection (Prudence, PR #432). And an undifferentiated list
+    # hid the 10 real judgments among 205 (issue #549), so kept rows are listed too.
     if res["urls"]:
         click.echo("\nWould set to 'unknown':" if not apply_ else "\nSet to 'unknown':")
         for u in res["urls"]:
-            click.echo(f"  {u}")
+            click.echo(f"  legacy  {u}")
+    if res["spared"]:
+        click.echo("\nSpared (kept as full-eval):")
+        for r in res["spared"]:
+            click.echo(f"  spare   {r['url']}  ({r['reason']})")
+    if not apply_ and res["urls"] and not (eval_doc_dirs or skip_urls):
+        click.echo(
+            "\nNo spare mechanism given: every row above is listed as legacy, "
+            "including any real judgment. --apply will need --spare-with-eval-doc "
+            "or --skip-url."
+        )
     if not apply_ and res["matched"]:
         click.echo(
             f"\nDry run — {res['matched']} row(s) above would be rewritten. "
@@ -4769,30 +4812,40 @@ def architect_targets(ctx):
     """
     config = ctx.obj["config"]
     from techne.core.architect import architect_db
-    from techne.core.patterns import known_targets
-    from techne.core.stores import plain_connect
+    from techne.core.patterns import known_targets, target_counts
 
     configured = known_targets()
-    with plain_connect(architect_db(config)) as conn:
-        rows = conn.execute(
-            "SELECT target, COUNT(*) AS n FROM pattern_applies GROUP BY target ORDER BY n DESC"
-        ).fetchall()
+    # ACTIVE PATTERNS ONLY decide "the store holds it" (issue #1016), the same
+    # test `pattern_search` applies, so a target whose patterns were all retired
+    # is not reported present here while MCP calls it unknown. Retired-only
+    # targets are still listed, separately, so the history is not hidden.
+    counts = target_counts(architect_db(config))
+    rows = [r for r in counts if r["active"]]
+    retired_only = [r for r in counts if not r["active"]]
 
     click.echo("configured (architect.pattern_targets):")
     for t in sorted(configured):
         click.echo(f"  {t}")
 
-    if not rows:
+    if not rows and not retired_only:
         click.echo("\nstore holds no tagged patterns yet.")
         return
 
-    click.echo("\nin the store:")
     unlisted = []
+    if rows:
+        click.echo("\nin the store (active patterns):")
     for r in rows:
         mark = " " if r["target"] in configured else "  <- NOT CONFIGURED"
         if r["target"] not in configured:
             unlisted.append(r["target"])
-        click.echo(f"  {r['target']:<16} {r['n']:>5}{mark}")
+        click.echo(f"  {r['target']:<16} {r['active']:>5}{mark}")
+
+    if retired_only:
+        click.echo(
+            "\nretired only (no active pattern; `pattern_search` serves nothing for these):"
+        )
+        for r in retired_only:
+            click.echo(f"  {r['target']:<16} {r['retired']:>5} retired")
 
     if unlisted:
         click.echo(

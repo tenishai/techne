@@ -2091,15 +2091,25 @@ def _codex_blast_radius(args: dict, config: Config) -> dict:
     # Clamped, not trusted: a caller passing limit=100000 would recreate the exact
     # token blowout this bound exists to prevent.
     limit = max(1, min(int(args.get("limit") or _BLAST_DEFAULT_LIMIT), _BLAST_WALK_CAP))
+    # EVERY RETURN CARRIES THE BINDING (issue #730), from the same start path the
+    # read uses. From inside a linked worktree this tool answers from the PRIMARY's
+    # index (#719), and before this only `codex_search` said so.
+    import os as _os
+
+    _start = args.get("repo") or _os.getcwd()
     db_path = _codex_repo_db(args, config)
     if db_path is None:
-        return {
-            "symbol_id": symbol_id,
-            "direction": direction,
-            "depth": depth,
-            "nodes": [],
-            "notice": _NO_REPO_HINT,
-        }
+        return _with_binding(
+            config,
+            {
+                "symbol_id": symbol_id,
+                "direction": direction,
+                "depth": depth,
+                "nodes": [],
+                "notice": _NO_REPO_HINT,
+            },
+            _start,
+        )
     # Resolve a bare name / reject an unresolvable id, so a mistyped argument
     # returns an explicit error instead of an empty node list that reads as
     # "nothing reachable" (techne#303 — the MCP twin of the CLI fix in #300).
@@ -2119,7 +2129,7 @@ def _codex_blast_radius(args: dict, config: Config) -> dict:
             # CLI's "... and N more"; the total is already in the error text).
             if len(exc.candidates) > 10:
                 result["candidates_truncated"] = True
-        return result
+        return _with_binding(config, result, _start)
     # techne#606: blast radius is where the bare-name fallback does the most
     # damage — one invented hop drags in that phantom's whole upstream cone, and
     # the caller cannot tell it from a real dependent. So compute the radius
@@ -2233,7 +2243,7 @@ def _codex_blast_radius(args: dict, config: Config) -> dict:
         )
     if notices:
         result["notice"] = " ".join(notices)
-    return result
+    return _with_binding(config, result, _start)
 
 
 def _domain_search(domain: str):
@@ -2291,10 +2301,26 @@ def _pattern_search(args: dict, config: Config) -> dict:
             # "no patterns exist" — error instead.
             existing = patterns_for_target(db, target, limit=1)
             if not existing:
+                # SAY WHICH ABSENCE, AND WHAT IS VALID (issue #1016). A target whose
+                # patterns were all retired still has `pattern_applies` rows, so
+                # "unknown" alone contradicted `techne architect targets`.
+                from techne.core.patterns import target_counts
+
+                counts = target_counts(db)
+                retired = next((r["retired"] for r in counts if r["target"] == target), 0)
+                held = sorted(r["target"] for r in counts if r["active"])
+                why = (
+                    f"it is not configured and all {retired} pattern(s) tagged with it "
+                    "are retired"
+                    if retired
+                    else "it is neither configured nor tagged on any pattern"
+                )
                 return {
                     "error": (
-                        f"unknown target {target!r}. Configured targets: "
+                        f"unknown target {target!r}: {why}. Configured targets: "
                         f"{', '.join(sorted(allowed_targets))}. "
+                        f"Targets with active patterns in the store: "
+                        f"{', '.join(held) or 'none'}. "
                         "Set architect.pattern_targets, or run `techne architect targets`."
                     ),
                     "results": [],
@@ -2315,6 +2341,18 @@ def _pattern_search(args: dict, config: Config) -> dict:
             # single target ever exceeds it (it would silently drop valid hits).
             allowed = {p["id"] for p in patterns_for_target(db, target, limit=100_000)}
             hits = [h for h in hits if h["id"] in allowed]
+    if target and not hits and not notice and target in allowed_targets:
+        # A CONFIGURED target can hold only retired patterns too (issue #1016); an
+        # empty result there must say so, as `architect targets` does, rather than
+        # read as "never tagged".
+        from techne.core.patterns import target_counts
+
+        row = next((r for r in target_counts(db) if r["target"] == target), None)
+        if row and row["retired"] and not row["active"]:
+            notice = (
+                f"all {row['retired']} pattern(s) tagged {target!r} are retired; "
+                "none is active, so none is served."
+            )
     out: dict = {"results": hits, "count": len(hits)}
     if notice:
         out["notice"] = notice

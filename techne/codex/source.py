@@ -176,6 +176,21 @@ _GRAMMAR = _GrammarCache()
 # ---------------------------------------------------------------------------
 
 
+#: Every symbol kind the indexer writes to ``symbols.kind``. ``module`` is the
+#: synthetic per-file anchor; the rest come from the ``.scm`` captures below.
+#: ``tests/test_codex_source.py`` indexes a fixture holding one of each and
+#: asserts every kind here is actually emitted (issue #859).
+CODEX_KINDS: tuple[str, ...] = ("module", "function", "method", "class", "interface")
+
+#: The ``.scm`` capture names that open a symbol definition, in pick order.
+_SYMBOL_CAPTURES: tuple[str, ...] = (
+    "symbol.function",
+    "symbol.class",
+    "symbol.method",
+    "symbol.interface",
+)
+
+
 def _is_method_python(fn_node) -> bool:
     """True if a Python function_definition node is a method (inside a class body).
 
@@ -464,23 +479,12 @@ def _parse_file(
     import_matches: list[tuple] = []  # deferred for after symbols are collected
 
     for _pattern_idx, caps in matches:
-        # Symbol definition
-        if "symbol.function" in caps or "symbol.class" in caps or "symbol.method" in caps:
-            kind_key = next(
-                (
-                    k
-                    for k in (
-                        "symbol.function",
-                        "symbol.class",
-                        "symbol.method",
-                        "symbol.interface",
-                    )
-                    if k in caps
-                ),
-                None,
-            )
-            if kind_key is None:
-                continue
+        # Symbol definition. One tuple drives both the entry test and the kind pick
+        # (issue #859): the entry test used to name three captures while the pick
+        # named four, so every `symbol.interface` match fell through and TypeScript
+        # interfaces were never written.
+        kind_key = next((k for k in _SYMBOL_CAPTURES if k in caps), None)
+        if kind_key is not None:
             def_nodes = caps[kind_key]
             name_nodes = caps.get("symbol.name", [])
             for def_node, name_node in zip(def_nodes, name_nodes):
@@ -502,7 +506,9 @@ def _parse_file(
                     kind = "function"
 
                 sym_id = f"{file_str}::{name_str}::{kind}::{start_line}"
-                if language == "python":
+                if kind == "interface":
+                    sig = f"interface {name_str}"
+                elif language == "python":
                     sig = f"def {name_str}(...)"
                 else:
                     sig = f"function {name_str}(...)"
