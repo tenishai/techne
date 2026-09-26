@@ -502,14 +502,69 @@ class TestBannerLiveness:
 # ---- deferred checks: say what the banner did NOT run (techne#488) ---------
 
 
-def test_deferred_check_names_are_exactly_the_expensive_ones():
-    from techne.core.checks import deferred_check_names, registered_checks
+def test_every_registered_check_is_run_or_deferred_exactly_once(config, monkeypatch):
+    """Registry coverage that can fail (techne#701).
 
-    expected = [fn.__name__ for fn in registered_checks() if getattr(fn, "expensive", False)]
-    assert deferred_check_names() == expected
-    # Without this the test passes vacuously the day the last @expensive marker
-    # is removed, and goes on "proving" the feature works with nothing in it.
-    assert expected, "no @expensive check is registered — this assertion would prove nothing"
+    The test this replaces computed its expected set from `registered_checks()`
+    with the same predicate `deferred_check_names()` uses, so it could not
+    disagree, and it passed with a check's registration stripped. This one takes
+    the expected set from an INDEPENDENT source — every `check_*` function defined
+    in `techne.core.checks` — and asserts, by COUNT, that each is registered once
+    and lands in exactly one of the banner's `checks` or `checks_deferred`.
+
+    The accident it is for (docs/arch/liveness.md): a new check inserted between
+    the stacked `@register_check` / `@expensive` decorators of an existing one is
+    registered twice and strips the other's registration. A superset assertion
+    misses the double; a registry-derived one misses the strip.
+    """
+    import inspect
+    from collections import Counter
+
+    import techne.core.checks as checks_mod
+
+    defined = sorted(
+        name
+        for name, fn in vars(checks_mod).items()
+        if name.startswith("check_")
+        and inspect.isfunction(fn)
+        and fn.__module__ == checks_mod.__name__
+    )
+    registered = Counter(fn.__name__ for fn in checks_mod.registered_checks())
+    doubled = sorted(n for n, c in registered.items() if c > 1)
+    assert not doubled, f"registered more than once: {doubled}"
+    # `defined` lists only this module; a check registered from elsewhere is
+    # allowed, but every check defined HERE must be registered.
+    unregistered = sorted(set(defined) - set(registered))
+    assert not unregistered, f"defined but never registered: {unregistered}"
+    assert defined, "found no check_* functions; this test would prove nothing"
+
+    # Stub every check so each ran check yields ONE row named after itself —
+    # real checks may return None or several rows, which would blur the count.
+    stubs = []
+    for fn in checks_mod.registered_checks():
+
+        def stub(_config, _name=fn.__name__):
+            return checks_mod.CheckResult(
+                name=_name,
+                subsystem="t",
+                kind=checks_mod.Kind.FRESHNESS,
+                verdict=checks_mod.Verdict.LIVE,
+            )
+
+        stub.__name__ = fn.__name__
+        if getattr(fn, "expensive", False):
+            stub.expensive = True
+        stubs.append(stub)
+    monkeypatch.setattr(checks_mod, "_REGISTRY", stubs)
+
+    h = collect_health(config)
+    ran = Counter(c["name"] for c in h["checks"])
+    deferred = Counter(h["checks_deferred"])
+    assert not (set(ran) & set(deferred)), "a check both ran and was deferred"
+    assert ran + deferred == registered, (
+        f"missing or duplicated: ran={dict(ran)} deferred={dict(deferred)}"
+    )
+    assert deferred, "no @expensive check is registered — the deferred half proves nothing"
 
 
 def test_collect_health_records_what_the_cheap_run_skipped(config):
@@ -809,10 +864,12 @@ class TestRevisionInfo:
         assert info["drifted"] is None
 
     def test_no_loose_origin_ref_leaves_the_age_unknown(self, tmp_path):
-        """No honest mtime exists for a packed-only ref, so the age must stay None.
+        """Packed-only AND no reflog: no honest age exists, so it must stay None.
 
         Guards the removed FETCH_HEAD fallback: that file's mtime is last-FETCH,
-        which reads younger than last-moved and would falsely reassure.
+        which reads younger than last-moved and would falsely reassure. Since
+        techne#571 the reflog is read first; this pins the case where it is absent
+        too (reflogs can be disabled or expired).
         """
         from techne.core.health import _revision_info
 
@@ -827,6 +884,98 @@ class TestRevisionInfo:
         info = _revision_info(root / "techne")
         assert info["remote_revision"] == "bbbbbbb", "packed ref still resolves"
         assert info["remote_ref_age_days"] is None, "no loose ref = no honest age"
+
+    @staticmethod
+    def _packed_repo(tmp_path, reflog: str | None):
+        root = tmp_path / "repo"
+        git = root / ".git"
+        (git / "refs" / "heads").mkdir(parents=True)
+        (git / "HEAD").write_text("ref: refs/heads/main\n")
+        (git / "refs" / "heads" / "main").write_text("abc1234" + "0" * 33 + "\n")
+        (git / "packed-refs").write_text(f"{'bbbbbbb' + '0' * 33} refs/remotes/origin/main\n")
+        if reflog is not None:
+            log = git / "logs" / "refs" / "remotes" / "origin"
+            log.mkdir(parents=True)
+            (log / "main").write_text(reflog)
+        return root
+
+    def test_the_reflog_gives_the_age_after_the_loose_ref_is_packed(self, tmp_path):
+        """techne#571: `git pack-refs --all --prune` removed the loose ref and the
+        age went unknown; the reflog survives packing. The LAST line is the last
+        move, not the first."""
+        import time
+
+        from techne.core.health import _revision_info
+
+        now = int(time.time())
+        z = "0" * 40
+        reflog = (
+            f"{z} {'a' * 40} Some Name <n@x> {now - 30 * 86400} -0400\tfetch: clone\n"
+            f"{'a' * 40} {'b' * 40} Some Name <n@x> {now - 2 * 86400 - 60} -0400\tfetch: ff\n"
+        )
+        info = _revision_info(self._packed_repo(tmp_path, reflog) / "techne")
+        assert info["remote_ref_age_days"] == 2, info
+
+    def test_a_malformed_reflog_is_unknown_not_a_guess(self, tmp_path):
+        from techne.core.health import _revision_info
+
+        root = self._packed_repo(tmp_path, "garbage without a timestamp\n")
+        assert _revision_info(root / "techne")["remote_ref_age_days"] is None
+
+    def test_the_reflog_outranks_the_loose_ref_mtime(self, tmp_path):
+        """Same quantity, but the reflog is what doctor reads — so it wins."""
+        import time
+
+        from techne.core.health import _revision_info
+
+        now = int(time.time())
+        root = self._packed_repo(
+            tmp_path, f"{'0' * 40} {'b' * 40} N <n@x> {now - 5 * 86400 - 60} +0000\tfetch\n"
+        )
+        loose = root / ".git" / "refs" / "remotes" / "origin"
+        loose.mkdir(parents=True)
+        (loose / "main").write_text("bbbbbbb" + "0" * 33 + "\n")  # mtime: now
+        assert _revision_info(root / "techne")["remote_ref_age_days"] == 5
+
+    def test_real_git_pack_refs_keeps_the_age(self, tmp_path):
+        """End to end against git itself: fetch, pack with --prune, still known."""
+        import subprocess
+
+        from techne.core.health import _revision_info
+
+        def g(cwd, *a):
+            subprocess.run(["git", "-C", str(cwd), *a], capture_output=True, check=True)
+
+        origin = tmp_path / "origin"
+        origin.mkdir()
+        g(origin, "init", "-q", "-b", "main")
+        for i in range(2):
+            (origin / f"f{i}").write_text("x")
+            g(origin, "add", "-A")
+            g(
+                origin,
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-qm",
+                f"c{i}",
+            )
+            if i == 0:
+                subprocess.run(
+                    ["git", "clone", "-q", str(origin), str(tmp_path / "repo")],
+                    capture_output=True,
+                    check=True,
+                )
+        repo = tmp_path / "repo"
+        g(repo, "fetch", "-q", "origin")  # moves origin/main: a reflog entry
+        g(repo, "pack-refs", "--all", "--prune")
+        assert not (repo / ".git" / "refs" / "remotes" / "origin" / "main").exists()
+
+        assert _revision_info(repo / "techne")["remote_ref_age_days"] == 0
 
     def test_the_checkout_this_suite_runs_from_is_actually_readable(self):
         """The gap every synthetic fixture missed.
@@ -881,7 +1030,7 @@ class TestFreshnessCaveat:
         banner = format_banner(self._h(remote_ref_age_days=21))
         assert "level with origin/main" in banner
         assert "local ref last moved 21d ago" in banner, (
-            "'matches' is the FALSE-GREEN case — a 3-week-old ref reads as level"
+            "'level with' is the FALSE-GREEN case — a 3-week-old ref reads as level"
         )
 
     def test_caveat_present_on_the_drifted_case(self):
@@ -981,4 +1130,6 @@ class TestFreshnessCaveat:
 
         info = _revision_info(root / "techne")  # must not raise RecursionError
         assert info["revision"] is None
-        assert info["drifted"] is None
+        # No `drifted` assertion: the branch is refs/heads/loop, so the off-main
+        # return leaves it None for ANY repo, cycle or not (techne#572). The teeth
+        # are the absence of RecursionError and `revision is None`.

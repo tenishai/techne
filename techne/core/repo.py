@@ -7,10 +7,11 @@ each growing its own copy.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 
-def find_repo_root(path: Path) -> Path | None:
+def find_repo_root(path: Path, probe: Callable[[Path], bool] | None = None) -> Path | None:
     """Walk up from *path* looking for a ``.git`` entry; return the repo root.
 
     Directory-aware: when *path* is an existing directory (e.g. a hook's cwd or
@@ -18,14 +19,41 @@ def find_repo_root(path: Path) -> Path | None:
     Otherwise — a file, existing or deleted — the walk starts at its parent, so
     a deleted file's repo is still discoverable as long as an ancestor still
     holds ``.git``. Returns None when no ancestor is a repo.
+
+    AN UNREADABLE ANCESTOR MEANS "NO MARKER HERE", NEVER A RAISE (techne#981),
+    the same rule and the same trade as ``threads/features.py::find_repo``
+    (techne#963): ``Path.exists()`` and ``Path.is_dir()`` re-raise
+    ``PermissionError`` on 3.11-3.13 and swallow it only on 3.14, and this walk
+    runs on the SessionStart banner path (``cards:freshness``,
+    ``codex:freshness``). Guarded at the CALL SITE so it also covers an injected
+    ``probe`` and a future one that opens ``.git`` rather than stat-ing it. The
+    answer is the nearest READABLE marker: if the unreadable directory itself
+    held the true repo, an outer one is returned with no signal.
+
+    ``probe(candidate) -> bool`` tests one directory for the marker; tests pass a
+    raising stub so the guard has teeth on 3.14 and as root.
     """
-    if path.is_dir():
+    if probe is None:
+
+        def probe(candidate: Path) -> bool:
+            return (candidate / ".git").exists()
+
+    try:
+        is_dir = path.is_dir()
+    except OSError:
+        is_dir = False
+    if is_dir:
         start = path
     else:
-        # A file (possibly deleted): climb from its containing directory.
+        # A file (possibly deleted), or a path we cannot stat: climb from its
+        # containing directory.
         start = path.parent if path.name else path
     for candidate in [start, *start.parents]:
-        if (candidate / ".git").exists():
+        try:
+            hit = probe(candidate)
+        except OSError:
+            continue
+        if hit:
             return candidate
     return None
 

@@ -683,9 +683,9 @@ def migrate_legacy_codex_db(config: Config) -> Path | None:
     path (techne#209). Idempotent; returns the destination path if it migrated,
     else ``None`` (nothing to do).
 
-    NOT auto-invoked while consumers still read the legacy path — wiring it in
-    is the job of the consumer-rewiring phase, so the move happens together with
-    the switch to per-repo resolution rather than out from under a live reader.
+    Invoked through :func:`ensure_legacy_migrated`, once per process ×
+    data_dir, from every per-repo resolution path (CLI, hooks, MCP). A legacy
+    db with NO tables is deleted rather than migrated (techne#875).
 
     WAL safety: checkpoints (TRUNCATE) before moving so no committed pages are
     stranded in a ``-wal`` sidecar, then moves the main db and clears any stale
@@ -695,8 +695,22 @@ def migrate_legacy_codex_db(config: Config) -> Path | None:
     if not legacy.exists():
         return None
 
+    # A ZERO-TABLE HUSK IS NOTHING TO MIGRATE, SO IT IS REMOVED (techne#875). The
+    # per-repo move leaves `<data_dir>/codex.db` as a 4096-byte file with no tables;
+    # it can never gain a `repo_root`, so the warning below fired once per process —
+    # every hook, CLI run and MCP start — forever, on the same log channel that
+    # carries a REAL migration failure. An empty `sqlite_master` holds no data.
+    # Opened through SQLite rather than judged by size, so a WAL that still holds
+    # the schema counts as tables.
+    if _has_no_tables(legacy):
+        for f in (legacy, Path(str(legacy) + "-wal"), Path(str(legacy) + "-shm")):
+            f.unlink(missing_ok=True)
+        log.debug("codex: removed empty legacy %s (no tables, nothing to migrate)", legacy)
+        return None
+
     root = get_meta(legacy, "repo_root")
     if not root:
+        # Tables but no repo_root: a real anomaly, so it keeps the warning.
         log.warning("codex: legacy %s has no repo_root — leaving in place", legacy)
         return None
 
@@ -726,6 +740,15 @@ def migrate_legacy_codex_db(config: Config) -> Path | None:
 # ---------------------------------------------------------------------------
 # codex_meta helpers — repo-level KV store
 # ---------------------------------------------------------------------------
+
+
+def _has_no_tables(db_path: Path) -> bool:
+    """True when *db_path* is a SQLite file whose schema holds no objects at all."""
+    conn = plain_connect(db_path)
+    try:
+        return conn.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()[0] == 0
+    finally:
+        conn.close()
 
 
 def get_meta(db_path: Path, key: str) -> str | None:

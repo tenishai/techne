@@ -45,7 +45,9 @@ def _rowids(cfg, table, ids=()):
         conn.close()
 
 
-def _observations(cfg, n):
+def _observations(cfg, n, age_minutes=60):
+    """`n` observations, backdated past `vectors:coverage`'s grace window by
+    default so an unembedded one counts as a real gap (techne#704)."""
     from techne.core.state import add_observation, start_session
 
     sid = start_session(cfg.db_path, project_path="/tmp/p")
@@ -53,6 +55,10 @@ def _observations(cfg, n):
         add_observation(cfg.db_path, sid, "Edit", f"edit {i}")
     conn = connect(cfg.db_path)
     try:
+        conn.execute(
+            "UPDATE observations SET timestamp = datetime('now', ?)", (f"-{age_minutes} minutes",)
+        )
+        conn.commit()
         return [r[0] for r in conn.execute("SELECT id FROM observations ORDER BY id")]
     finally:
         conn.close()
@@ -122,6 +128,111 @@ def test_non_empty_knowledge_keeps_its_percentage(cfg):
     _rowids(cfg, "threads")
     res = check_vector_coverage(cfg)
     assert "1/1 live knowledge embedded and current (100%)" in res.detail, res.detail
+
+
+# --- #704 -------------------------------------------------------------------
+
+
+def _knowledge_complete(cfg):
+    from techne.core.knowledge import store
+
+    _rowids(cfg, "knowledge", [store(cfg.db_path, "a durable fact", type="fact")])
+
+
+def test_a_seconds_old_unembedded_tail_is_pending_not_stale(cfg):
+    """The remedy's own Bash call lands an unembedded row; that must not keep the
+    check yellow after the remedy ran."""
+    from techne.core.checks import Verdict, check_vector_coverage
+
+    _knowledge_complete(cfg)
+    _observations(cfg, 2, age_minutes=0)
+    _rowids(cfg, "observations")
+    _rowids(cfg, "threads")
+
+    res = check_vector_coverage(cfg)
+    assert res.verdict is Verdict.LIVE, res.detail
+    assert res.remedy is None
+    assert "2 observations pending" in res.detail, "the tail stays visible"
+    assert "unembedded" not in res.detail
+
+
+def test_a_backlog_older_than_the_grace_window_is_still_stale(cfg):
+    """The #814 incident (883 observations behind) must still alarm."""
+    from techne.core.checks import Verdict, check_vector_coverage
+
+    _knowledge_complete(cfg)
+    _observations(cfg, 3, age_minutes=60)
+    conn = connect(cfg.db_path)
+    try:
+        # One fresh row on top of the old backlog: only the old ones count.
+        conn.execute("UPDATE observations SET timestamp = datetime('now') WHERE id = 3")
+        conn.commit()
+    finally:
+        conn.close()
+    _rowids(cfg, "observations")
+    _rowids(cfg, "threads")
+
+    res = check_vector_coverage(cfg)
+    assert res.verdict is Verdict.STALE, res.detail
+    assert "2 observations unembedded" in res.detail, res.detail
+    assert "1 observations pending" in res.detail, res.detail
+    assert res.remedy == "techne vectors backfill"
+
+
+def test_the_threads_lane_gets_the_same_grace(cfg):
+    """A summary re-save re-inserts the thread row, so threads leave a tail too."""
+    from techne.core.checks import Verdict, check_vector_coverage
+
+    _knowledge_complete(cfg)
+    _observations(cfg, 1)
+    conn = connect(cfg.db_path)
+    try:
+        sid = conn.execute("SELECT session_id FROM observations").fetchone()[0]
+        for tid, age in (("t-new", "-0 minutes"), ("t-old", "-60 minutes")):
+            conn.execute(
+                "INSERT INTO threads (id, session_id, thread_num, label, summary, updated_at) "
+                "VALUES (?, ?, 1, 'l', 's', datetime('now', ?))",
+                (tid, sid, age),
+            )
+        conn.commit()
+        ids = [r[0] for r in conn.execute("SELECT id FROM observations")]
+    finally:
+        conn.close()
+    _rowids(cfg, "observations", ids)
+    _rowids(cfg, "threads")
+
+    res = check_vector_coverage(cfg)
+    assert res.verdict is Verdict.STALE, "the hour-old thread is a real gap"
+    assert "1 threads unembedded" in res.detail, res.detail
+    assert "1 threads pending" in res.detail, res.detail
+
+
+def test_the_pending_clause_leaves_the_942_wording_alone(cfg):
+    """Pre-pass finding: the pending block once sat between `if total:` and its
+    `else`, so the no-knowledge coverage text followed the PENDING test instead."""
+    from techne.core.checks import check_vector_coverage
+
+    # Knowledge present, nothing pending: no sibling coverage text.
+    _knowledge_complete(cfg)
+    ids = _observations(cfg, 2)
+    _rowids(cfg, "observations", ids)
+    _rowids(cfg, "threads")
+    res = check_vector_coverage(cfg)
+    assert "embedded;" not in res.detail and "observations 2/2" not in res.detail, res.detail
+    assert "pending" not in res.detail
+
+
+def test_no_knowledge_with_a_pending_tail_keeps_its_coverage_text(cfg):
+    from techne.core.checks import Verdict, check_vector_coverage
+
+    ids = _observations(cfg, 2, age_minutes=0)
+    _rowids(cfg, "knowledge")
+    _rowids(cfg, "observations", ids[:1])
+    _rowids(cfg, "threads")
+    res = check_vector_coverage(cfg)
+    assert "observations 1/2 embedded" in res.detail, res.detail
+    assert "1 observations pending" in res.detail, res.detail
+    assert res.verdict is Verdict.LIVE
 
 
 # --- #948 -------------------------------------------------------------------

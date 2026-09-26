@@ -22,6 +22,7 @@ RESOLVED sha, not just the ref asked for. Confirmed against a real install:
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -223,3 +224,63 @@ def test_a_non_sha_commit_id_is_not_dressed_up_as_one(monkeypatch, commit, expec
     payload = json.dumps({"url": "x", "vcs_info": {"commit_id": commit}})
     _patch_dist(monkeypatch, payload)
     assert _installed_revision() == expected
+
+
+# --- techne#982: one build rule, over one resolved path, for every surface ------
+
+
+def _symlinked_package(tmp_path, real_parent, link_parent):
+    """A package dir under `real_parent`, imported through a symlink under `link_parent`."""
+    real = tmp_path / real_parent / "techne"
+    real.mkdir(parents=True)
+    (real / "__init__.py").write_text("")
+    link = tmp_path / link_parent / "techne"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(real, target_is_directory=True)
+    return real, link
+
+
+@pytest.mark.parametrize(
+    "real_parent,link_parent,build",
+    [
+        ("venv/lib/site-packages", "linked", "installed"),
+        ("repo", "venv/lib/site-packages", "checkout"),
+    ],
+)
+def test_every_surface_classifies_a_symlinked_package_the_same_way(
+    tmp_path, monkeypatch, real_parent, link_parent, build
+):
+    """`--version` passed an UNRESOLVED path and so read a symlinked tree the
+    opposite way from the banner, in both directions (techne#982)."""
+    import techne
+    from techne.core.health import _package_dir
+
+    real, link = _symlinked_package(tmp_path, real_parent, link_parent)
+    (real.parent / "pyproject.toml").write_text('[project]\nversion = "9.9.9"\n')
+    monkeypatch.setattr(techne, "__file__", str(link / "__init__.py"))
+
+    assert _package_dir() == real.resolve()
+    assert _revision_info(_package_dir())["build"] == build, "banner / techne_status"
+    assert _version_string().endswith(f"({build})"), "--version"
+    resolved = techne._resolve_version()
+    if build == "checkout":
+        assert resolved == "9.9.9", "version resolution must take the checkout branch too"
+    else:
+        assert resolved != "9.9.9", "an installed build must not read the tree's pyproject"
+
+
+def test_version_string_reads_the_resolved_package_dir(monkeypatch):
+    """Every `_version_string` test before #982 patched `_revision_info` with a
+    lambda that ignored its argument, so the path cli.py passed was untested."""
+    import techne
+    from techne.core import health
+
+    seen = []
+
+    def _record(p):
+        seen.append(p)
+        return {"build": "checkout", "revision": "abc1234"}
+
+    monkeypatch.setattr(health, "_revision_info", _record)
+    _version_string()
+    assert seen == [Path(techne.__file__).resolve().parent]

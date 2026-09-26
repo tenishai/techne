@@ -499,6 +499,9 @@ class TestNoFalseGreens:
             conn.execute("CREATE TABLE IF NOT EXISTS knowledge_vec_rowids (rowid INTEGER)")
             conn.execute("INSERT INTO knowledge_vec_rowids (rowid) VALUES (?)", (kid,))
             conn.execute("CREATE TABLE IF NOT EXISTS observations_vec_rowids (rowid INTEGER)")
+            # Past the grace window (techne#704), so this is a real gap and not
+            # the capture tail of a live session.
+            conn.execute("UPDATE observations SET timestamp = datetime('now', '-1 hour')")
             conn.commit()
         finally:
             conn.close()
@@ -2014,6 +2017,42 @@ class TestRuntimeRevision:
         assert r.verdict is Verdict.STALE, r.detail
         assert "last fetched" in r.detail, r.detail
         assert "years" not in r.detail, f"reported the tip's commit date, not the fetch: {r.detail}"
+
+    def test_doctor_from_a_working_checkout_still_reports_the_deployment(
+        self, config, tmp_path, monkeypatch
+    ):
+        """techne#690: the deployment sat 20 commits behind while doctor, run from
+        the repo, said only "working checkout, not a deployment"."""
+        import subprocess
+
+        (tmp_path / "work").mkdir()
+        (tmp_path / "home").mkdir()
+        work = self._repo(tmp_path / "work", behind=0)
+        subprocess.run(
+            ["git", "-C", str(work), "checkout", "-q", "-b", "feat"],
+            capture_output=True,
+            check=True,
+        )
+        deployed = self._repo(tmp_path / "home", behind=2)
+        monkeypatch.setenv("TECHNE_HOME", str(tmp_path / "home"))
+
+        out = self._check(config, work, monkeypatch)
+        assert isinstance(out, list), "the deployment must be a row of its own"
+        own, dep = out
+        assert own.name == "runtime:revision" and own.verdict is Verdict.DORMANT, own.detail
+        assert dep.name == "runtime:deployed"
+        assert dep.verdict is Verdict.STALE, dep.detail
+        assert "2 commit(s) BEHIND" in dep.detail
+        assert f"deployment at {deployed}" in dep.detail, "must name the path it measured"
+        assert dep.remedy == f"git -C {deployed} pull"
+
+    def test_running_from_the_deployment_reports_it_once(self, config, tmp_path, monkeypatch):
+        """No duplicate row when the imported checkout IS the deployment."""
+        deployed = self._repo(tmp_path, behind=0)
+        monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+        r = self._check(config, deployed, monkeypatch)
+        assert not isinstance(r, list)
+        assert r.name == "runtime:revision" and r.verdict is Verdict.LIVE, r.detail
 
     def test_a_failed_commit_count_is_unknown_not_live(self, config, tmp_path, monkeypatch):
         """A PROBE THAT FAILED IS NOT A HEALTHY RUNTIME.

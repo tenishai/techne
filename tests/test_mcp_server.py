@@ -35,11 +35,16 @@ def config(db_path):
 
 class TestHandleRequest:
     def test_initialize_returns_current_version(self, config):
-        """serverInfo.version must come from techne.__version__, not a literal."""
+        """serverInfo.version is the build identity `techne --version` prints (#982),
+        which starts with techne.__version__ rather than a literal."""
+        from techne.cli import _version_string
+
         response = handle_request({"jsonrpc": "2.0", "id": 1, "method": "initialize"}, config)
         assert response["jsonrpc"] == "2.0"
         assert response["id"] == 1
-        assert response["result"]["serverInfo"] == {"name": "techne", "version": __version__}
+        info = response["result"]["serverInfo"]
+        assert info == {"name": "techne", "version": _version_string()}
+        assert info["version"].startswith(__version__)
 
     def test_initialize_advertises_tools_capability(self, config):
         response = handle_request({"id": 1, "method": "initialize"}, config)
