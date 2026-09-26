@@ -528,9 +528,11 @@ techne architect ingest PATTERNS_MD [--verdict skip|skip-with-flag|patterns-only
 techne architect reverdict URL --verdict X # correct one investigation's verdict without
                                            # re-ingesting. Leaves surveyed_at alone:
                                            # correcting a judgment is not a re-survey.
-techne architect sweep-legacy-verdicts --before DATE [--apply]
-                                           # retire pre-#428 auto-assigned verdicts to
-                                           # 'unknown'. Dry-run by default, date-scoped.
+techne architect sweep-legacy-verdicts --before DATE [--spare-with-eval-doc DIR]
+    [--skip-url URL] [--apply]             # retire pre-#428 auto-assigned verdicts to
+                                           # 'unknown'. Dry-run by default; --apply needs
+                                           # a spare option, since a date alone also
+                                           # catches real full-evals (#549).
 techne architect search QUERY
 techne architect show PATTERN_ID
 techne architect export [-o FILE]          # regenerate shareable architectural-patterns.md
@@ -642,6 +644,7 @@ hooks:
                               #   applies on the next edit; no 'techne init' needed.
   codex_edit_rail_min_deps: 3 # min transitive dependents before the edit rail fires (skip leaf edits)
   codex_edit_rail_limit: 10   # max dependents injected per edit (closest-first by depth)
+  codex_edit_rail_exclude_globs: [tests/*, */tests/*, test_*.py, ...]  # test files the rail never injects (#406)
   codex_reindex_on_edit: true # default on (#301, #1020): reindexes just the edited file, so the
                               #   two codex rails above don't answer from a graph gone stale
                               #   mid-session. Checked inside PostToolUse; applies on the next edit.

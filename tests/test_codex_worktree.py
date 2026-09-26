@@ -328,3 +328,9 @@ def test_the_edit_rail_declines_inside_a_worktree(primary, worktree, tmp_path, m
     assert wt_out is None, (
         "the edit rail ran inside a worktree — base-branch graph, PR-branch line numbers"
     )
+    # Issue #721: the reason is in the return contract, so this assertion names the
+    # one guard it tests instead of any of thirteen ways to return nothing.
+    from techne.hooks.post_tool_use import _edit_rail_outcome
+
+    wt = _edit_rail_outcome(cfg, "s3", "Edit", dict(edit, file_path=str(worktree / "a.py")))
+    assert wt.declined_because == "linked_worktree"

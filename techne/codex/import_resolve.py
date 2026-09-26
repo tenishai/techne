@@ -470,12 +470,10 @@ def resolve_edges_by_import(conn) -> dict:
         #
         # This is also the case the module docstring already promises: a callee
         # that is re-exported or is not a top-level symbol stays `unresolved`.
-        # `interface` IS NOT IN THE LIST because the indexer never emits it
-        # (Prudence r4 nit 4): `source.py`'s entry condition tests only
-        # symbol.function / symbol.class / symbol.method, so an
-        # `interface_declaration` match is discarded. Listing it read as covering
-        # three kinds while covering two. Nothing is lost — an interface is not
-        # callable — but the extraction gap is filed separately.
+        # `interface` IS NOT IN THE LIST: an interface is not callable or
+        # constructible, so no call or import-bound call can land on one. The
+        # indexer does emit the kind since issue #859; binding a call to it would
+        # invent an edge.
         candidates = conn.execute(
             "SELECT id FROM symbols WHERE file IN (%s) AND name = ? "
             "AND kind IN ('function', 'class')"

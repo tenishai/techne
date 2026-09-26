@@ -105,11 +105,51 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- **The codex edit rail stops injecting import and test nodes** (#406). Synthetic
+  `<module>` nodes and test-file nodes are dropped before the `min_deps` threshold, the
+  `limit` cap and the log. Measured on 2026-08-02, 92 of 117 injections hit the cap of
+  10 and ~70% of those slots were this noise, which pushed real depth-2 dependents out.
+  Test paths come from the new `hooks.codex_edit_rail_exclude_globs`; `total_hits`
+  still logs the raw walk size so the audit's radius stays comparable.
+- **The edit rail names why it stayed silent** (#721). `_edit_rail_outcome` returns
+  `EditRailOutcome(text, declined_because)`, one reason per decline path (flag off,
+  not an edit, no repo, repo not indexed, linked worktree, below `min_deps`, and so
+  on). `assert ... is None` passed for thirteen reasons at once; a test can now assert
+  the one it means.
+- **`codex_blast_radius` says which index it answered from** (#730). Every return
+  carries `domain` / `binding` / `state` / `target`, as `codex_search` already did.
+  From a linked worktree it reads the primary's index, and before this only
+  `codex_search` said so. `walked` / `truncated` are unchanged beside it.
+- **TypeScript interfaces are indexed** (#859). The symbol entry test named three
+  captures and the kind pick named four, so every `interface_declaration` match was
+  discarded. `CODEX_KINDS` now lists every kind the indexer writes, and a test indexes
+  one of each. An existing index picks interfaces up when its `.ts` files are
+  re-indexed: run `techne codex index --rebuild <repo>`.
+- **`architect sweep-legacy-verdicts` can spare real full-evals** (#549). New
+  `--spare-with-eval-doc DIR` (spare a row whose URL slug has a
+  `<slug>-evaluation*.md`) and `--skip-url URL`, both repeatable. The dry run labels
+  each row `legacy` or `spare`, and `--apply` is refused without a spare option,
+  because measured on 2026-08-11 every `--before` date that reached the legacy rows
+  also reached real operator judgments.
+- **`Where to apply in techne / cabal / liminal` links all three targets** (#693).
+  `_APPLY_RE` captured only the first target, so the row looked linked while the rest
+  were dropped. It now takes a continuation joined by `/`, `,`, `and` or `&` on the
+  same line, counted only when the list then ends at `**`, `:` or the line end, so
+  prose after the first target (`in techne, cabal's gate differs`) still links only
+  the first. On the live corpus this adds 42 links to 36 patterns and loses none;
+  run `techne architect backfill` to write them.
+- **A target whose patterns are all retired reads the same on both surfaces**
+  (#1016). `techne architect targets` counted every `pattern_applies` row while
+  `pattern_search` served active patterns only. `targets` now counts active patterns
+  and lists retired-only targets separately. On MCP, an unconfigured retired-only
+  target's error says its patterns are retired and lists the targets that hold active
+  ones; a configured one returns no rows with a notice saying the same.
 - **The evidence gate reads the whole Bash command, not its first line** (#713, first
   finding). `actions` held only line 1, so a multi-line command opening with `cd <repo>`
   hid a `gh pr merge` on line 2 and `ran_action` reported it unbacked. The command is now
-  cut at the first output marker, so output from a captured row never enters an action. The `tests_green`
-  union and heredoc-written files are not changed here.
+  cut at the first output marker, so output from a captured row never enters an action,
+  and heredoc bodies are stripped because they are data. The `tests_green` union and
+  heredoc-written files are not changed here.
 - **`techne session-end` no longer records a clean exit for a session that died long
   ago** (#986). Past the sweep's 6-hour idle window it stamps `ended_at` from last
   activity with source `derived`, and leaves an existing end at or after last activity
@@ -117,7 +157,8 @@ All notable changes to techne are documented here. Format loosely follows
 - **SessionStart reads `source`** (#906). On `resume`, `clear` and `compact` the model
   gets a one-line reactivation notice instead of the full banner; the operator's banner
   is unchanged. After `clear` the model gets threads and knowledge back through
-  `techne_resume` and peer sessions through `techne_inbox`, both named in the line. `startup`, a missing source or an unknown one keep the full banner.
+  `techne_resume` and peer sessions through `techne_inbox`, both named in the line.
+  `startup`, a missing source or an unknown one keep the full banner.
 - **Reflect keeps the error at the end of a long observation** (#907). Up to 3
   failure-shaped lines (120 chars each) from the part past the 200-char head are
   appended, so a Bash error is in the prompt instead of only the command echo.
@@ -235,6 +276,11 @@ All notable changes to techne are documented here. Format loosely follows
   default recall and egress.
 
 ### Changed
+
+- **One helper owns the #70 AND-then-OR fallback** (#559).
+  `search.fts_with_or_fallback(query, run)` holds the control flow; the four FTS
+  callers (`search_fts`, the knowledge connection search, `search_symbols`,
+  `search_patterns`) keep their own SQL in `run`. No behaviour change.
 
 - **Per-turn recall searches pasted content on its question lines** instead of on
   the whole prompt (#1018). Pasted content means a `<pasted_content>` block, or

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Iterable
 from pathlib import Path
 
 from techne.core.stores import plain_connect
@@ -67,15 +68,27 @@ _WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
 
 # A pattern's target project is named on its "Where to apply" line as
 # `…where to apply in <target>…` (the live corpus folds it into the bold heading,
-# `**Where to apply in techne**:`). We anchor on that exact phrase and capture the
-# single token that follows "apply in" — so neither descriptive prose elsewhere
-# (`**built in techne**`) nor a comparison later in the same heading
-# (`…in techne (vs cabal)`) manufactures a spurious applies row (Prudence, PR#130).
-# A target named only in non-bold prose after the colon is not extracted — an
-# honest under-reach, not a false positive.
+# `**Where to apply in techne**:`). We anchor on that exact phrase, so descriptive
+# prose elsewhere (`**built in techne**`) never manufactures a spurious applies row
+# (Prudence, PR#130). A target named only in non-bold prose after the colon is not
+# extracted — an honest under-reach, not a false positive.
+#
+# The capture takes the token after "apply in" PLUS a DELIMITED continuation
+# (issue #693): `in techne / cabal / liminal` and `in techne, cabal and argus` name
+# three targets, and a single capture kept the first and silently dropped the rest
+# while the row still looked linked. Only `/`, `,`, `, and`, `and` and `&` continue
+# the list, on ONE line, and the continuation counts only when the list then ENDS —
+# at a closing `**`, a `:` or the end of the line. Otherwise prose after the first
+# target (`in techne, cabal's gate differs`, `in techne, similar to liminal's`,
+# `in techne (vs cabal)`) would link a target the heading never claimed; there
+# the capture falls back to the first target alone.
+_APPLY_SEP = r"[ \t]*(?:/|,[ \t]*and\b|,|\band\b|&)[ \t]*"
 _APPLY_RE = re.compile(
-    r"where\s+(?:to|it might|this)\s+appl\w*\s+in\s+([a-z][a-z0-9-]*)", re.IGNORECASE
+    r"where\s+(?:to|it might|this)\s+appl\w*\s+in\s+"
+    r"([a-z][a-z0-9-]*(?:(?:" + _APPLY_SEP + r"[a-z][a-z0-9-]*)+(?=[ \t]*(?:\*\*|:|$)))?)",
+    re.IGNORECASE | re.MULTILINE,
 )
+_APPLY_SPLIT_RE = re.compile(_APPLY_SEP, re.IGNORECASE)
 # The projects a pattern may declare itself relevant to. NOT hardcoded prose:
 # every name here is a real target named in the /investigate-url skill's context
 # block, so a pattern that says "apply in prudence" resolves instead of being
@@ -175,8 +188,9 @@ def _wikilink_targets(body: str) -> list[str]:
 
 def _apply_targets(body: str, allowed: set[str] | None = None) -> list[str]:
     """Extract canonical project targets from `where to apply in <target>` phrases
-    in *body*. Only the token immediately after "apply in" is taken; unknown tokens
-    are dropped. Deduped, order-preserved.
+    in *body*. The token after "apply in" is taken, plus any further tokens joined
+    to it by `/`, `,`, `and` or `&` (issue #693); unknown tokens are dropped.
+    Deduped, order-preserved.
 
     *allowed* defaults to the configured set (`known_targets()`). Callers looping
     over many rows should resolve it ONCE and pass it, rather than re-reading
@@ -186,11 +200,12 @@ def _apply_targets(body: str, allowed: set[str] | None = None) -> list[str]:
     seen: set[str] = set()
     if allowed is None:
         allowed = known_targets()
-    for raw in _APPLY_RE.findall(body or ""):
-        t = _TARGET_ALIASES.get(raw.lower(), raw.lower())
-        if t in allowed and t not in seen:
-            seen.add(t)
-            out.append(t)
+    for group in _APPLY_RE.findall(body or ""):
+        for raw in _APPLY_SPLIT_RE.split(group):
+            t = _TARGET_ALIASES.get(raw.lower(), raw.lower())
+            if t in allowed and t not in seen:
+                seen.add(t)
+                out.append(t)
     return out
 
 
@@ -315,8 +330,55 @@ def set_verdict(
         conn.close()
 
 
-def sweep_legacy_verdicts(db_path: Path, *, before: str, dry_run: bool = True) -> dict:
+def _url_slug(url: str) -> str:
+    """The repo-ish name an eval doc is filed under: the URL's last path segment,
+    lowercased, `.git` dropped. `https://github.com/x/precisionMemBench` ->
+    `precisionmembench`."""
+    tail = url.rstrip("/").rsplit("/", 1)[-1].lower()
+    return tail[:-4] if tail.endswith(".git") else tail
+
+
+def _url_key(url: str) -> str:
+    """A URL as `--skip-url` compares it: case, a trailing `/` and `.git` do not
+    matter, so a spare list pasted in a slightly different form still spares."""
+    u = url.strip().rstrip("/").lower()
+    return u[:-4] if u.endswith(".git") else u
+
+
+def _eval_doc_slugs(dirs: Iterable[Path]) -> list[str]:
+    """Lowercased stems of `*evaluation*.md` files in *dirs* (issue #549)."""
+    stems: list[str] = []
+    for d in dirs:
+        for f in Path(d).glob("*.md"):
+            if "evaluation" in f.stem.lower():
+                stems.append(f.stem.lower())
+    return stems
+
+
+def _has_eval_doc(url: str, stems: list[str]) -> bool:
+    """True when an eval doc is named for this URL's slug: `<slug>-evaluation*.md`,
+    or `<slug>-<more>-evaluation.md` (an owner suffix). Deliberately loose — a
+    false match SPARES a row, which is the safe direction for a destructive sweep."""
+    slug = _url_slug(url)
+    return bool(slug) and any(s == slug or s.startswith(f"{slug}-") for s in stems)
+
+
+def sweep_legacy_verdicts(
+    db_path: Path,
+    *,
+    before: str,
+    dry_run: bool = True,
+    spare_urls: Iterable[str] = (),
+    eval_doc_dirs: Iterable[Path] = (),
+) -> dict:
     """Retire pre-techne#428 auto-assigned verdicts to 'unknown'.
+
+    SPARING (issue #549). Date alone cannot express the legacy set: measured on
+    2026-08-11, ten genuine operator full-evals sat among 205 legacy rows across
+    both June and July, so every `before` value destroyed some. The real predicate
+    is "full-eval with no eval doc", so a row is spared when its URL is in
+    *spare_urls* or an eval doc for its slug exists in any of *eval_doc_dirs*.
+    Spared rows are returned with the reason, so a dry run shows what is kept.
 
     Every `full-eval` written before the fix was assigned by the ingester purely
     because the markdown carried patterns, so none of those values is a judgment.
@@ -355,17 +417,29 @@ def sweep_legacy_verdicts(db_path: Path, *, before: str, dry_run: bool = True) -
         # guards (curated.py:105, cards.py:106, documents.py:71); reproducing it in
         # a *destructive* path is worse than in an idempotent one.
         conn.execute("BEGIN IMMEDIATE")
-        rows = conn.execute(
+        candidates = conn.execute(
             "SELECT url, surveyed_at FROM investigations "
             "WHERE verdict = 'full-eval' AND surveyed_at < ? ORDER BY surveyed_at",
             (before,),
         ).fetchall()
+        skip = {_url_key(u) for u in spare_urls}
+        stems = _eval_doc_slugs(eval_doc_dirs)
+        rows, spared = [], []
+        for r in candidates:
+            if _url_key(r[0]) in skip:
+                spared.append({"url": r[0], "reason": "skip-url"})
+            elif _has_eval_doc(r[0], stems):
+                spared.append({"url": r[0], "reason": "eval-doc"})
+            else:
+                rows.append(r)
         applied = 0
         if not dry_run and rows:
-            cur = conn.execute(
+            # Row by row, re-checking the scope, so a spared URL can never be
+            # caught by a set-based UPDATE.
+            cur = conn.executemany(
                 "UPDATE investigations SET verdict = ? "
-                "WHERE verdict = 'full-eval' AND surveyed_at < ?",
-                (UNKNOWN_VERDICT, before),
+                "WHERE verdict = 'full-eval' AND surveyed_at < ? AND url = ?",
+                [(UNKNOWN_VERDICT, before, u) for u in dict.fromkeys(r[0] for r in rows)],
             )
             # rowcount from the UPDATE, not len(rows) from the SELECT: the audit
             # number for a destructive rewrite must be measured against the write
@@ -377,6 +451,7 @@ def sweep_legacy_verdicts(db_path: Path, *, before: str, dry_run: bool = True) -
             "applied": applied,
             "before": before,
             "urls": [r[0] for r in rows],
+            "spared": spared,
         }
     finally:
         conn.close()
@@ -826,6 +901,33 @@ def related_patterns(db_path: Path, pattern_id: str) -> dict:
         conn.close()
 
 
+def target_counts(db_path: Path) -> list[dict]:
+    """Per stored target: how many ACTIVE patterns are tagged with it, and how many
+    retired (any other status). Active first, most-tagged first.
+
+    One definition of "a target the store holds" for every surface (issue #1016).
+    `techne architect targets` counted every `pattern_applies` row while
+    `pattern_search` probed with `patterns_for_target`, which serves active
+    patterns only, so a target whose patterns were all retired was "unknown" to
+    MCP and "present" to the CLI.
+    """
+    conn = plain_connect(db_path)
+    try:
+        return [
+            dict(r)
+            for r in conn.execute(
+                """SELECT a.target,
+                          SUM(p.status = 'active') AS active,
+                          SUM(p.status != 'active') AS retired
+                   FROM pattern_applies a JOIN patterns p ON p.id = a.pattern_id
+                   GROUP BY a.target
+                   ORDER BY active DESC, retired DESC, a.target"""
+            )
+        ]
+    finally:
+        conn.close()
+
+
 def patterns_for_target(db_path: Path, target: str, *, limit: int = 100) -> list[dict]:
     """All active patterns tagged as applying to *target* (see known_targets()).
 
@@ -1011,10 +1113,9 @@ def search_patterns(db_path: Path, query: str, *, limit: int = 20) -> list[dict]
     FTS caller that never got it. The fallback fires ONLY when the AND pass returns
     nothing, so a query that already resolves is returned unchanged.
     """
-    from techne.core.search import build_or_fts_query, prepare_fts_query
+    from techne.core.search import fts_with_or_fallback, prepare_fts_query
 
-    fts = prepare_fts_query(query)  # None when empty/all-punctuation → MATCH '' crash (#143)
-    if fts is None:
+    if prepare_fts_query(query) is None:  # nothing searchable: don't open the db (#143)
         return []
     conn = plain_connect(db_path)
     try:
@@ -1030,15 +1131,8 @@ def search_patterns(db_path: Path, query: str, *, limit: int = 20) -> list[dict]
             ).fetchall()
             return [dict(r) for r in rows]
 
-        results = _match(fts)
-        if not results:
-            # The AND pass matched nothing — retry as OR-of-terms so a multi-term
-            # question returns the ranked union rather than a false "no patterns".
-            # build_or_fts_query returns "" for <2 terms (AND==OR → no re-query).
-            or_query = build_or_fts_query(query)
-            if or_query:
-                results = _match(or_query)
-        return results
+        # The AND pass, then OR-of-terms only if it matched nothing (#70, #392).
+        return fts_with_or_fallback(query, _match)
     finally:
         conn.close()
 

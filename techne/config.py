@@ -247,6 +247,22 @@ class HookConfig:
     codex_edit_rail_min_deps: int = 3
     # Hard cap on dependents injected per edit (closest-first by depth).
     codex_edit_rail_limit: int = 10
+    # Test-file globs the edit rail drops from its payload (issue #406), matched
+    # with fnmatch against each dependent's repo-relative path AND its basename.
+    # Synthetic `<module>` nodes are always dropped; they are not a path question.
+    codex_edit_rail_exclude_globs: list[str] = field(
+        default_factory=lambda: [
+            "tests/*",
+            "*/tests/*",
+            "test/*",
+            "*/test/*",
+            "test_*.py",
+            "*_test.*",
+            "*.test.*",
+            "*.spec.*",
+            "conftest.py",
+        ]
+    )
     # Experimental (techne#109/#277): per-turn recall injection. When ON, a
     # UserPromptSubmit hook runs a knowledge search scoped to the submitted prompt
     # and injects the most relevant durable facts into context via additionalContext
@@ -1191,9 +1207,9 @@ class Config:
             def _g(key):  # the config value, else the HookConfig default (#1028 r1)
                 return h.get(key, getattr(_hd, key))
 
-            def _str_list(v):
+            def _str_list(v, key="inbound_recall_tools", what="tool names"):
                 if not isinstance(v, list) or not all(isinstance(t, str) for t in v):
-                    raise ValueError("hooks.inbound_recall_tools must be a list of tool names.")
+                    raise ValueError(f"hooks.{key} must be a list of {what}.")
                 return list(v)
 
             cfg.hooks = HookConfig(
@@ -1207,6 +1223,11 @@ class Config:
                 codex_edit_rail=_g("codex_edit_rail"),
                 codex_edit_rail_min_deps=int(_g("codex_edit_rail_min_deps")),
                 codex_edit_rail_limit=int(_g("codex_edit_rail_limit")),
+                codex_edit_rail_exclude_globs=_str_list(
+                    _g("codex_edit_rail_exclude_globs"),
+                    "codex_edit_rail_exclude_globs",
+                    "glob strings",
+                ),
                 per_turn_recall=_g("per_turn_recall"),
                 per_turn_recall_limit=int(_g("per_turn_recall_limit")),
                 per_turn_recall_chars=int(_g("per_turn_recall_chars")),
@@ -1463,6 +1484,7 @@ class Config:
                 "codex_edit_rail": self.hooks.codex_edit_rail,
                 "codex_edit_rail_min_deps": self.hooks.codex_edit_rail_min_deps,
                 "codex_edit_rail_limit": self.hooks.codex_edit_rail_limit,
+                "codex_edit_rail_exclude_globs": list(self.hooks.codex_edit_rail_exclude_globs),
                 "per_turn_recall": self.hooks.per_turn_recall,
                 "per_turn_recall_limit": self.hooks.per_turn_recall_limit,
                 "per_turn_recall_chars": self.hooks.per_turn_recall_chars,

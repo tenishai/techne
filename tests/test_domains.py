@@ -717,3 +717,40 @@ class TestWhichDomainsCanReportAbsent:
 
         assert report.binding != "absent", report
         assert report.state == "unavailable", report
+
+
+def test_codex_blast_radius_says_which_index_it_answered_from(config, tmp_path, monkeypatch):
+    """Issue #730: the sibling of the test above. `codex_blast_radius` resolved
+    through the same `_codex_repo_db` and returned no binding, so a caller inside a
+    review worktree could not tell it was reading the primary's index. Through
+    TOOL_HANDLERS, on all three returns: success, unresolvable id, and no repo."""
+    from techne import mcp_server
+    from techne.core.codegraph import add_edge, add_symbol
+    from techne.core.codex import CODEX_SCHEMA, repo_db_path
+    from techne.core.stores import SqliteStore
+
+    repo_b = tmp_path / "repo_b"
+    (repo_b / ".git").mkdir(parents=True)
+    db_b = repo_db_path(config, repo_b)
+    db_b.parent.mkdir(parents=True, exist_ok=True)
+    SqliteStore("codex", db_b).migrate(CODEX_SCHEMA)
+    add_symbol(db_b, id="b.py::hub::function::1", file="b.py", name="hub", kind="function")
+    add_symbol(db_b, id="c.py::user::function::1", file="c.py", name="user", kind="function")
+    add_edge(db_b, "c.py::user::function::1", "hub", "call")
+
+    elsewhere = tmp_path / "not-a-repo"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    blast = mcp_server.TOOL_HANDLERS["codex_blast_radius"]
+
+    ok = blast({"symbol_id": "b.py::hub::function::1", "repo": str(repo_b)}, config)
+    assert [n["id"] for n in ok["nodes"]] == ["c.py::user::function::1"]
+    assert (ok["domain"], ok["target"]) == ("codex", str(db_b))
+    assert ok["binding"] != "absent"
+    assert "walked" in ok and "truncated" in ok  # the #722 fields survive the wrap
+
+    bad = blast({"symbol_id": "no_such_symbol", "repo": str(repo_b)}, config)
+    assert "error" in bad and bad["target"] == str(db_b)
+
+    none = blast({"symbol_id": "hub"}, config)
+    assert none["nodes"] == [] and none["domain"] == "codex" and none["binding"] == "absent"
