@@ -85,8 +85,9 @@ def _emit_metrics(rows: list[dict], per_class: dict) -> None:
     collapsing 1.0 -> 0.0 moves the mean by 0.167 and hides inside a floor sized
     for drift. That is precisely what a draft of #827's fix did: `paraphrase-dbpool`
     went to zero and the class still read 0.833, over a 0.8 floor. It never reached
-    `main` — PR #829's review rounds ablated it before merge (techne#2822). A diff
-    over per-task rows sees the collapse at full amplitude.
+    `main` — PR #829's own body records the measurement and its review rounds
+    ablated the draft before merge. A diff over per-task rows sees the collapse at
+    full amplitude.
 
     Deliberately NOT a committed baseline file. A baseline pinned in the repo
     would carry this machine's numbers to every other machine and re-introduce
@@ -185,8 +186,9 @@ def test_retrieval_gate_vec(pinned_model2vec, tmp_path, capsys):
     # cannot tell a real regression from cross-machine drift at the same
     # magnitude. A draft of #827's fix took paraphrase r@10 from 1.0 to 0.833 and
     # this gate passed it green, because retrieval_gold.yaml's 0.8 reserves exactly
-    # that much for BLAS wobble; PR #829's review caught and ablated it pre-merge
-    # (techne#2822), so it never shipped on `main`. A base-vs-head diff on ONE runner has no such
+    # that much for BLAS wobble; PR #829's own body records the measurement, and
+    # its review caught and ablated the draft pre-merge, so it never shipped on
+    # `main`. A base-vs-head diff on ONE runner has no such
     # blind spot: the leg is byte-deterministic run-to-run (model2vec/potion is
     # numpy-only static, `pinned_model2vec` rebuilds the singleton), so any
     # movement between two runs on one machine is the CODE. Zero tolerance.

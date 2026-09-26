@@ -9,9 +9,9 @@ recall@10 floor of 0.8 is chosen so that "a single gold slipping rank 10->11
 reordering across machines. A draft of #827's fix (`_fts_floor` sized at
 `limit // 3`) spent that tolerance deterministically -- it took paraphrase r@10
 from 1.0 to 0.833 by evicting one gold -- and the gate went GREEN. It never
-reached `main`: PR #829's review rounds ablated it before merge (measurement in
-techne#2822). The commit that shipped, 33473a4, sizes `_fts_floor` at 1, which
-holds r@10 at 1.0.
+reached `main`: PR #829's own body records the measurement and its review rounds
+ablated the draft before merge. The commit that shipped, 33473a4, sizes
+`_fts_floor` at 1, which holds r@10 at 1.0.
 
 THIS IS THAT HUMAN, AUTOMATED. It compares two dumps rather than one dump against
 a fixed number, which removes the blind spot instead of narrowing it.

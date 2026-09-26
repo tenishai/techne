@@ -12,9 +12,10 @@ All notable changes to techne are documented here. Format loosely follows
   next session" for any hook flag. Only `per_turn_recall` and `codex_grep_assist` are
   true of that — they decide which hooks are registered in Claude Code's
   `settings.json`, loaded at session start. `capture_bash`, `codex_edit_rail` and
-  `codex_reindex_on_edit` are read inside the always-registered PostToolUse hook on
-  every call, so they already applied immediately; `docs/operator-guide.md` and the
-  README said so and are unchanged.
+  `codex_reindex_on_edit` are read inside PostToolUse's handler on every call once
+  that hook is registered (default on via `hooks.post_tool_use`), so they already
+  applied immediately; `docs/operator-guide.md` and the README said so and are
+  unchanged.
 - **`docs/investigating.md` gets two filter-discipline rules** (#926, #927), from a
   2026-09-13 re-audit that found four misses in eight repos, all from the same
   failure: a real technique discarded along with a product it didn't resemble. A
@@ -27,8 +28,9 @@ All notable changes to techne are documented here. Format loosely follows
 - **`deployment.md`'s phrase-6 row now names all four of its causes** (#786). `lists
   databases in a shape techne cannot read` picked up an escaping `file` path and a NUL
   byte as causes when #782/#784 landed, on top of the malformed-entry and
-  empty/whitespace cases already documented. The remedy now says a NUL byte is the one
-  cause invisible in the manifest itself.
+  empty/whitespace cases already documented. The remedy now says a NUL byte reaches the
+  check as the literal `\u0000` escape in the manifest text, so search for it rather
+  than eyeballing the field.
 - **`integrations/` vs `techne/platforms/` — the boundary is now written down**
   (#760). `techne/platforms/` is techne's own code for adapting to a client, imported
   and shipped in the wheel; `integrations/` is a foreign client's own code (TypeScript
