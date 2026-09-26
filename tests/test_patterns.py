@@ -1192,7 +1192,7 @@ def test_sweep_spares_rows_with_an_eval_doc_or_a_skip_url(db, tmp_path):
         "https://github.com/a/goose",
         "https://github.com/t/precisionMemBench",
         "https://github.com/n/claude-pulse",
-        "https://github.com/x/dolt",
+        "https://github.com/x/Dolt",
         "https://github.com/x/notes",
         "https://github.com/x/legacy",
     ):
@@ -1202,19 +1202,19 @@ def test_sweep_spares_rows_with_an_eval_doc_or_a_skip_url(db, tmp_path):
         db,
         before="2026-07-01",
         dry_run=False,
-        spare_urls=["https://github.com/x/dolt"],
+        spare_urls=["https://GitHub.com/x/dolt.git/"],  # same repo, pasted differently
         eval_doc_dirs=[evals],
     )
     assert sorted(res["urls"]) == ["https://github.com/x/legacy", "https://github.com/x/notes"]
     assert res["applied"] == 2
     assert sorted((r["url"].rsplit("/", 1)[1], r["reason"]) for r in res["spared"]) == [
+        ("Dolt", "skip-url"),
         ("claude-pulse", "eval-doc"),
-        ("dolt", "skip-url"),
         ("goose", "eval-doc"),
         ("precisionMemBench", "eval-doc"),
     ]
     assert _verdict_for(db, "https://github.com/a/goose") == "full-eval"
-    assert _verdict_for(db, "https://github.com/x/dolt") == "full-eval"
+    assert _verdict_for(db, "https://github.com/x/Dolt") == "full-eval"
     assert _verdict_for(db, "https://github.com/x/legacy") == "unknown"
 
 

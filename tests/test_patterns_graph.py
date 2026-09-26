@@ -769,6 +769,16 @@ def test_widening_the_target_set_did_not_weaken_the_pr130_guard():
     assert _apply_targets("Where to apply in techne (vs cabal)", allowed=TARGETS) == ["techne"]
     assert _apply_targets("this is used in techne (vs cabal)", allowed=TARGETS) == []
     assert _apply_targets("**Where to apply**: techne/cabal", allowed=TARGETS) == []
+    # A comma or `and` followed by prose that happens to START with a target name
+    # (Temperance, pre-pass on #693): the list never ends at `**`/`:`/EOL, so only
+    # the first target is taken. Nor does a continuation cross a line break.
+    for body in (
+        "Where to apply in techne, cabal's gate is different",
+        "Where to apply in techne, argus uses it too",
+        "Where to apply in techne and cabal later on",
+        "Where to apply in techne\nand cabal**: separately",
+    ):
+        assert _apply_targets(body, allowed=TARGETS) == ["techne"], body
 
 
 def test_a_heading_naming_several_targets_links_all_of_them():
@@ -781,6 +791,8 @@ def test_a_heading_naming_several_targets_links_all_of_them():
         "**Where to apply in techne, cabal, and argus**: x": ["techne", "cabal", "argus"],
         "**Where to apply in Cabal & limenal**: x": ["cabal", "liminal"],
         "**Where to apply in cabal / widgets / techne**: x": ["cabal", "techne"],
+        "Where to apply in techne and cabal: at the hook layer": ["techne", "cabal"],
+        "Where to apply in techne / cabal": ["techne", "cabal"],
     }
     for body, want in cases.items():
         assert _apply_targets(body, allowed=TARGETS) == want, body

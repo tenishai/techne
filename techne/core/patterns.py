@@ -76,15 +76,19 @@ _WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
 # The capture takes the token after "apply in" PLUS a DELIMITED continuation
 # (issue #693): `in techne / cabal / liminal` and `in techne, cabal and argus` name
 # three targets, and a single capture kept the first and silently dropped the rest
-# while the row still looked linked. Only `/`, `,`, `and` and `&` continue the
-# list (an Oxford `, and` too), so a trailing comparison (`in techne, similar to liminal's gate`, or
-# `in techne (vs cabal)`) still stops at the first target.
+# while the row still looked linked. Only `/`, `,`, `, and`, `and` and `&` continue
+# the list, on ONE line, and the continuation counts only when the list then ENDS —
+# at a closing `**`, a `:` or the end of the line. Otherwise prose after the first
+# target (`in techne, cabal's gate differs`, `in techne, similar to liminal's`,
+# `in techne (vs cabal)`) would link a target the heading never claimed; there
+# the capture falls back to the first target alone.
+_APPLY_SEP = r"[ \t]*(?:/|,[ \t]*and\b|,|\band\b|&)[ \t]*"
 _APPLY_RE = re.compile(
     r"where\s+(?:to|it might|this)\s+appl\w*\s+in\s+"
-    r"([a-z][a-z0-9-]*(?:\s*(?:/|,\s*and\b|,|\band\b|&)\s*[a-z][a-z0-9-]*)*)",
-    re.IGNORECASE,
+    r"([a-z][a-z0-9-]*(?:(?:" + _APPLY_SEP + r"[a-z][a-z0-9-]*)+(?=[ \t]*(?:\*\*|:|$)))?)",
+    re.IGNORECASE | re.MULTILINE,
 )
-_APPLY_SPLIT_RE = re.compile(r"\s*(?:/|,\s*and\b|,|\band\b|&)\s*", re.IGNORECASE)
+_APPLY_SPLIT_RE = re.compile(_APPLY_SEP, re.IGNORECASE)
 # The projects a pattern may declare itself relevant to. NOT hardcoded prose:
 # every name here is a real target named in the /investigate-url skill's context
 # block, so a pattern that says "apply in prudence" resolves instead of being
@@ -334,6 +338,13 @@ def _url_slug(url: str) -> str:
     return tail[:-4] if tail.endswith(".git") else tail
 
 
+def _url_key(url: str) -> str:
+    """A URL as `--skip-url` compares it: case, a trailing `/` and `.git` do not
+    matter, so a spare list pasted in a slightly different form still spares."""
+    u = url.strip().rstrip("/").lower()
+    return u[:-4] if u.endswith(".git") else u
+
+
 def _eval_doc_slugs(dirs: Iterable[Path]) -> list[str]:
     """Lowercased stems of `*evaluation*.md` files in *dirs* (issue #549)."""
     stems: list[str] = []
@@ -411,11 +422,11 @@ def sweep_legacy_verdicts(
             "WHERE verdict = 'full-eval' AND surveyed_at < ? ORDER BY surveyed_at",
             (before,),
         ).fetchall()
-        skip = set(spare_urls)
+        skip = {_url_key(u) for u in spare_urls}
         stems = _eval_doc_slugs(eval_doc_dirs)
         rows, spared = [], []
         for r in candidates:
-            if r[0] in skip:
+            if _url_key(r[0]) in skip:
                 spared.append({"url": r[0], "reason": "skip-url"})
             elif _has_eval_doc(r[0], stems):
                 spared.append({"url": r[0], "reason": "eval-doc"})

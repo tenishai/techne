@@ -115,7 +115,7 @@ All notable changes to techne are documented here. Format loosely follows
   captures and the kind pick named four, so every `interface_declaration` match was
   discarded. `CODEX_KINDS` now lists every kind the indexer writes, and a test indexes
   one of each. An existing index picks interfaces up when its `.ts` files are
-  re-indexed: run `techne codex index --force <repo>`.
+  re-indexed: run `techne codex index --rebuild <repo>`.
 - **`architect sweep-legacy-verdicts` can spare real full-evals** (#549). New
   `--spare-with-eval-doc DIR` (spare a row whose URL slug has a
   `<slug>-evaluation*.md`) and `--skip-url URL`, both repeatable. The dry run labels
@@ -124,9 +124,10 @@ All notable changes to techne are documented here. Format loosely follows
   also reached real operator judgments.
 - **`Where to apply in techne / cabal / liminal` links all three targets** (#693).
   `_APPLY_RE` captured only the first target, so the row looked linked while the rest
-  were dropped. It now takes a continuation joined by `/`, `,`, `and` or `&`; a
-  trailing comparison (`in techne, similar to liminal's gate`) still stops at the
-  first target. On the live corpus this adds 53 links to 44 patterns and loses none;
+  were dropped. It now takes a continuation joined by `/`, `,`, `and` or `&` on the
+  same line, counted only when the list then ends at `**`, `:` or the line end, so
+  prose after the first target (`in techne, cabal's gate differs`) still links only
+  the first. On the live corpus this adds 42 links to 36 patterns and loses none;
   run `techne architect backfill` to write them.
 - **A target whose patterns are all retired reads the same on both surfaces**
   (#1016). `techne architect targets` counted every `pattern_applies` row while

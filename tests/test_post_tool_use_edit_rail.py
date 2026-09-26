@@ -300,7 +300,8 @@ def test_noise_does_not_count_toward_min_deps(home, monkeypatch, capsys):
 
 def test_noise_no_longer_displaces_deeper_real_dependents(home, monkeypatch, capsys):
     """The measured failure in issue #406: noise at depth 1 filled the cap and cut
-    the real depth-2 dependents. With limit=2, both depth-2 callers must show."""
+    the real dependents. With limit=2 and six noise nodes at depth 1, the real
+    direct caller must take a slot and the count must be the three real nodes."""
     _write_config(home, codex_edit_rail=True, codex_edit_rail_min_deps=2,
                   codex_edit_rail_limit=2)
     repo, db = _make_indexed_repo(home)
@@ -405,3 +406,36 @@ def test_symbol_decline_reasons(home, monkeypatch):
 
     monkeypatch.setattr("techne.core.codegraph.symbol_at", _boom)
     assert _edit_rail_outcome(cfg, "d", "Edit", ti).declined_because == "error"
+
+
+def test_decline_reasons_set_matches_the_code():
+    """The set pins the reasons: every `_decline("...")` literal in the rail is in
+    it, and nothing in it is unused. A new decline path must be named here."""
+    import inspect
+    import re
+
+    from techne.hooks.post_tool_use import EDIT_RAIL_DECLINE_REASONS, _edit_rail_outcome
+
+    used = set(re.findall(r'_decline\("(\w+)"\)', inspect.getsource(_edit_rail_outcome)))
+    assert used == EDIT_RAIL_DECLINE_REASONS
+
+
+def test_outside_repo_reason(home, monkeypatch):
+    """The edited path does not sit under the resolved root (a root resolver that
+    disagrees with the path, as a symlinked checkout can make it)."""
+    from techne.config import Config
+    from techne.hooks.post_tool_use import _edit_rail_outcome
+
+    _write_config(home, codex_edit_rail=True, codex_edit_rail_min_deps=1)
+    repo, db = _make_indexed_repo(home)
+    _seed_handle_with_deps(repo, db, 1)
+    cfg = Config.load()
+    ti = _edit_payload(repo)["tool_input"]
+    assert _edit_rail_outcome(cfg, "a", "Edit", ti).declined_because is None
+
+    other = home / "elsewhere"
+    other.mkdir()
+    monkeypatch.setattr("techne.core.repo.find_repo_root", lambda _p: other)
+    monkeypatch.setattr("techne.core.repo.primary_repo_root", lambda _p: other)
+    monkeypatch.setattr("techne.core.codex.resolve_repo_db_for_query", lambda *_a: db)
+    assert _edit_rail_outcome(cfg, "b", "Edit", ti).declined_because == "outside_repo"
