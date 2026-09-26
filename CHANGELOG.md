@@ -115,9 +115,9 @@ All notable changes to techne are documented here. Format loosely follows
   activity with source `derived`, and leaves an existing end at or after last activity
   alone. The Stop hook still stamps now/`clean`.
 - **SessionStart reads `source`** (#906). On `resume`, `clear` and `compact` the model
-  gets a one-line reactivation notice pointing at `techne_resume` instead of the full
-  banner; the operator's banner is unchanged. After `clear` the model has no banner
-  content until it calls `techne_resume`. `startup`, a missing source or an unknown one keep the full banner.
+  gets a one-line reactivation notice instead of the full banner; the operator's banner
+  is unchanged. After `clear` the model gets threads and knowledge back through
+  `techne_resume` and peer sessions through `techne_inbox`, both named in the line. `startup`, a missing source or an unknown one keep the full banner.
 - **Reflect keeps the error at the end of a long observation** (#907). Up to 3
   failure-shaped lines (120 chars each) from the part past the 200-char head are
   appended, so a Bash error is in the prompt instead of only the command echo.

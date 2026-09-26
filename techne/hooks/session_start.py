@@ -152,16 +152,17 @@ DEFERRED_CONTEXT_KEY = "session_start:deferred"
 #: instead, and what replaces the banner differs per source — stated, not assumed:
 #: `resume` restores the prior transcript, which already carries the banner it was
 #: given; `compact` keeps the compaction summary and PostCompact restores the
-#: checkpoint; `clear` gets NOTHING back by design, so coordination, threads, recent
-#: sessions, knowledge and the model's copy of drift are gone until the agent calls
-#: techne_resume, which the line names. Per-turn recall, when on, is topic recall
-#: and does not restore those blocks. The operator's banner (drift included) is
+#: checkpoint; `clear` gets NOTHING back by design. After `clear`, techne_resume
+#: (named in the line) restores active threads, recent threads and knowledge;
+#: coordination comes back only through techne_inbox, and the model's copy of drift
+#: does not come back (drift is the operator's to act on). Per-turn recall, when on,
+#: is topic recall and restores none of these blocks. The operator's banner (drift included) is
 #: unchanged for all three. An absent, unknown or non-string source keeps the full
 #: banner.
 REACTIVATION_SOURCES = frozenset({"resume", "clear", "compact"})
 REACTIVATION_LINE = (
     "techne memory is active for this session ({source}). Per-turn recall continues; "
-    "call techne_resume for the full session context."
+    "call techne_resume for threads and knowledge, techne_inbox for peer sessions."
 )
 
 

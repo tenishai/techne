@@ -1800,12 +1800,22 @@ class TestSessionStartReadsSource:
         assert stash is None, "a stashed full banner would re-inject on the next prompt"
         assert "hook drift" in out["systemMessage"], "the operator's banner is unchanged"
 
-    @pytest.mark.parametrize("source", ["startup", None, "something-new", ["compact"]])
-    def test_a_cold_or_unknown_start_keeps_the_full_banner(self, tmp_path, source):
-        payload = {"session_id": f"s-{source}"}
+    @pytest.mark.parametrize(
+        ("name", "source"),
+        [
+            ("startup", "startup"),
+            ("absent", None),
+            ("unknown", "something-new"),
+            # Unhashable: without the isinstance guard the membership test raises and
+            # the hook exits with no output at all.
+            ("list", ["compact"]),
+        ],
+    )
+    def test_a_cold_or_unknown_start_keeps_the_full_banner(self, tmp_path, name, source):
+        payload = {"session_id": f"s-{name}"}
         if source is not None:
             payload["source"] = source
-        out, stash = self._run(tmp_path, str(source).strip("[]'"), payload)
+        out, stash = self._run(tmp_path, name, payload)
         assert "hookSpecificOutput" not in out, "full context is deferred as before"
         assert "hook drift" in (stash or {}).get("summary", "")
 
