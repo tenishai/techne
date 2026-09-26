@@ -319,8 +319,11 @@ running, here's the shape of a healthy setup, and why each piece is there:
    fires for repos you've indexed. This is the difference between "memory of past
    sessions" and "memory that also understands the code in front of you." Index the
    repos you actually work in; skip the ones you don't.
-3. **Restart the session after changing any hook.** Claude Code loads hooks at session
-   *start*, so a config change doesn't fire until the next session. Change it, restart,
+3. **Restart after changing `per_turn_recall` or `codex_grep_assist`.** Those two decide
+   which hooks are registered in Claude Code's `settings.json`, and Claude Code loads
+   that hook chain at session start — so run `techne init` and restart after changing
+   either. Other hook flags (`capture_bash`, `codex_edit_rail`, `codex_reindex_on_edit`)
+   are read on every tool call and apply immediately. Change it, restart if needed,
    then confirm with a real Grep that symbols get injected — that's the go-live signal,
    not just "the hook is registered."
 4. **Run `techne status` after any hook change.** If it reports drift, `techne init`

@@ -83,9 +83,11 @@ def _emit_metrics(rows: list[dict], per_class: dict) -> None:
     PER-TASK IS THE HALF THAT MATTERS, and it is why this is not just a nicer
     report. The kill-gates score CLASS MEANS over 6 tasks, so a single gold
     collapsing 1.0 -> 0.0 moves the mean by 0.167 and hides inside a floor sized
-    for drift. That is precisely what 275035a did: `paraphrase-dbpool` went to
-    zero and the class still read 0.833, over a 0.8 floor. A diff over per-task
-    rows sees the collapse at full amplitude.
+    for drift. That is precisely what a draft of #827's fix did: `paraphrase-dbpool`
+    went to zero and the class still read 0.833, over a 0.8 floor. It never reached
+    `main` — PR #829's own body records the measurement and its review rounds
+    ablated the draft before merge. A diff over per-task rows sees the collapse at
+    full amplitude.
 
     Deliberately NOT a committed baseline file. A baseline pinned in the repo
     would carry this machine's numbers to every other machine and re-introduce
@@ -182,9 +184,11 @@ def test_retrieval_gate_vec(pinned_model2vec, tmp_path, capsys):
     #
     # WHY A DIFF AT ALL: the kill-gates below are absolute, and an absolute floor
     # cannot tell a real regression from cross-machine drift at the same
-    # magnitude. Commit 275035a took paraphrase r@10 from 1.0 to 0.833 and this
-    # gate passed it green, because retrieval_gold.yaml's 0.8 reserves exactly
-    # that much for BLAS wobble. A base-vs-head diff on ONE runner has no such
+    # magnitude. A draft of #827's fix took paraphrase r@10 from 1.0 to 0.833 and
+    # this gate passed it green, because retrieval_gold.yaml's 0.8 reserves exactly
+    # that much for BLAS wobble; PR #829's own body records the measurement, and
+    # its review caught and ablated the draft pre-merge, so it never shipped on
+    # `main`. A base-vs-head diff on ONE runner has no such
     # blind spot: the leg is byte-deterministic run-to-run (model2vec/potion is
     # numpy-only static, `pinned_model2vec` rebuilds the singleton), so any
     # movement between two runs on one machine is the CODE. Zero tolerance.

@@ -6,8 +6,10 @@ the contract is pinned independently of how CI happens to invoke it. Stdlib-only
 THE DEFECT THIS GUARDS. The eval-vec kill-gates are absolute floors, and
 retrieval_gold.yaml sizes the paraphrase recall@10 floor (0.8) so that "a single
 gold slipping rank 10->11 (r@10 1.0->0.833) still passes" — a tolerance for
-cross-machine BLAS drift. Commit 275035a spent it deterministically and the gate
-went green. `test_catches_the_275035a_shape` below is that exact shape.
+cross-machine BLAS drift. A draft of #827's fix spent it deterministically and
+the gate went green; PR #829's own body records the measurement, and its review
+rounds caught and ablated the draft before merge, so it never reached `main`.
+`test_catches_the_dropped_gold_shape` below is that exact shape.
 """
 
 from __future__ import annotations
@@ -51,7 +53,7 @@ def test_identical_dumps_pass(tmp_path):
     assert "No regression" in r.stdout
 
 
-def test_catches_the_275035a_shape(tmp_path):
+def test_catches_the_dropped_gold_shape(tmp_path):
     """THE ACCEPTANCE CRITERION FOR techne#832.
 
     One gold collapses 1.0 -> 0.0 while the class mean only sags to 0.833, which
