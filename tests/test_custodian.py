@@ -975,6 +975,7 @@ def test_resident_ingest_still_labels_rows_agent_assisted(config):
 
     from techne.core.conflict import conflict_check_ingest
     from techne.core.federation import federation_conflict_ingest
+    from techne.core.reflect import ingest_one_and_drain, ingest_reflection_response
     from techne.core.sleepdream import consolidate_ingest, dream_ingest
 
     # federation_conflict_ingest WAS THE ONE OMISSION, and it survived a full 3,240-test
@@ -984,8 +985,13 @@ def test_resident_ingest_still_labels_rows_agent_assisted(config):
     # elsewhere in this file. What was unguarded is the RESIDENT direction: nothing
     # would have noticed if this public default drifted. In a PR whose thesis is that
     # a mislabelled producer is invisible, an unpinned public default is the gap.
+    #
+    # ingest_one_and_drain/ingest_reflection_response added by #712: reflect.py spelled
+    # the same default as a bare literal rather than importing RESIDENT_PRODUCER, and
+    # `reflect` is one of the rails check_model_bound_rails enumerates (checks.py) —
+    # squarely inside this guard's blast radius but left out of both halves of #709.
     for fn in (consolidate_ingest, dream_ingest, conflict_check_ingest,
-               federation_conflict_ingest):
+               federation_conflict_ingest, ingest_one_and_drain, ingest_reflection_response):
         default = inspect.signature(fn).parameters["model_used"].default
         assert default == "agent-assisted", f"{fn.__name__} changed the resident default"
 
