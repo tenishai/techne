@@ -2341,6 +2341,18 @@ def _pattern_search(args: dict, config: Config) -> dict:
             # single target ever exceeds it (it would silently drop valid hits).
             allowed = {p["id"] for p in patterns_for_target(db, target, limit=100_000)}
             hits = [h for h in hits if h["id"] in allowed]
+    if target and not hits and not notice and target in allowed_targets:
+        # A CONFIGURED target can hold only retired patterns too (issue #1016); an
+        # empty result there must say so, as `architect targets` does, rather than
+        # read as "never tagged".
+        from techne.core.patterns import target_counts
+
+        row = next((r for r in target_counts(db) if r["target"] == target), None)
+        if row and row["retired"] and not row["active"]:
+            notice = (
+                f"all {row['retired']} pattern(s) tagged {target!r} are retired; "
+                "none is active, so none is served."
+            )
     out: dict = {"results": hits, "count": len(hits)}
     if notice:
         out["notice"] = notice

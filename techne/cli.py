@@ -4842,7 +4842,7 @@ def architect_targets(ctx):
 
     if retired_only:
         click.echo(
-            "\nretired only (no active pattern; `pattern_search` treats these as unknown):"
+            "\nretired only (no active pattern; `pattern_search` serves nothing for these):"
         )
         for r in retired_only:
             click.echo(f"  {r['target']:<16} {r['retired']:>5} retired")

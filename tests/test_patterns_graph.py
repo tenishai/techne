@@ -1290,3 +1290,11 @@ def test_a_target_with_only_retired_patterns_reads_the_same_on_both_surfaces(
     assert "cabal                2 retired" in out
     # the paste line must not tell the operator to configure a retired-only target
     assert 'pattern_targets: ["liminal", "techne"]' in out
+
+    # A CONFIGURED retired-only target: no error (it is configured), but the empty
+    # result says why rather than reading as "never tagged" (pre-pass, round 2).
+    (home / "config.yaml").write_text("architect:\n  pattern_targets: [techne, cabal]\n")
+    served = _pattern_search({"target": "cabal"}, Config.load())
+    assert "error" not in served and served["count"] == 0
+    assert "all 2 pattern(s) tagged 'cabal' are retired" in served["notice"]
+    assert "serves nothing for these" in CliRunner().invoke(main, ["architect", "targets"]).output

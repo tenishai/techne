@@ -132,8 +132,9 @@ All notable changes to techne are documented here. Format loosely follows
 - **A target whose patterns are all retired reads the same on both surfaces**
   (#1016). `techne architect targets` counted every `pattern_applies` row while
   `pattern_search` served active patterns only. `targets` now counts active patterns
-  and lists retired-only targets separately, and the MCP error says the target's
-  patterns are retired and lists the targets that do hold active patterns.
+  and lists retired-only targets separately. On MCP, an unconfigured retired-only
+  target's error says its patterns are retired and lists the targets that hold active
+  ones; a configured one returns no rows with a notice saying the same.
 
 - **`techne doctor` reports the deployed runtime even when run from a repo checkout**
   (#690). `runtime:revision` only inspects the checkout `techne` was imported from, which
