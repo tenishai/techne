@@ -5,6 +5,36 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Docs
+
+- **Two lines stopped saying every hook config change needs a new session** (#1032).
+  `docs/welcome.md` and `AGENTS.md` both said "a config change doesn't fire until the
+  next session" for any hook flag. Only `per_turn_recall` and `codex_grep_assist` are
+  true of that — they decide which hooks are registered in Claude Code's
+  `settings.json`, loaded at session start. `capture_bash`, `codex_edit_rail` and
+  `codex_reindex_on_edit` are read inside the always-registered PostToolUse hook on
+  every call, so they already applied immediately; `docs/operator-guide.md` and the
+  README said so and are unchanged.
+- **`docs/investigating.md` gets two filter-discipline rules** (#926, #927), from a
+  2026-09-13 re-audit that found four misses in eight repos, all from the same
+  failure: a real technique discarded along with a product it didn't resemble. A
+  candidate can no longer be dropped without first naming what its technique does
+  independent of the product it sits in ("not a reviewer", "contradicts our scope" are
+  not reasons on their own); and a `skip-with-flag` reason must cite either a
+  `[[wikilink]]` to the covering pattern, a `file:line` actually read, or an explicit
+  availability/feasibility fact — a 111-row audit found every confirmed miss came from
+  reasons citing none of these.
+- **`deployment.md`'s phrase-6 row now names all four of its causes** (#786). `lists
+  databases in a shape techne cannot read` picked up an escaping `file` path and a NUL
+  byte as causes when #782/#784 landed, on top of the malformed-entry and
+  empty/whitespace cases already documented. The remedy now says a NUL byte is the one
+  cause invisible in the manifest itself.
+- **`integrations/` vs `techne/platforms/` — the boundary is now written down**
+  (#760). `techne/platforms/` is techne's own code for adapting to a client, imported
+  and shipped in the wheel; `integrations/` is a foreign client's own code (TypeScript
+  today, for opencode and pi) that shells out to techne's CLI and never ships. Added
+  `integrations/README.md` and a line in `ARCHITECTURE.md`'s `ENTRY:` block.
+
 ### Added
 
 - `techne init` and `techne skills install` now install `investigate-url` and

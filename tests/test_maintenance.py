@@ -1621,18 +1621,24 @@ def test_a_nul_byte_is_refused_rather_than_raised(tmp_path):
 
 
 def test_a_nul_byte_does_not_kill_the_whole_retention_run(tmp_path):
-    """THE HALF WITH TEETH for the NUL (Prudence, #784 r1).
+    """Retention survives a NUL by either of two guards (Prudence, #784 r1; #802 N1).
 
-    `read_manifest` merely refused; `prune_backup_sets` DIED. `cli.py` calls it with
-    no `except`, so the ValueError raised out and retention stopped for EVERY set --
-    a prunable stale set survived alongside the good one, nothing was reported on
-    the `failed` channel, and the run looked like nothing needed doing.
+    NOT pinned to the explicit `if "\\x00" in name:` check specifically — with that
+    guard disabled, `(base / name).resolve()` a few lines later still raises
+    `ValueError` on the embedded NUL, and the caught exception routes this same
+    poisoned set to `failed` the same way. Only
+    `test_a_nul_byte_is_refused_rather_than_raised`, which matches on the "NUL byte"
+    message, is pinned to the explicit guard.
 
-    That is verbatim the failure `_manifest_db_filename`'s own comment says it
-    exists to prevent, reintroduced by the guard added for #782 -- so it is pinned
-    at the reader that DELETES, not only at the one that refuses. Measured before
-    the fix: this test raised ValueError; on main (no containment at all) it passed.
-    A regression that only a caller-level test can see.
+    What this test does hold: `read_manifest` merely refused; `prune_backup_sets`
+    used to DIE. `cli.py` calls it with no `except`, so a raised ValueError stopped
+    retention for EVERY set -- a prunable stale set survived alongside the good
+    one, nothing was reported on the `failed` channel, and the run looked like
+    nothing needed doing. That is verbatim the failure `_manifest_db_filename`'s own
+    comment says it exists to prevent, reintroduced by the guard added for #782 --
+    so it is pinned at the reader that DELETES, not only at the one that refuses.
+    Measured before the fix: this test raised ValueError; on main (no containment
+    at all) it passed. A regression that only a caller-level test can see.
     """
     backups = tmp_path / "backups"
     for stamp in ("backup-20260101-000000", "backup-20260201-000000"):

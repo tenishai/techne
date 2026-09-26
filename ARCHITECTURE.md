@@ -12,6 +12,7 @@ ENTRY:
 - CLI techne → techne/cli.py:main (init/status/threads/search/reflect/consolidate/dream/architect/codex/library/coord…)
 - MCP → techne/mcp_server.py (stdio JSON-RPC, 38 tools; `techne init --platform claude-code`)
 - hooks → techne/hooks/*.py (session_start/end, pre/post_tool_use, pre/post_compact, user_prompt_submit)
+- integrations → integrations/*/ (a foreign client's own TypeScript, loaded and run by that client — not techne's; does not ship in the wheel; see integrations/README.md for the boundary against techne/platforms/)
 
 SEAMS → card:
 - domain-stores  techne/core/stores.py       (StoreAdapter registry, SQLite-only)      → docs/arch/domain-stores.md
