@@ -273,8 +273,8 @@ def _archivist(config, start_path: str | None = None) -> BindingReport:
 
     # `_resolve_archivist_path` RAISES on the techne#346 misconfiguration
     # (archivist_db_path pointing at the personal db). Left to propagate to
-    # `all_bindings`, which turns it into an `unavailable` row CARRYING THE MESSAGE —
-    # this is the one tool an operator would run to diagnose exactly that.
+    # `_resolve_or_fault`, which turns it into an `unavailable` row CARRYING THE
+    # MESSAGE for both `techne bindings` and the domain calls (techne#727).
     path = _resolve_archivist_path(config)
     if not _present(path):
         return _fault("archivist", binding, path, f"team store named but not present at {path}")
@@ -387,7 +387,7 @@ def domain_binding(config, domain: str, start_path: str | None = None) -> Bindin
             # EVERY resolver takes the same shape, so no `except TypeError` is needed
             # to tell them apart — that dance would silently swallow a genuine
             # TypeError raised INSIDE a resolver and retry with fewer arguments.
-            return resolver(config, start_path)
+            return _resolve_or_fault(name, resolver, config, start_path)
     known = ", ".join(n for n, _ in DOMAINS)
     raise KeyError(f"unknown domain: {domain!r} (known: {known})")
 
@@ -399,25 +399,34 @@ def all_bindings(config) -> list[BindingReport]:
     whole report down, and the report's value is that it is complete: an operator
     comparing four domains needs four rows, one of which may say it could not be read.
     """
-    out: list[BindingReport] = []
-    for name, resolver in DOMAINS:
-        try:
-            out.append(resolver(config, None))
-        except Exception as e:  # noqa: BLE001
-            # UNAVAILABLE, NOT ABSENT — a resolver that failed and a domain that is
-            # deliberately unconfigured are different facts, and reporting both as
-            # `absent` left a --json consumer unable to tell them apart at all.
-            #
-            # AND THE MESSAGE VERBATIM. Discarding `str(e)` for the exception TYPE meant
-            # the techne#346 guard's deliberately loud refusal — "archivist_db_path must
-            # not be the personal techne db" — arrived as "could not resolve: ValueError"
-            # in the one tool an operator would run to diagnose that misconfiguration.
-            # (Prudence, #717.)
-            # DEBUG, NOT WARNING-WITH-TRACEBACK. `techne bindings` is a diagnostic
-            # whose product IS the four rows; at warning level a config error printed a
-            # full stack trace to stderr directly above a row already carrying the same
-            # message verbatim, burying the readable answer under the raw one. The
-            # traceback still exists for a genuine resolver bug, one level down.
-            log.debug("bindings: %s resolver failed", name, exc_info=True)
-            out.append(_fault(name, None, None, f"{type(e).__name__}: {e}"))
-    return out
+    return [_resolve_or_fault(name, resolver, config, None) for name, resolver in DOMAINS]
+
+
+def _resolve_or_fault(name: str, resolver, config, start_path: str | None) -> BindingReport:
+    """Run one resolver; a resolver that raises becomes an `unavailable` row.
+
+    SHARED BY `domain_binding` AND `all_bindings` (techne#727). Only `all_bindings`
+    used to convert, so the techne#346 refusal reached `techne bindings` as a row
+    carrying its message and reached `archivist_search` — the other place an operator
+    meets that misconfiguration — as a raised ValueError. One conversion, two callers,
+    so the two surfaces cannot disagree about the same config.
+    """
+    try:
+        return resolver(config, start_path)
+    except Exception as e:  # noqa: BLE001
+        # UNAVAILABLE, NOT ABSENT — a resolver that failed and a domain that is
+        # deliberately unconfigured are different facts, and reporting both as
+        # `absent` left a --json consumer unable to tell them apart at all.
+        #
+        # AND THE MESSAGE VERBATIM. Discarding `str(e)` for the exception TYPE meant
+        # the techne#346 guard's deliberately loud refusal — "archivist_db_path must
+        # not be the personal techne db" — arrived as "could not resolve: ValueError"
+        # in the one tool an operator would run to diagnose that misconfiguration.
+        # (Prudence, #717.)
+        # DEBUG, NOT WARNING-WITH-TRACEBACK. `techne bindings` is a diagnostic
+        # whose product IS the four rows; at warning level a config error printed a
+        # full stack trace to stderr directly above a row already carrying the same
+        # message verbatim, burying the readable answer under the raw one. The
+        # traceback still exists for a genuine resolver bug, one level down.
+        log.debug("bindings: %s resolver failed", name, exc_info=True)
+        return _fault(name, None, None, f"{type(e).__name__}: {e}")

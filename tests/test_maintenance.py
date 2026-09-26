@@ -1679,10 +1679,11 @@ def test_a_nul_byte_does_not_kill_the_whole_retention_run(tmp_path):
     # file either, so an ordinary absent `techne.db` with no NUL anywhere satisfies
     # both of them identically — measured. Pinning the MALFORMED route [6] rather
     # than the missing-file route [7] makes the test bite on the guard it is named
-    # for. It still does not name the NUL to the operator; that waits on #785,
-    # where `_classify_backup_set` stops discarding the `problem` string it built.
+    # for. Since #785 the reason also carries the resolver's own `problem`, so the
+    # operator is told it is a NUL rather than left to search the manifest for one.
     ((_, reason),) = failed
     assert RETENTION_REFUSAL_PHRASES[6] in reason, f"refused by the wrong guard: {reason!r}"
+    assert "NUL byte" in reason, f"the resolver's problem was discarded: {reason!r}"
 
 
 @pytest.mark.parametrize("name", ["/etc/passwd", "../../evil.db", "..", "../"])
@@ -1976,3 +1977,58 @@ def test_the_nul_refusal_blames_the_domain_when_there_is_no_file_key() -> None:
     assert "'file' for 'mydomain'" in with_file_key, (
         f"a NUL carried by the `file` key did not blame `file`: {with_file_key!r}"
     )
+
+
+def test_a_set_with_two_problems_reports_both(tmp_path):
+    """techne#785. `_classify_backup_set` returned on the first non-empty problem list,
+    so a malformed entry masked a genuinely missing database — two causes with opposite
+    remedies, learned one run at a time. Pins BOTH directions, because a naive join keeps
+    the single-phrase `in reason` assertions elsewhere green while changing what the
+    operator reads: two problems name both, and one problem names only its own."""
+    from techne.core.maintenance import RETENTION_REFUSAL_PHRASES, _classify_backup_set
+
+    def _manifest_set(name: str, databases: dict, present: list[str]) -> Path:
+        d = tmp_path / name
+        d.mkdir()
+        (d / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "techne_version": "0.15.0",
+                    "databases": databases,
+                }
+            )
+        )
+        for f in present:
+            (d / f).write_bytes(b"")
+        return d
+
+    both = _classify_backup_set(
+        _manifest_set(
+            "both",
+            {"techne": {"file": ""}, "coord": {"file": "coord.db"}},
+            ["techne.db"],
+        )
+    )
+    assert both.stamp is None and both.holds_data is True
+    assert RETENTION_REFUSAL_PHRASES[6] in both.refusal, both.refusal
+    assert RETENTION_REFUSAL_PHRASES[7] in both.refusal, both.refusal
+    assert "'techne'" in both.refusal and "(coord)" in both.refusal, both.refusal
+
+    only_bad = _classify_backup_set(
+        _manifest_set(
+            "bad", {"techne": {"file": ""}, "coord": {"file": "coord.db"}}, ["coord.db"]
+        )
+    )
+    assert RETENTION_REFUSAL_PHRASES[6] in only_bad.refusal
+    assert RETENTION_REFUSAL_PHRASES[7] not in only_bad.refusal, only_bad.refusal
+
+    only_missing = _classify_backup_set(
+        _manifest_set(
+            "missing",
+            {"techne": {"file": "techne.db"}, "coord": {"file": "coord.db"}},
+            ["techne.db"],
+        )
+    )
+    assert RETENTION_REFUSAL_PHRASES[7] in only_missing.refusal
+    assert RETENTION_REFUSAL_PHRASES[6] not in only_missing.refusal, only_missing.refusal

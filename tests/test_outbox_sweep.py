@@ -522,6 +522,49 @@ def test_the_first_tombstone_survives_an_out_of_band_write(config):
     )
 
 
+def test_null_synced_at_rows_are_sweepable_but_the_lane_keeps_its_tombstones(config):
+    """#547: a `synced` row with a NULL synced_at was vacuously protected by the
+    second tombstone (nothing compares greater than NULL), so such rows could
+    never age out. The #528 r8 shape: two NULL rows for one lane, a dated synced
+    row, and a newer pending row holding the first tombstone's slot.
+
+    Both halves of the interaction are pinned: the NULL rows go, and the two
+    rows the tombstones exist for — the newest row (presence) and the newest
+    DATED synced row (MAX(synced_at)) — stay.
+    """
+    from techne.core.database import connect
+
+    conn = connect(config.db_path)
+    ids = {}
+    for key, status, synced_at in (
+        ("null_a", "synced", None),
+        ("null_b", "synced", None),
+        ("dated", "synced", "2020-01-02 00:00:00"),
+        ("newest", "pending", None),
+    ):
+        cur = conn.execute(
+            "INSERT INTO outbox (target, data_json, content_hash, status, created_at, "
+            "synced_at) VALUES ('sink:probe', '{}', ?, ?, '2020-01-01 00:00:00', ?)",
+            (f"h-{key}", status, synced_at),
+        )
+        ids[key] = cur.lastrowid
+    conn.commit()
+    conn.close()
+
+    sweep_delivered(config.db_path, retain_days=7)
+
+    conn = connect(config.db_path)
+    survivors = {
+        r[0] for r in conn.execute("SELECT id FROM outbox WHERE target = 'sink:probe'")
+    }
+    last_synced = conn.execute(
+        "SELECT MAX(synced_at) FROM outbox WHERE target = 'sink:probe'"
+    ).fetchone()[0]
+    conn.close()
+    assert survivors == {ids["dated"], ids["newest"]}, survivors
+    assert last_synced == "2020-01-02 00:00:00"
+
+
 def _inlines_prefilter(source: str) -> bool:
     """THE ONE DEFINITION of "this file inlines a dedup-shaped outbox query".
 

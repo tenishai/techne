@@ -105,6 +105,32 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- **An anchored memory whose commit left HEAD's history is flagged, not trusted** (#391).
+  Recall's freshness check compared only file bytes, so after a rebase or force-push a
+  byte-identical file read `unchanged`. It now also asks `git merge-base --is-ancestor`,
+  and a match whose pinned commit is no longer an ancestor reads `diverged` ("re-read
+  before quoting"). A sha this clone has never seen, or one already garbage-collected,
+  cannot be judged and stays `unchanged`.
+- **`techne watch` exits 78 on an exhausted inotify limit** (#529). watchdog raises
+  `OSError(ENOSPC)` / `OSError(EMFILE)` when `fs.inotify.max_user_watches` /
+  `max_user_instances` runs out, which took the generic exit path, so the shipped unit
+  respawned it forever. On Linux both now raise `StartupConfigError` naming the sysctl
+  to raise; other errors, and every platform but Linux, are unchanged.
+- **The outbox age sweep can remove `synced` rows with a NULL `synced_at`** (#547). The
+  second tombstone's tie-break is vacuously true for NULL, so such rows (reachable only
+  through out-of-band writes) were kept forever. That tombstone exists for
+  `MAX(synced_at)`, which ignores NULL, so it now only protects dated rows; the newest
+  row per target is still kept by the first tombstone.
+- **`archivist_search` reports the #346 misconfiguration instead of raising** (#727).
+  With `archivist_db_path` pointed at the personal db, `techne bindings` showed an
+  `unavailable` row carrying the refusal while the domain call raised `ValueError`. Both
+  now go through one conversion and return the same message. The issue's other two
+  findings were already fixed on main.
+- **A backup set with two problems reports both** (#785). A malformed manifest entry
+  used to mask a genuinely missing database, so the operator learned the second cause
+  only after fixing the first. The refusal now lists both phrases, and a malformed entry
+  carries the resolver's reason (for example "contains a NUL byte") instead of only the
+  domain name.
 - **The codex edit rail stops injecting import and test nodes** (#406). Synthetic
   `<module>` nodes and test-file nodes are dropped before the `min_deps` threshold, the
   `limit` cap and the log. Measured on 2026-08-02, 92 of 117 injections hit the cap of
@@ -277,6 +303,16 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Changed
 
+- **`techne_recall` returns a count of federation conflicts, not the items** (#863).
+  Each item carries an adjudication prompt with no cap; ten of them were 90% of a
+  103,091-char recall that overflowed the tool-output limit. Recall now returns
+  `federation_conflicts_pending` and a note; pass `include_federation_conflicts=true`
+  to get the items for `techne_federation_conflict_ingest`.
+- **Reflection authors verify before writing `high`** (#790). The reflect prompt, the
+  `techne-promote` skill and the reflect guide now say the observation block is a
+  clipped index, not evidence, and that a `high` claim naming a number, issue, state or
+  mechanism must be checked against the source first, or written at `medium`. The
+  skill's allowed tools gain `gh issue view`, `gh pr view` and `git log`.
 - **One helper owns the #70 AND-then-OR fallback** (#559).
   `search.fts_with_or_fallback(query, run)` holds the control flow; the four FTS
   callers (`search_fts`, the knowledge connection search, `search_symbols`,

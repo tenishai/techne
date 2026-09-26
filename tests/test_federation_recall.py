@@ -1929,3 +1929,83 @@ class TestRelativeConnDbPath:
         assert "db_path: team-mirror.db" in out.read_text()  # relative, not absolutized
         reloaded = Config.load(out)
         assert reloaded.connections["team"].db_path == "team-mirror.db"
+
+
+# ---------------------------------------------------------------------------
+# techne#863 — recall reports the conflict backlog; it does not return it
+# ---------------------------------------------------------------------------
+
+
+def _conflicting_stores(tmp_path):
+    """The sqlite-vs-postgres scenario above, wired as a live recall config."""
+    local_db = tmp_path / "local.db"
+    team_db = tmp_path / "team.db"
+    _init_team_db(local_db)
+    _init_team_db(team_db)
+    local_id = store(
+        local_db, "use postgres for the main application database",
+        type="fact", tags="datastore,database",
+    )
+    store(
+        team_db, "we switched to sqlite — postgres was overkill for this workload",
+        type="fact", tags="datastore,database",
+    )
+    for db, sql, params in (
+        (team_db, "UPDATE knowledge SET event_at = '2026-07-04 12:00:00'", ()),
+        (local_db, "UPDATE knowledge SET event_at = '2026-01-01 00:00:00' WHERE id=?",
+         (local_id,)),
+    ):
+        conn = connect(db)
+        try:
+            conn.execute(sql, params)
+            conn.commit()
+        finally:
+            conn.close()
+    cfg = Config()
+    cfg.db_path = local_db
+    cfg.connections = {
+        "team-archivist": FederationConnectionSpec(role="team", db_path=str(team_db))
+    }
+    return cfg
+
+
+def _recall_args(cfg, arguments):
+    from techne.mcp_server import handle_request
+
+    resp = handle_request(
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+         "params": {"name": "techne_recall", "arguments": arguments}},
+        cfg,
+    )
+    assert "error" not in resp, resp.get("error")
+    return json.loads(resp["result"]["content"][0]["text"])
+
+
+def test_recall_returns_a_conflict_count_not_the_adjudication_backlog(tmp_path):
+    """techne#863: ten conflict items were 90% of a 103k-char recall and the call did
+    not complete. By default recall says the backlog exists and how to fetch it; the
+    items and their prompts stay out of the payload."""
+    cfg = _conflicting_stores(tmp_path)
+
+    data = _recall_args(cfg, {"topic": "database postgres sqlite"})
+
+    assert "federation_conflicts" not in data, "the adjudication items leaked into recall"
+    assert data["federation_conflicts_pending"] >= 1
+    assert "include_federation_conflicts=true" in data["_federation_note"]
+    assert data["search_results"], "the context asked for must still be returned"
+
+
+def test_recall_opt_in_still_returns_the_items_ingest_needs(tmp_path):
+    """The chore stays reachable: the opt-in returns the same items as before, with
+    the fields techne_federation_conflict_ingest takes."""
+    cfg = _conflicting_stores(tmp_path)
+
+    data = _recall_args(
+        cfg, {"topic": "database postgres sqlite", "include_federation_conflicts": True}
+    )
+
+    assert "federation_conflicts_pending" not in data
+    items = data["federation_conflicts"]
+    assert items and all(
+        {"prompt", "check_hash", "focus_content", "comparison_ids"} <= set(i) for i in items
+    )
