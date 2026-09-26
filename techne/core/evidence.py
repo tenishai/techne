@@ -1140,8 +1140,12 @@ def query_turn_evidence(
                 # Cut at the FIRST output marker: the real boundary is at or after
                 # it, so the text before it is always a prefix of the command and
                 # never output — output here would let a command's printed text back
-                # a `ran_action` claim.
-                cmd = content.partition(_BASH_OUTPUT_MARKER)[0][len("Ran: ") :].strip()
+                # a `ran_action` claim. Heredoc bodies are DATA, not commands, and are
+                # stripped for the same reason: a `gh pr create` whose body says
+                # "run gh pr merge 1061" backed a merge claim (Prudence, PR #1061).
+                cmd = _strip_heredoc_bodies(
+                    content.partition(_BASH_OUTPUT_MARKER)[0][len("Ran: ") :]
+                ).strip()
                 actions.append(cmd)
 
                 # techne#939: classify non-test verification commands too. EVERY
@@ -1542,7 +1546,7 @@ def check_claims(claims: list[dict], evidence: Evidence) -> list[dict]:
             elif any(match_str in a for a in evidence.actions):
                 matching = [a for a in evidence.actions if match_str in a]
                 status = "backed"
-                detail = f"Found matching action: {matching[0]!r}."
+                detail = f"Found matching action: {matching[0][:120]!r}."
             elif not evidence.bash_captured:
                 status = "unverifiable"
                 detail = _BASH_OFF_DETAIL

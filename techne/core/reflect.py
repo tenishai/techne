@@ -62,7 +62,9 @@ def _clip_observation(content: str) -> str:
         for ln in content[MAX_OBS_CONTENT_CHARS:].split("\n")
         if ln.strip() and _FAILURE_LINE_RE.search(ln)
     ]
-    kept = list(dict.fromkeys(hits))[-MAX_SALVAGED_LINES:]
+    # Dedupe keeping each line's LAST position, so a failure repeated at the very
+    # end is not dropped in favour of an earlier copy.
+    kept = list(dict.fromkeys(reversed(hits)))[:MAX_SALVAGED_LINES][::-1]
     if not kept:
         return head
     rescued = " ⏎ ".join(

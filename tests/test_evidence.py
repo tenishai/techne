@@ -140,6 +140,21 @@ class TestQueryTurnEvidence:
         verdict = check_claims([{"type": "ran_action", "match": "gh pr merge"}], ev)[0]
         assert verdict["status"] == "backed"
 
+    def test_a_heredoc_body_is_data_not_an_action(self, db_path):
+        """Prudence, PR #1061: a PR body describing a merge must not back the merge."""
+        _insert_session(db_path, "sess-hd")
+        _insert_obs(
+            db_path,
+            "sess-hd",
+            "Bash",
+            "Ran: cd /repo\ngh pr create --body-file - <<'EOF'\nthen run gh pr merge 1061\nEOF"
+            "\nOutput: https://github.com/o/r/pull/1061",
+        )
+        ev = query_turn_evidence(db_path, "sess-hd")
+        assert "gh pr create" in ev.actions[0]
+        verdict = check_claims([{"type": "ran_action", "match": "gh pr merge 1061"}], ev)[0]
+        assert verdict["status"] == "unbacked"
+
     def test_output_marker_in_the_command_never_pulls_output_into_the_action(self, db_path):
         """Two markers: the cut is at the first, so the action is a command prefix."""
         _insert_session(db_path, "sess-m2")

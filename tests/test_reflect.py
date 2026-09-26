@@ -2717,6 +2717,16 @@ def test_render_keeps_the_error_at_the_end_of_a_long_bash_row():
     assert len(rendered) < 200 + MAX_SALVAGED_LINES * 130 + 80
 
 
+def test_render_keeps_a_repeated_failure_at_its_last_position():
+    """Prudence nit, PR #1061: dedup must not drop the final line for an earlier copy."""
+    from techne.core.reflect import _render_observations
+
+    body = "Ran: make\nOutput: " + "x" * 300
+    tail = "\nerror: A\nerror: B\nerror: C\nerror: D\nerror: A"
+    rendered = _render_observations([{"tool_name": "Bash", "content": body + tail}])
+    assert rendered.endswith("error: C ⏎ error: D ⏎ error: A]"), rendered
+
+
 def test_render_leaves_short_and_failure_free_rows_as_before():
     from techne.core.reflect import MAX_OBS_CONTENT_CHARS, _render_observations
 
