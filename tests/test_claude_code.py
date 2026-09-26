@@ -416,6 +416,40 @@ class TestPreflightGuard:
         with pytest.raises(RuntimeError, match="worktree"):
             claude_code.register_hooks(cfg)
 
+    def test_allow_worktree_registers_and_warns(
+        self, fake_home, cfg, monkeypatch, tmp_path, capsys
+    ):
+        """Issue #436: an explicit, visible opt-in rather than no way to install."""
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        worktree = tmp_path / "repo" / ".claude" / "worktrees" / "agent-DEADBEEF"
+        worktree.mkdir(parents=True)
+        monkeypatch.setattr(hooks_mod, "_install_root", lambda: worktree)
+        claude_code.register_hooks(cfg, allow_worktree=True)
+        err = capsys.readouterr().err
+        assert "--allow-worktree" in err and str(worktree) in err, err
+        assert "SessionStart" in json.loads(claude_code.SETTINGS_PATH.read_text())["hooks"]
+
+    def test_init_passes_allow_worktree_through(self, monkeypatch):
+        """The flag reaches register_hooks; without it the refusal is unchanged."""
+        from click.testing import CliRunner
+
+        from techne import platforms
+        from techne.cli import main
+
+        seen = []
+
+        def fake_register_hooks(config, *, allow_worktree=False):
+            seen.append(allow_worktree)
+            raise RuntimeError("stop here")
+
+        monkeypatch.setattr(platforms.claude_code, "register_hooks", fake_register_hooks)
+        runner = CliRunner()
+        r1 = runner.invoke(main, ["init", "--no-vectors"])
+        r2 = runner.invoke(main, ["init", "--no-vectors", "--allow-worktree"])
+        assert seen == [False, True], (r1.output, r2.output)
+        assert r1.exit_code == r2.exit_code == 1
+
     def test_is_worktree_path_detection(self):
         from techne.platforms.claude_code import hooks as hooks_mod
 
@@ -1709,6 +1743,81 @@ class TestDriftReachesTheOperator:
             "the deferred stash dropped the drift block — the agent would never "
             "learn about it even after prompting"
         )
+
+
+class TestSessionStartReadsSource:
+    """Issue #906: resume/clear/compact get a reactivation line, not the full banner."""
+
+    def _run(self, tmp_path, name, payload):
+        import json as _json
+        import os as _os
+        import subprocess as _sp
+        import sys as _sys
+
+        from techne.core.database import connect
+        from techne.core.extension_state import get_state
+        from techne.hooks.session_start import DEFERRED_CONTEXT_KEY
+
+        home = tmp_path / name
+        cc_dir = home / ".claude"
+        techne_home = home / ".techne"
+        cc_dir.mkdir(parents=True)
+        techne_home.mkdir(parents=True)
+        (techne_home / "config.yaml").write_text(
+            "platform: claude-code\nhooks:\n  post_tool_use: true\n  codex_grep_assist: true\n"
+        )
+        (cc_dir / "settings.json").write_text("{}")  # guaranteed drift for the operator
+        env = {
+            **_os.environ,
+            "HOME": str(home),
+            "CLAUDE_CONFIG_DIR": str(cc_dir),
+            "TECHNE_HOME": str(techne_home),
+        }
+        r = _sp.run(
+            [_sys.executable, "-m", "techne.hooks.session_start"],
+            input=_json.dumps(payload),
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=60,
+        )
+        assert r.returncode == 0, r.stderr
+        conn = connect(techne_home / "techne.db")
+        try:
+            stash = get_state(conn, f"{DEFERRED_CONTEXT_KEY}:{payload['session_id']}")
+        finally:
+            conn.close()
+        return _json.loads(r.stdout), stash
+
+    @pytest.mark.parametrize("source", ["resume", "clear", "compact"])
+    def test_a_warm_start_gets_the_reactivation_line(self, tmp_path, source):
+        from techne.hooks.session_start import REACTIVATION_LINE
+
+        out, stash = self._run(tmp_path, source, {"session_id": f"s-{source}", "source": source})
+        assert out["hookSpecificOutput"]["additionalContext"] == REACTIVATION_LINE.format(
+            source=source
+        )
+        assert stash is None, "a stashed full banner would re-inject on the next prompt"
+        assert "hook drift" in out["systemMessage"], "the operator's banner is unchanged"
+
+    @pytest.mark.parametrize(
+        ("name", "source"),
+        [
+            ("startup", "startup"),
+            ("absent", None),
+            ("unknown", "something-new"),
+            # Unhashable: without the isinstance guard the membership test raises and
+            # the hook exits with no output at all.
+            ("list", ["compact"]),
+        ],
+    )
+    def test_a_cold_or_unknown_start_keeps_the_full_banner(self, tmp_path, name, source):
+        payload = {"session_id": f"s-{name}"}
+        if source is not None:
+            payload["source"] = source
+        out, stash = self._run(tmp_path, name, payload)
+        assert "hookSpecificOutput" not in out, "full context is deferred as before"
+        assert "hook drift" in (stash or {}).get("summary", "")
 
 
 class TestUnusableSettingsIsAConditionNotProse:

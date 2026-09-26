@@ -388,10 +388,16 @@ def run_session_end(
     config: Config,
     session_id: str,
     summary: str | None = None,
+    *,
+    derive_if_idle_hours: int | None = None,
 ) -> dict:
     """End a session: detect threads, link, save, age, enqueue outbox sync.
 
     Returns a dict: {threads, linked, aged_completed, aged_stale, queued}.
+
+    `derive_if_idle_hours` is for callers that may be REPLAYING a session rather
+    than ending it now (the `session-end` CLI); see `end_session`. The Stop hook
+    leaves it None, because it only ever fires as the session ends.
 
     Note: sessions with fewer than MIN_NEW_OBSERVATIONS observations are still
     processed — the minimum-observation guard lives in the hook, not here.
@@ -440,7 +446,13 @@ def run_session_end(
             # (Prudence, #356). The heuristic-summary branch is intentionally NOT
             # re-run — that's the recompute the gate exists to avoid.
             if summary:
-                end_session(config.db_path, session_id, summary=summary, source="manual")
+                end_session(
+                    config.db_path,
+                    session_id,
+                    summary=summary,
+                    source="manual",
+                    derive_if_idle_hours=derive_if_idle_hours,
+                )
             aged = age_threads(config.db_path, config)
             return {
                 "threads": 0,
@@ -556,13 +568,20 @@ def run_session_end(
             print(f"techne: reflect pass failed: {e}", file=sys.stderr)
 
     if summary:
-        end_session(config.db_path, session_id, summary=summary, source="manual")
+        end_session(
+            config.db_path,
+            session_id,
+            summary=summary,
+            source="manual",
+            derive_if_idle_hours=derive_if_idle_hours,
+        )
     else:
         end_session(
             config.db_path,
             session_id,
             summary=format_combined_summary(threads),
             source="heuristic",
+            derive_if_idle_hours=derive_if_idle_hours,
         )
 
     # Team topology: egress live knowledge to the base Archivist AFTER reflection

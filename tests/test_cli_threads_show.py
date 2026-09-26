@@ -134,3 +134,30 @@ class TestThreadsShow:
         conn.close()
         result = _invoke(["threads", "show", "sess-empty", "--no-color"])
         assert "(no observations)" in result.output
+
+
+class TestSessionPrefixIsLiteral:
+    """Issue #902: a session-id prefix is text, not a LIKE pattern.
+
+    One test per command, because the three lookups drifted before they were folded
+    into `_resolve_session_prefix` and a future copy would drift again.
+    """
+
+    @pytest.mark.parametrize("pattern", ["%", "_", "sess_abc", "sess%001"])
+    def test_threads_show_refuses_a_metacharacter_prefix(self, cfg_with_session, pattern):
+        result = _invoke(["threads", "show", pattern, "--no-color"])
+        assert result.exit_code == 0
+        assert "No session matching" in result.output, (
+            f"{pattern!r} matched a session whose id does not start with it"
+        )
+
+    @pytest.mark.parametrize("pattern", ["%", "_", "sess_abc"])
+    def test_threads_redetect_refuses_a_metacharacter_prefix(self, cfg_with_session, pattern):
+        result = _invoke(["threads", "redetect", pattern])
+        assert result.exit_code == 0
+        assert "No session matching" in result.output
+        assert "Redetected" not in result.output
+
+    def test_a_literal_prefix_still_resolves(self, cfg_with_session):
+        result = _invoke(["threads", "redetect", "sess-abc"])
+        assert "Redetected sess-abc-001" in result.output, result.output

@@ -145,6 +145,26 @@ def render_drift_block(config) -> str:
 #: until its first UserPromptSubmit claims it (techne#562).
 DEFERRED_CONTEXT_KEY = "session_start:deferred"
 
+#: SessionStart `source` values that are NOT a cold start (issue #906). Claude Code
+#: fires the hook for `startup`, `resume`, `clear` and `compact` alike; re-adding the
+#: full banner right after a compaction undoes part of what the compaction reclaimed,
+#: and `clear` is the operator asking for a clean slate. These get REACTIVATION_LINE
+#: instead, and what replaces the banner differs per source — stated, not assumed:
+#: `resume` restores the prior transcript, which already carries the banner it was
+#: given; `compact` keeps the compaction summary and PostCompact restores the
+#: checkpoint; `clear` gets NOTHING back by design. After `clear`, techne_resume
+#: (named in the line) restores active threads, recent threads and knowledge;
+#: coordination comes back only through techne_inbox, and the model's copy of drift
+#: does not come back (drift is the operator's to act on). Per-turn recall, when on,
+#: is topic recall and restores none of these blocks. The operator's banner (drift included) is
+#: unchanged for all three. An absent, unknown or non-string source keeps the full
+#: banner.
+REACTIVATION_SOURCES = frozenset({"resume", "clear", "compact"})
+REACTIVATION_LINE = (
+    "techne memory is active for this session ({source}). Per-turn recall continues; "
+    "call techne_resume for threads and knowledge, techne_inbox for peer sessions."
+)
+
 
 def main() -> None:
     run_ts = _now_iso()
@@ -230,6 +250,7 @@ def _run_phases_2_to_9(
     agent_identity = os.environ.get("TECHNE_IDENTITY", "")
     platform = config.platform
     cc_session_id = data.get("session_id") or None
+    source = data.get("source")
 
     # ------------------------------------------------------------------
     # Phase 2: Capture prior last_session BEFORE inserting the new one, so the
@@ -658,8 +679,15 @@ def _run_phases_2_to_9(
         # journal shows is a SEPARATE carrier (`hook_system_message`) from the
         # `additionalContext` being deferred (`hook_additional_context`). The human
         # still sees session state at startup; only the model's copy waits.
+        reactivation = isinstance(source, str) and source in REACTIVATION_SOURCES
+        if reactivation:
+            # The operator's banner is unchanged; the model's copy is replaced whole
+            # (see REACTIVATION_SOURCES for what each source has instead). Not
+            # stashed either: deferring the full summary would re-inject it on the
+            # next prompt, which is the re-injection this avoids.
+            summary = REACTIVATION_LINE.format(source=source)
         deferred = False
-        if config.hooks.defer_session_start_context and session_id:
+        if config.hooks.defer_session_start_context and session_id and not reactivation:
             try:
                 from techne.core.database import connect
                 from techne.core.extension_state import set_state
