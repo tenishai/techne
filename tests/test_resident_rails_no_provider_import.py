@@ -1,11 +1,14 @@
-"""AST guard: the resident emit/ingest rails import no provider SDK (#499).
+"""AST guard: the resident emit/ingest rails import no provider SDK DIRECTLY (#499).
 
 techne's resident-model rails — reflect, sleepdream (consolidate/dream),
-faithfulness, memory_claims — run on the CALLER'S OWN model via emit/ingest, which
-is why they need no API key and is load-bearing for the whole "no provider account
-required" posture. Nothing enforced that until now: a future convenience import —
-one `import litellm` inside a rail function to make one thing work — would silently
-move the default path onto a provider key, and every other test would stay green.
+faithfulness, memory_claims — have a RESIDENT path that runs on the caller's own
+model via emit/ingest and needs no API key. That is the invariant this test
+guards, and it is narrower than "these modules never touch a provider SDK":
+nothing stops a future convenience import — one `import litellm` written directly
+inside a rail function to make one thing work — from silently moving the
+*default* resident path onto a provider key, with every other test staying
+green. This test catches exactly that: a provider SDK named in the rail
+module's OWN source, module-level or deferred.
 
 Walks the WHOLE AST rather than grepping, so a DEFERRED import inside a function
 body is caught exactly like a module-level one — a lesson #489 (fastconfig's sibling
@@ -15,6 +18,17 @@ guard) already paid for: a relative import deferred inside a function evaded thr
 `thread_orchestrator.py` is the deliberate, named exception (techne#19's operator-model
 path for autonomous/headless runs, gated behind the `[llm]` extra) — it is not one of
 the four rail modules and is not scanned here.
+
+NOT GUARDED, AND DELIBERATELY SO: reflect.py already imports `_make_generate_fn`
+from the `techne.core.threads` shim package, which re-exports it from
+`thread_orchestrator.py` — so reflect.py transitively reaches the module that
+imports litellm. That composition is the documented operator-model/headless route
+(reflect-pipeline.md), not a hole this test misses: it is a SEPARATE code path
+from the resident emit/ingest one, selected only when `config.model` names a real
+API model. Catching that at the AST level would mean forbidding the import
+entirely, which would break the legitimate headless path. What this test can and
+does prevent is the *rail module itself* silently starting to `import litellm` —
+the case #499 asked for.
 """
 
 from __future__ import annotations

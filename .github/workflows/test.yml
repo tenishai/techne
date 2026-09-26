@@ -775,8 +775,10 @@ jobs:
   # unwired until 2026-08-02, by which point 2 of 8 cards had silently drifted —
   # including a card carrying a GOTCHA that its own seam had since fixed.
   #
-  # Its own unit tests (tests/test_arch_cards_gate.py) run in the matrix job; this
-  # runs the gate against the REAL cards, which is the part those tests can't cover.
+  # Its own unit tests (tests/test_arch_cards_gate.py) run in the matrix job, and as
+  # of #706 (test_real_repo_cards_are_fresh) one of those unit tests ALSO runs the
+  # gate against the real cards, so this step is no longer the only place that
+  # happens — it is CI's copy of the same check, independent of a local pytest run.
   # Stdlib-only and deterministic: no pip install, no extras, ~0.3s.
   arch-cards:
     # Do not move back to ubuntu-latest (#461): hosted jobs here can fail to

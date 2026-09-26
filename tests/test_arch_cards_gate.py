@@ -2,7 +2,9 @@
 
 Runs the checker as a subprocess against a throwaway git repo via ARCH_CARDS_ROOT, so
 the contract is pinned before the script is copied into other repos. Stdlib-only, like
-the checker itself — no techne import needed.
+the checker itself — no techne import needed. `test_real_repo_cards_are_fresh` (#706)
+is the one exception: it omits ARCH_CARDS_ROOT on purpose to run the same checker
+against THIS repo's own cards, not a fixture.
 """
 from __future__ import annotations
 
