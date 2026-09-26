@@ -2676,7 +2676,9 @@ def test_undecline_cli_resolves_a_prefix_and_refuses_an_empty_one(tmp_path):
     def run(*args):
         return runner.invoke(main, ["reflect", "undecline", *args], obj={"config": config})
 
-    for bad in ("", ".", "zzzz-no-such-session"):
+    # `%` and `_` are LIKE metacharacters (issue #902): passed through unescaped, `%`
+    # resolved to the newest session exactly as the empty prefix did.
+    for bad in ("", ".", "zzzz-no-such-session", "%", "_", "%..."):
         result = run("--session", bad)
         assert result.exit_code == 1, (
             f"--session {bad!r} must be refused, not resolved. An empty or dot-only "
@@ -2693,4 +2695,36 @@ def test_undecline_cli_resolves_a_prefix_and_refuses_an_empty_one(tmp_path):
     assert declined_queue_rows(config, session_id) == [], (
         "the command emit PRINTS must work when pasted verbatim -- no surface prints the "
         "full session id, so a prefix is all the operator has"
+    )
+
+
+def test_render_keeps_the_error_at_the_end_of_a_long_bash_row():
+    """Issue #907: the head of a Bash row is its command echo; the error is last."""
+    from techne.core.reflect import MAX_SALVAGED_LINES, _render_observations
+
+    body = "Ran: make build\nOutput: " + "\n".join(f"compiling unit {i}" for i in range(60))
+    error = "ld: undefined reference to `frobnicate'"
+    rendered = _render_observations([{"tool_name": "Bash", "content": f"{body}\n{error}"}])
+    assert error in rendered, "the failure line past the 200-char head must survive"
+    assert "compiling unit 59" not in rendered, "only failure-shaped lines are rescued"
+    assert "\n" not in rendered.split("] ", 1)[1], "the row is still one prompt line"
+
+    # Bounded: many failures keep only the LAST few, each capped.
+    noisy = body + "".join(f"\nERROR {i} " + "x" * 400 for i in range(10))
+    rendered = _render_observations([{"tool_name": "Bash", "content": noisy}])
+    assert "ERROR 9" in rendered and "ERROR 6" not in rendered
+    assert rendered.count("ERROR") == MAX_SALVAGED_LINES
+    assert len(rendered) < 200 + MAX_SALVAGED_LINES * 130 + 80
+
+
+def test_render_leaves_short_and_failure_free_rows_as_before():
+    from techne.core.reflect import MAX_OBS_CONTENT_CHARS, _render_observations
+
+    short = "Ran: ls\nOutput: a b"
+    assert _render_observations([{"tool_name": "Bash", "content": short}]) == (
+        "- [Bash] Ran: ls Output: a b"
+    )
+    clean = "x" * (MAX_OBS_CONTENT_CHARS + 50)
+    assert _render_observations([{"tool_name": "Bash", "content": clean}]) == (
+        f"- [Bash] {'x' * MAX_OBS_CONTENT_CHARS}…"
     )

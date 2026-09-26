@@ -123,6 +123,37 @@ class TestQueryTurnEvidence:
         ev = query_turn_evidence(db_path, "sess-b")
         assert "ls -la" in ev.actions
 
+    def test_multi_line_command_is_kept_whole(self, db_path):
+        """Issue #713: `cd <repo>` on line 1 hid everything after it from ran_action."""
+        _insert_session(db_path, "sess-ml")
+        _insert_obs(
+            db_path,
+            "sess-ml",
+            "Bash",
+            "Ran: cd /repo\ngh pr merge 709 --squash --delete-branch \\\n  --admin"
+            "\nOutput: merged",
+        )
+        ev = query_turn_evidence(db_path, "sess-ml")
+        assert len(ev.actions) == 1
+        assert "gh pr merge 709" in ev.actions[0]
+        assert "merged" not in ev.actions[0], "output must never enter an action"
+        verdict = check_claims([{"type": "ran_action", "match": "gh pr merge"}], ev)[0]
+        assert verdict["status"] == "backed"
+
+    def test_output_marker_in_the_command_never_pulls_output_into_the_action(self, db_path):
+        """Two markers: the cut is at the first, so the action is a command prefix."""
+        _insert_session(db_path, "sess-m2")
+        _insert_obs(
+            db_path,
+            "sess-m2",
+            "Bash",
+            "Ran: git commit -m 'x\nOutput: fake'\nOutput: gh pr merge printed here",
+        )
+        ev = query_turn_evidence(db_path, "sess-m2")
+        assert ev.actions == ["git commit -m 'x"]
+        verdict = check_claims([{"type": "ran_action", "match": "gh pr merge"}], ev)[0]
+        assert verdict["status"] == "unbacked"
+
     def test_bash_commit_sha_parsed(self, db_path):
         _insert_session(db_path, "sess-git")
         _insert_obs(

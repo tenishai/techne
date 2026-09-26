@@ -175,6 +175,83 @@ class TestSessionEndCommand:
         assert b3 == b1, "thread_boundaries must not accumulate on replay (unbounded-growth guard)"
 
 
+    # Issue #986: the CLI is a REPLAY path, so "now" and "clean" are not assumed.
+    @staticmethod
+    def _seed(db_path, sid, *, started, obs_ts=None, ended=None, source=None):
+        from techne.core.database import connect, init_db
+
+        init_db(db_path).close()
+        conn = connect(db_path)
+        try:
+            conn.execute(
+                "INSERT INTO sessions (id, started_at, ended_at, ended_at_source)"
+                " VALUES (?, ?, ?, ?)",
+                (sid, started, ended, source),
+            )
+            if obs_ts:
+                conn.execute(
+                    "INSERT INTO observations (session_id, timestamp, tool_name, content)"
+                    " VALUES (?, ?, 'Bash', 'Ran: true')",
+                    (sid, obs_ts),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _end(db_path, sid):
+        from techne.core.database import connect
+
+        conn = connect(db_path)
+        try:
+            r = conn.execute(
+                "SELECT ended_at, ended_at_source FROM sessions WHERE id = ?", (sid,)
+            ).fetchone()
+            return r["ended_at"], r["ended_at_source"]
+        finally:
+            conn.close()
+
+    def test_a_long_dead_session_gets_a_derived_end_not_a_clean_one(self, cli_config) -> None:
+        self._seed(
+            cli_config.db_path,
+            "dead-1",
+            started="2026-08-20 13:55:08",
+            obs_ts="2026-08-20T14:10:00",
+        )
+        assert CliRunner().invoke(main, ["session-end", "dead-1"]).exit_code == 0
+        assert self._end(cli_config.db_path, "dead-1") == ("2026-08-20 14:10:00", "derived")
+
+    def test_a_dead_session_with_no_observations_ends_at_its_start(self, cli_config) -> None:
+        self._seed(cli_config.db_path, "dead-0", started="2026-08-20 13:55:08")
+        assert CliRunner().invoke(main, ["session-end", "dead-0"]).exit_code == 0
+        assert self._end(cli_config.db_path, "dead-0") == ("2026-08-20 13:55:08", "derived")
+
+    def test_a_true_end_is_not_replaced_by_a_replay(self, cli_config) -> None:
+        self._seed(
+            cli_config.db_path,
+            "dead-2",
+            started="2026-08-20 13:55:08",
+            obs_ts="2026-08-20T14:10:00",
+            ended="2026-08-20 14:30:00",
+            source="clean",
+        )
+        assert CliRunner().invoke(main, ["session-end", "dead-2"]).exit_code == 0
+        assert self._end(cli_config.db_path, "dead-2") == ("2026-08-20 14:30:00", "clean")
+
+    def test_a_live_session_still_ends_clean_now(self, cli_config) -> None:
+        from techne.core.database import connect
+
+        conn = connect(cli_config.db_path)
+        try:
+            now = conn.execute("SELECT datetime('now')").fetchone()[0]
+        finally:
+            conn.close()
+        self._seed(cli_config.db_path, "live-1", started=now, obs_ts=now)
+        assert CliRunner().invoke(main, ["session-end", "live-1"]).exit_code == 0
+        ended, source = self._end(cli_config.db_path, "live-1")
+        assert source == "clean" and ended >= now
+
+
 class TestDepositCommand:
     """`techne deposit` — federation brick: ephemeral producer writes to a foreign store (#221)."""
 

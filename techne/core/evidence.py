@@ -194,7 +194,7 @@ class Evidence:
     """Git commit SHAs parsed from Bash output, deduped, order-preserved."""
 
     actions: list[str] = field(default_factory=list)
-    """Bash commands run (text after "Ran: " on the first content line)."""
+    """Bash commands run: the full text after "Ran: ", up to the output marker."""
 
     tests: SuiteEvidence = field(default_factory=SuiteEvidence)
     checks: CheckEvidence = field(default_factory=lambda: CheckEvidence())
@@ -1133,9 +1133,15 @@ def query_turn_evidence(
 
         elif tool_name == "Bash":
             # "Ran: <command>\nOutput: <output>"
-            first_line = content.split("\n", 1)[0]
-            if first_line.startswith("Ran: "):
-                cmd = first_line[len("Ran: ") :].strip()
+            if content.startswith("Ran: "):
+                # THE WHOLE COMMAND, NOT ITS FIRST LINE (issue #713). A multi-line
+                # command opening with `cd <repo>` left `actions` holding ~200 copies
+                # of that `cd`, so `ran_action` could not see `gh pr merge` on line 2.
+                # Cut at the FIRST output marker: the real boundary is at or after
+                # it, so the text before it is always a prefix of the command and
+                # never output — output here would let a command's printed text back
+                # a `ran_action` claim.
+                cmd = content.partition(_BASH_OUTPUT_MARKER)[0][len("Ran: ") :].strip()
                 actions.append(cmd)
 
                 # techne#939: classify non-test verification commands too. EVERY
@@ -1544,7 +1550,8 @@ def check_claims(claims: list[dict], evidence: Evidence) -> list[dict]:
                 status = "unbacked"
                 detail = (
                     f"No Bash action containing {match_str!r} found. "
-                    f"Actions seen: {evidence.actions[:5]!r}."
+                    # Each clipped: an action is now a whole multi-line command.
+                    f"Actions seen: {[a[:120] for a in evidence.actions[:5]]!r}."
                 )
 
         elif claim_type == "wrote_file":

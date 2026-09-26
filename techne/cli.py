@@ -786,18 +786,14 @@ def threads_redetect(ctx, session_id, sync):
 
     conn = connect(config.db_path)
     try:
-        row = conn.execute(
-            "SELECT id FROM sessions WHERE id LIKE ? || '%' ORDER BY started_at DESC LIMIT 1",
-            (session_id,),
-        ).fetchone()
+        sid = _resolve_session_prefix(conn, session_id)
     finally:
         conn.close()
 
-    if row is None:
+    if sid is None:
         click.echo(f"No session matching: {session_id}")
         return
 
-    sid = row["id"]
     result = redetect_threads(config, sid, sync=sync)
     sync_msg = f", {result['queued']} queued for sync" if sync else ""
     click.echo(
@@ -839,11 +835,15 @@ def threads_show(ctx, session_id, no_color, detector):
 
     conn = connect(config.db_path)
     try:
-        sess = conn.execute(
-            "SELECT id, project_path, started_at FROM sessions "
-            "WHERE id LIKE ? || '%' ORDER BY started_at DESC LIMIT 1",
-            (session_id,),
-        ).fetchone()
+        resolved = _resolve_session_prefix(conn, session_id)
+        sess = (
+            conn.execute(
+                "SELECT id, project_path, started_at FROM sessions WHERE id = ?",
+                (resolved,),
+            ).fetchone()
+            if resolved is not None
+            else None
+        )
         if sess is None:
             click.echo(f"No session matching: {session_id}")
             return
@@ -947,6 +947,24 @@ def threads_show(ctx, session_id, no_color, detector):
             click.echo()
     finally:
         conn.close()
+
+
+def _resolve_session_prefix(conn, prefix: str) -> str | None:
+    """The newest session whose id starts with *prefix* LITERALLY, or None.
+
+    One definition for every command that takes a session-id prefix (issue #902):
+    the three copies of `LIKE ? || '%'` passed the operator's text through as a
+    pattern, so `%` or `_` matched some other session — `reflect undecline
+    --session '%'` retracted every decline in the newest one and exited 0.
+    """
+    from techne.core.database import like_escape
+
+    row = conn.execute(
+        "SELECT id FROM sessions WHERE id LIKE ? || '%' ESCAPE '\\' "
+        "ORDER BY started_at DESC LIMIT 1",
+        (like_escape(prefix),),
+    ).fetchone()
+    return row["id"] if row else None
 
 
 def _segments_from_boundary_rows(n_obs: int, rows: list[dict]) -> list[list[int]]:
@@ -2651,7 +2669,24 @@ def _vector_lines(config, setup_vectors: bool) -> list[str]:
     "so search is semantic from the start. --no-vectors keeps search keyword-only until "
     "`techne vectors backfill` (techne#1021).",
 )
-def init(ctx, platform, identity_dir, posture, install_skills, force_skills, setup_vectors):
+@click.option(
+    "--allow-worktree",
+    is_flag=True,
+    default=False,
+    help="Register even though techne runs from a git worktree (e.g. a bare repo's "
+    "worktree is your only checkout). Prints a warning: pruning that worktree breaks "
+    "the MCP server and every hook until you re-run `techne init`.",
+)
+def init(
+    ctx,
+    platform,
+    identity_dir,
+    posture,
+    install_skills,
+    force_skills,
+    setup_vectors,
+    allow_worktree,
+):
     """Initialize techne — create database, register hooks, set up MCP."""
     from techne.core.database import init_db
     from techne.core.memory_doctor import find_curated_memory_files
@@ -2679,7 +2714,7 @@ def init(ctx, platform, identity_dir, posture, install_skills, force_skills, set
         from techne.platforms.claude_code import register_hooks, register_mcp
 
         try:
-            register_hooks(config)
+            register_hooks(config, allow_worktree=allow_worktree)
             register_mcp(config)
         except RuntimeError as exc:
             # register_hooks refuses to wire an interpreter it cannot validate
@@ -3038,9 +3073,15 @@ def session_end(ctx, session_id, summary):
     won't accumulate a backlog.
     """
     config = ctx.obj["config"]
+    from techne.core.state import ABANDONED_SESSION_IDLE_HOURS
     from techne.lifecycle import run_session_end
 
-    result = run_session_end(config, session_id, summary=summary)
+    # A replay, not only a live end (issue #986): a session silent past the sweep's
+    # idle window gets its end derived from last activity and stamped 'derived',
+    # instead of a clean exit at "now" that never happened.
+    result = run_session_end(
+        config, session_id, summary=summary, derive_if_idle_hours=ABANDONED_SESSION_IDLE_HOURS
+    )
     click.echo(
         f"session-end {session_id}: {result['threads']} threads, "
         f"{result['linked']} linked, {result['queued']} queued"
@@ -3802,22 +3843,18 @@ def reflect_undecline(ctx, session_id, thread_ids):
     #: is the trigger. `clear_declines` guards the empty id, but resolution now runs in
     #: FRONT of that guard. `--session "."` reduces to the same wildcard via the rstrip.
     prefix = session_id.rstrip(".")
-    row = None
+    sid = None
     if prefix:
         conn = connect(config.db_path)
         try:
-            row = conn.execute(
-                "SELECT id FROM sessions WHERE id LIKE ? || '%' ORDER BY started_at DESC LIMIT 1",
-                (prefix,),
-            ).fetchone()
+            sid = _resolve_session_prefix(conn, prefix)
         finally:
             conn.close()
-    if row is None:
+    if sid is None:
         # DISTINCT FROM "no declines", because they call for opposite actions and used to
         # print identically — a mistyped id read as "nothing to do".
         click.echo(f"No session matching: {session_id}", err=True)
         ctx.exit(1)
-    sid = row["id"]
 
     n = clear_declines(config, sid, list(thread_ids) or None)
     if not n:
