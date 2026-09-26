@@ -16,7 +16,7 @@ For the CLI equivalents see the [README](../README.md); for what is switched on
 
 ### `techne_recall`
 
-Call this before relying on an assumption about this project, person, or past decision — to retrieve context for a specific topic across all layers including identity. Git-anchored knowledge results that need attention carry an explicit `freshness` tag (modified/moved/deleted/unknown) — spend verification effort only on those rather than re-checking every result by hand. An entry with no…
+Call this before relying on an assumption about this project, person, or past decision — to retrieve context for a specific topic across all layers including identity. Git-anchored knowledge results that need attention carry an explicit `freshness` tag (modified/diverged/moved/deleted/unknown) — spend verification effort only on those rather than re-checking every result by hand. An entry with no…
 
 ### `techne_search`
 
@@ -110,7 +110,7 @@ Feed back one conflict verdict from techne_conflict_emit (techne#213). `response
 
 ### `techne_federation_conflict_ingest`
 
-Feed back your verdict on a cross-store contradiction surfaced by techne_recall (techne#222). Use the fields from a federation_conflicts item returned by techne_recall: focus_content, focus_store, focus_event_at, comparison_ids, check_hash. Answer the prompt with a JSON verdict array (same format as techne_conflict_ingest) and pass it as response. SUPERSEDE + team newer → pending 'retire'…
+Feed back your verdict on a cross-store contradiction surfaced by techne_recall (techne#222). Use the fields from a federation_conflicts item returned by techne_recall(include_federation_conflicts=true): focus_content, focus_store, focus_event_at, comparison_ids, check_hash. Answer the prompt with a JSON verdict array (same format as techne_conflict_ingest) and pass it as response. SUPERSEDE + team newer → pending 'retire'…
 
 ### `techne_memory_claims_emit`
 

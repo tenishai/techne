@@ -703,14 +703,30 @@ def _techne_recall(args: dict, config: Config) -> dict:
         {"identity_matches": _identity_matches()},
     )
 
-    # Step E — surface conflict prompts; recall itself does NOT write
+    # Step E — surface conflict prompts; recall itself does NOT write.
+    # A COUNT BY DEFAULT, THE ITEMS ON REQUEST (techne#863). Each item carries its
+    # focus content plus a full adjudication prompt, uncapped: ten of them were 92,859
+    # of a 103,091-char recall, the call overflowed the tool-output ceiling, and the
+    # 7k of context actually asked for never reached the caller. Adjudication is a
+    # write-path chore, not retrieval context, so recall reports that it exists and
+    # how to get it — the opt-in returns exactly what it used to.
     if conflicts:
-        out["federation_conflicts"] = conflicts
-        out["_federation_note"] = (
-            "Cross-store contradictions detected. For each item in federation_conflicts: "
-            "answer the prompt field using your own model (JSON verdict array), then call "
-            "techne_federation_conflict_ingest with the result to stage a reviewable candidate."
-        )
+        if args.get("include_federation_conflicts"):
+            out["federation_conflicts"] = conflicts
+            out["_federation_note"] = (
+                "Cross-store contradictions detected. For each item in federation_conflicts: "
+                "answer the prompt field using your own model (JSON verdict array), then call "
+                "techne_federation_conflict_ingest with the result to stage a reviewable "
+                "candidate."
+            )
+        else:
+            out["federation_conflicts_pending"] = len(conflicts)
+            out["_federation_note"] = (
+                f"{len(conflicts)} cross-store contradiction(s) found for this topic; left "
+                "out of recall because adjudicating them is maintenance, not context. To "
+                "adjudicate, call techne_recall again with include_federation_conflicts=true "
+                "and feed each verdict to techne_federation_conflict_ingest."
+            )
 
     return out
 
@@ -1011,8 +1027,8 @@ TOOLS = [
             "Call this before relying on an assumption about this project, person, or past "
             "decision — to retrieve context for a specific topic across all layers "
             "including identity. Git-anchored knowledge results that need "
-            "attention carry an explicit `freshness` tag (modified/moved/"
-            "deleted/unknown) — spend verification effort only on those rather "
+            "attention carry an explicit `freshness` tag (modified/diverged/"
+            "moved/deleted/unknown) — spend verification effort only on those rather "
             "than re-checking every result by hand. An entry with no `freshness` "
             "tag needs no file check: it is either non-anchored or "
             "anchored-and-unchanged (anchored entries carry an `anchor_path` field)."
@@ -1021,6 +1037,15 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "topic": {"type": "string", "description": "Topic to recall context for"},
+                "include_federation_conflicts": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Return the full cross-store contradiction items (each with an "
+                        "adjudication prompt) instead of only their count. Off by default: "
+                        "they are maintenance, and can dwarf the context asked for."
+                    ),
+                },
             },
             "required": ["topic"],
         },
@@ -1493,7 +1518,8 @@ TOOLS = [
         "description": (
             "Feed back your verdict on a cross-store contradiction surfaced by techne_recall "
             "(techne#222). Use the fields from a federation_conflicts item returned by "
-            "techne_recall: focus_content, focus_store, focus_event_at, comparison_ids, "
+            "techne_recall(include_federation_conflicts=true): focus_content, focus_store, "
+            "focus_event_at, comparison_ids, "
             "check_hash. Answer the prompt with a JSON verdict array (same format as "
             "techne_conflict_ingest) and pass it as response. "
             "SUPERSEDE + team newer → pending 'retire' candidate targeting the LOCAL row "

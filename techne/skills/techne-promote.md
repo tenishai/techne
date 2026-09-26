@@ -1,5 +1,5 @@
 ---
-allowed-tools: Bash(techne:*), Bash(.venv/bin/python -m techne.cli:*), Bash(sqlite3:*), Read, Write, Edit
+allowed-tools: Bash(techne:*), Bash(.venv/bin/python -m techne.cli:*), Bash(sqlite3:*), Bash(gh issue view:*), Bash(gh pr view:*), Bash(git log:*), Read, Write, Edit
 description: Agent-assisted promotion of techne observations into curated knowledge (the no-API-key path). Emits per-thread reflection prompts, you answer them as strict candidates, ingests them into knowledge_candidates for review. Use to grow techne's knowledge layer from accumulated session observations (techne#92/#20).
 disable-model-invocation: false
 ---
@@ -33,6 +33,7 @@ Run from the techne repo. Use `techne` on PATH, or `.venv/bin/python -m techne.c
    - **Not already known** — skip anything in the prompt's "What the agent already knows" block, and don't restate what the code/git history already records.
    - **Evidence-anchored** to what the thread actually did, in one sharp sentence. Prefer fewer, sharper items over many vague ones.
    - **Honest** — never invent a fact the observations don't support. If a thread is pure mechanical work, return `[]`.
+   - **Verified before `high`** — the prompt's observations are an index, not evidence: the first slice of the thread, each line clipped. Before writing `"confidence":"high"` on a candidate that names a number, an issue/PR title, a state, or a mechanism, check it against the source (`gh issue view`, `gh pr view`, `git log`, `sqlite3` on the store). If you can't, write it at `medium` and say what is unconfirmed, or drop it. This is the one check that has caught errors at authorship; the review queue caught none (techne#790).
 
 5. **Ingest** the same file:
    `techne reflect ingest /tmp/techne-promote-<SID>.json`

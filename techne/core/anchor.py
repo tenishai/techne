@@ -3,15 +3,20 @@
 A *memory* that points into a repo (a `file:line`, function, or flag) is an
 **evidence-anchored** memory. At write time we capture a content hash of the
 anchored file plus the git HEAD sha; at recall time we re-classify that anchor
-against the current working tree into one of four states so the consuming agent
+against the current working tree into one of five states so the consuming agent
 spends verification cost only where it's warranted:
 
     unchanged — file present, bytes identical → trust as-is
     modified  — file present, bytes differ    → surface, re-read before quoting
     moved     — file gone, identical content found elsewhere in the repo
     deleted   — file gone, no matching content found
+    diverged  — bytes identical, but the commit the anchor was pinned at is no
+                longer in HEAD's history (rebase, force-push, other branch) —
+                the match may be coincidental (techne#391). Checked only when the
+                bytes match; a sha this clone has never seen (or one already
+                garbage-collected) is "cannot tell" and stays ``unchanged``.
 
-A fifth, ``unknown``, is the honest off-git answer: the anchor can't be resolved
+A sixth, ``unknown``, is the honest off-git answer: the anchor can't be resolved
 on this host (no repo checked out, path outside any repo, git failure/timeout).
 Per the portable-memory principle (techne#57) memory follows the operator across
 machines and clients where the repo may not exist at all — so ``unknown`` NEVER
@@ -150,6 +155,32 @@ def _find_moved(
     return None, True
 
 
+def _history_diverged(anchor_file: Path, stored_git_sha: str | None) -> bool:
+    """True only when git says *stored_git_sha* is definitely NOT an ancestor of HEAD.
+
+    ``git merge-base --is-ancestor`` exits 0 (ancestor), 1 (not an ancestor), or
+    something else (unknown object, no repo, …). Only exit 1 counts as diverged:
+    a sha this clone has never fetched (memory written on another machine) is
+    "cannot tell", and an unverifiable history must not downgrade content the
+    hash check just verified. Never raises.
+    """
+    if not stored_git_sha:
+        return False
+    repo_root = _find_repo_root(anchor_file.resolve())
+    if repo_root is None:
+        return False
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo_root), "merge-base", "--is-ancestor", stored_git_sha, "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=_GIT_TIMEOUT,
+        )
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        return False
+    return proc.returncode == 1
+
+
 def classify(
     anchor_path: str,
     stored_content_hash: str | None,
@@ -158,9 +189,11 @@ def classify(
     """Classify an anchor's freshness at RECALL time.
 
     Returns ``(state, detail)`` where *state* is one of
-    ``unchanged | modified | moved | deleted | unknown``:
+    ``unchanged | diverged | modified | moved | deleted | unknown``:
 
       - ``unchanged`` — file present, sha256 == stored → ``('unchanged', '')``
+      - ``diverged``  — sha256 == stored, but *stored_git_sha* is no longer an
+                        ancestor of HEAD → ``('diverged', '<short sha>')``
       - ``modified``  — file present, sha256 differs    → ``('modified', '')``
       - ``moved``     — file gone, identical content elsewhere in repo
                         → ``('moved', '<new repo-rel path>')``
@@ -183,6 +216,8 @@ def classify(
             except OSError as e:
                 return "unknown", f"could not read anchor file: {e}"
             if current == stored_content_hash:
+                if _history_diverged(p, stored_git_sha):
+                    return "diverged", (stored_git_sha or "")[:12]
                 return "unchanged", ""
             return "modified", ""
 
@@ -229,6 +264,13 @@ def _freshness_payload(state: str, detail: str) -> dict | None:
     if state == "modified":
         tag = f"[freshness: modified — {_RE_READ}]"
         note = "anchored file changed since this was stored; reduced confidence"
+    elif state == "diverged":
+        at = f" {detail}" if detail else ""
+        tag = f"[freshness: diverged — anchored commit{at} is not in HEAD's history; {_RE_READ}]"
+        note = (
+            "file bytes match, but the commit this was pinned at was rebased away, "
+            "force-pushed over, or is on another branch; the match may be coincidental"
+        )
     elif state == "moved":
         where = f" → {detail}" if detail else ""
         tag = f"[freshness: moved{where} — {_RE_READ}]"

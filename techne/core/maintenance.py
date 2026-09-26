@@ -695,7 +695,7 @@ def _classify_backup_set(child: Path) -> SetClass:
     for domain, meta in dbs.items():
         name, problem = _manifest_db_filename(domain, meta, child)
         if problem:
-            malformed.append(domain)
+            malformed.append(problem)
         # is_file(), NOT exists(): a `file` naming the set directory ("./", "./.")
         # makes exists() true, so the set was classified RESTORABLE, took a keep
         # slot, and at keep=1 EVICTED THE GENUINE SET with failed: [] -- while
@@ -706,22 +706,25 @@ def _classify_backup_set(child: Path) -> SetClass:
         # to the set directory ITSELF, which is not an escape and is this guard's.
         elif not (child / name).is_file():
             missing.append(domain)
+    # BOTH CAUSES, NOT THE FIRST ONE (techne#785). This returned on `malformed` before
+    # looking at `missing`, so a set with an empty `file` AND an absent db reported only
+    # the first — and the natural reading of "a bad entry" is "the databases are fine,
+    # edit one string". The two have opposite remedies, so an operator told one of them
+    # needed a second run to learn the other. Each cause keeps its own phrase and its own
+    # domain list; a set with one problem reads as it did before, except that a
+    # malformed entry now carries the resolver's own `problem` (which names the domain)
+    # instead of the bare domain — "contains a NUL byte" was built and then discarded.
+    causes = []
     if malformed:
-        return SetClass(
-            None,
-            (
-                f"{RETENTION_REFUSAL_PHRASES[6]} ({', '.join(sorted(malformed))}) — "
-                "`restore` refuses it, so it is not counted as a backup and is never pruned"
-            ),
-            holds_data=True,
-        )
-    missing = sorted(missing)
+        causes.append(f"{RETENTION_REFUSAL_PHRASES[6]} ({'; '.join(sorted(malformed))})")
     if missing:
+        causes.append(f"{RETENTION_REFUSAL_PHRASES[7]} ({', '.join(sorted(missing))})")
+    if causes:
         return SetClass(
             None,
             (
-                f"{RETENTION_REFUSAL_PHRASES[7]} ({', '.join(missing)}) — `restore` refuses "
-                "it, so it is not counted as a backup and is never pruned"
+                f"{'; and it '.join(causes)} — `restore` refuses it, so it is not counted "
+                "as a backup and is never pruned"
             ),
             holds_data=True,
         )

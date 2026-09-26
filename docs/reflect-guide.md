@@ -347,6 +347,14 @@ exception: they *are* payable, which is why they self-heal rather than being ret
 > and skip anything already in the prompt's "what the agent already knows" block or
 > obvious from re-reading the code.
 >
+> **Verify before you write `high`.** The observations in a prompt are an index, not
+> evidence — the first slice of the thread, each line clipped. A `high` entry that names a
+> number, an issue or PR, a state or a mechanism gets checked against the source first
+> (`gh issue view`, `gh pr view`, `git log`, `sqlite3` on the store). If you cannot check
+> it, write it at `medium` and say what is unconfirmed, or leave it out. This holds under
+> either `write_to`: under `live` nothing reviews it after you, and under `candidates` a
+> reviewer rarely has the evidence you had one command away.
+>
 > **Do NOT sweep the queue by hand — offer `techne reflect reconcile` instead.** If `emit`
 > reports `unemittable_queued`, that count is TWO populations: rows whose thread is gone from
 > the current detection (*superseded* — `reconcile` retires these, dry-run by default), and
