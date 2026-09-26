@@ -91,3 +91,55 @@ def test_probe_that_raises_oserror_subclass_is_also_caught():
         raise IsADirectoryError(21, "Is a directory")
 
     assert find_repo("/a/b/c/file.py", fs_check=probe) is None
+
+
+# --- techne#981: the sibling walk in core/repo.py, now on the banner path -------
+
+
+def test_find_repo_root_returns_none_when_every_probe_denies(tmp_path):
+    from techne.core.repo import find_repo_root
+
+    def deny(_p: Path) -> bool:
+        raise PermissionError(13, "Permission denied")
+
+    assert find_repo_root(tmp_path / "a" / "b.py", probe=deny) is None
+
+
+def test_find_repo_root_keeps_walking_past_an_unreadable_ancestor(tmp_path):
+    from techne.core.repo import find_repo_root
+
+    repo = tmp_path / "myrepo"
+    target = repo / "locked" / "deep" / "file.py"
+
+    def probe(p: Path) -> bool:
+        if p.name == "locked":
+            raise PermissionError(13, "Permission denied")
+        return p == repo
+
+    assert find_repo_root(target, probe=probe) == repo
+
+
+def test_find_repo_root_survives_an_unstatable_start(tmp_path, monkeypatch):
+    """`is_dir()` on the start path raises on 3.11-3.13 just as `exists()` does."""
+    from techne.core.repo import find_repo_root
+
+    (tmp_path / "r" / ".git").mkdir(parents=True)
+    start = tmp_path / "r" / "sub"
+    real_is_dir = Path.is_dir
+
+    def is_dir(self, *a, **kw):
+        if self == start:
+            raise PermissionError(13, "Permission denied")
+        return real_is_dir(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "is_dir", is_dir)
+    assert find_repo_root(start) == tmp_path / "r"
+
+
+def test_find_repo_root_default_probe_still_finds_a_real_repo(tmp_path):
+    from techne.core.repo import find_repo_root
+
+    (tmp_path / "r" / ".git").mkdir(parents=True)
+    (tmp_path / "r" / "pkg").mkdir()
+    assert find_repo_root(tmp_path / "r" / "pkg") == tmp_path / "r"
+    assert find_repo_root(tmp_path / "r" / "pkg" / "gone.py") == tmp_path / "r"

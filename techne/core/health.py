@@ -11,7 +11,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from techne import __version__
+from techne import __version__, _is_installed_path
 from techne.config import Config
 from techne.core.repo import git_dirs as _git_dirs
 from techne.core.repo import read_ref as _read_ref
@@ -83,6 +83,66 @@ def _installed_revision() -> str | None:
         return None
 
 
+def _package_dir() -> Path:
+    """The RESOLVED directory of the imported ``techne`` package.
+
+    Every build-identity surface starts here (techne#982). ``--version`` used to
+    pass ``Path(__file__).parent`` unresolved, so a symlinked site-packages read
+    as a checkout there and as installed everywhere else.
+    """
+    import techne
+
+    return Path(techne.__file__).resolve().parent
+
+
+def build_identity(version: str | None = None) -> str:
+    """Version plus build identity — ``--version`` and the MCP handshake (techne#965/#982).
+
+    ONE derivation for both, over the same resolved path ``collect_health`` uses,
+    so ``techne --version``, ``serverInfo.version``, ``techne_status`` and the
+    SessionStart banner cannot name different builds. The MCP handshake reported
+    a bare ``__version__`` after #971 fixed the other three, and ``serverInfo`` is
+    what an MCP client displays.
+
+    ``0.16.1+21813c1 (installed)`` borrows PEP 440's LOCAL LABEL shape, but the
+    string is NOT a PEP 440 version and must not be parsed: the `` (checkout)`` /
+    `` (installed)`` suffix is deliberate, a human-facing build word. A version
+    that already carries a local label (``0.0.0+unknown``) takes the revision
+    after a space rather than a second ``+``. Never raises.
+    """
+    version = __version__ if version is None else version
+    try:
+        info = _revision_info(_package_dir())
+        revision, build = info.get("revision"), info.get("build")
+    except Exception:  # noqa: BLE001 — an identity line must never fail
+        revision, build = None, None
+    if revision:
+        sep = " " if "+" in version else "+"
+        return f"{version}{sep}{revision} ({build})"
+    return f"{version} ({build})" if build else version
+
+
+def _reflog_last_moved(reflog: Path) -> float | None:
+    """Unix time of the LAST entry in a git reflog file, or None (techne#571).
+
+    A line is ``<old> <new> <name> <email> <epoch> <tz>\t<message>``; the name
+    may contain spaces, so the epoch is read from the end of the part before the
+    tab. Absent, empty or malformed means None — never a guess.
+    """
+    try:
+        lines = reflog.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        if not line.strip():
+            continue
+        fields = line.split("\t", 1)[0].split()
+        if len(fields) >= 2 and fields[-2].isdigit():
+            return float(fields[-2])
+        return None
+    return None
+
+
 def _revision_info(
     package_path: Path,
     installed_revision: "Callable[[], str | None] | None" = None,
@@ -122,7 +182,7 @@ def _revision_info(
     ``doctor`` is worse than one that stays quiet.
     """
     info: dict = {
-        "build": "installed" if "site-packages" in str(package_path) else "checkout",
+        "build": "installed" if _is_installed_path(package_path) else "checkout",
         "revision": None,
         "remote_revision": None,
         "drifted": None,
@@ -201,23 +261,31 @@ def _revision_info(
     # diverted — and docs/arch/liveness.md records the invariant that a working
     # checkout still STATES how far behind it is, because "on a peer's branch,
     # behind the merge" IS the #473 incident.
-    # ONLY the loose ref's mtime, deliberately — no FETCH_HEAD fallback. The ref's
-    # mtime is when origin/main last MOVED, exactly the quantity
-    # check_runtime_revision reports from the reflog (measured identical here:
-    # both 14:37:01). FETCH_HEAD measures the last fetch, a different quantity —
-    # 15:05:36 in the same repo, 28 minutes later, because a fetch that moves
-    # nothing still rewrites it. Reported under the same label it reads YOUNGER
-    # than the truth, i.e. more reassuring, which is the wrong direction for a
-    # staleness caveat. When the ref is packed-only there is no honest mtime, so
-    # the age is left None and the banner says so.
-    try:
-        age = datetime.now(timezone.utc) - datetime.fromtimestamp(
-            (common_dir / "refs" / "remotes" / "origin" / "main").stat().st_mtime,
-            tz=timezone.utc,
-        )
-        info["remote_ref_age_days"] = max(age.days, 0)
-    except OSError:
-        pass
+    # WHEN origin/main LAST MOVED, read from its REFLOG first (techne#571). The
+    # last line of `logs/refs/remotes/origin/main` carries the unix time of the
+    # last move — the very entry check_runtime_revision reads with `git log -g
+    # -1`, so the banner and doctor agree by construction, not by measurement.
+    # It also survives `git pack-refs --all --prune`, which removes the loose ref
+    # and used to turn the age into "unknown" after a routine gc.
+    #
+    # Then the loose ref's mtime (the same quantity, when a reflog is disabled or
+    # expired), and NEVER FETCH_HEAD: that is the last FETCH, and a fetch that
+    # moves nothing still rewrites it (15:05:36 vs 14:37:01 in one repo, measured),
+    # so under this label it reads YOUNGER than the truth — the reassuring
+    # direction, wrong for a staleness caveat. With neither source there is no
+    # honest age: it stays None and the banner says so.
+    moved = _reflog_last_moved(common_dir / "logs" / "refs" / "remotes" / "origin" / "main")
+    if moved is None:
+        try:
+            moved = (common_dir / "refs" / "remotes" / "origin" / "main").stat().st_mtime
+        except OSError:
+            moved = None
+    if moved is not None:
+        try:
+            age = datetime.now(timezone.utc) - datetime.fromtimestamp(moved, tz=timezone.utc)
+            info["remote_ref_age_days"] = max(age.days, 0)
+        except (OverflowError, OSError, ValueError):
+            pass  # an epoch no clock can hold is no honest age either
 
     if not tracks_main:
         # Deliberately off main, so being unlevel with main is not a defect — but
@@ -251,10 +319,9 @@ def collect_health(config: Config) -> dict:
     one session row but keeps capturing, so MAX(started_at) would falsely read
     as a multi-day gap while capture is in fact healthy.
     """
-    import techne
     from techne.core.state import db_stats
 
-    package_path = str(Path(techne.__file__).resolve().parent)
+    package_path = str(_package_dir())
     health: dict = {
         "version": __version__,
         "package_path": package_path,
@@ -431,7 +498,7 @@ def format_banner(health: dict) -> str:
     drifted = health.get("drifted")
     rev = health.get("revision")
     # THE FRESHNESS CAVEAT GOES ON EVERY BRANCH, not just the stale one — ported
-    # from check_runtime_revision, which learned it the hard way: "matches
+    # from check_runtime_revision, which learned it the hard way: "level with
     # origin/main" is the FALSE-GREEN case, because the comparison is against a
     # LOCAL ref that is only as fresh as the last fetch. A ref fetched three weeks
     # ago reads as level when main has moved. Note `age == 0` is falsy, so this
@@ -439,12 +506,12 @@ def format_banner(health: dict) -> str:
     # the freshest case.
     #
     # "last moved", NOT "fetched", and the label is now exact rather than a
-    # compromise. The only source is the loose ref's mtime (see _revision_info —
-    # the FETCH_HEAD fallback was removed), and that is when origin/main last
-    # CHANGED, which is precisely the quantity check_runtime_revision reports from
-    # the ref's reflog: measured identical in this repo, both 14:37:01. "fetched"
-    # would be wrong for it — a fetch that moves nothing rewrites FETCH_HEAD but
-    # not the ref (15:05:36 vs 14:37:01 here, 28 minutes apart).
+    # compromise. The source is origin/main's reflog, falling back to the loose
+    # ref's mtime (see _revision_info — never FETCH_HEAD), and both are when
+    # origin/main last CHANGED: the reflog is the very entry
+    # check_runtime_revision reads (techne#571). "fetched" would be wrong for it —
+    # a fetch that moves nothing rewrites FETCH_HEAD but not the ref (15:05:36 vs
+    # 14:37:01 here, 28 minutes apart).
     _age = health.get("remote_ref_age_days")
     fetched = f", local ref last moved {_age}d ago" if _age is not None else ", ref age unknown"
     _remote = health.get("remote_revision")
@@ -513,6 +580,13 @@ def format_banner(health: dict) -> str:
         # up-to-date main — before its first commit, which is exactly when a
         # SessionStart banner greets you — printed the same sha on both sides of
         # the word "differs". doctor says "level with origin/main" for this.
+        #
+        # OFF MAIN AND AHEAD IS WHERE THE TWO PART (techne#572). doctor picks its
+        # wording on `behind` alone, so a feature branch with an unpushed commit
+        # (behind=0, ahead=1) is "level with origin/main" there and "differs from
+        # origin/main" here. A sha comparison cannot tell ahead from behind — the
+        # same limit the DIVERGED branch below states for main-and-ahead — so this
+        # says "differs" and does not guess a direction. Both lines stay green.
         if not _remote:
             # KNOWN, DELIBERATE DISAGREEMENT WITH doctor. A single-branch clone
             # (`git clone --branch feat --single-branch`) genuinely has no

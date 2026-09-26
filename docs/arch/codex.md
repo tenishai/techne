@@ -1,7 +1,7 @@
 ---
 card: arch-card:techne-codex
-updated: 2026-09-18
-anchor: techne/core/codex.py sha=b135306e72f3b2798199fd0cc2e13c7d929daec3
+updated: 2026-09-25
+anchor: techne/core/codex.py sha=90226f1ce088e4a7764d5d13a2e8acb00ed7ee00
 anchor: techne/codex/source.py sha=e1bc518b637fd8f2511d0e283869de11dd899544
 anchor: techne/codex/import_resolve.py sha=d02ae2cd30fea01c0b27861dc8c8330ef4b81c72
 ---
@@ -33,5 +33,6 @@ THE EDIT RAIL DECLINES INSIDE A LINKED WORKTREE, as a direct consequence. `_inje
 
 
 OPS: schema symbols(id,file,name,kind,…)+edges; codex_meta KV (v2) persists repo_root; migrations via _apply_codex_migration() before store.migrate().
+LEGACY `<data_dir>/codex.db` WITH NO TABLES IS DELETED, NOT WARNED ABOUT (techne#875). The per-repo move leaves a zero-table husk that can never gain a `repo_root`, so `migrate_legacy_codex_db` warned once per process — every hook, CLI run and MCP start — on the channel that carries a real migration failure. An empty `sqlite_master` (read through SQLite, so a WAL still holding schema counts) holds no data; the file and its sidecars are removed at debug level. A legacy db WITH tables and no `repo_root` is still an anomaly and still warns.
 API: `techne codex index <repo>`; MCP codex_search, codex_blast_radius.
 CONSUMERS: none cross-repo yet (experimental). CI installs the `codex` extra so extraction tests run, not skip.

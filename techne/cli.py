@@ -88,19 +88,11 @@ def _version_string() -> str:
     HEAD), versus a wheel with no VCS provenance. An editable checkout is not one
     of them; it reads HEAD like any other checkout and prints its sha.
     """
-    from techne.core.health import _revision_info
+    # Derived in core/health.py so the MCP handshake gets the SAME string, from
+    # the same RESOLVED package path the banner uses (techne#982).
+    from techne.core.health import build_identity
 
-    try:
-        info = _revision_info(Path(__file__).parent)  # cli.py lives IN the package
-        revision, build = info.get("revision"), info.get("build")
-    except Exception:  # noqa: BLE001 — --version must never fail
-        revision, build = None, None
-
-    if revision:
-        # A version that already carries a local label cannot take another `+`.
-        sep = " " if "+" in __version__ else "+"
-        return f"{__version__}{sep}{revision} ({build})"
-    return f"{__version__} ({build})" if build else __version__
+    return build_identity(__version__)
 
 
 @click.group(cls=_AliasedGroup)
