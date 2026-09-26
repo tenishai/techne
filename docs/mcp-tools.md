@@ -60,7 +60,7 @@ Read-only and guarded (techne#554): one `SELECT`, over the distilled knowledge t
 
 ### `techne_store`
 
-Call this when you learn a durable fact, make or are given a decision, get user feedback or a correction, or finish reasoning you'd hate to redo — to store a durable personal-memory entry (fact, decision, evaluation, procedure). Store the conclusion, not the transcript. Architectural patterns go to the Architect store via `techne architect ingest`, not here (techne#137).
+Call this when you learn a durable fact, make or are given a decision, get user feedback or a correction, or finish reasoning you'd hate to redo — to store a durable personal-memory entry (fact, decision, evaluation, procedure). Store the conclusion, not the transcript. Architectural patterns go to the Architect store via `techne architect ingest`, not here (techne#137). When this entry replaces or corrects an existing one, pass its id in `supersedes`: writing "SUPERSEDES #N" in the content does nothing, and #N keeps surfacing as current (techne#887).
 
 ### `techne_observe`
 

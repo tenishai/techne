@@ -1,6 +1,7 @@
 """Knowledge store — durable facts, decisions, patterns, evaluations, procedures."""
 
 import hashlib
+import re
 from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -64,8 +65,16 @@ def store(
     source: str = "session",
     anchor: str | None = None,
     provenance: dict | None = None,
+    supersedes: Iterable[int] | None = None,
 ) -> int:
     """Store a knowledge entry. Returns the new entry's id.
+
+    `supersedes` (techne#887) retires existing entries INTO the new one, in the
+    same transaction as the insert: each id gets `superseded_by = <new id>` and
+    the #117 dependency cascade, via `_retire_in_conn`. Before this, an entry could
+    only say "SUPERSEDES #N" in prose, which recall never reads, so the old row
+    stayed live. All-or-nothing: an unknown or already-superseded id rolls back
+    the insert too, so a failed call never leaves the new row half-linked.
 
     `provenance` (techne#553) carries `written_by` / `origin_source` /
     `origin_session` for a federated write. IN THE SAME INSERT, deliberately: the
@@ -119,9 +128,15 @@ def store(
                 anchor_content_hash = resolved["content_hash"]
                 anchor_git_sha = resolved["git_sha"]
 
+    retire_ids = _normalize_ids(supersedes)
+
     numeric = CONFIDENCE_NUMERIC[confidence]
     conn = connect(db_path)
     try:
+        if retire_ids:
+            # Write lock before the liveness reads in _retire_in_conn (TOCTOU guard,
+            # same as supersede()).
+            conn.execute("BEGIN IMMEDIATE")
         cur = conn.execute(
             """INSERT INTO knowledge
                  (type, content, source, tags, confidence, confidence_numeric,
@@ -144,10 +159,40 @@ def store(
                 (provenance or {}).get("origin_session"),
             ),
         )
+        new_id = cur.lastrowid
+        for old_id in retire_ids:
+            _retire_in_conn(conn, old_id, new_id)
         conn.commit()
-        return cur.lastrowid
+        return new_id
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
+
+
+def _normalize_ids(ids: Iterable[int] | int | None) -> list[int]:
+    """Validate a `supersedes` argument: a single id or an iterable of ids, as ints.
+
+    Duplicates are refused rather than folded: the second retire of the same id
+    would fail with "already superseded by <the row we just wrote>", which blames
+    the store for a typo in the call."""
+    if ids is None:
+        return []
+    if isinstance(ids, (int, str)):
+        ids = [ids]
+    out: list[int] = []
+    for raw in ids:
+        if isinstance(raw, bool):
+            raise ValueError(f"supersedes: {raw!r} is not a knowledge id")
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            raise ValueError(f"supersedes: {raw!r} is not a knowledge id") from None
+        if value in out:
+            raise ValueError(f"supersedes: knowledge id {value} is listed twice")
+        out.append(value)
+    return out
 
 
 def supersede(db_path: Path, old_id: int, new_content: str, source: str = "session") -> int:
@@ -330,6 +375,112 @@ def _retire_in_conn(conn, old_id: int, survivor_id: int) -> int:
     # entry go `uncertain` until reconfirmed. The survivor is NOT auto-propagated.
     _cascade_uncertain(conn, old_id)
     return survivor_id
+
+
+def retire(db_path: Path, old_id: int, survivor_id: int) -> int:
+    """Retire *old_id* into an EXISTING live entry *survivor_id* (techne#887).
+
+    Public wrapper for `_retire_in_conn`, which until now was reachable only from
+    the contradiction check: the case where an entry already in the store says in
+    prose that it replaces an older one, and the link was never written. Minting a
+    new revision (supersede()) would duplicate the survivor's content, so this only
+    repoints the loser and runs the #117 cascade. Returns *survivor_id*.
+
+    Refuses an ARCHIVED survivor as well as a superseded one: retiring a live row
+    into a row recall no longer injects would drop the fact from default context
+    entirely. `_retire_in_conn` checks only `superseded_by`, so the check is here.
+    """
+    conn = connect(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT status FROM knowledge WHERE id = ?", (survivor_id,)).fetchone()
+        if row is not None and row["status"] == "archived":
+            raise ValueError(
+                f"Survivor {survivor_id} is archived; retire into a live entry "
+                f"(`techne knowledge unarchive {survivor_id}` first if it should be live)"
+            )
+        result = _retire_in_conn(conn, old_id, survivor_id)
+        conn.commit()
+        return result
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+# A replacement declared in prose (techne#887): the OPENING of an entry names the
+# entry it replaces. Strict on purpose. The 2026-09-12 sweep on the live store found
+# a bare LIKE '%supersede%' matched 266 rows, most of them entries discussing
+# supersession, "SHARPENS #N", or "supersedes my recommendation". So this needs the
+# verb, then a MARKED id straight after it (`#N`, `techne#N`, `knowledge #N`, or the
+# knowledge sigil), inside the first 400 characters. A bare number is not enough:
+# "corrects 2 errors" would name entry 2. "superseded by #N" is the opposite
+# direction and does not match (`supersedes?` needs `:` or whitespace next), and
+# other repos' refs (`cabal#12`) do not match either.
+_REF = r"(?:(?:(?:techne|knowledge)\s*)?#|\N{BRAIN})\s*(\d{1,9})\b"
+_DECLARATION = re.compile(
+    r"\b(?:supersedes?|corrects|correction\s+(?:to|of))\s*:?\s+" + _REF,
+    re.IGNORECASE,
+)
+# "SUPERSEDES techne#882 (old runner), #887 (its hardening) and #995": the
+# list form knowledge #1155 used. A continuation must be marked too.
+_DECLARATION_MORE = re.compile(r"\s*(?:\([^)]*\)\s*)?(?:,|\band\b|&)\s*" + _REF, re.IGNORECASE)
+DECLARATION_WINDOW = 400
+
+
+def declared_targets(content: str) -> list[int]:
+    """Knowledge ids that *content* says, in its opening, it replaces."""
+    head = (content or "")[:DECLARATION_WINDOW]
+    targets: list[int] = []
+    for m in _DECLARATION.finditer(head):
+        targets.append(int(m.group(1)))
+        pos = m.end()
+        while more := _DECLARATION_MORE.match(head, pos):
+            targets.append(int(more.group(1)))
+            pos = more.end()
+    return list(dict.fromkeys(targets))
+
+
+def find_declared_supersessions(db_path: Path) -> list[dict]:
+    """Prose-declared supersessions that were never written to `superseded_by`
+    (techne#887). REPORT ONLY: nothing here writes.
+
+    A pair is reported when a live entry (the declarer) names, in its opening, an
+    OLDER entry that is still live. Ids that are missing, already superseded,
+    newer than the declarer, or the declarer itself are skipped: each of those
+    needs a person, not a rule. When two entries claim the same target the newest
+    claimant wins, since the latest declaration is the one to keep.
+
+    Returned in ascending target order, which is the order to apply them in:
+    `_retire_in_conn` needs a LIVE survivor, and in a chain a->b->c retiring b
+    first would leave a nothing live to retire into.
+
+    Advisory, never a verdict: `techne#N` in prose can name a GitHub issue rather
+    than a knowledge row, and that ambiguity is not decidable from the text.
+    """
+    conn = connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT id, substr(content, 1, ?) AS head, superseded_by, status FROM knowledge",
+            (DECLARATION_WINDOW,),
+        ).fetchall()
+    finally:
+        conn.close()
+    live = {
+        r["id"]: r["head"] for r in rows if r["superseded_by"] is None and r["status"] != "archived"
+    }
+    best: dict[int, int] = {}
+    for declarer, head in live.items():
+        for target in declared_targets(head):
+            if target >= declarer or target not in live:
+                continue
+            if target not in best or declarer > best[target]:
+                best[target] = declarer
+    return [
+        {"target": t, "declarer": d, "target_preview": (live[t] or "")[:80].replace("\n", " ")}
+        for t, d in sorted(best.items())
+    ]
 
 
 def merge_into(

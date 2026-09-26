@@ -124,6 +124,17 @@ running," not just "is it configured" — a hook can be enabled in
 stray edit, an interrupted `init`), and liveness catches that the way a
 config read cannot.
 
+**Exit code.** `techne doctor` exits 0 when every subsystem is live or
+deliberately dormant (off by config), and 1 when any is stale, unobservable,
+broken or could not be checked, or when storage has duplicate-row debt. On
+Claude Code with techne's hooks installed, hook registration drifting from
+config also exits 1; elsewhere drift is reported but not counted. Dormant is
+healthy; unobservable is a failure by decision (techne#468: a rail that cannot
+report is unfinished). So a non-zero exit on a working install names a real
+finding, and `techne doctor` can gate CI as-is (techne#877). Its advisory
+sections, such as supersessions declared only in prose, never change the exit
+code.
+
 ---
 
 ## The recall rule, and its limit

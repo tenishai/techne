@@ -7,6 +7,20 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Added
 
+- `techne knowledge supersede OLD_ID CONTENT` writes a new revision and retires the
+  old entry; `techne knowledge supersede OLD_ID --by ID` retires it into an entry that
+  already exists, without writing a row (#877, #887). Until now the only route was the
+  Python API, so an agent that spotted a stale entry could only write "SUPERSEDES #N"
+  in prose, which recall never reads. Both forms keep the old row and mark its
+  dependents uncertain.
+- `techne_store` takes `supersedes: [ids]`: the named entries are retired into the new
+  one in the same write, and a bad id stores nothing (#887).
+- `techne doctor` lists live entries whose opening declares ("SUPERSEDES #N",
+  "CORRECTS #N", "CORRECTION to #N") that they replace an older live entry, each with
+  the `supersede --by` command that records it (#887). Advisory: a `#N` in prose can
+  name an issue rather than a knowledge row, so it does not change the exit code, and
+  doctor writes nothing.
+
 - `techne init` and `techne skills install` now install `investigate-url` and
   `survey-field` as thin stub skills (`~/.claude/skills/<name>/SKILL.md`, #1040).
   Each stub holds only an injected `techne guide investigating|surveying` line, so
@@ -49,6 +63,15 @@ All notable changes to techne are documented here. Format loosely follows
   timeout block rather than inside it.
 
 ### Fixed
+
+- `techne knowledge add` and `knowledge list` take their `--type` choices from core's
+  valid types (#877). They offered `pattern`, which core always refuses (patterns live
+  in the Architect store), and omitted `document` and `document_card`, which it
+  accepts. A refusal from core now prints as a CLI error, not a traceback.
+- `techne architect tag ID --status superseded` without `--superseded-by` is refused
+  (#880). It wrote a row the summary counted as superseded and `topic_show` listed
+  under no parent. `--superseded-by` sets the status and is now the only way to it;
+  `--status active` together with `--superseded-by` is refused as contradictory.
 
 - `techne_reflect_emit` results fit under Claude Code's MCP result cap (#993). The size
   trim summed compact JSON per item while the server sends the whole result as indent=2
