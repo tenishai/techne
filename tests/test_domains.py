@@ -754,3 +754,22 @@ def test_codex_blast_radius_says_which_index_it_answered_from(config, tmp_path, 
 
     none = blast({"symbol_id": "hub"}, config)
     assert none["nodes"] == [] and none["domain"] == "codex" and none["binding"] == "absent"
+
+
+def test_archivist_search_reports_the_346_misconfiguration_instead_of_raising(config):
+    """#727 finding 3. Pointing `archivist_db_path` at the personal db makes
+    `_resolve_archivist_path` raise. `techne bindings` already turned that into an
+    `unavailable` row carrying the message; the domain call raised instead, so the
+    other place an operator meets the misconfiguration answered with a traceback.
+    Both now go through one conversion (`bindings._resolve_or_fault`)."""
+    from techne.core.bindings import all_bindings
+
+    config.archivist_db_path = str(config.db_path)
+
+    r = SEARCH["archivist"](config, "anything")
+
+    assert r["state"] == "unavailable", r
+    assert r["results"] == []
+    assert "techne#346" in r["notice"], r
+    row = next(b for b in all_bindings(config) if b.domain == "archivist")
+    assert r["notice"] == row.detail, "the domain call and `techne bindings` disagree"

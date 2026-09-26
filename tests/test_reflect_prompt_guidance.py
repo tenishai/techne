@@ -166,3 +166,38 @@ def test_an_operator_override_replaces_the_guidance_entirely(tmp_path, monkeypat
         "an override REPLACES the template — if this ever fails, overrides changed "
         "to extend, and the guidance story for override users changes with it"
     )
+
+
+def test_high_confidence_requires_verification_in_every_authoring_surface():
+    """techne#790: verify before writing `high`. The rendered observations are a
+    truncated index, and the only errors caught in the 2026-08 drain were caught by
+    the author checking the source — none by the review queue. The rule has to be
+    where the author is: the emit prompt (headless rail and resident agent alike),
+    the promote skill, and the guide's copy-into-your-agent block."""
+    from pathlib import Path
+
+    from techne.core.prompts import render_prompt
+
+    rendered = render_prompt(
+        Config(),
+        "reflect",
+        PROMPT_TEMPLATE,
+        label="l",
+        summary="s",
+        observations="o",
+        existing="(none)",
+        knowledge_types="fact",
+        max_items=5,
+    )
+    assert 'VERIFY BEFORE YOU WRITE "high"' in rendered
+    assert "an index, not\nevidence" in rendered
+    assert 'mark it "medium"' in rendered
+
+    root = Path(__file__).resolve().parent.parent
+    skill = (root / "techne" / "skills" / "techne-promote.md").read_text()
+    assert "**Verified before `high`**" in skill
+    # The skill says to run these, so its tool allowlist must let it.
+    for tool in ("Bash(gh issue view:*)", "Bash(gh pr view:*)", "Bash(git log:*)"):
+        assert tool in skill.split("---")[1], f"allowed-tools lacks {tool}"
+    guide = (root / "docs" / "reflect-guide.md").read_text()
+    assert "**Verify before you write `high`.**" in guide

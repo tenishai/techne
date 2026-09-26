@@ -29,7 +29,7 @@ Two retrieval shapes:
 - **`recall`** — topic-scoped context for *right now* (incl. the identity layer).
 - **`search`** — query across sessions / threads / knowledge.
 
-**Why it's different:** git-anchored memories carry a **freshness grade** — a fact tied to a file that has since changed/moved/been deleted is flagged `modified/moved/deleted/unknown`, so the agent spends verification effort only where the ground actually shifted. Memories whose basis was superseded are surfaced as **uncertain** and down-ranked instead of asserted as fact.
+**Why it's different:** git-anchored memories carry a **freshness grade** — a fact tied to a file that has since changed/moved/been deleted is flagged `modified/moved/deleted/unknown` (and `diverged` when the file is intact but the commit it was pinned at left HEAD's history), so the agent spends verification effort only where the ground actually shifted. Memories whose basis was superseded are surfaced as **uncertain** and down-ranked instead of asserted as fact.
 
 ```bash
 pipx install --force "techne[vectors] @ git+https://github.com/tenishai/techne.git@v0.17.0"   # semantic recall (FTS works without it)
