@@ -118,12 +118,16 @@ def handle_request(request: dict, config: Config) -> dict:
     req_id = request.get("id")
 
     if method == "initialize":
+        from techne.core.health import build_identity
+
         return _response(
             req_id,
             {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "techne", "version": __version__},
+                # The same build identity as `techne --version` (techne#982), not
+                # the bare release version: this is the string the client shows.
+                "serverInfo": {"name": "techne", "version": build_identity(__version__)},
                 "instructions": SERVER_INSTRUCTIONS,
             },
         )

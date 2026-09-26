@@ -90,6 +90,19 @@ __all__ = [
 ]
 
 
+def _is_installed_path(package_dir) -> bool:
+    """THE build rule: is this RESOLVED package directory an installed build?
+
+    One function, because three surfaces classify the build — this module's
+    version resolution, ``core/health.py::_revision_info`` (banner and
+    ``techne_status``) and ``--version`` / the MCP handshake through
+    ``core/health.py::build_identity`` — and a docstring asking them to agree is
+    what let ``--version`` skip ``.resolve()`` and classify a symlinked tree the
+    other way (techne#982). Callers pass a RESOLVED path; this only tests it.
+    """
+    return "site-packages" in str(package_dir)
+
+
 def _resolve_version() -> str:
     """Resolve the version of the code that is actually IMPORTED.
 
@@ -166,7 +179,7 @@ def _resolve_version() -> str:
     except Exception:  # no usable __file__: frozen/builtin, or not a str
         package_dir = None
 
-    if package_dir is not None and "site-packages" not in str(package_dir):
+    if package_dir is not None and not _is_installed_path(package_dir):
         # A CHECKOUT. pyproject is the only trustworthy source here, and if it
         # cannot be read we say so rather than reaching for the dist-info.
         #

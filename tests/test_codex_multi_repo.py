@@ -252,6 +252,38 @@ def test_migrate_legacy_without_repo_root_left_in_place(tmp_path):
     assert legacy.exists()
 
 
+def test_migrate_legacy_empty_husk_is_removed_quietly(tmp_path, caplog):
+    """techne#875: a zero-table legacy db warned on every process, forever."""
+    import logging
+    import sqlite3
+
+    cfg = _config(tmp_path)
+    legacy = tmp_path / "codex.db"
+    sqlite3.connect(legacy).execute("PRAGMA user_version = 0").connection.close()
+    assert legacy.exists()
+
+    with caplog.at_level(logging.DEBUG, logger="techne.core.codex"):
+        assert migrate_legacy_codex_db(cfg) is None
+    assert not legacy.exists(), "an empty husk carries no data and must not recur"
+    assert not (tmp_path / "codex.db-wal").exists()
+    assert not (tmp_path / "codex.db-shm").exists()
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_migrate_legacy_with_tables_but_no_repo_root_still_warns(tmp_path, caplog):
+    """The anomaly worth a warning is a db that HAS content and no repo_root."""
+    import logging
+
+    cfg = _config(tmp_path)
+    from techne.core.codex import codex_store
+
+    legacy = codex_store(cfg).db_path
+    with caplog.at_level(logging.WARNING, logger="techne.core.codex"):
+        assert migrate_legacy_codex_db(cfg) is None
+    assert legacy.exists()
+    assert any("has no repo_root" in r.getMessage() for r in caplog.records)
+
+
 # ---------------------------------------------------------------------------
 # Shared helper promotion
 # ---------------------------------------------------------------------------

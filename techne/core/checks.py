@@ -797,7 +797,7 @@ def check_mcp_registration(config) -> CheckResult | None:
 
 @register_check
 @expensive
-def check_runtime_revision(config) -> CheckResult | None:
+def check_runtime_revision(config) -> CheckResult | list[CheckResult]:
     """WHAT CODE IS ACTUALLY RUNNING? (techne#473)
 
     Every other check here asks whether a subsystem ran. This one asks which
@@ -828,13 +828,46 @@ def check_runtime_revision(config) -> CheckResult | None:
     against a 5s hook budget, on a fail-open path that drops the whole banner on
     overrun — ran in the hot path the comment said they avoided. Caught in
     #487 review. The marker is now the mechanism; this paragraph only describes it.
+
+    IT ALSO REPORTS THE DEPLOYMENT WHEN THAT IS A DIFFERENT CHECKOUT (techne#690).
+    Everything above answers "what am I running?" about the checkout `techne` was
+    imported from. `techne doctor` is almost always run from a repo working copy,
+    where that answer is a DORMANT "working checkout, not a deployment" — so on
+    2026-08-19 the deployed runtime sat 20 commits behind main, re-deriving rows a
+    migration had just removed, while every doctor run anyone did stayed quiet.
+    The one place the check would have fired, `cd ~/.techne/runtime && techne
+    doctor`, is the one place nobody runs it. So when `<techne_home>/runtime` is a
+    checkout and is not the one we imported, it is evaluated too, under its own
+    name (`runtime:deployed`), with the same rules — two questions, two rows. The
+    same deployment `_deployment_checkout` already prefers for `runtime:loaded`.
     """
-    import subprocess
     from pathlib import Path
 
     import techne
+    from techne.config import techne_home
 
     runtime = Path(techne.__file__).resolve().parent.parent
+    own = _runtime_revision_result(runtime, "runtime:revision")
+
+    deployed = techne_home() / "runtime"
+    try:
+        separate = (deployed / ".git").exists() and deployed.resolve() != runtime
+    except OSError:
+        # An unreadable techne_home is not a deployment we can describe; the
+        # imported checkout's own answer still stands.
+        separate = False
+    if not separate:
+        return own
+
+    from dataclasses import replace
+
+    dep = _runtime_revision_result(deployed, "runtime:deployed")
+    return [own, replace(dep, detail=f"deployment at {deployed}: {dep.detail}")]
+
+
+def _runtime_revision_result(runtime: Path, name: str) -> CheckResult:
+    """The body of `check_runtime_revision`, for ONE checkout (see its docstring)."""
+    import subprocess
 
     def _git(*args) -> str | None:
         try:
@@ -853,7 +886,7 @@ def check_runtime_revision(config) -> CheckResult | None:
         # A real (non-editable) install has no revision to compare, and that is a
         # legitimate, healthy state — not something to report red.
         return CheckResult(
-            name="runtime:revision",
+            name=name,
             subsystem="runtime",
             kind=Kind.FRESHNESS,
             verdict=Verdict.DORMANT,
@@ -864,7 +897,7 @@ def check_runtime_revision(config) -> CheckResult | None:
     upstream = _git("rev-parse", "--short", "origin/main")
     if upstream is None:
         return CheckResult(
-            name="runtime:revision",
+            name=name,
             subsystem="runtime",
             kind=Kind.FRESHNESS,
             verdict=Verdict.UNKNOWN,
@@ -928,7 +961,7 @@ def check_runtime_revision(config) -> CheckResult | None:
         # `upstream is None` branch that handles the identical situation
         # correctly. Reached in practice via the 5s timeout (#487 review).
         return CheckResult(
-            name="runtime:revision",
+            name=name,
             subsystem="runtime",
             kind=Kind.FRESHNESS,
             verdict=Verdict.UNKNOWN,
@@ -982,7 +1015,7 @@ def check_runtime_revision(config) -> CheckResult | None:
         # checkout" — which at least looked malformed rather than authoritative,
         # but "looks obviously broken" is not the standard this module holds.
         return CheckResult(
-            name="runtime:revision",
+            name=name,
             subsystem="runtime",
             kind=Kind.FRESHNESS,
             verdict=Verdict.UNKNOWN,
@@ -996,7 +1029,7 @@ def check_runtime_revision(config) -> CheckResult | None:
         else:
             distance = f"level with origin/main ({upstream})"
         return CheckResult(
-            name="runtime:revision",
+            name=name,
             subsystem="runtime",
             kind=Kind.FRESHNESS,
             verdict=Verdict.DORMANT,
@@ -1011,7 +1044,7 @@ def check_runtime_revision(config) -> CheckResult | None:
 
     if behind:
         return CheckResult(
-            name="runtime:revision",
+            name=name,
             subsystem="runtime",
             kind=Kind.FRESHNESS,
             verdict=Verdict.STALE,
@@ -1032,7 +1065,7 @@ def check_runtime_revision(config) -> CheckResult | None:
         else f"level with the local origin/main ({upstream})"
     )
     return CheckResult(
-        name="runtime:revision",
+        name=name,
         subsystem="runtime",
         kind=Kind.FRESHNESS,
         verdict=Verdict.LIVE,
@@ -2650,6 +2683,14 @@ def check_config_trust(config) -> CheckResult:
     )
 
 
+#: How young an unembedded observation/thread row may be before it counts
+#: against `vectors:coverage` (techne#704). The SessionStart chain runs the
+#: backfill just before the banner, so anything older than this at banner time
+#: is a row that backfill missed or never ran for; anything younger is the
+#: capture tail of the sessions that are live right now.
+_VECTOR_TAIL_GRACE = timedelta(minutes=15)
+
+
 @register_check
 def check_vector_coverage(config) -> CheckResult:
     """Are knowledge rows actually embedded?
@@ -2859,27 +2900,64 @@ def check_vector_coverage(config) -> CheckResult:
     # threads rotate their rowid, so neither carries `vec_stale` or supersession —
     # "present or not" IS the whole question for them, and inventing a richer
     # predicate here would be a second definition of coverage.
+    #
+    # A GRACE WINDOW FOR THE NEWEST ROWS (techne#704). `post_tool_use` captures
+    # every Bash call as an observation and only `backfill_vectors` embeds one, so
+    # the remedy's own invocation, the doctor run that re-checks it and the query
+    # that inspects the result each land an unembedded row. The check could not be
+    # relied on to read clean during a live session, and a check its own remedy
+    # cannot clear trains the reader to skip the banner. Rows younger than
+    # `_VECTOR_TAIL_GRACE` are therefore PENDING: counted and named in the detail,
+    # left out of the verdict. Age, not a backfill watermark, because a watermark
+    # freezes when the backfill stops running (the #814 incident: the SessionStart
+    # segment was deleted by every `techne init`), and every row after it would
+    # then read as pending forever — a silent green. Age keeps that backlog loud:
+    # 883 observations behind is far outside any window.
+    #
+    # Threads too, keyed on `updated_at`: a summary re-save re-inserts the row, so
+    # the threads lane leaves a seconds-old tail exactly as observations do. A
+    # timestamp SQLite cannot parse yields NULL, which counts as a real gap.
     sibling_gaps: dict[str, int] = {}
+    sibling_pending: dict[str, int] = {}
     sibling_counts: dict[str, tuple[int, int]] = {}
+    grace = f"-{int(_VECTOR_TAIL_GRACE.total_seconds())} seconds"
     conn = connect(config.db_path)
     try:
-        for tbl, id_col in (("observations", "id"), ("threads", "rowid")):
+        for tbl, id_col, ts_col in (
+            ("observations", "id", "timestamp"),
+            ("threads", "rowid", "updated_at"),
+        ):
             try:
                 tot = conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
                 emb = conn.execute(
                     f"SELECT COUNT(*) FROM {tbl} "
                     f"WHERE {id_col} IN (SELECT rowid FROM {tbl}_vec_rowids)"
                 ).fetchone()[0]
+                pending = conn.execute(
+                    f"SELECT COUNT(*) FROM {tbl} "
+                    f"WHERE {id_col} NOT IN (SELECT rowid FROM {tbl}_vec_rowids) "
+                    f"AND julianday({ts_col}) > julianday('now', ?)",
+                    (grace,),
+                ).fetchone()[0]
             except Exception:  # noqa: BLE001 — that table's vec channel is absent
                 continue
             sibling_counts[tbl] = (emb, tot)
-            if tot - emb > 0:
-                sibling_gaps[tbl] = tot - emb
+            if tot - emb - pending > 0:
+                sibling_gaps[tbl] = tot - emb - pending
+            if pending:
+                sibling_pending[tbl] = pending
     finally:
         conn.close()
     if total:
         for tbl, gap in sibling_gaps.items():
             detail += f", {gap} {tbl} unembedded"
+    if sibling_pending:
+        minutes = int(_VECTOR_TAIL_GRACE.total_seconds() // 60)
+        detail += (
+            "; "
+            + ", ".join(f"{n} {tbl}" for tbl, n in sibling_pending.items())
+            + f" pending (under {minutes} min old — embedded at the next session start)"
+        )
     else:
         # With no knowledge, the siblings ARE the vector channel, so report their
         # coverage outright rather than only their gaps (techne#942).
@@ -2897,7 +2975,7 @@ def check_vector_coverage(config) -> CheckResult:
         evidence=(
             f"live knowledge={total}, embedded={embedded}, stale={stale}, "
             f"superseded={superseded}, superseded-but-embedded={orphans}, "
-            f"dangling={dangling}"
+            f"dangling={dangling}, unembedded-within-grace={sibling_pending or 0}"
         ),
         detail=detail,
         remedy=None if healthy else "techne vectors backfill",
