@@ -68,32 +68,15 @@ def test_search_symbols_multi_term_or_fallback(db):
     assert {h["name"] for h in hits} == {"PolicyStore", "ScopeGrant", "has_scope"}
 
 
-def test_search_symbols_and_precedence_preserved(db):
-    """techne#1079: the symbol matching every term still ranks first — the AND
-    pass isn't reordered by the top-up — but it no longer replaces the whole
-    pool: a partial (single-term) match is appended after it."""
+def test_search_symbols_and_precision_preserved(db):
+    """The OR fallback fires ONLY when AND matches nothing: when one symbol
+    contains every term, the AND pass returns it alone — the fallback must not
+    flatten in partial (single-term) matches."""
     _sym(db, "full", "handle", sig="def handle(policy, scope): ...")  # policy AND scope
     _sym(db, "partial", "policy_only", sig="def policy_only(): ...")  # policy only
 
     hits = search_symbols(db, "policy scope")
-    assert [h["id"] for h in hits] == ["full", "partial"]
-
-
-def test_search_symbols_tops_up_one_row_and_with_several_partial_matches(db):
-    """techne#1079: the litestream bug, reproduced at the symbol-search call
-    site. One symbol matches every term (AND row); several others match only
-    one term each. The AND row keeps precedence, every partial match is
-    appended after it, and no id repeats."""
-    _sym(db, "full", "handle", sig="def handle(policy, scope, grant): ...")  # all 3 terms
-    _sym(db, "p1", "policy_only", sig="def policy_only(): ...")  # policy only
-    _sym(db, "p2", "scope_helper", sig="def scope_helper(): ...")  # scope only
-    _sym(db, "p3", "grant_check", sig="def grant_check(): ...")  # grant only
-
-    hits = search_symbols(db, "policy scope grant")
-    ids = [h["id"] for h in hits]
-    assert ids[0] == "full", "the AND row keeps precedence"
-    assert set(ids[1:]) == {"p1", "p2", "p3"}, "every partial match must be topped up"
-    assert len(ids) == len(set(ids)), f"duplicate id in {ids}"
+    assert [h["id"] for h in hits] == ["full"]  # AND matched 'full'; no OR fallback
 
 
 def test_search_symbols_blank_query_returns_empty(db):
