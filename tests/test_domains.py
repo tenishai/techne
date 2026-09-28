@@ -773,3 +773,33 @@ def test_archivist_search_reports_the_346_misconfiguration_instead_of_raising(co
     assert "techne#346" in r["notice"], r
     row = next(b for b in all_bindings(config) if b.domain == "archivist")
     assert r["notice"] == row.detail, "the domain call and `techne bindings` disagree"
+
+
+@pytest.mark.parametrize("bound", ["local", "store"])
+def test_the_archivist_passes_the_identifier_settings_through(config, tmp_path, monkeypatch, bound):
+    """techne#1082 r2: `archivist_search` has two `search()` calls, local and bound
+    store, and each must carry `search.identifier_head_slots` and
+    `search.identifier_rare_fraction` from config, or the knobs go inert on that
+    surface while the CLI, MCP and hook honour them."""
+    from techne.core.database import init_db
+
+    if bound == "store":
+        team = tmp_path / "team.db"
+        init_db(team)
+        config.archivist_db_path = str(team)
+    config.search.identifier_head_slots = 0
+    config.search.identifier_rare_fraction = 0.123
+
+    seen: list[dict] = []
+
+    def _spy(_db, _query, **kw):
+        seen.append(kw)
+        return []
+
+    monkeypatch.setattr("techne.core.search.search", _spy)
+    r = SEARCH["archivist"](config, "b2dcdd2")
+
+    assert r["binding"] == bound
+    assert len(seen) == 1
+    assert seen[0]["identifier_head_slots"] == 0
+    assert seen[0]["identifier_rare_fraction"] == 0.123
