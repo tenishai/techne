@@ -124,12 +124,25 @@ def test_a_common_identifier_does_not_trigger_and_a_rare_one_does(db):
 
 def test_the_threshold_is_a_fraction_of_the_scope_with_a_floor(db):
     """Rare is fewer than max(IDENTIFIER_MIN_DF, ceil(rows * fraction)) matches."""
-    _obs(db, [f"ran reflect-drain pass {i}" for i in range(IDENTIFIER_MIN_DF)])
+    _obs(db, [f"merged b2dcdd2 pass {i}" for i in range(IDENTIFIER_MIN_DF)])
     _obs(db, [f"filler row {i}" for i in range(95)])  # 100 rows in scope
 
-    assert _rare(db, "reflect-drain", fraction=0.01)[0] == [], "the floor (5) holds"
-    assert _rare(db, "reflect-drain", fraction=0.06)[0] == ["reflect-drain"], "6 > 5"
-    assert _rare(db, "reflect-drain", fraction=0.05)[0] == [], "ceil(100 * 0.05) = 5"
+    assert _rare(db, "b2dcdd2", fraction=0.01)[0] == [], "the floor (5) holds"
+    assert _rare(db, "b2dcdd2", fraction=0.06)[0] == ["b2dcdd2"], "6 > 5"
+    assert _rare(db, "b2dcdd2", fraction=0.05)[0] == [], "ceil(100 * 0.05) = 5"
+
+
+def test_a_word_like_term_must_clear_a_stricter_bar(db):
+    """No digit, no underscore: `well-known` has the shape of `reflect-drain`, so
+    rarity has to do more. The bar is the threshold // IDENTIFIER_WORDLIKE_DIVISOR."""
+    _obs(db, [f"a well-known fix {i}" for i in range(5)])
+    _obs(db, [f"b2dcdd2 merged {i}" for i in range(5)])
+    _obs(db, [f"filler row {i}" for i in range(90)])  # 100 rows in scope
+
+    # threshold ceil(100 * 0.08) = 8: b2dcdd2 (5) is rare, well-known (5) is not (bar 4)
+    assert _rare(db, "well-known b2dcdd2", fraction=0.08)[0] == ["b2dcdd2"]
+    # threshold 12, word-like bar 6: both rare
+    assert _rare(db, "well-known b2dcdd2", fraction=0.12)[0] == ["well-known", "b2dcdd2"]
 
 
 def test_rarity_is_counted_in_the_searched_scope(db):
@@ -177,9 +190,10 @@ def test_the_pool_prefers_the_fts_pages_order(db):
             "reflect-drain --go ran after the nightly queue had filled past its usual depth",
         ],
     )
+    _obs(db, [f"filler row {i}" for i in range(38)])  # 40 rows: threshold 8, word bar 4
     fts_page = [{"source_table": "observation", "id": b, "content": "x", "rank": -1.0}]
 
-    pool = _identifier_pool(db, "reflect-drain --go", "all", 2, 0.002, fts_results=fts_page)
+    pool = _identifier_pool(db, "reflect-drain --go", "all", 2, 0.2, fts_results=fts_page)
 
     assert [r["id"] for r in pool][0] == b
     assert pool[1]["id"] == a, "precondition: BM25 alone puts the echo first"
@@ -247,16 +261,17 @@ def test_two_exact_rows_both_fit(db, monkeypatch):
     assert len(head) == IDENTIFIER_HEAD_SLOTS_DEFAULT
 
 
-def test_rows_fts_did_not_return_are_never_seated(db, monkeypatch):
-    """Candidates come from the FTS page, which already dropped deleted, superseded,
-    archived and uncertain rows. A rare key outside it must not reach the page."""
-    fts = [_row("observations", 501)]
-    _patch(monkeypatch, _full_vec(), fts, rare={("observations", 999)})
+def test_the_pool_never_offers_a_superseded_row(db):
+    """The scoped query goes through `_fts_match_rows`, so a superseded revision
+    that still holds the identifier is filtered like on every FTS read."""
+    from techne.core.knowledge import store, supersede
 
-    page = search(db, "emit_max_chars", table="all", limit=10)
+    old = store(db, "Merged as b2dcdd2 on Monday.", type="fact", source="test")
+    new = supersede(db, old, "Merged as b2dcdd2 on Tuesday.", source="test")
 
-    assert ("observations", 999) not in _keys(page)
-    assert not any(r.get("reserved_slot") == "identifier_head" for r in page)
+    pool = _identifier_pool(db, "b2dcdd2", "knowledge", 2, 0.002, fts_results=[])
+
+    assert [r["id"] for r in pool] == [new]
 
 
 def test_a_row_the_vector_channel_ranked_low_moves_up_without_duplicating(db, monkeypatch):
@@ -345,6 +360,22 @@ def test_a_row_already_at_its_index_does_not_shrink_the_curated_budget(db, monke
 
     assert json.dumps(page, sort_keys=True) == json.dumps(baseline, sort_keys=True)
     assert [r.get("reserved_slot") for r in page].count("curated_head") == 3
+
+
+def test_a_rare_knowledge_row_counts_toward_the_curated_quota(db, monkeypatch):
+    """A knowledge row the identifier head seats is a curated row on the page, so
+    the #946 reservation promotes one fewer (Prudence, #1082: the `in_head` count)."""
+    vec = _full_vec() + [_row("knowledge", 90 + j, 0.90 + j / 100) for j in range(4)]
+    fts = [_row("knowledge", 500), _row("observations", 501)]
+    _patch(monkeypatch, vec, fts, rare={("knowledge", 500)})
+
+    page = search(db, "emit_max_chars", table="all", limit=10)
+
+    assert _keys(page)[0] == ("knowledge", 500)
+    slots = [r.get("reserved_slot") for r in page]
+    assert slots.count("curated_head") == 1, "quota 2 on the 8-slot head, one already held"
+    assert [r["source_table"] for r in page].count("knowledge") == 2
+    assert len(page) == 10
 
 
 def test_a_page_with_no_other_lexical_row_is_refilled_from_the_displaced_vec_row(db, monkeypatch):

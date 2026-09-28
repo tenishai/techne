@@ -162,11 +162,27 @@ def archivist_search(config, query: str, limit: int = 20) -> dict:
     if report.binding == ARCHIVIST_ABSENT or not report.ok:
         return _envelope("archivist", config, [], report=report)
     if report.binding == ARCHIVIST_LOCAL:
-        rows = search(config.db_path, query, table="knowledge", limit=limit, include_archived=False)
+        rows = search(
+            config.db_path,
+            query,
+            table="knowledge",
+            limit=limit,
+            include_archived=False,
+            identifier_head_slots=config.search.identifier_head_slots,
+            identifier_rare_fraction=config.search.identifier_rare_fraction,
+        )
         return _envelope("archivist", config, rows, report=report)
     target = report.target
     rows = (
-        search(target, query, table="knowledge", limit=limit, include_archived=False)
+        search(
+            target,
+            query,
+            table="knowledge",
+            limit=limit,
+            include_archived=False,
+            identifier_head_slots=config.search.identifier_head_slots,
+            identifier_rare_fraction=config.search.identifier_rare_fraction,
+        )
         if target and target.is_file()
         else []
     )

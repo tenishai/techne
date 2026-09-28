@@ -1359,15 +1359,9 @@ def test_the_rail_drops_the_reserved_lexical_row(home, monkeypatch, capsys):
     assert [i for i, r in enumerate(full) if r["id"] == lex_id] == [page - 1]
 
 
-def test_the_rail_delivers_a_rare_identifier_row(home, monkeypatch, capsys):
-    """techne#1078 inverts the pin above for identifier-shaped queries.
-
-    Same fixture: a full vec channel of `k * _RESEND_OVERFETCH` rows and one row
-    only FTS matched. The difference is the query, `XYZZY-827`, a rare identifier:
-    the identifier head seats that row at index 0, inside the k rows the rail keeps.
-    """
-    _write_config(home, per_turn_recall=True)
-
+def _rail_identifier_fixture(monkeypatch):
+    """A full vec channel of `k * _RESEND_OVERFETCH` rows plus one row only FTS
+    matched, carrying the rare identifier `XYZZY-827`. Returns (page, lex_id)."""
     from techne.config import Config
 
     k = Config.load().hooks.per_turn_recall_limit
@@ -1398,16 +1392,47 @@ def test_the_rail_delivers_a_rare_identifier_row(home, monkeypatch, capsys):
     fake_fts = [dict(r, rank=-1.0) for r in _rows([lex_id] + vec_ids)]
     monkeypatch.setattr("techne.core.search.search_fts", lambda *a, **kw: fake_fts)
     monkeypatch.setattr("techne.core.search.search_vec", lambda *a, **kw: fake_vec)
+    return page, lex_id
+
+
+def test_the_rail_delivers_a_rare_identifier_row(home, monkeypatch, capsys):
+    """techne#1078 inverts the pin above for identifier-shaped queries.
+
+    Same shape of fixture. The difference is the query, `XYZZY-827`, a rare
+    identifier: the identifier head seats that row at index 0, inside the k rows
+    the rail keeps.
+    """
+    _write_config(home, per_turn_recall=True)
+    page, lex_id = _rail_identifier_fixture(monkeypatch)
 
     out = _run(monkeypatch, capsys, {"prompt": "XYZZY-827", "session_id": "rail-1"})
     ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
 
     assert f"⟦techne#{lex_id}⟧" in ctx, "the rare identifier row did not reach the session"
+    from techne.config import Config
     from techne.core.search import search
 
     full = search(Config.load().db_path, "XYZZY-827", table="knowledge", limit=page)
     assert full[0]["id"] == lex_id
     assert full[0]["reserved_slot"] == "identifier_head"
+
+
+def test_the_configured_identifier_slots_reach_the_rail(home, monkeypatch, capsys):
+    """END-TO-END: `search.identifier_head_slots: 0` in config.yaml turns the head
+    off ON THE RAIL (Prudence, #1082). The first cut wired the knob into the CLI
+    and MCP call sites and not the hook, so the rail kept seating identifier rows
+    whatever the operator set. Same fixture as the test above; only config differs."""
+    import yaml
+
+    (home / "config.yaml").write_text(
+        yaml.safe_dump({"hooks": {"per_turn_recall": True}, "search": {"identifier_head_slots": 0}})
+    )
+    _page, lex_id = _rail_identifier_fixture(monkeypatch)
+
+    out = _run(monkeypatch, capsys, {"prompt": "XYZZY-827", "session_id": "rail-1"})
+    ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+
+    assert f"⟦techne#{lex_id}⟧" not in ctx, "the rail ignored identifier_head_slots: 0"
 
 
 def test_the_configured_cap_reaches_the_rail(home, monkeypatch, capsys):

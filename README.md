@@ -629,11 +629,14 @@ search:
                               #   `reflect-drain`. Vec-first used to order those exact rows
                               #   by cosine distance, anywhere from rank 2 to off the page.
                               #   Displaces head rows like curated_head_slots; 0 restores
-                              #   the previous page. Plain-English queries are unaffected.
+                              #   the previous page. A query with no RARE identifier-shaped
+                              #   token is unaffected (hyphenated words and dates can be
+                              #   identifier-shaped; rarity keeps most of them out).
   identifier_rare_fraction: 0.002  # a token is "rare" when fewer than this fraction of the
                               #   searched tables' rows match it (floor 5): ~127 rows at
                               #   table="all" on a 63k-row store, so `techne.db` (~2,900
-                              #   rows) never triggers the head
+                              #   rows) never triggers the head. Word-like terms (no digit
+                              #   or underscore: `well-known`, `reflect-drain`) need half that
 
 hooks:
   post_tool_use: true         # capture tool use as observations

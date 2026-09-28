@@ -1316,8 +1316,14 @@ def _is_identifier_shaped(term: str) -> bool:
     Shapes (techne#1078): an underscore, letters mixed with digits (which covers
     hex shas such as `b2dcdd2`), a leading `--flag`, camelCase, `.`/`-`/`/` joining
     two word characters (`techne.db`, `reflect-drain`), or an all-letter token of
-    `_IDENTIFIER_LONG_TOKEN`+ characters. Pure digits do not count: `100000` and
-    issue numbers are too common to mean an exact lookup on their own.
+    `_IDENTIFIER_LONG_TOKEN`+ characters. A bare run of digits does not count
+    (`100000`, an issue number). Decimals, dates and versions DO, through the joiner
+    rule (`0.5`, `2026-09-28`, `2.1.283`), as do ordinals (`3rd`).
+
+    THIS ACCEPTS ORDINARY ENGLISH TOO, and nothing here pretends otherwise
+    (Prudence, #1082): `well-known`, `and/or`, `e.g.`, `iPhone`, `straightforward`
+    all pass. Shape cannot tell `well-known` from `reflect-drain`. Rarity is the
+    gate, with a stricter bar for word-like terms (`IDENTIFIER_WORDLIKE_DIVISOR`).
     """
     t = term.strip(_IDENTIFIER_STRIP).rstrip(".")
     if len(t) < 3 or not any(c.isalnum() for c in t):
@@ -1336,6 +1342,21 @@ def _is_identifier_shaped(term: str) -> bool:
     if any(a.islower() and b.isupper() for a, b in zip(t, t[1:])):
         return True
     return t.isalpha() and len(t) >= _IDENTIFIER_LONG_TOKEN
+
+
+#: Word-like identifier terms (no digit, no underscore: `reflect-drain`, `well-known`,
+#: `commentblockgate`, `straightforward`) must clear a bar this many times stricter
+#: than the scope threshold (techne#1082 review). Shape cannot tell `reflect-drain`
+#: from `well-known`, so rarity has to do more of the work for them. Measured on
+#: the 2026-09-28 snapshot at `table="all"` (bar 63): reflect-drain 49 and
+#: commentblockgate 40 still trigger; well-known 96, self-contained 94, and/or 115,
+#: troubleshooting 77 no longer do; straightforward 53 still does.
+IDENTIFIER_WORDLIKE_DIVISOR = 2
+
+
+def _has_code_mark(term: str) -> bool:
+    """A digit or an underscore: marks that plain English rarely carries."""
+    return any(c.isdigit() or c == "_" for c in term)
 
 
 def _identifier_terms(query: str) -> list[str]:
@@ -1393,13 +1414,14 @@ def _rare_identifier_terms(
     rare: list[str] = []
     keys: set[tuple[str, object]] = set()
     for term in terms:
+        bar = max_df if _has_code_mark(term) else max(2, max_df // IDENTIFIER_WORDLIKE_DIVISOR)
         found: set[tuple[str, object]] = set()
         for _, tag, sql in scopes:
-            rows = conn.execute(sql, (f'"{term}"', max_df - len(found))).fetchall()
+            rows = conn.execute(sql, (f'"{term}"', bar - len(found))).fetchall()
             found.update((tag, r[0]) for r in rows)
-            if len(found) >= max_df:
+            if len(found) >= bar:
                 break
-        if 0 < len(found) < max_df:
+        if 0 < len(found) < bar:
             rare.append(term)
             keys |= found
     return rare, keys
@@ -1541,7 +1563,9 @@ def search(
     `emit_max_chars 100000 config.yaml techne` missed at limit 10 and 15. It is a
     displacement: the vec rows it pushes out refill a short page, the #827 floor
     keeps its slot, and the #946 reservation is sized on the head that is left.
-    Without a rare identifier token the page is byte-identical to the pre-#1078 one.
+    A query with no RARE identifier-shaped token gets a page byte-identical to the
+    pre-#1078 one. Ordinary words can be identifier-shaped (`well-known`, a date), so
+    that is narrower than "plain English is unaffected"; see `_is_identifier_shaped`.
 
     Returned rows include:
 
@@ -1658,8 +1682,9 @@ def search(
     # from rank 2 to off the page. Rows FTS matched on such a token take the first
     # slots, in FTS order. A DISPLACEMENT like #946: they come out of the head budget,
     # the vec rows they push out go to `overflow`, and the #827 tail floor is
-    # untouched. With no rare identifier token nothing below runs differently, so a
-    # plain-English page is byte-identical to the pre-#1078 one.
+    # untouched. A query with no RARE identifier-shaped token runs nothing below
+    # differently, so its page is byte-identical to the pre-#1078 one. That is not
+    # "every plain-English query": a rare hyphenated word or date qualifies.
     ident_head: list[dict] = []
     ident_cap = _identifier_head_reservation(
         head_budget,
@@ -1726,7 +1751,8 @@ def search(
             if len(bumped) >= n_moved:
                 break
             key = (r["source_table"], r["id"])
-            if key in seen or any(key == (b["source_table"], b["id"]) for b in bumped):
+            # `search_vec` returns distinct keys, so `seen` is the only check needed.
+            if key in seen:
                 continue
             bumped.append(_as_page_row(r))
 

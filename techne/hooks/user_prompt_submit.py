@@ -836,6 +836,10 @@ def recall_block(
                 # unmarked; a longer one arrives one char over and is cut and
                 # marked by the code that owns that decision.
                 row_chars=config.hooks.per_turn_recall_chars + 1,
+                # techne#1078: this knowledge-scope rail is what the rarity
+                # fraction is tuned for, so it must honour the operator's knobs.
+                identifier_head_slots=config.search.identifier_head_slots,
+                identifier_rare_fraction=config.search.identifier_rare_fraction,
             )
         )
         rows = _drop_pull_only(config.db_path, rows)

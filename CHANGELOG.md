@@ -113,8 +113,10 @@ All notable changes to techne are documented here. Format loosely follows
   the page at limit 10 and 15, and `reflect-drain`/`commentblockgate` sat at the last
   slot; all three are now rank 1-2. "Rare" is fewer matching rows than
   `search.identifier_rare_fraction` (0.2%) of the searched tables, so `techne.db` never
-  triggers. Plain-English queries return the
-  same page as before. Three identifier tasks join the eval gate.
+  triggers. A query with no rare identifier-shaped token returns the same page as
+  before; word-like terms (`well-known`, `reflect-drain`) must be twice as rare, since
+  shape cannot tell them apart. The per-turn hook honours both settings. Three
+  identifier tasks join the eval gate.
 - **An anchored memory whose commit left HEAD's history is flagged, not trusted** (#391).
   Recall's freshness check compared only file bytes, so after a rebase or force-push a
   byte-identical file read `unchanged`. It now also asks `git merge-base --is-ancestor`,
