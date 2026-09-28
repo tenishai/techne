@@ -532,20 +532,32 @@ def search_fts(
         # to stand in for the whole pool (techne#1079) — top up with the
         # OR-of-terms pass; BM25 still ranks rows matching more (and rarer) terms
         # highest, so precision degrades gracefully.
-        results = fts_with_or_fallback(
-            query,
-            lambda match: _fts_match_rows(
-                conn,
-                match,
-                table,
-                candidate_limit,
-                include_archived=include_archived,
-                include_uncertain=include_uncertain,
-                row_chars=row_chars,
-            ),
-            want=candidate_limit,
-            key=lambda r: (r["source_table"], r["id"]),
-        )
+        #
+        # table="all" MUST top up PER TABLE, not on the pooled total: each
+        # sub-table gets its own `LIMIT candidate_limit` query, so a single
+        # `len(results) < want` over the concatenated rows lets one table's
+        # overflow (e.g. observations filling candidate_limit on its own) mask
+        # another table's empty AND pass (e.g. knowledge finding nothing) and
+        # skip its top-up entirely. Run the helper once per sub-table instead.
+        sub_tables = ("threads", "observations", "knowledge") if table == "all" else (table,)
+        results = []
+        for sub_table in sub_tables:
+            results.extend(
+                fts_with_or_fallback(
+                    query,
+                    lambda match, st=sub_table: _fts_match_rows(
+                        conn,
+                        match,
+                        st,
+                        candidate_limit,
+                        include_archived=include_archived,
+                        include_uncertain=include_uncertain,
+                        row_chars=row_chars,
+                    ),
+                    want=candidate_limit,
+                    key=lambda r: (r["source_table"], r["id"]),
+                )
+            )
 
         # For multi-table ("all"), pre-sort by raw rank for a deterministic input
         # order; the reranker normalises BM25 PER TABLE (techne#56) and then
@@ -1105,16 +1117,21 @@ def _fts_floor(limit: int, n_fts_only: int) -> int:
     DUPLICATE KEY AT ALL, at any floor: ``fts_results`` comes only from
     ``search_fts``, which runs one query per table with each ``*_fts`` rowid
     joined 1:1 to its base table and each table's rows tagged with a distinct
-    ``source_table``, and the #70 OR-fallback REASSIGNS ``results`` rather than
-    appending, so the AND and OR passes cannot both contribute a row. Measured:
-    6 query shapes x 4 table scopes on a seeded store, including queries that
-    fall through to the OR pass — 0 duplicates in all 24. So this is
-    unreachable from today's producer, not merely inert at today's floor. It is
-    kept to keep ``search()`` correct if a producer ever CAN duplicate — a
-    second knowledge query, or an OR-fallback that unions instead of replacing
-    — which costs one set comprehension. (Under monkeypatch it does behave as
-    described: sizing reverted with the floor at 3 fails the dupe test with an
-    8-row page. That is a property of the test harness, not of the system.)
+    ``source_table``. Since techne#1079 the OR pass CAN append rows alongside
+    the AND pass (topping up a short AND pass instead of only replacing an
+    empty one), but ``fts_with_or_fallback`` dedups the appended OR rows
+    against the AND rows by key (``(source_table, id)`` for ``search_fts``)
+    before returning, so the guarantee — no duplicate key reaches this
+    function — still holds; it now rests on that dedup pass rather than on
+    AND/OR being mutually exclusive. Measured: 6 query shapes x 4 table scopes
+    on a seeded store, including queries that fall through to the OR pass — 0
+    duplicates in all 24. So this is unreachable from today's producer, not
+    merely inert at today's floor. It is kept to keep ``search()`` correct if
+    a producer ever CAN duplicate — a second knowledge query, or a dedup key
+    that collides across tables — which costs one set comprehension. (Under
+    monkeypatch it does behave as described: sizing reverted with the floor at
+    3 fails the dupe test with an 8-row page. That is a property of the test
+    harness, not of the system.)
 
     For the same reason ``min(n_fts_only, ...)`` below is forward-looking
     scaffolding, not an active constraint: at this floor it reduces to
@@ -1420,9 +1437,11 @@ def search(
     # Size the floor off DISTINCT keys. UNREACHABLE, NOT MERELY DORMANT (#829
     # r3/r4): no producer that can reach this function emits a duplicate key at
     # ANY floor — search_fts joins each *_fts rowid 1:1 to its base table, tags a
-    # distinct source_table per table, and the #70 OR-fallback REASSIGNS results
-    # rather than appending. Widening the floor does NOT make this live; only a
-    # new producer would. Kept so search() stays correct if one ever exists.
+    # distinct source_table per table, and since techne#1079 the OR pass can
+    # append rows alongside the AND pass but fts_with_or_fallback dedups the
+    # appended rows against the AND rows by key first, so no duplicate reaches
+    # here. Widening the floor does NOT make this live; only a new producer
+    # would. Kept so search() stays correct if one ever exists.
     # (An earlier version of this comment said "becomes load-bearing if the floor
     # widens". That was wrong and is the claim #829 r3 removed from _fts_floor —
     # this copy is the one r4 caught still carrying it.)

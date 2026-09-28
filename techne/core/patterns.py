@@ -1097,7 +1097,7 @@ def investigations_for_url(db_path: Path, url: str) -> list[dict]:
 
 
 def search_patterns(db_path: Path, query: str, *, limit: int = 20) -> list[dict]:
-    """FTS over active patterns (name + body), with an OR fallback on an empty AND pass.
+    """FTS over active patterns (name + body), topped up by an OR-of-terms pass.
 
     The corpus is queried in problem language ("resume work after a crash without
     losing the task") while patterns are titled metaphorically ("Rebuild-not-reference

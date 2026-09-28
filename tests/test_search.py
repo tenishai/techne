@@ -519,6 +519,43 @@ class TestOrFallback:
         assert any("~/.techne/techne.db" in c for c in contents)
         assert any("replica container" in c for c in contents)
 
+    def test_all_table_tops_up_per_table_not_on_the_pooled_total(self, db_path):
+        """techne#1079 review fix: table="all" runs one candidate_limit-bounded
+        AND query PER sub-table, then concatenates. Comparing the SUMMED row
+        count against `want` lets one table's full AND pass (observations here)
+        mask another table's empty AND pass (knowledge) — the top-up decision
+        must be made per table.
+        """
+        from techne.core.state import add_observation, ensure_session
+
+        session_id = "s-1079-alltable"
+        ensure_session(db_path, session_id)
+        # Two observations match BOTH terms — fills observations' own
+        # candidate_limit (2) on the AND pass alone, so no topup is needed there.
+        # An old event_at keeps their recency score near zero so they cannot
+        # outscore the fresher, topped-up knowledge row below.
+        for i in range(2):
+            add_observation(
+                db_path,
+                session_id,
+                "Bash",
+                f"zerbat quoxlin filler observation {i}",
+                event_at="2015-01-01T00:00:00Z",
+            )
+        # Matches only ONE of the two terms — AND pass on knowledge finds
+        # nothing. Under the pre-fix pooled-sum comparison, 2 (observations) +
+        # 0 (knowledge) = 2 >= want(2), so the OR pass never runs for EITHER
+        # table and this row is never fetched at all.
+        store_knowledge(db_path, "zerbat only, nothing else in this note", type="fact")
+
+        results = search_fts(db_path, "zerbat quoxlin", table="all", limit=1, expansion_ratio=2)
+        assert len(results) == 1
+        assert results[0]["source_table"] == "knowledge", (
+            "the topped-up knowledge row must be fetched (and, scored fresher "
+            "than the stale observations, win the single slot); got "
+            f"{results[0]['source_table']!r}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Combined search (search()) tests
