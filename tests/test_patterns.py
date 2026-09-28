@@ -125,11 +125,12 @@ def test_search_patterns_or_fallback_on_empty_and_pass(db):
     assert hits[0]["name"].startswith("Two-gate alerting")
 
 
-def test_search_patterns_or_fallback_does_not_disturb_a_matching_and_query(db):
-    """#557: the fallback fires only on an empty AND pass — a working query is unchanged.
-
-    This is the no-regression half: adding the fallback must not widen results for
-    queries that already resolve, or precise searches would silently get noisier.
+def test_search_patterns_and_row_keeps_precedence_over_topped_up_or_row(db):
+    """techne#1079: the AND pass still resolves first — an exact match stays the
+    top hit — but a decoy sharing only one query term is no longer suppressed.
+    Before this fix the OR pass ran ONLY when AND matched nothing, so a single
+    exact match silently hid every partial match in the store; now it's topped
+    up after the exact match instead.
     """
     inv = upsert_investigation(db, url="u", surveyed_at="d", verdict="patterns-only")
     add_pattern(
@@ -139,14 +140,10 @@ def test_search_patterns_or_fallback_does_not_disturb_a_matching_and_query(db):
         source_url="u",
         body="Preserve, do not drop; defuse, do not trust.",
     )
-    # LOAD-BEARING FIXTURE DESIGN: the decoy must contain EXACTLY ONE of the two
-    # query terms ("quarantine", not "untrusted"). That is what gives this test teeth.
-    # AND("quarantine","untrusted") matches only the first pattern, so the guard holds
-    # the fallback back — but OR("quarantine" OR "untrusted") WOULD match this decoy,
-    # so if `if not results` is ever removed the OR pass runs, returns two rows, and
-    # the assertion below breaks. A decoy sharing NO query term makes the test vacuous:
-    # it then passes with or without the guard (verified by mutation — the first
-    # version of this test survived replacing the guard with `if True`).
+    # LOAD-BEARING FIXTURE DESIGN: the decoy shares EXACTLY ONE of the two query
+    # terms ("quarantine", not "untrusted"), so AND("quarantine","untrusted")
+    # matches only the first pattern while OR("quarantine" OR "untrusted") also
+    # matches this decoy — that's what gives the top-up assertion below teeth.
     add_pattern(
         db,
         investigation_id=inv,
@@ -161,8 +158,10 @@ def test_search_patterns_or_fallback_does_not_disturb_a_matching_and_query(db):
     assert len(search_patterns(db, "quarantine")) == 2, "decoy must share one query term"
 
     hits = search_patterns(db, "quarantine untrusted")
-    assert len(hits) == 1, "AND pass matched, so the OR fallback must not have widened it"
-    assert hits[0]["name"] == "Quarantine-fence untrusted content"
+    names = [h["name"] for h in hits]
+    assert names[0] == "Quarantine-fence untrusted content", "AND row keeps precedence"
+    assert names[1:] == ["Unrelated durable execution runtime"], "partial match topped up"
+    assert len(names) == len(set(names)), f"duplicate row in {names}"
 
 
 def test_ingest_patterns_md(db):

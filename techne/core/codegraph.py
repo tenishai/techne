@@ -215,12 +215,15 @@ def search_symbols(db_path: Path, query: str, *, limit: int = 20) -> list[dict]:
     """FTS over symbol name + signature.
 
     Multi-term queries use the #70 AND-then-OR pattern (techne#392): an
-    implicit-AND pass first — a symbol matching every term ranks highest — then,
-    ONLY if that returns nothing, an OR-of-terms fallback. Without the fallback a
-    multi-term query (e.g. "PolicyStore ScopeGrant has_scope") ANDs into a single
-    symbol's name+signature, matches nothing, and the empty result reads as "the
-    index is stale/missing" — driving a needless cold source-read. The fallback
-    returns the ranked union of per-term matches instead of a misleading 0.
+    implicit-AND pass first — a symbol matching every term ranks highest —
+    then an OR-of-terms pass tops up the pool when AND falls short of
+    `limit`, appending OR rows not already present (techne#1079). Without the
+    fallback a multi-term query (e.g. "PolicyStore ScopeGrant has_scope")
+    ANDs into a single symbol's name+signature and either matches nothing or
+    matches one row that crowds out every other match — either way the
+    result reads as "the index is stale/missing" and drives a needless cold
+    source-read. The fallback returns the ranked union of per-term matches
+    instead.
     """
     from techne.core.search import fts_with_or_fallback, prepare_fts_query
 
@@ -239,8 +242,9 @@ def search_symbols(db_path: Path, query: str, *, limit: int = 20) -> list[dict]:
             ).fetchall()
             return [dict(r) for r in rows]
 
-        # The AND pass, then OR-of-terms only if it matched nothing (#70, #392).
-        return fts_with_or_fallback(query, _match)
+        # The AND pass, topped up by OR-of-terms when it falls short of `limit`
+        # (#70, #392, techne#1079). Rows key on `id` — this table alone.
+        return fts_with_or_fallback(query, _match, want=limit, key=lambda r: r["id"])
     finally:
         conn.close()
 

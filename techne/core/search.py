@@ -5,7 +5,7 @@ import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from collections.abc import Callable
+from collections.abc import Callable, Hashable
 from typing import Literal
 
 from techne.core import embeddings as embeddings_mod
@@ -527,21 +527,37 @@ def search_fts(
     try:
         # #70: bare space-separated terms are FTS5 implicit-AND, so a multi-word
         # or natural-language query (recall topics especially) returns nothing
-        # unless one row contains *every* term. When the AND pass is empty, retry
-        # with an OR-of-terms query; BM25 still ranks rows matching more (and
-        # rarer) terms highest, so precision degrades gracefully.
-        results = fts_with_or_fallback(
-            query,
-            lambda match: _fts_match_rows(
-                conn,
-                match,
-                table,
-                candidate_limit,
-                include_archived=include_archived,
-                include_uncertain=include_uncertain,
-                row_chars=row_chars,
-            ),
-        )
+        # unless one row contains *every* term. When the AND pass falls short of
+        # candidate_limit — including a single row matching every term, which used
+        # to stand in for the whole pool (techne#1079) — top up with the
+        # OR-of-terms pass; BM25 still ranks rows matching more (and rarer) terms
+        # highest, so precision degrades gracefully.
+        #
+        # table="all" MUST top up PER TABLE, not on the pooled total: each
+        # sub-table gets its own `LIMIT candidate_limit` query, so a single
+        # `len(results) < want` over the concatenated rows lets one table's
+        # overflow (e.g. observations filling candidate_limit on its own) mask
+        # another table's empty AND pass (e.g. knowledge finding nothing) and
+        # skip its top-up entirely. Run the helper once per sub-table instead.
+        sub_tables = ("threads", "observations", "knowledge") if table == "all" else (table,)
+        results = []
+        for sub_table in sub_tables:
+            results.extend(
+                fts_with_or_fallback(
+                    query,
+                    lambda match, st=sub_table: _fts_match_rows(
+                        conn,
+                        match,
+                        st,
+                        candidate_limit,
+                        include_archived=include_archived,
+                        include_uncertain=include_uncertain,
+                        row_chars=row_chars,
+                    ),
+                    want=candidate_limit,
+                    key=lambda r: (r["source_table"], r["id"]),
+                )
+            )
 
         # For multi-table ("all"), pre-sort by raw rank for a deterministic input
         # order; the reranker normalises BM25 PER TABLE (techne#56) and then
@@ -597,12 +613,15 @@ def search_knowledge_conn(
     For multi-table hybrid search use ``search()`` or ``search_fts()``.
     """
     candidate_limit = limit * 2  # expansion_ratio=2 (matches search_fts default)
-    # #70: OR fallback when AND-pass returns nothing (same helper as search_fts)
+    # #70: OR tops up when AND falls short of candidate_limit (same helper as
+    # search_fts, techne#1079)
     results = fts_with_or_fallback(
         query,
         lambda match: _fts_match_rows(
             conn, match, "knowledge", candidate_limit, include_archived=False
         ),
+        want=candidate_limit,
+        key=lambda r: (r["source_table"], r["id"]),
     )
 
     # Enrich with event_at from the base knowledge table. _fts_match_rows omits
@@ -1098,16 +1117,21 @@ def _fts_floor(limit: int, n_fts_only: int) -> int:
     DUPLICATE KEY AT ALL, at any floor: ``fts_results`` comes only from
     ``search_fts``, which runs one query per table with each ``*_fts`` rowid
     joined 1:1 to its base table and each table's rows tagged with a distinct
-    ``source_table``, and the #70 OR-fallback REASSIGNS ``results`` rather than
-    appending, so the AND and OR passes cannot both contribute a row. Measured:
-    6 query shapes x 4 table scopes on a seeded store, including queries that
-    fall through to the OR pass — 0 duplicates in all 24. So this is
-    unreachable from today's producer, not merely inert at today's floor. It is
-    kept to keep ``search()`` correct if a producer ever CAN duplicate — a
-    second knowledge query, or an OR-fallback that unions instead of replacing
-    — which costs one set comprehension. (Under monkeypatch it does behave as
-    described: sizing reverted with the floor at 3 fails the dupe test with an
-    8-row page. That is a property of the test harness, not of the system.)
+    ``source_table``. Since techne#1079 the OR pass CAN append rows alongside
+    the AND pass (topping up a short AND pass instead of only replacing an
+    empty one), but ``fts_with_or_fallback`` dedups the appended OR rows
+    against the AND rows by key (``(source_table, id)`` for ``search_fts``)
+    before returning, so the guarantee — no duplicate key reaches this
+    function — still holds; it now rests on that dedup pass rather than on
+    AND/OR being mutually exclusive. Measured: 6 query shapes x 4 table scopes
+    on a seeded store, including queries that fall through to the OR pass — 0
+    duplicates in all 24. So this is unreachable from today's producer, not
+    merely inert at today's floor. It is kept to keep ``search()`` correct if
+    a producer ever CAN duplicate — a second knowledge query, or a dedup key
+    that collides across tables — which costs one set comprehension. (Under
+    monkeypatch it does behave as described: sizing reverted with the floor at
+    3 fails the dupe test with an 8-row page. That is a property of the test
+    harness, not of the system.)
 
     For the same reason ``min(n_fts_only, ...)`` below is forward-looking
     scaffolding, not an active constraint: at this floor it reduces to
@@ -1413,9 +1437,11 @@ def search(
     # Size the floor off DISTINCT keys. UNREACHABLE, NOT MERELY DORMANT (#829
     # r3/r4): no producer that can reach this function emits a duplicate key at
     # ANY floor — search_fts joins each *_fts rowid 1:1 to its base table, tags a
-    # distinct source_table per table, and the #70 OR-fallback REASSIGNS results
-    # rather than appending. Widening the floor does NOT make this live; only a
-    # new producer would. Kept so search() stays correct if one ever exists.
+    # distinct source_table per table, and since techne#1079 the OR pass can
+    # append rows alongside the AND pass but fts_with_or_fallback dedups the
+    # appended rows against the AND rows by key first, so no duplicate reaches
+    # here. Widening the floor does NOT make this live; only a new producer
+    # would. Kept so search() stays correct if one ever exists.
     # (An earlier version of this comment said "becomes load-bearing if the floor
     # widens". That was wrong and is the claim #829 r3 removed from _fts_floor —
     # this copy is the one r4 caught still carrying it.)
@@ -2058,12 +2084,36 @@ def build_or_fts_query(query: str) -> str:
     return " OR ".join(f'"{t}"' for t in terms)
 
 
-def fts_with_or_fallback(query: str, run: Callable[[str], list]) -> list:
+def fts_with_or_fallback(
+    query: str,
+    run: Callable[[str], list],
+    want: int | None = None,
+    key: Callable[[dict], Hashable] = lambda r: r.get("id"),
+) -> list:
     """The #70 control flow, in one place (issue #559): guard the query (#143),
-    run the implicit-AND pass, and only when that returns nothing run the
-    OR-of-terms pass. ``run`` takes an FTS5 MATCH string and owns its SQL, which
-    differs per caller (table, columns, joins, status filters), so only the
-    control flow is shared here.
+    run the implicit-AND pass, and run the OR-of-terms pass when the AND pass
+    didn't fill the caller's pool (techne#1079): empty, OR (when ``want`` is
+    given) short of ``want`` rows. A single row matching every term used to
+    replace the whole pool and hide the rows that answer the query.
+
+    AND rows keep precedence: when the AND pass returns fewer than ``want``
+    rows, OR rows are appended after, deduped against the AND rows by
+    ``key`` (default: the row's ``"id"``; a multi-table caller whose ids
+    aren't globally unique MUST pass a wider key, e.g.
+    ``lambda r: (r["source_table"], r["id"])``), then the combined list is
+    capped to ``want``. OR rows are NOT deduped against each other — ``run``
+    is expected to return each row at most once per call, as every caller's
+    SQL already does.
+
+    When the AND pass returns NOTHING — regardless of ``want`` — the old
+    behaviour applies as-is: OR runs once and its raw result is returned with
+    no cap and no dedup (nothing to dedup against). ``want=None`` (the
+    default) extends that to a non-empty AND pass too: no top-up, no cap, no
+    dedup pass, whatever the size.
+
+    ``run`` takes an FTS5 MATCH string and owns its SQL, which differs per
+    caller (table, columns, joins, status filters), so only the control flow
+    is shared here.
 
     Returns ``[]`` for an empty or all-punctuation query without calling ``run``.
     A single-term query never re-runs: AND and OR are the same query.
@@ -2076,4 +2126,11 @@ def fts_with_or_fallback(query: str, run: Callable[[str], list]) -> list:
         or_query = build_or_fts_query(query)
         if or_query:
             results = run(or_query)
+        return results
+    if want is not None and len(results) < want:
+        or_query = build_or_fts_query(query)
+        if or_query:
+            seen = {key(r) for r in results}
+            topup = [r for r in run(or_query) if key(r) not in seen]
+            results = (results + topup)[:want]
     return results
