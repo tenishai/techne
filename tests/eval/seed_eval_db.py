@@ -642,7 +642,83 @@ def seed(db_path: Path) -> dict[str, str]:
     )
     gold["g385_neg_sup_ci_new"] = "knowledge:%d" % _ci_v2
 
+    _seed_identifier_rows(db_path, gold)
     return gold
+
+
+# --- identifier (techne#1078) -------------------------------------------------
+# Exact-identifier lookups whose gold the vec-first page used to bury. Each task has
+# near-topic distractors (short rows on the same subject, no identifier) and a gold
+# that carries the identifier after filler, the same dilution as g935. That is the
+# live-store shape: a long observation holding the exact token loses on cosine
+# distance to short on-topic rows. Measured with identifier_head_slots=0 (the
+# pre-#1078 page): cfgkey had one gold in the lexical_tail slot and the other off
+# the page, sha and flag were off the page. With the default both cfgkey golds sit
+# at 1-2 and sha and flag at 1. Rows go in OBSERVATIONS so the table="knowledge"
+# classes (exact, paraphrase, two filter tasks) see an unchanged corpus. The filler
+# avoids every word of the table="all" negative queries: an earlier draft said
+# "weekly", sent negative-stale-oncall to its OR fallback on the FTS-only gate, and
+# took that task's MRR from 1.0 to 0.5.
+_G1078_FILLER = (
+    "Ran the housekeeping pass across the build hosts. Disk usage on the artifact "
+    "volume dropped after old images were pruned. Queued the dependency refresh and "
+    "left a note for the next shift about the flaky integration job. "
+)
+_G1078_VERBS = (
+    "stalled",
+    "recovered",
+    "was paused",
+    "was retried",
+    "slowed down",
+    "finished early",
+    "was rolled back",
+    "was reviewed",
+)
+_G1078_FOLLOWUPS = (
+    "changed",
+    "raised",
+    "reverted",
+    "tested",
+    "reviewed",
+    "rolled out",
+    "documented",
+    "audited",
+)
+#: key -> (gold rows, distractor template). The queries live in retrieval_gold.yaml.
+_G1078_TASKS = {
+    "cfgkey": (
+        [
+            "Edge proxy timeouts traced to retry_budget_ms being left at the default "
+            "in the gateway settings.",
+            "Checked retry_budget_ms on the gateway edge proxy after the timeouts cleared.",
+        ],
+        "The gateway edge proxy timeouts {v} after the retry settings were {w}.",
+    ),
+    "sha": (
+        ["The dashboard rollout was merged as 4e8a1f3 and deployed the same afternoon."],
+        "The dashboard rollout {v} once the merge was {w}.",
+    ),
+    "flag": (
+        ["Deploys now pass --skip-warmup so the cache warmup does not block the rollout."],
+        "The cache warmup during deploy {v} and the team {w} it.",
+    ),
+}
+
+
+def _seed_identifier_rows(db_path: Path, gold: dict[str, str]) -> None:
+    conn = connect(db_path)
+    try:
+        for key, (golds, template) in _G1078_TASKS.items():
+            for n, text in enumerate(golds):
+                suffix = "" if len(golds) == 1 else "_" + "ab"[n]
+                gold[f"g1078_{key}{suffix}"] = "observation:%d" % _add_observation_raw(
+                    conn, _G1078_FILLER * 4 + text, tool_name="Bash"
+                )
+            for v, w in zip(_G1078_VERBS, _G1078_FOLLOWUPS):
+                _add_observation_raw(conn, template.format(v=v, w=w))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 # --------------------------------------------------------------------------

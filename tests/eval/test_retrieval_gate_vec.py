@@ -131,10 +131,15 @@ def test_retrieval_gate_vec(pinned_model2vec, tmp_path, capsys):
             limit=10,
             use_vectors=True,
             half_life_days=_HALF_LIFE_DAYS,
+            # techne#1078: a task may pin the identifier head off to isolate the
+            # #827 tail (lexical-ticket-identifier does). None is the default.
+            identifier_head_slots=task.get("identifier_head_slots"),
         )
         ranked = [f"{r['source_table']}:{r['id']}" for r in retrieved]
         # techne#935: which CHANNEL served each hit, keyed the same way as `ranked`.
         match_sources = {f"{r['source_table']}:{r['id']}": r.get("match_source") for r in retrieved}
+        # techne#1078: which RESERVATION seated each hit, if any.
+        reserved = {f"{r['source_table']}:{r['id']}": r.get("reserved_slot") for r in retrieved}
 
         row = {
             "id": task["id"],
@@ -145,6 +150,7 @@ def test_retrieval_gate_vec(pinned_model2vec, tmp_path, capsys):
             "fpr": round(false_positive_rate(forbidden, ranked, fpr_k), 3),
             "n_results": len(ranked),
             "gold_match_sources": [match_sources.get(e) for e in expected],
+            "gold_reserved_slots": [reserved.get(e) for e in sorted(expected)],
         }
         rows.append(row)
 
@@ -227,7 +233,7 @@ def test_retrieval_gate_vec(pinned_model2vec, tmp_path, capsys):
     # The repo already carries this shape at test_retrieval_gate.py's
     # `assert "paraphrase" not in cfg` -- a pin on the config's shape guarding the
     # opposite direction.
-    _EXPECTED_GATED = frozenset({"exact", "filter", "paraphrase", "lexical"})
+    _EXPECTED_GATED = frozenset({"exact", "filter", "paraphrase", "lexical", "identifier"})
     assert set(gated_classes) == _EXPECTED_GATED, (
         f"gated set changed: {sorted(gated_classes)} != {sorted(_EXPECTED_GATED)}. "
         "Adding a class is fine -- update this pin deliberately. Losing one is not."
@@ -272,6 +278,14 @@ def test_retrieval_gate_vec(pinned_model2vec, tmp_path, capsys):
         "close. Removing it must fail here, not pass silently."
     )
     for r in lexical_rows:
+        # techne#1078: and through the TAIL SLOT. The task pins
+        # identifier_head_slots: 0 because its query is a rare identifier; drop that
+        # pin and the identifier head seats the gold at rank 1, still via `fts`, so
+        # the channel check below passes while `_fts_floor` goes ungated.
+        assert r["gold_reserved_slots"] == ["lexical_tail"], (
+            f"KILL-GATE [lexical]: {r['id']} gold seated by {r['gold_reserved_slots']!r}, "
+            "expected ['lexical_tail']. This task exists to exercise the #827 floor."
+        )
         sources = r["gold_match_sources"]
         assert sources and all(src == "fts" for src in sources), (
             f"KILL-GATE [lexical]: {r['id']} gold arrived via {sources!r}, expected "
@@ -279,6 +293,23 @@ def test_retrieval_gate_vec(pinned_model2vec, tmp_path, capsys):
             "vector channel it tests nothing, and the recall floors above cannot "
             "see the difference. Re-derive the dilution band in seed_eval_db.py "
             "(techne#935) rather than relaxing this assertion."
+        )
+
+    # --- techne#1078: identifier golds must arrive THROUGH the identifier head ----
+    #
+    # The recall floors cannot tell a gold the identifier head seated from one the
+    # vector channel happened to rank high, which is the #935 blind spot again. If
+    # the corpus drifts so the vector channel starts ranking these golds first, the
+    # class stays green and stops testing the reservation. So the slot is asserted
+    # directly, the way the lexical task asserts its channel.
+    identifier_rows = [r for r in rows if r["class"] == "identifier"]
+    assert identifier_rows, "no identifier task ran; the identifier head is ungated"
+    for r in identifier_rows:
+        slots = r["gold_reserved_slots"]
+        assert slots and all(s == "identifier_head" for s in slots), (
+            f"KILL-GATE [identifier]: {r['id']} golds seated by {slots!r}, expected "
+            "every one via 'identifier_head'. Re-derive the distractors in "
+            "seed_eval_db.py (_G1078_TASKS) rather than relaxing this."
         )
 
     # `negative` gates FPR — leak-prevention is this class's remit regardless of
