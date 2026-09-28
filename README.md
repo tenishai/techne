@@ -624,6 +624,19 @@ search:
                               #   displace the weakest non-curated head rows one for one,
                               #   and the tail floor is untouched. 0 restores the previous
                               #   page exactly; capped at a third of the head.
+  identifier_head_slots: 2    # head positions for rows matching a RARE identifier-shaped
+                              #   query token (#1078): `emit_max_chars`, `b2dcdd2`,
+                              #   `reflect-drain`. Vec-first used to order those exact rows
+                              #   by cosine distance, anywhere from rank 2 to off the page.
+                              #   Displaces head rows like curated_head_slots; 0 restores
+                              #   the previous page. A query with no RARE identifier-shaped
+                              #   token is unaffected (hyphenated words and dates can be
+                              #   identifier-shaped; rarity keeps most of them out).
+  identifier_rare_fraction: 0.002  # a token is "rare" when fewer than this fraction of the
+                              #   searched tables' rows match it (floor 5): ~127 rows at
+                              #   table="all" on a 63k-row store, so `techne.db` (~2,900
+                              #   rows) never triggers the head. Word-like terms (no digit
+                              #   or underscore: `well-known`, `reflect-drain`) need half that
 
 hooks:
   post_tool_use: true         # capture tool use as observations

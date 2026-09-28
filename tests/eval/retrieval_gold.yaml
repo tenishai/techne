@@ -64,6 +64,12 @@ config:
     recall_at_5_floor: 0.85
     recall_at_10_floor: 0.85
     mrr_floor: 0.85
+  # techne#1078. FTS-only ranks these first by construction (observed 1.0/1.0/1.0);
+  # the class earns its keep on the VEC side.
+  identifier:
+    recall_at_5_floor: 0.85
+    recall_at_10_floor: 0.85
+    mrr_floor: 0.85
   negative:
     fpr_ceiling: 0.0
 
@@ -145,6 +151,15 @@ config_vec:
   lexical:
     recall_at_5_floor: 0.0
     recall_at_10_floor: 0.8
+  # techne#1078 — exact lookups on a rare identifier token at table=all. Observed
+  # on the vec path with the identifier head: r@5=1.0, r@10=1.0, mrr=1.0. With it
+  # disabled (identifier_head_slots=0, the pre-#1078 page) the same three tasks
+  # score r@10=0.167, mrr=0.033: one cfgkey gold in the lexical_tail slot, the
+  # rest off the page. Floors at observed - 0.15; losing one task of three fails.
+  identifier:
+    recall_at_5_floor: 0.85
+    recall_at_10_floor: 0.85
+    mrr_floor: 0.85
   negative:
     fpr_ceiling: 0.0
     # techne#935: see test_retrieval_gate_vec.py for why 0.85 and not lower.
@@ -362,9 +377,42 @@ tasks:
   # prose so the static token-embedding average stops surfacing it; see
   # seed_eval_db.py for the measured dilution band and why the multiplier is
   # empirical.
+  #
+  # PINNED TO identifier_head_slots: 0 (techne#1078). `CHG-7742-KM` is a rare
+  # identifier, so with the default the identifier head seats this gold at rank 1
+  # and the task stops witnessing the tail floor. Disabling that one reservation
+  # for this one task keeps reverting `_fts_floor` a gate failure; the identifier
+  # class below covers the head.
   - id: lexical-ticket-identifier
     class: lexical
     query: "CHG-7742-KM"
     table: all
+    identifier_head_slots: 0
     expected_keys: [g935_lexical_ticket]
+    forbidden_keys: []
+
+  # --- identifier (techne#1078) ----------------------------------------------
+  # Exact lookups on a rare identifier token whose gold the vector channel ranks
+  # below short on-topic distractors. Rows and the measured before/after are in
+  # seed_eval_db.py (_G1078_TASKS). cfgkey has TWO exact rows, the shape that
+  # missed entirely on the live store because only one fits the lexical tail.
+  - id: identifier-config-key
+    class: identifier
+    query: "retry_budget_ms gateway edge proxy timeouts"
+    table: all
+    expected_keys: [g1078_cfgkey_a, g1078_cfgkey_b]
+    forbidden_keys: []
+
+  - id: identifier-commit-sha
+    class: identifier
+    query: "4e8a1f3 dashboard rollout merged"
+    table: all
+    expected_keys: [g1078_sha]
+    forbidden_keys: []
+
+  - id: identifier-cli-flag
+    class: identifier
+    query: "--skip-warmup cache warmup deploy"
+    table: all
+    expected_keys: [g1078_flag]
     forbidden_keys: []

@@ -1278,6 +1278,222 @@ def _curated_head_reservation(head_budget: int, slots: int) -> int:
     return min(slots, head_budget - 1, max(1, head_budget // 3))
 
 
+#: Head slots held for rows matching a RARE identifier-shaped query token
+#: (techne#1078). Measured on the 2026-09-28 snapshot (56,856 observations): the
+#: worst case, `emit_max_chars 100000 config.yaml techne`, has two exact rows, and
+#: 1 slot seats only one of them; 2 seats both. 3 moved no marker row against 2 on
+#: the nine issue queries, so it would spend a vec slot for nothing measured.
+IDENTIFIER_HEAD_SLOTS_DEFAULT = 2
+
+#: A token is rare when fewer rows than this FRACTION of the searched scope match it
+#: (techne#1078). Relative, not absolute, because the per-turn hook searches
+#: `table="knowledge"` (3,426 rows) and an absolute 100 there made `config.yaml`
+#: (70 knowledge rows) rare. At 0.2% the 2026-09-28 snapshot gives 127 for
+#: `table="all"` (63,155 rows) and 7 for `knowledge`. Measured df at `all`:
+#: must-trigger b2dcdd2 18, commentblockgate 40, reflect-drain 49,
+#: check_staged_symlinks.sh 65, emit_max_chars 71, ae219b5 77; must-not
+#: potion-base-8M 153, pre-commit 184, config.yaml 757, techne.db 2939.
+IDENTIFIER_RARE_FRACTION_DEFAULT = 0.002
+
+#: The threshold never drops below this, so a small store (the eval corpus, a fresh
+#: install) still treats a token in a handful of rows as rare.
+IDENTIFIER_MIN_DF = 5
+
+#: An all-letter token this long is treated as a squashed compound identifier
+#: (`commentblockgate` for `hooks.commentBlockGate`), since a query typed in lower
+#: case carries no other shape signal. Rarity still has to hold, so a long English
+#: word common in the store (`troubleshooting`) does not trigger.
+_IDENTIFIER_LONG_TOKEN = 15
+
+#: Surrounding punctuation stripped before the shape test, so `emit_max_chars:` or
+#: `(b2dcdd2)` reads as the identifier. Internal punctuation is the signal and stays.
+_IDENTIFIER_STRIP = "\"'`,;:()[]{}<>!?"
+
+
+def _is_identifier_shaped(term: str) -> bool:
+    """Does one query term look like an identifier rather than an English word?
+
+    Shapes (techne#1078): an underscore, letters mixed with digits (which covers
+    hex shas such as `b2dcdd2`), a leading `--flag`, camelCase, `.`/`-`/`/` joining
+    two word characters (`techne.db`, `reflect-drain`), or an all-letter token of
+    `_IDENTIFIER_LONG_TOKEN`+ characters. A bare run of digits does not count
+    (`100000`, an issue number). Decimals, dates and versions DO, through the joiner
+    rule (`0.5`, `2026-09-28`, `2.1.283`), as do ordinals (`3rd`).
+
+    THIS ACCEPTS ORDINARY ENGLISH TOO, and nothing here pretends otherwise
+    (Prudence, #1082): `well-known`, `and/or`, `e.g.`, `iPhone`, `straightforward`
+    all pass. Shape cannot tell `well-known` from `reflect-drain`. Rarity is the
+    gate, with a stricter bar for word-like terms (`IDENTIFIER_WORDLIKE_DIVISOR`).
+    """
+    t = term.strip(_IDENTIFIER_STRIP).rstrip(".")
+    if len(t) < 3 or not any(c.isalnum() for c in t):
+        return False
+    if t.startswith("--") and len(t) > 2 and t[2].isalnum():
+        return True
+    has_alpha = any(c.isalpha() for c in t)
+    has_digit = any(c.isdigit() for c in t)
+    if "_" in t.strip("_") and has_alpha:
+        return True
+    if has_alpha and has_digit:
+        return True
+    for i in range(1, len(t) - 1):
+        if t[i] in ".-/" and t[i - 1].isalnum() and t[i + 1].isalnum():
+            return True
+    if any(a.islower() and b.isupper() for a, b in zip(t, t[1:])):
+        return True
+    return t.isalpha() and len(t) >= _IDENTIFIER_LONG_TOKEN
+
+
+#: Word-like identifier terms (no digit, no underscore: `reflect-drain`, `well-known`,
+#: `commentblockgate`, `straightforward`) must clear a bar this many times stricter
+#: than the scope threshold (techne#1082 review). Shape cannot tell `reflect-drain`
+#: from `well-known`, so rarity has to do more of the work for them. Measured on
+#: the 2026-09-28 snapshot at `table="all"` (bar 63): reflect-drain 49 and
+#: commentblockgate 40 still trigger; well-known 96, self-contained 94, and/or 115,
+#: troubleshooting 77 no longer do; straightforward 53 still does.
+IDENTIFIER_WORDLIKE_DIVISOR = 2
+
+
+def _has_code_mark(term: str) -> bool:
+    """A digit or an underscore: marks that plain English rarely carries."""
+    return any(c.isdigit() or c == "_" for c in term)
+
+
+def _identifier_terms(query: str) -> list[str]:
+    """The identifier-shaped terms of ``query``, as FTS phrase-literal bodies.
+
+    Built on `_fts_terms`, the same split `search_fts` quotes into its MATCH, so a
+    term counted here is exactly a phrase FTS matched on.
+    """
+    return [t for t in _fts_terms(query) if _is_identifier_shaped(t.replace('""', '"'))]
+
+
+#: Per scope: (base table, the `source_table` tag `_fts_match_rows` gives its rows,
+#: SQL returning a phrase MATCH's result-row ids). Allow-listed names only.
+_IDENTIFIER_SCOPES = {
+    "observations": (
+        "observations",
+        "observation",
+        "SELECT rowid FROM observations_fts WHERE observations_fts MATCH ? LIMIT ?",
+    ),
+    "knowledge": (
+        "knowledge",
+        "knowledge",
+        "SELECT rowid FROM knowledge_fts WHERE knowledge_fts MATCH ? LIMIT ?",
+    ),
+    "threads": (
+        "threads",
+        "thread",
+        "SELECT t.id FROM threads_fts f JOIN threads t ON t.rowid = f.rowid "
+        "WHERE threads_fts MATCH ? LIMIT ?",
+    ),
+}
+
+
+def _rare_identifier_terms(
+    conn: sqlite3.Connection, query: str, table: SearchTable, fraction: float
+) -> tuple[list[str], set[tuple[str, object]]]:
+    """The identifier-shaped terms of ``query`` RARE in the searched scope, and the
+    keys of every row matching one.
+
+    Rare means at least one and fewer than ``max(IDENTIFIER_MIN_DF, ceil(rows *
+    fraction))`` rows match the term as an FTS phrase, where ``rows`` counts the
+    tables ``table`` searches. Each lookup is bounded by that threshold, so a common
+    term like `techne.db` costs at most that many rowids per table, and the key set
+    is at most threshold-sized per rare term.
+    """
+    terms = _identifier_terms(query)
+    if not terms or fraction <= 0:
+        return [], set()
+    names = _IDENTIFIER_SCOPES if table == "all" else (table,)
+    scopes = [_IDENTIFIER_SCOPES[n] for n in names]
+    n_rows = sum(
+        conn.execute(f"SELECT count(*) FROM {base}").fetchone()[0] for base, _, _ in scopes
+    )
+    max_df = max(IDENTIFIER_MIN_DF, math.ceil(n_rows * fraction))
+    rare: list[str] = []
+    keys: set[tuple[str, object]] = set()
+    for term in terms:
+        bar = max_df if _has_code_mark(term) else max(2, max_df // IDENTIFIER_WORDLIKE_DIVISOR)
+        found: set[tuple[str, object]] = set()
+        for _, tag, sql in scopes:
+            rows = conn.execute(sql, (f'"{term}"', bar - len(found))).fetchall()
+            found.update((tag, r[0]) for r in rows)
+            if len(found) >= bar:
+                break
+        if 0 < len(found) < bar:
+            rare.append(term)
+            keys |= found
+    return rare, keys
+
+
+def _identifier_pool(
+    db_path: Path,
+    query: str,
+    table: SearchTable,
+    slots: int,
+    fraction: float,
+    fts_results: list[dict],
+    include_archived: bool = True,
+    include_uncertain: bool = False,
+    row_chars: int | None = None,
+) -> list[dict]:
+    """Rows to seat in the identifier head, best first (techne#1078).
+
+    Two sources, in this order. First the rows of ``fts_results`` that hold a rare
+    term, in its order: they went through `search_fts`'s full rerank, which scores
+    every query term, so among exact rows the one matching more of the query leads.
+    Ranking rare-term rows by BM25 alone seated two `reflect-drain` shell echoes
+    ahead of the `reflect-drain --go` row the query named. Then a SCOPED query for
+    the same terms, best BM25 first, for the #946 reason: an exact row has to survive
+    that rerank into `search_fts`'s top ``limit`` to be in ``fts_results`` at all,
+    and on the live store one sat at observation-rank 16-47. It MATCHes through
+    `_fts_match_rows`, so the archived, uncertain and superseded filters are the
+    ones every FTS read applies.
+
+    Returns ``[]`` without opening the store when no term is identifier-shaped, and
+    on any SQLite error: failing open to the ordinary vec-first page is the safe
+    direction.
+    """
+    if slots <= 0 or not _identifier_terms(query):
+        return []
+    try:
+        conn = connect(db_path)
+    except sqlite3.Error:
+        return []
+    try:
+        rare, keys = _rare_identifier_terms(conn, query, table, fraction)
+        if not rare:
+            return []
+        scoped = _fts_match_rows(
+            conn,
+            " OR ".join(f'"{t}"' for t in rare),
+            table,
+            slots,
+            include_archived=include_archived,
+            include_uncertain=include_uncertain,
+            row_chars=row_chars,
+        )
+    except sqlite3.Error:
+        return []
+    finally:
+        conn.close()
+    scoped.sort(key=lambda r: r["rank"])
+    return [r for r in fts_results if (r["source_table"], r["id"]) in keys] + scoped
+
+
+def _identifier_head_reservation(head_budget: int, slots: int) -> int:
+    """How many HEAD slots the identifier reservation may take (techne#1078).
+
+    Never more than the head minus one, so the vector channel always keeps a head
+    slot — the same clamp `_curated_head_reservation` and `_fts_floor` apply. At
+    ``limit=10`` (head 9) the default seats 2.
+    """
+    if slots <= 0 or head_budget <= 1:
+        return 0
+    return min(slots, head_budget - 1)
+
+
 def search(
     db_path: Path,
     query: str,
@@ -1289,6 +1505,8 @@ def search(
     include_uncertain: bool = False,
     row_chars: int | None = None,
     curated_head_slots: int | None = None,
+    identifier_head_slots: int | None = None,
+    identifier_rare_fraction: float | None = None,
 ) -> list[dict]:
     """Hybrid search: BM25 (FTS5) + vector (cosine) combined by a vec-first
     union (techne#401).
@@ -1337,16 +1555,29 @@ def search(
     the curated channel has fewer rows than the reservation, the remaining slots stay
     with the rows that earned them, the same way the tail spends unused head budget.
 
+    AN EXACT IDENTIFIER LOOKUP GETS THE FIRST SLOTS (techne#1078). When the query
+    carries an identifier-shaped token (`emit_max_chars`, `b2dcdd2`, `reflect-drain`)
+    that fewer than ``identifier_rare_fraction`` of the searched rows match, up to
+    ``identifier_head_slots`` rows holding it lead the page, from `_identifier_pool`.
+    Vec-first had ordered them by distance: on the 2026-09-28 snapshot
+    `emit_max_chars 100000 config.yaml techne` missed at limit 10 and 15. It is a
+    displacement: the vec rows it pushes out refill a short page, the #827 floor
+    keeps its slot, and the #946 reservation is sized on the head that is left.
+    A query with no RARE identifier-shaped token gets a page byte-identical to the
+    pre-#1078 one. Ordinary words can be identifier-shaped (`well-known`, a date), so
+    that is narrower than "plain English is unaffected"; see `_is_identifier_shaped`.
+
     Returned rows include:
 
       - ``match_source``: ``"fts"``, ``"vec"``, or ``"fts+vec"``
       - ``fusion``: ``"vec_first"`` — how order was decided. Unchanged by the
         floor: the vector channel still decides the head of the page.
       - ``reserved_slot``: present ONLY on a row that is on the page because a
-        reservation put it there — ``"curated_head"`` (#946) or ``"lexical_tail"``
-        (#827). Absent means the row earned its place on rank. This is the field that
-        makes a ranking complaint answerable without re-deriving arithmetic, which is
-        the property a fused score prior would have destroyed.
+        reservation put it there — ``"identifier_head"`` (#1078), ``"curated_head"``
+        (#946) or ``"lexical_tail"`` (#827). Absent means the row earned its place on
+        rank. This is the field that makes a ranking complaint answerable without
+        re-deriving arithmetic, which is the property a fused score prior would have
+        destroyed.
 
     When vec is requested but no vec results came back (extras not
     installed, vec tables empty, etc.), falls through to FTS-only —
@@ -1444,14 +1675,86 @@ def search(
     #: Rows the head reservation displaced. Appended after the tail so a page that
     #: gave up a head slot cannot come back short (Prudence, #966 r1).
     overflow: list[dict] = []
+
+    # IDENTIFIER HEAD (techne#1078). A query carrying a RARE identifier-shaped token
+    # (`emit_max_chars`, `b2dcdd2`, `reflect-drain`) is an exact lookup, and vec-first
+    # ordered its exact rows by cosine distance: measured on the live store, anywhere
+    # from rank 2 to off the page. Rows FTS matched on such a token take the first
+    # slots, in FTS order. A DISPLACEMENT like #946: they come out of the head budget,
+    # the vec rows they push out go to `overflow`, and the #827 tail floor is
+    # untouched. A query with no RARE identifier-shaped token runs nothing below
+    # differently, so its page is byte-identical to the pre-#1078 one. That is not
+    # "every plain-English query": a rare hyphenated word or date qualifies.
+    ident_head: list[dict] = []
+    ident_cap = _identifier_head_reservation(
+        head_budget,
+        IDENTIFIER_HEAD_SLOTS_DEFAULT if identifier_head_slots is None else identifier_head_slots,
+    )
+    pool = _identifier_pool(
+        db_path,
+        query,
+        table,
+        ident_cap,
+        IDENTIFIER_RARE_FRACTION_DEFAULT
+        if identifier_rare_fraction is None
+        else identifier_rare_fraction,
+        fts_results,
+        include_archived=include_archived,
+        include_uncertain=include_uncertain,
+        row_chars=row_chars,
+    )
+    if pool:
+        vec_by_key = {(r["source_table"], r["id"]): r for r in vec_results}
+        natural: list[tuple] = []  # the head's keys as vec-first would seat them
+        for r in vec_results:
+            k = (r["source_table"], r["id"])
+            if k not in natural:
+                natural.append(k)
+        for r in pool:
+            if len(ident_head) >= ident_cap:
+                break
+            key = (r["source_table"], r["id"])
+            if key in seen:
+                continue
+            seen.add(key)
+            if key in vec_by_key:
+                row = _as_page_row(vec_by_key[key])
+            else:
+                row = dict(r)
+                row["match_source"] = "fts"
+                row["fusion"] = "vec_first"
+            # Marked only when the reservation MOVED the row: one vec-first
+            # already seated at this index is there on rank.
+            pos = len(ident_head)
+            if pos >= len(natural) or natural[pos] != key:
+                row["reserved_slot"] = "identifier_head"
+            ident_head.append(row)
+    vec_budget = head_budget - len(ident_head)
+    # Rows the reservation MOVED. One already at its vec-first index costs the page
+    # nothing, so it must not shrink the curated budget or bump a vec row either;
+    # counting it did both and changed a page that should have been identical.
+    n_moved = sum(1 for r in ident_head if r.get("reserved_slot") == "identifier_head")
+
     for r in vec_results:
-        if len(head) >= head_budget:
+        if len(head) >= vec_budget:
             break
         key = (r["source_table"], r["id"])
         if key in seen:
             continue
         seen.add(key)
         head.append(_as_page_row(r))
+    # The vec rows the identifier head pushed out, kept as overflow so a short tail
+    # cannot shorten the page (the #966 r1 rule).
+    bumped: list[dict] = []
+    if n_moved:
+        for r in vec_results:
+            if len(bumped) >= n_moved:
+                break
+            key = (r["source_table"], r["id"])
+            # `search_vec` returns distinct keys, so `seen` is the only check needed.
+            if key in seen:
+                continue
+            bumped.append(_as_page_row(r))
 
     # CURATED HEAD RESERVATION (techne#946) — a DISPLACEMENT, not an extra slot, so
     # `head + tail` is still exactly `limit` and the #827 tail floor is untouched.
@@ -1466,13 +1769,17 @@ def search(
     # distractor into a single-table page (fpr 0.0 -> 0.667). A single-table query has
     # no cross-table competition to correct, so there is nothing here to reserve
     # against.
+    # Sized on what the identifier head left (techne#1078). On the full
+    # `head_budget` the two stacked: `emit_max_chars` came back as 2 identifier + 3
+    # curated + 1 tail, six of ten slots reserved, and #946's "a third of the head"
+    # cap no longer held. Equal to `head_budget` when no identifier row was moved.
     reserve = (
-        _curated_head_reservation(head_budget, _curated_slots(curated_head_slots))
+        _curated_head_reservation(head_budget - n_moved, _curated_slots(curated_head_slots))
         if table == "all"
         else 0
     )
     if reserve:
-        in_head = sum(1 for r in head if r.get("source_table") in _CURATED_TABLES)
+        in_head = sum(1 for r in ident_head + head if r.get("source_table") in _CURATED_TABLES)
         deficit = reserve - in_head
         if deficit > 0:
             # THE CANDIDATES COME FROM A SCOPED QUERY, NOT FROM `vec_results`, AND
@@ -1565,7 +1872,7 @@ def search(
         # with a thin vec channel the first tail row is on the page regardless, so
         # marking it reserved answers "why is this row here" with a reservation that
         # did nothing.
-        if len(tail) < floor and len(head) >= head_budget:
+        if len(tail) < floor and len(head) >= vec_budget:
             row["reserved_slot"] = "lexical_tail"
         tail.append(row)
 
@@ -1573,7 +1880,11 @@ def search(
     # allowed to spend the slack rather than returning a short page. `overflow`
     # holds rows the head reservation displaced: last in line, so they refill a
     # short page rather than shrinking it (#966 r1).
-    return (head + tail + overflow)[:limit]
+    # `bumped` goes last, after the #946 overflow. A bumped curated row can come
+    # back through the #946 promotion, but promoting it displaces a row into
+    # `overflow`, which takes the page's last free slot first, so the duplicate is
+    # always cut by `[:limit]`.
+    return (ident_head + head + tail + overflow + bumped)[:limit]
 
 
 def backfill_vectors(
