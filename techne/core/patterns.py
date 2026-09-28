@@ -1097,7 +1097,7 @@ def investigations_for_url(db_path: Path, url: str) -> list[dict]:
 
 
 def search_patterns(db_path: Path, query: str, *, limit: int = 20) -> list[dict]:
-    """FTS over active patterns (name + body), topped up by an OR-of-terms pass.
+    """FTS over active patterns (name + body), with an OR fallback on an empty AND pass.
 
     The corpus is queried in problem language ("resume work after a crash without
     losing the task") while patterns are titled metaphorically ("Rebuild-not-reference
@@ -1108,11 +1108,10 @@ def search_patterns(db_path: Path, query: str, *, limit: int = 20) -> list[dict]
     queries found their target, 14/15 returned zero; with this fallback, 14/15 and
     zero empties.
 
-    Same #70 fallback that :func:`techne.core.search` and
-    :func:`techne.core.codegraph.search_symbols` already apply: the OR-of-terms
-    pass tops up the AND pass's pool when it falls short of `limit`, appending
-    OR rows not already present (techne#1079). A query whose AND pass already
-    fills `limit` is returned unchanged.
+    Same #70 empty-result fallback that :func:`techne.core.search` and
+    :func:`techne.core.codegraph.search_symbols` already apply — this was the one
+    FTS caller that never got it. The fallback fires ONLY when the AND pass returns
+    nothing, so a query that already resolves is returned unchanged.
     """
     from techne.core.search import fts_with_or_fallback, prepare_fts_query
 
@@ -1132,9 +1131,8 @@ def search_patterns(db_path: Path, query: str, *, limit: int = 20) -> list[dict]
             ).fetchall()
             return [dict(r) for r in rows]
 
-        # The AND pass, topped up by OR-of-terms when it falls short of `limit`
-        # (#70, #392, techne#1079). Rows key on `id` — this table alone.
-        return fts_with_or_fallback(query, _match, want=limit, key=lambda r: r["id"])
+        # The AND pass, then OR-of-terms only if it matched nothing (#70, #392).
+        return fts_with_or_fallback(query, _match)
     finally:
         conn.close()
 
