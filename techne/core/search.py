@@ -2096,12 +2096,20 @@ def fts_with_or_fallback(
     given) short of ``want`` rows. A single row matching every term used to
     replace the whole pool and hide the rows that answer the query.
 
-    AND rows keep precedence — OR rows are appended after, capped at ``want``,
-    and deduped against the AND rows and each other by ``key`` (default: the
-    row's ``"id"``; a multi-table caller whose ids aren't globally unique
-    MUST pass a wider key, e.g. ``lambda r: (r["source_table"], r["id"])``).
-    ``want=None`` (the default) keeps the old behaviour exactly: OR only runs
-    when AND is empty, no capping, no dedup pass.
+    AND rows keep precedence: when the AND pass returns fewer than ``want``
+    rows, OR rows are appended after, deduped against the AND rows by
+    ``key`` (default: the row's ``"id"``; a multi-table caller whose ids
+    aren't globally unique MUST pass a wider key, e.g.
+    ``lambda r: (r["source_table"], r["id"])``), then the combined list is
+    capped to ``want``. OR rows are NOT deduped against each other — ``run``
+    is expected to return each row at most once per call, as every caller's
+    SQL already does.
+
+    When the AND pass returns NOTHING — regardless of ``want`` — the old
+    behaviour applies as-is: OR runs once and its raw result is returned with
+    no cap and no dedup (nothing to dedup against). ``want=None`` (the
+    default) extends that to a non-empty AND pass too: no top-up, no cap, no
+    dedup pass, whatever the size.
 
     ``run`` takes an FTS5 MATCH string and owns its SQL, which differs per
     caller (table, columns, joins, status filters), so only the control flow
