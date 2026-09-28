@@ -494,6 +494,31 @@ class TestOrFallback:
         results = search_fts(db_path, "kubernetes", table="knowledge")
         assert len(results) >= 1
 
+    def test_one_row_and_pass_does_not_hide_partial_matches(self, db_path):
+        """techne#1079: the litestream scenario. One row quotes the whole query
+        (contains every term) and used to replace the entire candidate pool; the
+        rows that actually answer the query — each containing only SOME of the
+        terms — were never fetched. Now the AND row still ranks first, but the
+        partial rows are topped up from the OR pass rather than dropped."""
+        store_knowledge(
+            db_path,
+            "note: someone asked 'litestream replicate techne exec' again today",
+            type="fact",
+        )  # contains every term — the AND row
+        store_knowledge(db_path, "litestream is the tool we use for db replication", type="fact")
+        store_knowledge(db_path, "the techne store lives at ~/.techne/techne.db", type="fact")
+        store_knowledge(db_path, "exec runs a command inside the replica container", type="fact")
+
+        and_only = search_fts(db_path, "litestream replicate techne exec", table="knowledge")
+        contents = [r["content"] for r in and_only]
+        assert "litestream replicate techne exec" in contents[0], (
+            "the exact AND match must still rank first"
+        )
+        assert len(contents) > 1, "partial matches must be topped up, not hidden"
+        assert any("db replication" in c for c in contents)
+        assert any("~/.techne/techne.db" in c for c in contents)
+        assert any("replica container" in c for c in contents)
+
 
 # ---------------------------------------------------------------------------
 # Combined search (search()) tests
@@ -1374,3 +1399,76 @@ def test_fts_with_or_fallback_control_flow():
     calls.clear()
     assert fts_with_or_fallback("  \\ ", run_empty_then(["x"])) == []
     assert calls == []  # unsearchable: run never called
+
+
+def test_fts_with_or_fallback_tops_up_short_and_pass():
+    """techne#1079: a one-row AND pass no longer replaces the whole pool. When
+    `want` is given and AND returns fewer rows than `want`, the OR-of-terms pass
+    tops it up — AND rows first (precedence kept), then OR rows not already
+    present, in the OR pass's own order."""
+    from techne.core.search import fts_with_or_fallback
+
+    and_rows = [{"id": "full"}]  # the one row containing every term
+    or_rows = [{"id": "full"}, {"id": "partial-a"}, {"id": "partial-b"}]
+
+    def run(match):
+        return and_rows if "OR" not in match else or_rows
+
+    results = fts_with_or_fallback("alpha beta", run, want=5, key=lambda r: r["id"])
+    assert [r["id"] for r in results] == ["full", "partial-a", "partial-b"]
+
+
+def test_fts_with_or_fallback_and_precedence_over_or():
+    """AND rows keep precedence over topped-up OR rows even when the OR pass
+    would otherwise rank one of its own rows first (bm25/order is `run`'s
+    business, not the helper's — it only decides AND-before-OR)."""
+    from techne.core.search import fts_with_or_fallback
+
+    and_rows = [{"id": "and-1"}, {"id": "and-2"}]
+    or_rows = [{"id": "or-1"}, {"id": "and-2"}, {"id": "or-2"}]  # "and-2" reappears
+
+    def run(match):
+        return and_rows if "OR" not in match else or_rows
+
+    results = fts_with_or_fallback("alpha beta", run, want=10, key=lambda r: r["id"])
+    assert [r["id"] for r in results[:2]] == ["and-1", "and-2"]
+    assert [r["id"] for r in results[2:]] == ["or-1", "or-2"]
+
+
+def test_fts_with_or_fallback_dedups_on_key():
+    """No duplicate keys in the combined result: an OR row whose key already
+    appears in the AND rows is dropped, not appended a second time."""
+    from techne.core.search import fts_with_or_fallback
+
+    and_rows = [{"source_table": "knowledge", "id": 1}]
+    or_rows = [
+        {"source_table": "knowledge", "id": 1},  # same row as the AND hit
+        {"source_table": "thread", "id": 1},  # same numeric id, DIFFERENT table
+        {"source_table": "knowledge", "id": 2},
+    ]
+
+    def run(match):
+        return and_rows if "OR" not in match else or_rows
+
+    results = fts_with_or_fallback(
+        "alpha beta", run, want=10, key=lambda r: (r["source_table"], r["id"])
+    )
+    keys = [(r["source_table"], r["id"]) for r in results]
+    assert len(keys) == len(set(keys)), f"duplicate key in {keys}"
+    assert keys == [("knowledge", 1), ("thread", 1), ("knowledge", 2)]
+
+
+def test_fts_with_or_fallback_no_topup_when_pool_already_full():
+    """When the AND pass already fills `want`, the OR pass is never run — same
+    behaviour as before `want` existed, just made explicit for a non-None want."""
+    from techne.core.search import fts_with_or_fallback
+
+    calls: list[str] = []
+
+    def run(match):
+        calls.append(match)
+        return [{"id": "a"}, {"id": "b"}]
+
+    results = fts_with_or_fallback("alpha beta", run, want=2, key=lambda r: r["id"])
+    assert [r["id"] for r in results] == ["a", "b"]
+    assert calls == ['"alpha" "beta"']  # OR pass never invoked

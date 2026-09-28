@@ -5,7 +5,7 @@ import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from collections.abc import Callable
+from collections.abc import Callable, Hashable
 from typing import Literal
 
 from techne.core import embeddings as embeddings_mod
@@ -527,9 +527,11 @@ def search_fts(
     try:
         # #70: bare space-separated terms are FTS5 implicit-AND, so a multi-word
         # or natural-language query (recall topics especially) returns nothing
-        # unless one row contains *every* term. When the AND pass is empty, retry
-        # with an OR-of-terms query; BM25 still ranks rows matching more (and
-        # rarer) terms highest, so precision degrades gracefully.
+        # unless one row contains *every* term. When the AND pass falls short of
+        # candidate_limit — including a single row matching every term, which used
+        # to stand in for the whole pool (techne#1079) — top up with the
+        # OR-of-terms pass; BM25 still ranks rows matching more (and rarer) terms
+        # highest, so precision degrades gracefully.
         results = fts_with_or_fallback(
             query,
             lambda match: _fts_match_rows(
@@ -541,6 +543,8 @@ def search_fts(
                 include_uncertain=include_uncertain,
                 row_chars=row_chars,
             ),
+            want=candidate_limit,
+            key=lambda r: (r["source_table"], r["id"]),
         )
 
         # For multi-table ("all"), pre-sort by raw rank for a deterministic input
@@ -597,12 +601,15 @@ def search_knowledge_conn(
     For multi-table hybrid search use ``search()`` or ``search_fts()``.
     """
     candidate_limit = limit * 2  # expansion_ratio=2 (matches search_fts default)
-    # #70: OR fallback when AND-pass returns nothing (same helper as search_fts)
+    # #70: OR tops up when AND falls short of candidate_limit (same helper as
+    # search_fts, techne#1079)
     results = fts_with_or_fallback(
         query,
         lambda match: _fts_match_rows(
             conn, match, "knowledge", candidate_limit, include_archived=False
         ),
+        want=candidate_limit,
+        key=lambda r: (r["source_table"], r["id"]),
     )
 
     # Enrich with event_at from the base knowledge table. _fts_match_rows omits
@@ -2058,12 +2065,28 @@ def build_or_fts_query(query: str) -> str:
     return " OR ".join(f'"{t}"' for t in terms)
 
 
-def fts_with_or_fallback(query: str, run: Callable[[str], list]) -> list:
+def fts_with_or_fallback(
+    query: str,
+    run: Callable[[str], list],
+    want: int | None = None,
+    key: Callable[[dict], Hashable] = lambda r: r.get("id"),
+) -> list:
     """The #70 control flow, in one place (issue #559): guard the query (#143),
-    run the implicit-AND pass, and only when that returns nothing run the
-    OR-of-terms pass. ``run`` takes an FTS5 MATCH string and owns its SQL, which
-    differs per caller (table, columns, joins, status filters), so only the
-    control flow is shared here.
+    run the implicit-AND pass, and run the OR-of-terms pass when the AND pass
+    didn't fill the caller's pool (techne#1079): empty, OR (when ``want`` is
+    given) short of ``want`` rows. A single row matching every term used to
+    replace the whole pool and hide the rows that answer the query.
+
+    AND rows keep precedence — OR rows are appended after, capped at ``want``,
+    and deduped against the AND rows and each other by ``key`` (default: the
+    row's ``"id"``; a multi-table caller whose ids aren't globally unique
+    MUST pass a wider key, e.g. ``lambda r: (r["source_table"], r["id"])``).
+    ``want=None`` (the default) keeps the old behaviour exactly: OR only runs
+    when AND is empty, no capping, no dedup pass.
+
+    ``run`` takes an FTS5 MATCH string and owns its SQL, which differs per
+    caller (table, columns, joins, status filters), so only the control flow
+    is shared here.
 
     Returns ``[]`` for an empty or all-punctuation query without calling ``run``.
     A single-term query never re-runs: AND and OR are the same query.
@@ -2076,4 +2099,11 @@ def fts_with_or_fallback(query: str, run: Callable[[str], list]) -> list:
         or_query = build_or_fts_query(query)
         if or_query:
             results = run(or_query)
+        return results
+    if want is not None and len(results) < want:
+        or_query = build_or_fts_query(query)
+        if or_query:
+            seen = {key(r) for r in results}
+            topup = [r for r in run(or_query) if key(r) not in seen]
+            results = (results + topup)[:want]
     return results
