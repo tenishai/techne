@@ -555,6 +555,18 @@ class SearchConfig:
     # 3); the effective value is also capped at a third of the head, so a small page
     # is not swamped. See core/search.py:_curated_head_reservation.
     curated_head_slots: int = 3
+    # Head slots for rows matching a RARE identifier-shaped query token (techne#1078):
+    # `emit_max_chars`, `b2dcdd2`, `reflect-drain`. 0 disables it and restores the
+    # pre-#1078 page. 2 seats both exact rows of the worst measured query. A query
+    # with no RARE identifier-shaped token is unaffected; ordinary hyphenated words,
+    # dates and decimals are identifier-shaped, so rarity is what keeps them out.
+    identifier_head_slots: int = 2
+    # A token is rare when fewer rows than this fraction of the searched tables match
+    # it (floor 5 rows). 0.002 is 127 rows at table="all" and 7 at table="knowledge"
+    # on the 2026-09-28 live snapshot; word-like terms (no digit or underscore) need half
+    # that. See core/search.py:IDENTIFIER_RARE_FRACTION_DEFAULT. The per-turn hook reads
+    # both identifier settings too.
+    identifier_rare_fraction: float = 0.002
 
 
 @dataclass
@@ -1365,6 +1377,8 @@ class Config:
                 embedding_model=str(s.get("embedding_model", "")),
                 recall_documents_limit=int(s.get("recall_documents_limit", 3)),
                 curated_head_slots=int(s.get("curated_head_slots", 3)),
+                identifier_head_slots=int(s.get("identifier_head_slots", 2)),
+                identifier_rare_fraction=float(s.get("identifier_rare_fraction", 0.002)),
             )
 
         if "injection" in raw and isinstance(raw["injection"], dict):

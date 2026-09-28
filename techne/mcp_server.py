@@ -199,6 +199,8 @@ def _techne_search(args: dict, config: Config) -> dict:
         # nobody CHOSE to look at what those surface.
         include_uncertain=True,
         curated_head_slots=config.search.curated_head_slots,
+        identifier_head_slots=config.search.identifier_head_slots,
+        identifier_rare_fraction=config.search.identifier_rare_fraction,
     )
     return {"results": results, "count": len(results)}
 
@@ -591,6 +593,8 @@ def _techne_recall(args: dict, config: Config) -> dict:
             half_life_days=config.knowledge_confidence_half_life_days,
             include_archived=False,
             curated_head_slots=config.search.curated_head_slots,
+            identifier_head_slots=config.search.identifier_head_slots,
+            identifier_rare_fraction=config.search.identifier_rare_fraction,
         )
         # Graded staleness (techne#90): grade anchored knowledge results against the
         # current working tree and attach a freshness tag. Non-anchored results are
@@ -633,6 +637,8 @@ def _techne_recall(args: dict, config: Config) -> dict:
         half_life_days=config.knowledge_confidence_half_life_days,
         include_archived=False,
         curated_head_slots=config.search.curated_head_slots,
+        identifier_head_slots=config.search.identifier_head_slots,
+        identifier_rare_fraction=config.search.identifier_rare_fraction,
     )
     for r in local_results:
         r["_store"] = "local"

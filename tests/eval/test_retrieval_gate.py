@@ -159,7 +159,7 @@ def test_retrieval_gate(tmp_path, capsys):
     # The repo already carries this shape at test_retrieval_gate.py's
     # `assert "paraphrase" not in cfg` -- a pin on the config's shape guarding the
     # opposite direction.
-    _EXPECTED_GATED = frozenset({"exact", "filter", "lexical"})
+    _EXPECTED_GATED = frozenset({"exact", "filter", "lexical", "identifier"})
     assert set(gated_classes) == _EXPECTED_GATED, (
         f"gated set changed: {sorted(gated_classes)} != {sorted(_EXPECTED_GATED)}. "
         "Adding a class is fine -- update this pin deliberately. Losing one is not."
