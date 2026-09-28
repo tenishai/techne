@@ -494,6 +494,117 @@ class TestOrFallback:
         results = search_fts(db_path, "kubernetes", table="knowledge")
         assert len(results) >= 1
 
+    def test_one_row_and_pass_does_not_hide_partial_matches(self, db_path):
+        """techne#1079: the litestream scenario. One row quotes the whole query
+        (contains every term) and used to replace the entire candidate pool; the
+        rows that actually answer the query — each containing only SOME of the
+        terms — were never fetched. Now the AND row still ranks first, but the
+        partial rows are topped up from the OR pass rather than dropped."""
+        store_knowledge(
+            db_path,
+            "note: someone asked 'litestream replicate techne exec' again today",
+            type="fact",
+        )  # contains every term — the AND row
+        store_knowledge(db_path, "litestream is the tool we use for db replication", type="fact")
+        store_knowledge(db_path, "the techne store lives at ~/.techne/techne.db", type="fact")
+        store_knowledge(db_path, "exec runs a command inside the replica container", type="fact")
+
+        and_only = search_fts(db_path, "litestream replicate techne exec", table="knowledge")
+        contents = [r["content"] for r in and_only]
+        assert "litestream replicate techne exec" in contents[0], (
+            "the exact AND match must still rank first"
+        )
+        assert len(contents) > 1, "partial matches must be topped up, not hidden"
+        assert any("db replication" in c for c in contents)
+        assert any("~/.techne/techne.db" in c for c in contents)
+        assert any("replica container" in c for c in contents)
+
+    def test_and_or_pools_tops_up_per_table_not_on_the_pooled_total(self, db_path):
+        """techne#1079 review fix: table="all" runs one candidate_limit-bounded
+        AND query PER sub-table. Comparing the SUMMED row count across tables
+        against a single `want` lets one table's full AND pass (observations
+        here) mask another table's empty AND pass (knowledge) and skip its
+        top-up — `_and_or_pools` must decide per table.
+
+        Tested directly against `_and_or_pools` rather than through
+        `search_fts`'s final page: once any table's AND pass reaches
+        `candidate_limit` (always >= the display `limit`), AND rows alone
+        already fill the whole page under AND-first precedence (techne#1079
+        v2), so this specific bug's effect on the OR pool never survives to
+        the truncated final output — the pool is the only place it shows.
+        """
+        from techne.core.database import connect
+        from techne.core.search import _and_or_pools
+        from techne.core.state import add_observation, ensure_session
+
+        session_id = "s-1079-alltable"
+        ensure_session(db_path, session_id)
+        # Two observations match BOTH terms — fills observations' own
+        # candidate_limit (2) on the AND pass alone, so no topup is needed there.
+        for i in range(2):
+            add_observation(db_path, session_id, "Bash", f"zerbat quoxlin filler observation {i}")
+        # Matches only ONE of the two terms — AND pass on knowledge finds
+        # nothing. Under the pre-fix pooled-sum comparison, 2 (observations) +
+        # 0 (knowledge) = 2 >= want(2), so the OR pass never runs for EITHER
+        # table and this row is never fetched at all.
+        store_knowledge(db_path, "zerbat only, nothing else in this note", type="fact")
+
+        conn = connect(db_path)
+        try:
+            and_pool, or_pool = _and_or_pools(conn, "zerbat quoxlin", "all", candidate_limit=2)
+        finally:
+            conn.close()
+
+        assert len(and_pool) == 2, "both observations match AND"
+        assert all(r["source_table"] == "observation" for r in and_pool)
+        assert any(r["source_table"] == "knowledge" for r in or_pool), (
+            "knowledge's own AND pass found nothing (0 < want=2), so it must be "
+            "topped up independently of observations already filling their pool"
+        )
+
+    def test_and_row_outranks_a_short_or_row_that_would_win_a_joint_rerank(self, db_path):
+        """THE GUARD FOR #1081/#1084: reranking AND and OR rows TOGETHER let a
+        short on-topic OR row outrank a long exact-match AND row on normalised
+        BM25 + recency — measured on the live store, this dropped identifier
+        queries from rank 1 to 2 or 3 and lost `reflect-drain` from the hybrid
+        path entirely. That PR was reverted and techne#1079 reopened over it.
+
+        This fixture reproduces the exact shape: the AND row contains BOTH
+        query terms but is long (BM25-diluting filler) and stale (old
+        `updated_at`); the OR row contains only ONE term but is short and
+        fresh. Verified directly (see this test file's mutation-check
+        instructions) that merging the two into one pool and reranking ONCE —
+        the #1081 shape — puts the OR row first. The fix must keep the AND
+        row first regardless, because precedence here is structural (AND
+        rows are reranked and concatenated as their own block, before any OR
+        row is even considered), not a side effect of these particular
+        scores.
+        """
+        from techne.core.database import connect
+
+        long_and = "alpha beta " + " ".join(f"filler{i}" for i in range(80))
+        id_and = store_knowledge(db_path, long_and, type="fact")
+        id_or = store_knowledge(db_path, "alpha short note", type="fact")
+
+        conn = connect(db_path)
+        try:
+            # Stale the AND row and leave the OR row fresh — the combination
+            # that, measured, flips a JOINT rerank in the OR row's favour.
+            conn.execute(
+                "UPDATE knowledge SET updated_at = '2000-01-01 00:00:00' WHERE id = ?",
+                (id_and,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        results = search_fts(db_path, "alpha beta", table="knowledge", limit=2)
+        ids = [r["id"] for r in results]
+        assert ids == [id_and, id_or], (
+            f"AND row (matches both terms) must rank before the OR row "
+            f"(matches only 'alpha'), regardless of recency/length; got {ids}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Combined search (search()) tests
@@ -1374,3 +1485,79 @@ def test_fts_with_or_fallback_control_flow():
     calls.clear()
     assert fts_with_or_fallback("  \\ ", run_empty_then(["x"])) == []
     assert calls == []  # unsearchable: run never called
+
+
+def test_fts_and_or_split_tops_up_short_and_pass():
+    """techne#1079: a one-row AND pass no longer replaces the whole pool. When
+    `want` is given and AND returns fewer rows than `want`, the OR-of-terms pass
+    tops it up, returned as a SEPARATE list from the AND rows (v2: search_fts
+    reranks the two blocks separately, so the split must be preserved rather
+    than merged — see fts_and_or_split's docstring)."""
+    from techne.core.search import fts_and_or_split
+
+    and_rows = [{"id": "full"}]  # the one row containing every term
+    or_rows = [{"id": "full"}, {"id": "partial-a"}, {"id": "partial-b"}]
+
+    def run(match):
+        return and_rows if "OR" not in match else or_rows
+
+    and_out, or_out = fts_and_or_split("alpha beta", run, want=5, key=lambda r: r["id"])
+    assert [r["id"] for r in and_out] == ["full"]
+    assert [r["id"] for r in or_out] == ["partial-a", "partial-b"]  # "full" deduped out
+
+
+def test_fts_and_or_split_dedups_on_key():
+    """No duplicate keys across the two returned lists: an OR row whose key
+    already appears in the AND rows is dropped from the OR list, not merely
+    left for a later merge to catch."""
+    from techne.core.search import fts_and_or_split
+
+    and_rows = [{"source_table": "knowledge", "id": 1}]
+    or_rows = [
+        {"source_table": "knowledge", "id": 1},  # same row as the AND hit
+        {"source_table": "thread", "id": 1},  # same numeric id, DIFFERENT table
+        {"source_table": "knowledge", "id": 2},
+    ]
+
+    def run(match):
+        return and_rows if "OR" not in match else or_rows
+
+    and_out, or_out = fts_and_or_split(
+        "alpha beta", run, want=10, key=lambda r: (r["source_table"], r["id"])
+    )
+    keys = [(r["source_table"], r["id"]) for r in and_out + or_out]
+    assert len(keys) == len(set(keys)), f"duplicate key in {keys}"
+    assert [(r["source_table"], r["id"]) for r in or_out] == [("thread", 1), ("knowledge", 2)]
+
+
+def test_fts_and_or_split_no_topup_when_pool_already_full():
+    """When the AND pass already fills `want`, the OR pass is never run — same
+    behaviour as before `want` existed, just made explicit for a non-None want."""
+    from techne.core.search import fts_and_or_split
+
+    calls: list[str] = []
+
+    def run(match):
+        calls.append(match)
+        return [{"id": "a"}, {"id": "b"}]
+
+    and_out, or_out = fts_and_or_split("alpha beta", run, want=2, key=lambda r: r["id"])
+    assert [r["id"] for r in and_out] == ["a", "b"]
+    assert or_out == []
+    assert calls == ['"alpha" "beta"']  # OR pass never invoked
+
+
+def test_fts_with_or_fallback_merges_split_and_caps_at_want():
+    """fts_with_or_fallback is fts_and_or_split's two lists concatenated
+    AND-then-OR and capped at `want` — the shape codegraph/patterns rely on,
+    since they don't rerank and need AND-then-OR ordering unconditionally."""
+    from techne.core.search import fts_with_or_fallback
+
+    and_rows = [{"id": "full"}]
+    or_rows = [{"id": "full"}, {"id": "partial-a"}, {"id": "partial-b"}]
+
+    def run(match):
+        return and_rows if "OR" not in match else or_rows
+
+    out = fts_with_or_fallback("alpha beta", run, want=2, key=lambda r: r["id"])
+    assert [r["id"] for r in out] == ["full", "partial-a"]  # capped at want=2
