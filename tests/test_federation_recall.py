@@ -231,6 +231,242 @@ class TestMergesTeamResults:
         for r in merged:
             assert "_norm_bm25" not in r and "_combined" not in r
 
+    def test_merge_and_rank_and_row_outranks_a_joint_rerank_or_row(self, tmp_path):
+        """Prudence's #1088 review Important 1: merge_and_rank pools
+        local_results and remote_deduped and used to make ONE _rerank call,
+        recreating #1081's joint rerank one hop further out — the fix that
+        made search_fts/search_knowledge_conn structural (AND rows and OR
+        rows never scored against each other) did not reach this pooling
+        step. Same fixture as the search_fts/search_knowledge_conn guards:
+        one long, stale, exact (AND) row and one short, fresh, partial (OR)
+        row, tagged `_match_pass` by their producer. Run through both inputs
+        merge_and_rank takes — a local set (via search() with use_vectors=False,
+        i.e. search_fts's tagged output directly) and a remote set (via
+        search_knowledge_conn) — since the bug reproduces on either side of
+        the pool.
+        """
+        from techne.core.federation import merge_and_rank
+        from techne.core.search import search, search_knowledge_conn
+
+        local_db = tmp_path / "local.db"
+        _init_team_db(local_db)
+
+        long_and = "alpha beta " + " ".join(f"filler{i}" for i in range(80))
+        id_and = store(local_db, long_and, type="fact")
+        id_or = store(local_db, "alpha short note", type="fact")
+        conn = connect(local_db)
+        try:
+            conn.execute(
+                "UPDATE knowledge SET updated_at = '2000-01-01 00:00:00' WHERE id = ?",
+                (id_and,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Local side: use_vectors=False returns search_fts's tagged,
+        # already-correct [and, or] order directly (no vector fusion at all).
+        local_results = search(
+            local_db, "alpha beta", table="knowledge", limit=2, use_vectors=False
+        )
+        assert [r["id"] for r in local_results] == [id_and, id_or], (
+            "fixture sanity: local search must already be AND-first"
+        )
+        merged_local = merge_and_rank(
+            local_results, [], limit=2, recency_weight=0.3, bm25_weight=0.7,
+            half_life_days=30.0,
+        )
+        assert [r["id"] for r in merged_local] == [id_and, id_or], (
+            f"merge_and_rank must not reorder local AND/OR rows; got "
+            f"{[r['id'] for r in merged_local]}"
+        )
+
+        # Remote side: search_knowledge_conn's tagged rows as remote_deduped.
+        conn = connect(local_db)
+        try:
+            remote_rows = search_knowledge_conn(conn, "alpha beta", 2)
+        finally:
+            conn.close()
+        merged_remote = merge_and_rank(
+            [], remote_rows, limit=2, recency_weight=0.3, bm25_weight=0.7,
+            half_life_days=30.0,
+        )
+        assert [r["id"] for r in merged_remote] == [id_and, id_or], (
+            f"merge_and_rank must not reorder remote AND/OR rows either; got "
+            f"{[r['id'] for r in merged_remote]}"
+        )
+
+    def test_merge_and_rank_does_not_empty_the_page_of_untagged_local_rows(self, tmp_path):
+        """Prudence's #1088 review round 2 Important 1 — reproducing her probe.
+
+        Round 1 demoted ANY untagged row to OR-tier (`== "and"` / `!= "and"`).
+        An untagged row can still be strong evidence — an `fts+vec` overlap
+        row matched every query term lexically, same as an AND row, but
+        before this round's `_as_page_row` fix it carried `rank` without the
+        tag — and round 1 gave it no way to earn a spot in the AND bucket,
+        no matter how good a match it was. When a remote's AND pass alone
+        already fills `limit` (12 AND-tagged rows here, against limit=10),
+        `and_ranked` consumes the WHOLE page and no untagged local row can
+        ever appear — `remaining` is 0 before the OR bucket (holding every
+        local row) is even considered. That is a federated page with zero
+        local content, regardless of how the untagged rows would have
+        scored on their own merits.
+
+        The fix (demote ONLY an explicit `"or"` tag) puts untagged rows in
+        the SAME bucket as the remote's AND rows, so they compete for the
+        page on recency/BM25 instead of being excluded categorically. Local
+        rows are left fresh and the remote is staled, so local wins on
+        recency — deterministic without depending on cross-corpus BM25
+        magnitudes.
+        """
+        from techne.core.federation import merge_and_rank
+        from techne.core.search import search_knowledge_conn
+
+        local_db = tmp_path / "local.db"
+        remote_db = tmp_path / "remote.db"
+        _init_team_db(local_db)
+        _init_team_db(remote_db)
+
+        for i in range(8):
+            store(local_db, f"alpha beta local fact number {i}", type="fact")
+        for i in range(12):
+            store(remote_db, f"alpha beta remote fact number {i}", type="fact")
+
+        # Stale the remote store's rows; local rows keep their fresh default
+        # updated_at — the tiebreak that makes "local wins" deterministic.
+        remote_conn = connect(remote_db)
+        try:
+            remote_conn.execute("UPDATE knowledge SET updated_at = '2000-01-01 00:00:00'")
+            remote_conn.commit()
+            remote_deduped = search_knowledge_conn(remote_conn, "alpha beta", 10)
+        finally:
+            remote_conn.close()
+        assert len(remote_deduped) == 10, "fixture sanity: the remote AND pass must fill limit=10"
+        assert all(r.get("_match_pass") == "and" for r in remote_deduped), (
+            "fixture sanity: every remote row must be AND-tagged"
+        )
+
+        # Local rows RE-SHAPED THE WAY `_as_page_row` SHAPED AN `fts+vec`
+        # OVERLAP ROW BEFORE THIS ROUND'S FIX (Prudence's probe methodology):
+        # `rank` kept, `_match_pass` removed. These rows matched every term
+        # lexically — the tag is what's missing, not the evidence.
+        local_conn = connect(local_db)
+        try:
+            local_rows_raw = search_knowledge_conn(local_conn, "alpha beta", 10)
+        finally:
+            local_conn.close()
+        # Local and remote are separate autoincrement id spaces (both 1-N), so
+        # ids collide across stores — discriminate by content instead.
+        local_results = []
+        for r in local_rows_raw:
+            r = dict(r)
+            r.pop("_match_pass", None)
+            r["match_source"] = "fts+vec"
+            local_results.append(r)
+
+        merged = merge_and_rank(
+            local_results, remote_deduped, limit=10, recency_weight=0.3,
+            bm25_weight=0.7, half_life_days=30.0,
+        )
+        survivors = [r for r in merged if "local fact" in (r.get("content") or "")]
+        assert survivors, (
+            "at least one untagged local row must survive the "
+            "merge — round 1's `== \"and\"` rule emptied the page of them "
+            "whenever a remote's AND pass alone filled `limit`"
+        )
+
+    def test_merge_and_rank_keeps_an_or_row_with_vector_agreement_above_vec_only(
+        self, tmp_path, monkeypatch
+    ):
+        """Prudence's #1088 review round 3 Important — reproducing her probe.
+
+        Round 2's rule (`_match_pass == "or"` demoted UNCONDITIONALLY) inverted
+        the evidence ordering once `_as_page_row` started copying the tag onto
+        `fts+vec` overlaps (round 2): an `fts+vec` OR row — a partial lexical
+        match PLUS independent vector agreement, strictly MORE evidence — ended
+        up ranked below an untagged vec-only row that matched nothing lexically
+        at all. Local store: 3 full matches (AND), 3 partial matches (`alpha`
+        only, topped up as OR), 4 lexically unrelated rows. The vector channel
+        is mocked so a PARTIAL-match row is its #1 hit, followed by the 4
+        unrelated rows — the probe's exact shape, no embedding backend needed.
+        Remote: 10 stale AND-tagged rows, filling `limit=10` on their own.
+        Round 2 dropped every `fts+vec` OR row, including the vector channel's
+        #1 hit; the fix (demote only when `match_source != "fts+vec"` too)
+        keeps it.
+        """
+        import techne.core.search as search_mod
+        from techne.core.federation import merge_and_rank
+        from techne.core.search import search, search_knowledge_conn
+
+        local_db = tmp_path / "local.db"
+        remote_db = tmp_path / "remote.db"
+        _init_team_db(local_db)
+        _init_team_db(remote_db)
+
+        for i in range(3):
+            store(local_db, f"alpha beta full match {i}", type="fact")
+        partial_ids = [
+            store(local_db, f"alpha only partial match {i}", type="fact") for i in range(3)
+        ]
+        unrelated_ids = [
+            store(local_db, f"nothing relevant here {i}", type="fact") for i in range(4)
+        ]
+        for i in range(10):
+            store(remote_db, f"alpha beta remote fact number {i}", type="fact")
+
+        # Mock the vector channel: its #1 hit is a PARTIAL-match row, then the
+        # 4 unrelated rows — the probe's shape, independent of any embedding
+        # backend being installed.
+        vec_rows = [{"source_table": "knowledge", "id": partial_ids[0], "distance": 0.05}]
+        vec_rows += [
+            {"source_table": "knowledge", "id": uid, "distance": 0.10 + j / 100}
+            for j, uid in enumerate(unrelated_ids)
+        ]
+
+        def _fake_search_vec(_db, _query, table="all", limit=20, **_kw):
+            return [dict(r) for r in vec_rows][:limit]
+
+        monkeypatch.setattr(search_mod, "search_vec", _fake_search_vec)
+
+        local_results = search(local_db, "alpha beta", table="knowledge", limit=10)
+        vec_hit = next(
+            (r for r in local_results if r.get("id") == partial_ids[0] and r.get("match_source")),
+            None,
+        )
+        assert vec_hit is not None, "fixture sanity: the vec #1 hit must reach the local page"
+        assert vec_hit["match_source"] == "fts+vec", (
+            "fixture sanity: it must overlap the OR row lexically too"
+        )
+        assert vec_hit.get("_match_pass") == "or", (
+            "fixture sanity: that row's lexical pass must be OR, not AND"
+        )
+
+        remote_conn = connect(remote_db)
+        try:
+            remote_conn.execute("UPDATE knowledge SET updated_at = '2000-01-01 00:00:00'")
+            remote_conn.commit()
+            remote_deduped = search_knowledge_conn(remote_conn, "alpha beta", 10)
+        finally:
+            remote_conn.close()
+        assert len(remote_deduped) == 10, "fixture sanity: the remote AND pass must fill limit=10"
+
+        merged = merge_and_rank(
+            local_results, remote_deduped, limit=10, recency_weight=0.3,
+            bm25_weight=0.7, half_life_days=30.0,
+        )
+        survivor = next(
+            (
+                r for r in merged
+                if r.get("id") == partial_ids[0] and r.get("match_source") == "fts+vec"
+            ),
+            None,
+        )
+        assert survivor is not None, (
+            "the vector channel's #1 hit — an fts+vec OR row — must survive the "
+            "merge; round 2's rule demoted every OR-tagged row unconditionally "
+            "and dropped it"
+        )
+
     def test_team_rows_tagged_with_store_and_role(self, tmp_path):
         """Remote rows carry _store (connection name) and _role ('team')."""
         from techne.core.federation import fan_out_search

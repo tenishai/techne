@@ -341,6 +341,35 @@ def test_a_single_table_query_is_never_widened(db, monkeypatch, scoped):
     assert all("reserved_slot" not in r for r in page)
 
 
+# --- techne#1079 review Nit 3: AND precedence in the #827 tail --------------------
+
+
+def test_and_row_wins_the_lexical_tail_slot_over_a_curated_or_row(db, monkeypatch):
+    """`_curated_first`'s curated/rest partition used to run across the WHOLE
+    `fts_only` list, so a curated OR row (partial match) could jump ahead of a
+    non-curated AND row (all-terms match) for the single #827 tail slot — the
+    same AND-precedence problem the #1088 review's Important 1 fixed for
+    `federation.merge_and_rank`, showing up here in miniature. Partitioning
+    within each `_match_pass` block first keeps the AND row in front.
+
+    Nine vec rows fill the whole head budget (limit=10, floor=1), so the two
+    FTS-only rows below compete for the single tail slot on nothing but
+    `_curated_first`'s ordering.
+    """
+    vec = [_row("observations", i, 0.10 + i / 100) for i in range(9)]
+    fts_only = [
+        {"source_table": "observations", "id": 200, "rank": -2.0, "_match_pass": "and"},
+        {"source_table": "knowledge", "id": 201, "rank": -1.0, "_match_pass": "or"},
+    ]
+    _patch_channels(monkeypatch, vec, fts_rows=fts_only)
+
+    page = search(db, "q", table="all", limit=10)
+
+    keys = [(r["source_table"], r["id"]) for r in page]
+    assert ("observations", 200) in keys, "the AND row must win the one tail slot"
+    assert ("knowledge", 201) not in keys, "the curated OR row must not jump ahead of it"
+
+
 def test_a_one_row_page_belongs_to_the_vector_channel(db, monkeypatch):
     """Matching `_fts_floor`'s refusal to reserve at limit<=1: a single slot handed to
     a curated row the vector channel ranked last is a different product, not a prior."""

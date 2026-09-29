@@ -496,11 +496,73 @@ def merge_and_rank(
     can be under-ranked relative to a from-scratch cross-corpus normalisation.
     This affects ordering only (never inclusion/exclusion), and true cross-corpus
     BM25 calibration is out of MVP scope. Do NOT invent ad-hoc normalisation here.
+
+    AND ROWS FROM EVERY STORE ARE RERANKED TOGETHER, THEN OR ROWS FILL WHAT'S
+    LEFT (techne#1079 review Important 1). A single pooled `_rerank` call over
+    `local_results + remote_deduped` recreates the #1081 bug one hop further
+    out: `search_fts` and `search_knowledge_conn` already keep their own AND
+    and OR rows in separate blocks, tagged `_match_pass`, precisely so a short
+    OR row's BM25+recency can't outscore a long exact AND row — but pooling
+    everyone's rows back into one list here and reranking ONCE erases that
+    separation, since `_rerank` re-normalises BM25 per `source_table` across
+    the reunited AND+OR rows. Measured (Prudence's probe): a stale long
+    exact-match row and a fresh short partial-match row, correctly ordered
+    `[and, or]` by both `search_knowledge_conn` and `search()`, came out
+    `[or, and]` through this function. Fixed by reranking every store's
+    FIRST-TIER rows as one block, then filling the remaining slots with
+    every store's SECOND-TIER rows as a second block, and concatenating
+    AND-first — the tier rule is below.
+
+    THE TIER RULE, STATED ONCE HERE (techne#1079 review round 3 — the arch
+    card and the two producers point back to this docstring rather than
+    restating the rule, so it drifts in one place if it ever changes again).
+    A row is SECOND TIER only when its SOLE evidence is a partial lexical
+    match: `_match_pass == "or"` AND `match_source != "fts+vec"`. Every other
+    row is FIRST TIER — an AND-tagged row, an untagged row (no lexical pass
+    at all: a pure vec-only match, or a remote on a version that predates the
+    tag), and an OR-tagged row that ALSO has independent vector agreement
+    (`match_source == "fts+vec"`).
+
+    TWO ROUNDS GOT THIS WRONG BEFORE THE `match_source` CHECK, IN OPPOSITE
+    DIRECTIONS. Round 1 demoted any untagged row (`_match_pass != "and"`):
+    a local hybrid page is mostly untagged `vec`/`fts+vec` rows, so a remote
+    filling `limit` with AND rows could empty a federated page of local
+    content entirely — measured, `team x10` where `main` gave `local x8,
+    team x2`. Round 2 fixed that (`_match_pass == "or"` is the only demotion
+    trigger) but promoted an OR-tagged row unconditionally, including one the
+    vector channel ALSO ranked highly once `_as_page_row` started copying the
+    tag onto `fts+vec` overlaps (search.py, techne#1079 round 2) — so an
+    `fts+vec` OR row (partial lexical match PLUS vector agreement, strictly
+    MORE evidence) ended up ranked below an untagged vec-only row (NO lexical
+    match at all). MEASURED (Prudence's probe): a local page whose vector
+    channel's #1 hit was a partial-match row (`fts+vec`, tagged `"or"`),
+    against a remote filling `limit` with AND rows — round 2's rule dropped
+    every `fts+vec` OR row from the merged page, including that #1 hit, where
+    the pre-#1079 single-rerank shape on `main` kept it. Checking
+    `match_source` closes both directions at once: an OR row is demoted only
+    when it has no vector corroboration either, so "more evidence never
+    ranks lower" holds without reopening either round's bug.
     """
     from techne.core.search import _rerank
 
-    pooled = list(local_results) + list(remote_deduped)
-    return _rerank(pooled, limit, recency_weight, bm25_weight, half_life_days=half_life_days)
+    def _second_tier(r: dict) -> bool:
+        return r.get("_match_pass") == "or" and r.get("match_source") != "fts+vec"
+
+    tier1 = [r for r in local_results if not _second_tier(r)]
+    tier1 += [r for r in remote_deduped if not _second_tier(r)]
+    tier2 = [r for r in local_results if _second_tier(r)]
+    tier2 += [r for r in remote_deduped if _second_tier(r)]
+
+    tier1_ranked = _rerank(
+        tier1, limit, recency_weight, bm25_weight, half_life_days=half_life_days
+    )
+    remaining = limit - len(tier1_ranked)
+    tier2_ranked = (
+        _rerank(tier2, remaining, recency_weight, bm25_weight, half_life_days=half_life_days)
+        if remaining > 0 and tier2
+        else []
+    )
+    return tier1_ranked + tier2_ranked
 
 
 # ---------------------------------------------------------------------------
