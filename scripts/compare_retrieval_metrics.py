@@ -88,6 +88,52 @@ def _regressions(base: dict, head: dict, epsilon: float) -> list[dict]:
     return found
 
 
+def _skipped_no_base(base: dict, head: dict) -> tuple[dict, list[str]]:
+    """Tasks the base leg skipped because its search() lacks a kwarg they set.
+
+    techne#1086. The base leg runs HEAD's tests against MAIN's search(), so a PR
+    that adds a search() kwarg and a task that uses it would otherwise kill that
+    leg with a TypeError. The harness skips such a task there and lists it under
+    `skipped_no_base`. Those tasks have no base to diff against, so they are
+    reported, not compared.
+
+    Returns (skipped, problems). A listed task that head did not measure, or that
+    base ALSO measured, means the two dumps disagree about what was run; that is
+    a problem, not a skip.
+    """
+    skipped = base.get("skipped_no_base") or {}
+    problems = []
+    for tid in sorted(skipped):
+        if tid not in head.get("per_task", {}):
+            problems.append(f"{tid}: skipped on base as new in HEAD, but head did not measure it")
+        if tid in base.get("per_task", {}):
+            problems.append(f"{tid}: listed as skipped on base, yet base measured it")
+    return skipped, problems
+
+
+def _without(head: dict, task_ids) -> dict:
+    """`head` restricted to the tasks not in `task_ids`, class means recomputed.
+
+    The means are recomputed from the per-task rows the same way the gate's
+    aggregate_gold does (a plain mean, rounded to 3), so the per-class diff
+    compares means over the SAME task set on both legs.
+    """
+    task_ids = set(task_ids)
+    if not task_ids:
+        return head
+    per_task = {k: v for k, v in head.get("per_task", {}).items() if k not in task_ids}
+    by_class: dict[str, list[dict]] = {}
+    for row in per_task.values():
+        by_class.setdefault(row.get("class", "unknown"), []).append(row)
+    per_class = {}
+    for cls, rows in by_class.items():
+        m = {k: round(sum(r[k] for r in rows) / len(rows), 3)
+             for k in _HIGHER_IS_BETTER + _LOWER_IS_BETTER if all(k in r for r in rows)}
+        m["n"] = len(rows)
+        per_class[cls] = m
+    return {**head, "per_task": per_task, "per_class": per_class}
+
+
 def _case_count_drift(base: dict, head: dict) -> list[str]:
     """Classes whose case count differs between the legs — techne#857.
 
@@ -129,6 +175,25 @@ def main() -> int:
     args = ap.parse_args()
 
     base, head = _load(args.base), _load(args.head)
+
+    # techne#1086: tasks new in HEAD that the base search() cannot run. Named up
+    # front, then left out of HEAD's side so both legs cover the same tasks and
+    # the #857 case-count guard below still refuses any OTHER shortfall.
+    skipped, problems = _skipped_no_base(base, head)
+    if problems:
+        print("=== CANNOT DIFF: the base leg's skip list does not match the dumps ===")
+        for line in problems:
+            print(f"  {line}")
+        return 1
+    if skipped:
+        print("=== new in HEAD, no base: skipped on the base leg (#1086) ===")
+        for tid in sorted(skipped):
+            info = skipped[tid]
+            print(f"  {tid} ({info.get('class')}): origin/main's search() lacks "
+                  f"{', '.join(info.get('missing_kwargs', []))}")
+        print("  Not compared. Every other task is diffed below; class means are over "
+              "the tasks both legs ran.\n")
+        head = _without(head, skipped)
 
     # REFUSE TO DIFF UNEQUAL CASE SETS (#857) — before the table, not after, so
     # no number is printed that invites comparison. A short leg is a broken run,
