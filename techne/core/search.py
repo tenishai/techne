@@ -1,5 +1,6 @@
 """Search across all techne data layers — FTS5 and optional vector search."""
 
+import json
 import math
 import sqlite3
 import sys
@@ -300,6 +301,128 @@ def _rerank(
     return result
 
 
+#: Per FTS sub-table: (FTS table, base table, base column equal to the FTS rowid,
+#: base columns the result row is built from). Allow-listed names only — every SQL
+#: string below interpolates these, never caller input.
+_FTS_SUB_TABLES: dict[str, tuple[str, str, str, str]] = {
+    "threads": (
+        "threads_fts",
+        "threads",
+        "rowid",
+        "b.id, b.label, b.summary, b.resume_points, b.status, b.session_id, b.updated_at",
+    ),
+    "observations": (
+        "observations_fts",
+        "observations",
+        "id",
+        "b.id, b.content, b.tool_name, b.session_id, b.timestamp, b.event_at, b.tier",
+    ),
+    "knowledge": (
+        "knowledge_fts",
+        "knowledge",
+        "id",
+        "b.id, b.type, b.content, b.tags, b.confidence, b.confidence_numeric, "
+        "b.last_confirmed_at, b.status, b.source, b.updated_at",
+    ),
+}
+
+
+#: The most one clamped term can add to a row's bm25: FTS5's clamped idf (1e-6) times
+#: its fixed ``k1 + 1`` (k1 = 1.2), the limit of the term-frequency factor
+#: (techne#1093). Bounds how far dropping a term can move any row's score.
+_CLAMPED_TERM_MAX_BM25 = 1e-6 * 2.2
+
+
+def _drop_clamped_or_terms(conn: sqlite3.Connection, fts_table: str, or_query: str) -> str:
+    """Drop the terms of an OR-of-terms MATCH that occur in more than half of
+    ``fts_table``'s rows (techne#1093). Returns ``or_query`` unchanged when no
+    term qualifies, and when EVERY term does (the query is never emptied).
+
+    THE 50% IS FIXED BY FTS5, NOT TUNED. FTS5's bm25 computes
+    ``idf = log((N - df + 0.5) / (df + 0.5))`` and clamps ``idf <= 0`` to 1e-6,
+    which happens exactly when ``df >= N / 2``. Such a term adds at most ~1e-6
+    per row to any score, so dropping it cannot reorder rows that match a kept
+    term; it only removes rows that match NOTHING BUT clamped terms, which rank
+    below every such row. At 20% the prune was measured lossy (FTS-only pages
+    26/49 identical), so do not lower it. ``N`` is the FTS index's own row
+    count (``_docsize`` holds one row per indexed document), the same ``N`` bm25
+    uses — not a filtered count.
+
+    Each term costs one probe bounded at ``N // 2 + 1`` rowids. ``or_query`` is
+    :func:`build_or_fts_query`'s output: phrase literals with no whitespace
+    inside them, joined by ``" OR "``, so splitting on that separator is exact.
+    """
+    terms = or_query.split(" OR ")
+    if len(terms) < 2:
+        return or_query
+    half = conn.execute(f"SELECT count(*) FROM {fts_table}_docsize").fetchone()[0] // 2
+    probe = f"SELECT count(*) FROM (SELECT 1 FROM {fts_table} WHERE {fts_table} MATCH ? LIMIT ?)"
+    keep = [t for t in terms if conn.execute(probe, (t, half + 1)).fetchone()[0] <= half]
+    return " OR ".join(keep) if keep else or_query
+
+
+def _fts_sub_table_rows(
+    conn: sqlite3.Connection,
+    sub_table: str,
+    fts_query: str,
+    candidate_limit: int,
+    filter_sql: str,
+) -> list[sqlite3.Row]:
+    """The top ``candidate_limit`` base rows of one FTS sub-table, best bm25
+    first, each carrying its ``rank`` — RANK FIRST, THEN FETCH (techne#1092).
+
+    The single-statement shape (``FTS JOIN base ... ORDER BY rank LIMIT``)
+    fetched and sorted EVERY matching row with its content before the LIMIT
+    applied, and the OR pass matches most of a table (p50 47,399 of 59,836
+    observations). So step 1 ranks ``(rowid, bm25)`` pairs alone and keeps the
+    top ``candidate_limit``; step 2 fetches at most that many base rows by id.
+
+    FILTERS APPLY BEFORE THE LIMIT, IN STEP 1. ``filter_sql`` (the knowledge
+    superseded/archived/uncertain clauses) is on base columns, so when it is
+    non-empty step 1 joins the base table to evaluate it — still sorting only
+    ``(rowid, rank)``. Filtering after the LIMIT would return a short page
+    whenever a filtered row ranked inside it. Step 2 repeats the filter, so a
+    row changed or deleted between the two statements shows up as a MISSING
+    row, and any missing row sends the whole sub-table through the original
+    single-statement query instead. The page is therefore always exactly what
+    that query returns, with the same ``bm25`` values.
+    """
+    fts, base, key, cols = _FTS_SUB_TABLES[sub_table]
+    if filter_sql:
+        rank_sql = (
+            f"SELECT f.rowid, bm25({fts}) AS rank FROM {fts} f "
+            f"JOIN {base} b ON b.{key} = f.rowid "
+            f"WHERE {fts} MATCH ?{filter_sql} ORDER BY rank LIMIT ?"
+        )
+    else:
+        rank_sql = (
+            f"SELECT rowid, bm25({fts}) AS rank FROM {fts} "
+            f"WHERE {fts} MATCH ? ORDER BY rank LIMIT ?"
+        )
+    ranked = conn.execute(rank_sql, (fts_query, candidate_limit)).fetchall()
+    if not ranked:
+        return []
+    fetched = {
+        r["_fts_rowid"]: r
+        for r in conn.execute(
+            f"SELECT b.{key} AS _fts_rowid, {cols} FROM {base} b "
+            f"WHERE b.{key} IN (SELECT value FROM json_each(?)){filter_sql}",
+            (json.dumps([r[0] for r in ranked]),),
+        )
+    }
+    if len(fetched) == len(ranked):
+        return [dict(fetched[rowid], rank=rank) for rowid, rank in ranked]
+    return [
+        dict(r)
+        for r in conn.execute(
+            f"SELECT {cols}, bm25({fts}) AS rank FROM {fts} f "
+            f"JOIN {base} b ON b.{key} = f.rowid "
+            f"WHERE {fts} MATCH ?{filter_sql} ORDER BY rank LIMIT ?",
+            (fts_query, candidate_limit),
+        )
+    ]
+
+
 def _fts_match_rows(
     conn: sqlite3.Connection,
     fts_query: str,
@@ -308,35 +431,59 @@ def _fts_match_rows(
     include_archived: bool = True,
     include_uncertain: bool = False,
     row_chars: int | None = None,
+    drop_clamped_or_terms: bool = False,
 ) -> list[dict]:
     """Run the per-table FTS5 MATCH queries for ``fts_query`` and return raw
     candidate rows (pre-rerank). Shared by the implicit-AND pass and the #70
-    OR fallback so both issue identical SQL.
+    OR fallback so both issue identical SQL; each table ranks before it
+    fetches (see :func:`_fts_sub_table_rows`).
 
     ``include_archived`` (techne#216): when False, soft-archived knowledge rows
     (``status = 'archived'``) are filtered out of the knowledge FTS query.
     Default True — explicit search (techne_search) returns archived entries;
     only DEFAULT recall (techne_recall) passes False. Affects the knowledge
     table only; threads/observations have no archive lifecycle.
+
+    ``drop_clamped_or_terms`` (techne#1093): ``fts_query`` is an OR-of-terms
+    query; drop, per table, the terms bm25 clamps to ~zero weight (see
+    :func:`_drop_clamped_or_terms`). The pruned result is kept only when it
+    provably has the full query's top ``candidate_limit`` rows: it must be full
+    (otherwise rows matching only dropped terms would fill the rest), and the
+    bm25 gap at the LIMIT boundary must exceed the most the dropped terms can
+    add to a score (otherwise a clamped term decides a tie for the last slot).
+    Failing either, that table re-runs the full query. Order WITHIN the kept
+    rows can still differ from the full query's where two rows tie on every
+    kept term, and ``rank`` differs by the dropped terms' clamped
+    contributions. Only the OR pass sets this; the AND pass never drops a term.
     """
     # The caller's cap wins for KNOWLEDGE rows; the ledger tables keep
     # `_ROW_CHAR_CAP` regardless (techne#842).
     _cap = row_chars if row_chars is not None else _ROW_CHAR_CAP
     results: list[dict] = []
 
+    def _rows(sub_table: str, filter_sql: str = "") -> list[dict]:
+        if drop_clamped_or_terms:
+            pruned = _drop_clamped_or_terms(conn, _FTS_SUB_TABLES[sub_table][0], fts_query)
+            if pruned != fts_query:
+                rows = _fts_sub_table_rows(conn, sub_table, pruned, candidate_limit + 1, filter_sql)
+                # The pruned top `candidate_limit` is the full query's top set only if
+                # the score gap at the LIMIT boundary exceeds what the dropped terms
+                # could add (a row past it can gain at most `slack`). A short result,
+                # or a boundary tie within `slack`, re-runs the full query: the rows
+                # matching only dropped terms, or a clamped term breaking the tie,
+                # would decide the last slot.
+                slack = (
+                    len(fts_query.split(" OR ")) - len(pruned.split(" OR "))
+                ) * _CLAMPED_TERM_MAX_BM25
+                if (
+                    len(rows) > candidate_limit
+                    and rows[candidate_limit]["rank"] - rows[candidate_limit - 1]["rank"] > slack
+                ):
+                    return rows[:candidate_limit]
+        return _fts_sub_table_rows(conn, sub_table, fts_query, candidate_limit, filter_sql)
+
     if table in ("threads", "all"):
-        rows = conn.execute(
-            """SELECT t.id, t.label, t.summary, t.resume_points, t.status,
-                      t.session_id, t.updated_at,
-                      bm25(threads_fts) AS rank
-               FROM threads_fts f
-               JOIN threads t ON t.rowid = f.rowid
-               WHERE threads_fts MATCH ?
-               ORDER BY rank
-               LIMIT ?""",
-            (fts_query, candidate_limit),
-        ).fetchall()
-        for r in rows:
+        for r in _rows("threads"):
             results.append(
                 {
                     "source_table": "thread",
@@ -352,18 +499,7 @@ def _fts_match_rows(
             )
 
     if table in ("observations", "all"):
-        rows = conn.execute(
-            """SELECT o.id, o.content, o.tool_name, o.session_id,
-                      o.timestamp, o.event_at, o.tier,
-                      bm25(observations_fts) AS rank
-               FROM observations_fts f
-               JOIN observations o ON o.id = f.rowid
-               WHERE observations_fts MATCH ?
-               ORDER BY rank
-               LIMIT ?""",
-            (fts_query, candidate_limit),
-        ).fetchall()
-        for r in rows:
+        for r in _rows("observations"):
             results.append(
                 {
                     "source_table": "observation",
@@ -383,7 +519,7 @@ def _fts_match_rows(
         # rows; explicit search (default True) keeps them. Interpolating a fixed
         # clause here — not a bound param — because it's a boolean-selected literal
         # SQL fragment, never user input.
-        archived_clause = "" if include_archived else " AND k.status != 'archived'"
+        archived_clause = "" if include_archived else " AND b.status != 'archived'"
         # techne#501: `uncertain` is a TRUST STATE and now FILTERS, where it used to
         # only feed decay_score as "a tiebreak/penalty, not a primary signal"
         # (weight 0.1). A state answers "may this be acted on"; a confidence answers
@@ -398,21 +534,9 @@ def _fts_match_rows(
         # `_cascade_uncertain` has never fired in production. Filtering by default
         # changes nothing today and protects the moment #443 populates the deps
         # and the cascade starts flipping rows.
-        uncertain_clause = "" if include_uncertain else " AND k.status != 'uncertain'"
-        rows = conn.execute(
-            f"""SELECT k.id, k.type, k.content, k.tags, k.confidence,
-                      k.confidence_numeric, k.last_confirmed_at, k.status,
-                      k.source, k.updated_at,
-                      bm25(knowledge_fts) AS rank
-               FROM knowledge_fts f
-               JOIN knowledge k ON k.id = f.rowid
-               WHERE knowledge_fts MATCH ?
-                 AND k.superseded_by IS NULL{archived_clause}{uncertain_clause}
-               ORDER BY rank
-               LIMIT ?""",
-            (fts_query, candidate_limit),
-        ).fetchall()
-        for r in rows:
+        uncertain_clause = "" if include_uncertain else " AND b.status != 'uncertain'"
+        filter_sql = f" AND b.superseded_by IS NULL{archived_clause}{uncertain_clause}"
+        for r in _rows("knowledge", filter_sql):
             results.append(
                 {
                     "source_table": "knowledge",
@@ -511,9 +635,9 @@ def _and_or_pools(
     and_pool: list[dict] = []
     or_pool: list[dict] = []
     for sub_table in sub_tables:
-        and_rows, or_rows = fts_and_or_split(
-            query,
-            lambda match, st=sub_table: _fts_match_rows(
+
+        def _run(match: str, st: SearchTable = sub_table, drop: bool = False) -> list[dict]:
+            return _fts_match_rows(
                 conn,
                 match,
                 st,
@@ -521,9 +645,16 @@ def _and_or_pools(
                 include_archived=include_archived,
                 include_uncertain=include_uncertain,
                 row_chars=row_chars,
-            ),
+                drop_clamped_or_terms=drop,
+            )
+
+        and_rows, or_rows = fts_and_or_split(
+            query,
+            _run,
             want=candidate_limit,
             key=lambda r: (r["source_table"], r["id"]),
+            # techne#1093: the OR pass drops terms bm25 clamps to ~zero weight.
+            run_or=lambda match, run=_run: run(match, drop=True),
         )
         for r in and_rows:
             r["_match_pass"] = "and"
@@ -705,6 +836,15 @@ def search_knowledge_conn(
         ),
         want=candidate_limit,
         key=lambda r: (r["source_table"], r["id"]),
+        # techne#1093: the OR pass drops terms bm25 clamps to ~zero weight.
+        run_or=lambda match: _fts_match_rows(
+            conn,
+            match,
+            "knowledge",
+            candidate_limit,
+            include_archived=False,
+            drop_clamped_or_terms=True,
+        ),
     )
     for r in and_rows:
         r["_match_pass"] = "and"
@@ -2486,8 +2626,8 @@ def has_direct_match(db_path: Path, query: str, table: SearchTable = "all") -> b
 
     Scoped by `table`, which defaults to `"all"` and therefore fans across every FTS
     table — callers wanting the S5 semantics must pass `table="knowledge"` explicitly.
-    `_fts_match_rows` builds ordinary result rows, so this does select content and does
-    order by rank; the cost is bounded by `LIMIT 1` rather than by doing less work.
+    `_fts_match_rows` builds ordinary result rows: it ranks every match, then fetches
+    the one best row (techne#1092).
     """
     fts_query = prepare_fts_query(query)
     if fts_query is None:
@@ -2528,6 +2668,7 @@ def fts_and_or_split(
     run: Callable[[str], list],
     want: int | None = None,
     key: Callable[[dict], Hashable] = lambda r: r.get("id"),
+    run_or: Callable[[str], list] | None = None,
 ) -> tuple[list, list]:
     """The #70 control flow (issue #559), returning the AND pass and the
     OR-of-terms top-up as TWO SEPARATE lists rather than one merged list
@@ -2559,21 +2700,28 @@ def fts_and_or_split(
     since ``run`` is expected to return each row at most once per call, as
     every caller's SQL already does. ``want=None`` runs OR only on an empty
     AND pass, same as the pre-#1079 helper.
+
+    ``run_or`` (default ``run``) runs the OR-of-terms query instead of ``run``
+    — the AND pass always goes through ``run``. Search passes one that drops
+    terms matching over half the table (techne#1093); codegraph and patterns
+    don't.
     """
     fts = prepare_fts_query(query)
     if fts is None:
         return [], []
+    if run_or is None:
+        run_or = run
     and_rows = run(fts)
     if not and_rows:
         or_query = build_or_fts_query(query)
-        return [], (run(or_query) if or_query else [])
+        return [], (run_or(or_query) if or_query else [])
     if want is None or len(and_rows) >= want:
         return and_rows, []
     or_query = build_or_fts_query(query)
     if not or_query:
         return and_rows, []
     seen = {key(r) for r in and_rows}
-    topup = [r for r in run(or_query) if key(r) not in seen]
+    topup = [r for r in run_or(or_query) if key(r) not in seen]
     return and_rows, topup
 
 
