@@ -340,13 +340,17 @@ def _drop_clamped_or_terms(conn: sqlite3.Connection, fts_table: str, or_query: s
 
     THE 50% IS FIXED BY FTS5, NOT TUNED. FTS5's bm25 computes
     ``idf = log((N - df + 0.5) / (df + 0.5))`` and clamps ``idf <= 0`` to 1e-6,
-    which happens exactly when ``df >= N / 2``. Such a term adds at most ~1e-6
-    per row to any score, so dropping it cannot reorder rows that match a kept
-    term; it only removes rows that match NOTHING BUT clamped terms, which rank
-    below every such row. At 20% the prune was measured lossy (FTS-only pages
-    26/49 identical), so do not lower it. ``N`` is the FTS index's own row
-    count (``_docsize`` holds one row per indexed document), the same ``N`` bm25
-    uses — not a filtered count.
+    which happens exactly when ``df >= N / 2``. Such a term adds at most
+    ``_CLAMPED_TERM_MAX_BM25`` to any row's score, so dropping it can only
+    reorder rows whose scores on the kept terms are within that amount (two
+    rows tying on every kept term can swap), and it removes rows that match
+    NOTHING BUT clamped terms, which rank below every row matching a kept term.
+    :func:`_fts_match_rows` guards the LIMIT boundary against both. At 20% the
+    prune was measured lossy (FTS-only pages 26/49 identical), so do not lower
+    it. bm25's ``N`` is FTS5's ``nTotalRow`` (the averages record in
+    ``<fts>_data``); ``<fts>_docsize`` has one row per indexed document and
+    equals it while the index is consistent. It is the whole index, not a
+    filtered count.
 
     Each term costs one probe bounded at ``N // 2 + 1`` rowids. ``or_query`` is
     :func:`build_or_fts_query`'s output: phrase literals with no whitespace

@@ -236,6 +236,65 @@ def test_a_boundary_tie_decided_by_a_clamped_term_re_runs_the_full_query(db_path
     assert [(r["id"], r["rank"]) for r in pruned] == [(r["id"], r["rank"]) for r in full]
 
 
+def test_a_near_tie_inside_the_slack_bound_re_runs_the_full_query(db_path):
+    """Pins the SIZE of the boundary slack, not just the guard's existence
+    (Prudence, PR #1098 review). `halfword` sits at df = N/2 exactly: kept, but
+    clamped too, so the pruned top two differ by a gap strictly between 0 and
+    one clamped term's maximum. The dropped `crowdword` is worth more than that
+    gap and puts the second row first under the full query. A slack of 0, or
+    one sized to the bare 1e-6 clamp, keeps the pruned (wrong) row."""
+    first = store_knowledge(db_path, "halfword halfword xa")
+    second = store_knowledge(db_path, "halfword crowdword xb")
+    for i in range(3):
+        store_knowledge(db_path, f"halfword pad{i} yy")
+    for i in range(5):
+        store_knowledge(db_path, f"crowdword pad{i} zz")
+    # N = 10: halfword df = 5 (kept, clamped), crowdword df = 6 (dropped).
+    query = '"halfword" OR "crowdword"'
+    conn = connect(db_path)
+    try:
+        assert _drop_clamped_or_terms(conn, "knowledge_fts", query) == '"halfword"'
+        raw = _fts_match_rows(conn, '"halfword"', "knowledge", 2)
+        full = _fts_match_rows(conn, query, "knowledge", 1)
+        pruned = _fts_match_rows(conn, query, "knowledge", 1, drop_clamped_or_terms=True)
+    finally:
+        conn.close()
+    assert [r["id"] for r in raw] == [first, second], "fixture: pruned order puts `first` ahead"
+    gap = raw[1]["rank"] - raw[0]["rank"]
+    assert 1e-6 > gap > 0, "fixture: a near tie inside one clamped term, not an exact tie"
+    assert [r["id"] for r in full] == [second], "fixture: the dropped term flips the order"
+    assert [(r["id"], r["rank"]) for r in pruned] == [(r["id"], r["rank"]) for r in full]
+
+
+def test_the_slack_bound_is_the_full_k1_plus_1_multiple_of_the_clamp(db_path):
+    """The bound is ``1e-6 * (k1 + 1)`` per dropped term, not the bare 1e-6 clamp:
+    a clamped term's tf factor reaches up to 2.2. Here the pruned top two differ
+    by ~1.2e-6, above the bare clamp and below 2.2e-6, and the dropped
+    `crowdword` (tf 15) flips them. A bound of 1e-6 would call that gap safe and
+    keep the wrong row; the previous test's gap (<1e-6) can't tell the two apart."""
+    first = store_knowledge(db_path, " ".join(["halfword"] * 15 + ["xa"]))
+    second = store_knowledge(db_path, " ".join(["halfword"] + ["crowdword"] * 15 + ["xb"]))
+    for i in range(3):
+        store_knowledge(db_path, "halfword " + " ".join(f"p{i}w{j}" for j in range(17)))
+    for i in range(5):
+        store_knowledge(db_path, f"crowdword q{i}w0")
+    # N = 10: halfword df = 5 (kept, clamped), crowdword df = 6 (dropped).
+    query = '"halfword" OR "crowdword"'
+    conn = connect(db_path)
+    try:
+        assert _drop_clamped_or_terms(conn, "knowledge_fts", query) == '"halfword"'
+        raw = _fts_match_rows(conn, '"halfword"', "knowledge", 2)
+        full = _fts_match_rows(conn, query, "knowledge", 1)
+        pruned = _fts_match_rows(conn, query, "knowledge", 1, drop_clamped_or_terms=True)
+    finally:
+        conn.close()
+    assert [r["id"] for r in raw] == [first, second], "fixture: pruned order puts `first` ahead"
+    gap = raw[1]["rank"] - raw[0]["rank"]
+    assert 2.2e-6 > gap > 1e-6, "fixture: gap between the bare clamp and the real bound"
+    assert [r["id"] for r in full] == [second], "fixture: the dropped term flips the order"
+    assert [(r["id"], r["rank"]) for r in pruned] == [(r["id"], r["rank"]) for r in full]
+
+
 def test_the_and_pass_never_drops_a_term(df_db):
     """Only the OR pass prunes. `crowdword rareword` has no AND match, so the OR
     pass runs: it probes df and drops `crowdword`, while the AND MATCH before it
