@@ -1,8 +1,8 @@
 ---
 card: arch-card:techne-search-embeddings
 updated: 2026-09-29
-anchor: techne/core/embeddings.py sha=70922c23c8a262b178932108c9750eed1d499a54
-anchor: techne/core/static_direct.py sha=ae20551a5c334ffe6b7376d7c14978b7b39869fa
+anchor: techne/core/embeddings.py sha=b187b6425f10a894924ad97afcaf8cb556a11f15
+anchor: techne/core/static_direct.py sha=a70c7baba16383dae6c588849f7abc9cc1058698
 anchor: techne/core/search.py sha=9b3a0f64c28a5b1545120f58ad0c7e1a967046fc
 anchor: techne/platforms/claude_code/hooks.py sha=ed7125159e939df81839a8455f34e67f388a73f0
 ---
