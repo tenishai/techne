@@ -508,52 +508,61 @@ def merge_and_rank(
     the reunited AND+OR rows. Measured (Prudence's probe): a stale long
     exact-match row and a fresh short partial-match row, correctly ordered
     `[and, or]` by both `search_knowledge_conn` and `search()`, came out
-    `[or, and]` through this function. Fixed the same way as the two
-    producers: rerank every store's rows NOT explicitly tagged `"or"` as one
-    block, then fill the remaining slots with every store's `"or"`-tagged
-    rows as a second block, and concatenate AND-first. See the next
-    paragraph for why untagged rows join the first block, not the second.
+    `[or, and]` through this function. Fixed by reranking every store's
+    FIRST-TIER rows as one block, then filling the remaining slots with
+    every store's SECOND-TIER rows as a second block, and concatenating
+    AND-first — the tier rule is below.
 
-    A ROW WITHOUT `_match_pass` IS FIRST-TIER, NOT DEMOTED (techne#1079 review
-    round 2 — round 1 shipped the opposite rule and it was wrong). ONLY a row
-    explicitly tagged `"or"` is demoted; anything else — untagged included —
-    is bucketed with the AND rows. The tag means "went through the lexical
-    AND/OR split and landed in the OR pass"; its ABSENCE means "unknown
-    provenance", never "known to be a partial match", and the two must not be
-    treated alike. A local `search()` page with vectors on is mostly `vec` and
-    `fts+vec` rows, and NEITHER carries the tag — `_as_page_row` copies
-    `_match_pass` from the underlying FTS row now (search.py, techne#1079
-    round 2), same as it already copied `rank`, but a pure vec-only row has
-    no FTS row to copy from at all. An `fts+vec` OVERLAP row matched every
-    query term lexically — strictly stronger evidence than an AND row from a
-    single-channel FTS-only store — so demoting it below a remote's AND rows
-    was backwards, not merely conservative. MEASURED (Prudence's probe): a
-    remote returning close to `limit` AND-tagged rows, pooled with a local
-    hybrid page whose vec/fts+vec rows were left untagged, produced an
-    all-remote page under the round-1 `== "and"` rule (`team x10`) where the
-    pre-#1079 single-rerank shape on `main` gave `local x8, team x2` — every
-    local vector hit pushed off the page by a remote's lexical rows it had no
-    real ranking edge over. `!= "or"` restores that composition while still
-    fixing the #1081 inversion, since every OR row is tagged `"or"` by its
-    producer regardless of which bucket untagged rows join.
+    THE TIER RULE, STATED ONCE HERE (techne#1079 review round 3 — the arch
+    card and the two producers point back to this docstring rather than
+    restating the rule, so it drifts in one place if it ever changes again).
+    A row is SECOND TIER only when its SOLE evidence is a partial lexical
+    match: `_match_pass == "or"` AND `match_source != "fts+vec"`. Every other
+    row is FIRST TIER — an AND-tagged row, an untagged row (no lexical pass
+    at all: a pure vec-only match, or a remote on a version that predates the
+    tag), and an OR-tagged row that ALSO has independent vector agreement
+    (`match_source == "fts+vec"`).
+
+    TWO ROUNDS GOT THIS WRONG BEFORE THE `match_source` CHECK, IN OPPOSITE
+    DIRECTIONS. Round 1 demoted any untagged row (`_match_pass != "and"`):
+    a local hybrid page is mostly untagged `vec`/`fts+vec` rows, so a remote
+    filling `limit` with AND rows could empty a federated page of local
+    content entirely — measured, `team x10` where `main` gave `local x8,
+    team x2`. Round 2 fixed that (`_match_pass == "or"` is the only demotion
+    trigger) but promoted an OR-tagged row unconditionally, including one the
+    vector channel ALSO ranked highly once `_as_page_row` started copying the
+    tag onto `fts+vec` overlaps (search.py, techne#1079 round 2) — so an
+    `fts+vec` OR row (partial lexical match PLUS vector agreement, strictly
+    MORE evidence) ended up ranked below an untagged vec-only row (NO lexical
+    match at all). MEASURED (Prudence's probe): a local page whose vector
+    channel's #1 hit was a partial-match row (`fts+vec`, tagged `"or"`),
+    against a remote filling `limit` with AND rows — round 2's rule dropped
+    every `fts+vec` OR row from the merged page, including that #1 hit, where
+    the pre-#1079 single-rerank shape on `main` kept it. Checking
+    `match_source` closes both directions at once: an OR row is demoted only
+    when it has no vector corroboration either, so "more evidence never
+    ranks lower" holds without reopening either round's bug.
     """
     from techne.core.search import _rerank
 
-    and_rows = [r for r in local_results if r.get("_match_pass") != "or"]
-    and_rows += [r for r in remote_deduped if r.get("_match_pass") != "or"]
-    or_rows = [r for r in local_results if r.get("_match_pass") == "or"]
-    or_rows += [r for r in remote_deduped if r.get("_match_pass") == "or"]
+    def _second_tier(r: dict) -> bool:
+        return r.get("_match_pass") == "or" and r.get("match_source") != "fts+vec"
 
-    and_ranked = _rerank(
-        and_rows, limit, recency_weight, bm25_weight, half_life_days=half_life_days
+    tier1 = [r for r in local_results if not _second_tier(r)]
+    tier1 += [r for r in remote_deduped if not _second_tier(r)]
+    tier2 = [r for r in local_results if _second_tier(r)]
+    tier2 += [r for r in remote_deduped if _second_tier(r)]
+
+    tier1_ranked = _rerank(
+        tier1, limit, recency_weight, bm25_weight, half_life_days=half_life_days
     )
-    remaining = limit - len(and_ranked)
-    or_ranked = (
-        _rerank(or_rows, remaining, recency_weight, bm25_weight, half_life_days=half_life_days)
-        if remaining > 0 and or_rows
+    remaining = limit - len(tier1_ranked)
+    tier2_ranked = (
+        _rerank(tier2, remaining, recency_weight, bm25_weight, half_life_days=half_life_days)
+        if remaining > 0 and tier2
         else []
     )
-    return and_ranked + or_ranked
+    return tier1_ranked + tier2_ranked
 
 
 # ---------------------------------------------------------------------------

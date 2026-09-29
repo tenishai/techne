@@ -1808,13 +1808,16 @@ def search(
             # copy, so restore `rank` explicitly. (#402 review — Prudence.)
             if "rank" in fts_row:
                 row["rank"] = fts_row["rank"]
-            # Same for `_match_pass` (techne#1079 review round 2): an fts+vec
-            # overlap row matched every query term lexically as an AND row (or
-            # was topped up as an OR row) before the vector channel found it
-            # too — that provenance must survive onto the merged page row, not
-            # just onto the fts-only rows the tail/curated/identifier code
-            # paths copy directly. Without it, federation's merge_and_rank
-            # could not tell an fts+vec AND row from a pure vec-only row.
+            # Same for `_match_pass` (techne#1079 review round 2/3): an
+            # fts+vec overlap row went through the AND/OR split before the
+            # vector channel found it too, and `merge_and_rank`'s tier rule
+            # needs to know which pass it came from — NOT to sort an AND
+            # overlap from a vec-only row (both are first tier either way),
+            # but to tell an OR overlap (partial lexical match PLUS vector
+            # agreement — more evidence, stays first tier) from an OR row
+            # with no vector corroboration (second tier). Without the copy,
+            # every fts+vec row read as untagged and merge_and_rank could
+            # not draw that distinction at all.
             if "_match_pass" in fts_row:
                 row["_match_pass"] = fts_row["_match_pass"]
         else:

@@ -375,6 +375,98 @@ class TestMergesTeamResults:
             "whenever a remote's AND pass alone filled `limit`"
         )
 
+    def test_merge_and_rank_keeps_an_or_row_with_vector_agreement_above_vec_only(
+        self, tmp_path, monkeypatch
+    ):
+        """Prudence's #1088 review round 3 Important — reproducing her probe.
+
+        Round 2's rule (`_match_pass == "or"` demoted UNCONDITIONALLY) inverted
+        the evidence ordering once `_as_page_row` started copying the tag onto
+        `fts+vec` overlaps (round 2): an `fts+vec` OR row — a partial lexical
+        match PLUS independent vector agreement, strictly MORE evidence — ended
+        up ranked below an untagged vec-only row that matched nothing lexically
+        at all. Local store: 3 full matches (AND), 3 partial matches (`alpha`
+        only, topped up as OR), 4 lexically unrelated rows. The vector channel
+        is mocked so a PARTIAL-match row is its #1 hit, followed by the 4
+        unrelated rows — the probe's exact shape, no embedding backend needed.
+        Remote: 10 stale AND-tagged rows, filling `limit=10` on their own.
+        Round 2 dropped every `fts+vec` OR row, including the vector channel's
+        #1 hit; the fix (demote only when `match_source != "fts+vec"` too)
+        keeps it.
+        """
+        import techne.core.search as search_mod
+        from techne.core.federation import merge_and_rank
+        from techne.core.search import search, search_knowledge_conn
+
+        local_db = tmp_path / "local.db"
+        remote_db = tmp_path / "remote.db"
+        _init_team_db(local_db)
+        _init_team_db(remote_db)
+
+        for i in range(3):
+            store(local_db, f"alpha beta full match {i}", type="fact")
+        partial_ids = [
+            store(local_db, f"alpha only partial match {i}", type="fact") for i in range(3)
+        ]
+        unrelated_ids = [
+            store(local_db, f"nothing relevant here {i}", type="fact") for i in range(4)
+        ]
+        for i in range(10):
+            store(remote_db, f"alpha beta remote fact number {i}", type="fact")
+
+        # Mock the vector channel: its #1 hit is a PARTIAL-match row, then the
+        # 4 unrelated rows — the probe's shape, independent of any embedding
+        # backend being installed.
+        vec_rows = [{"source_table": "knowledge", "id": partial_ids[0], "distance": 0.05}]
+        vec_rows += [
+            {"source_table": "knowledge", "id": uid, "distance": 0.10 + j / 100}
+            for j, uid in enumerate(unrelated_ids)
+        ]
+
+        def _fake_search_vec(_db, _query, table="all", limit=20, **_kw):
+            return [dict(r) for r in vec_rows][:limit]
+
+        monkeypatch.setattr(search_mod, "search_vec", _fake_search_vec)
+
+        local_results = search(local_db, "alpha beta", table="knowledge", limit=10)
+        vec_hit = next(
+            (r for r in local_results if r.get("id") == partial_ids[0] and r.get("match_source")),
+            None,
+        )
+        assert vec_hit is not None, "fixture sanity: the vec #1 hit must reach the local page"
+        assert vec_hit["match_source"] == "fts+vec", (
+            "fixture sanity: it must overlap the OR row lexically too"
+        )
+        assert vec_hit.get("_match_pass") == "or", (
+            "fixture sanity: that row's lexical pass must be OR, not AND"
+        )
+
+        remote_conn = connect(remote_db)
+        try:
+            remote_conn.execute("UPDATE knowledge SET updated_at = '2000-01-01 00:00:00'")
+            remote_conn.commit()
+            remote_deduped = search_knowledge_conn(remote_conn, "alpha beta", 10)
+        finally:
+            remote_conn.close()
+        assert len(remote_deduped) == 10, "fixture sanity: the remote AND pass must fill limit=10"
+
+        merged = merge_and_rank(
+            local_results, remote_deduped, limit=10, recency_weight=0.3,
+            bm25_weight=0.7, half_life_days=30.0,
+        )
+        survivor = next(
+            (
+                r for r in merged
+                if r.get("id") == partial_ids[0] and r.get("match_source") == "fts+vec"
+            ),
+            None,
+        )
+        assert survivor is not None, (
+            "the vector channel's #1 hit — an fts+vec OR row — must survive the "
+            "merge; round 2's rule demoted every OR-tagged row unconditionally "
+            "and dropped it"
+        )
+
     def test_team_rows_tagged_with_store_and_role(self, tmp_path):
         """Remote rows carry _store (connection name) and _role ('team')."""
         from techne.core.federation import fan_out_search
