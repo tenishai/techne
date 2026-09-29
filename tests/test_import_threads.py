@@ -187,6 +187,19 @@ def test_ensure_threads_skips_a_session_with_no_observations(cfg):
     assert ensure_threads(cfg, sid, replace=True) is None
 
 
+@pytest.fixture
+def fallback(monkeypatch):
+    """Force the #954 obs_key fallback. Since techne#1091 emit persists a thread that
+    has no row before rendering it, so an item carries `obs_key` only when that write
+    fails. These tests pin the fallback, so they make it fail."""
+    import techne.core.reflect as reflect
+
+    def _fail(*a, **k):
+        raise RuntimeError("persistence disabled for this test")
+
+    monkeypatch.setattr(reflect, "persist_unsaved_threads", _fail)
+
+
 def _unpersisted_session(cfg):
     from techne.core.state import add_observation, start_session
 
@@ -197,7 +210,7 @@ def _unpersisted_session(cfg):
     return sid
 
 
-def test_an_answered_unpersisted_thread_stays_claimed_across_a_knowledge_write(cfg):
+def test_an_answered_unpersisted_thread_stays_claimed_across_a_knowledge_write(cfg, fallback):
     """The fallback half. A thread with no persisted row is claimed by its obs_key when
     answered, so a knowledge write does not re-offer it."""
     from techne.core.knowledge import store
@@ -219,7 +232,7 @@ def test_an_answered_unpersisted_thread_stays_claimed_across_a_knowledge_write(c
     )
 
 
-def test_a_rendered_but_unanswered_unpersisted_thread_is_re_offered(cfg):
+def test_a_rendered_but_unanswered_unpersisted_thread_is_re_offered(cfg, fallback):
     """Prudence #955 r1: claiming an unpersisted thread on RENDER dropped it silently.
     It has no queue row, so the #900 heal cannot re-offer it. It must stay offered
     until answered."""
@@ -239,7 +252,7 @@ def test_a_rendered_but_unanswered_unpersisted_thread_is_re_offered(cfg):
     )
 
 
-def test_an_unpersisted_decline_is_excluded_and_undecline_reaches_it(cfg):
+def test_an_unpersisted_decline_is_excluded_and_undecline_reaches_it(cfg, fallback):
     from techne.core.reflect import clear_declines, emit_reflection_pass, ingest_reflection_batch
 
     sid = _unpersisted_session(cfg)
@@ -254,7 +267,7 @@ def test_an_unpersisted_decline_is_excluded_and_undecline_reaches_it(cfg):
     assert emit_reflection_pass(cfg, sid)["count"] == first["count"]
 
 
-def test_the_drain_loop_terminates_for_unpersisted_threads(cfg):
+def test_the_drain_loop_terminates_for_unpersisted_threads(cfg, fallback):
     """The guide's loop: emit, answer, ingest, until emit returns 0."""
     from techne.core.knowledge import store
     from techne.core.reflect import emit_reflection_pass, ingest_reflection_batch
@@ -271,7 +284,7 @@ def test_the_drain_loop_terminates_for_unpersisted_threads(cfg):
         pytest.fail("the emit/ingest loop did not terminate in 10 passes")
 
 
-def test_mcp_ingest_claims_an_unpersisted_thread(cfg):
+def test_mcp_ingest_claims_an_unpersisted_thread(cfg, fallback):
     from techne.core.reflect import emit_reflection_pass
     from techne.mcp_server import _techne_reflect_ingest
 
@@ -291,7 +304,7 @@ def test_mcp_ingest_claims_an_unpersisted_thread(cfg):
     assert item["obs_key"] not in offered
 
 
-def test_mcp_ingest_without_obs_key_warns(cfg):
+def test_mcp_ingest_without_obs_key_warns(cfg, fallback):
     """Prudence #955 r2: `obs_key` is optional over MCP, so an agent that follows the
     tool description can answer an unpersisted thread and have it offered again. The
     answer is still stored; the result says what happened."""
