@@ -2245,3 +2245,29 @@ def test_recall_opt_in_still_returns_the_items_ingest_needs(tmp_path):
     assert items and all(
         {"prompt", "check_hash", "focus_content", "comparison_ids"} <= set(i) for i in items
     )
+
+
+def test_federated_recall_output_keeps_provenance_and_drops_match_pass(tmp_path):
+    """techne#1094 addendum: `merge_and_rank` reads `_match_pass`, so the tag must
+    survive until after the merge and be stripped only at the tool boundary. The
+    federation provenance keys `_store`/`_role` stay in the output."""
+    local_db = tmp_path / "local.db"
+    team_db = tmp_path / "team.db"
+    _init_team_db(local_db)
+    _init_team_db(team_db)
+    store(local_db, "alpha beta local full match", type="fact")
+    store(local_db, "alpha only local partial", type="fact")
+    store(team_db, "alpha beta team full match", type="fact")
+
+    cfg = Config()
+    cfg.db_path = local_db
+    cfg.connections = {"team": FederationConnectionSpec(role="team", db_path=str(team_db))}
+
+    rows = _recall(cfg, "alpha beta")["search_results"]
+
+    assert any(r.get("_store") == "team" for r in rows), "fixture sanity: federated path ran"
+    assert all(r.get("_store") for r in rows if r.get("origin") == "memory")
+    leaked = sorted(
+        {k for r in rows for k in r if k.startswith("_") and k not in {"_store", "_role"}}
+    )
+    assert leaked == [], f"internal keys reached federated techne_recall output: {leaked}"
