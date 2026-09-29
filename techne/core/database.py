@@ -819,9 +819,15 @@ def like_escape(s: str) -> str:
     return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-def connect(db_path: Path) -> sqlite3.Connection:
+def connect(db_path: Path, *, check_same_thread: bool = True) -> sqlite3.Connection:
+    """Open ``db_path`` in WAL mode, migrating it if it is behind.
+
+    ``check_same_thread=False`` is for a caller that serialises use of the
+    connection itself: the MCP server's long-lived read connection
+    (``core/read_conn.py``, techne#1095) holds a lock around every use.
+    """
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), check_same_thread=check_same_thread)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     # Wait up to 5s for a lock before raising "database is locked". Multiple
