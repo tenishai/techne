@@ -789,7 +789,23 @@ class TestSearchVec:
         and nothing has re-embedded yet. The `embedding MATCH ?` then raises
         "Dimension mismatch"; that must degrade to FTS-only ([]), NEVER crash the
         top-level recall path. (Before the fix, this OperationalError propagated
-        straight out of search()/search_vec().)"""
+        straight out of search()/search_vec().)
+
+        techne#1101: the stub for ``_get_embedding_model`` must take the real
+        signature. The live call site is ``_query_embedding``
+        (``_get_embedding_model(allow_download=False)``) — a zero-arg lambda
+        raises TypeError there, which is itself an ``Exception`` caught by
+        ``_query_embedding``'s own broad ``except``, so ``_query_embedding``
+        returns None and ``search_vec`` short-circuits to ``[]`` BEFORE it ever
+        touches the stale-dimension vec tables below. That made the old test
+        green for the wrong reason — it never reached the
+        ``except sqlite3.OperationalError`` branch in ``_vec_channel_rows`` this
+        test claims to cover. A ``_SpyConnection`` swapped in via ``conn=``
+        (techne#1094's caller-supplied-connection path) positively asserts that
+        branch was taken, by recording the actual "Dimension mismatch" error
+        sqlite-vec raises on the `embedding MATCH ?` query.
+        """
+        import sqlite3
         import struct
 
         import techne.core.search as _search_mod
@@ -801,7 +817,9 @@ class TestSearchVec:
         np = pytest.importorskip("numpy")
 
         # Stub the active backend at 256-d (independent of what's installed / any
-        # model download) so the query embeds at 256 while the table is 384.
+        # model download) so the query embeds at 256 while the table is 384. Real
+        # signature: `_get_embedding_model(config=None, *, allow_download=True)` —
+        # `_query_embedding` calls it as `_get_embedding_model(allow_download=False)`.
         class _FakeBackend:
             name = "model2vec:stub-256"
             dim = 256
@@ -809,7 +827,7 @@ class TestSearchVec:
             def embed(self, texts):
                 return [np.full(256, 0.1, dtype="float32") for _ in texts]
 
-        monkeypatch.setattr(_search_mod, "_get_embedding_model", lambda: _FakeBackend())
+        monkeypatch.setattr(_search_mod, "_get_embedding_model", lambda *a, **k: _FakeBackend())
 
         # Lay down 384-d vec tables with a row each — the pre-upgrade cache.
         conn = connect(db_path)
@@ -825,9 +843,41 @@ class TestSearchVec:
         finally:
             conn.close()
 
-        # Query with the 256-d backend against 384-d tables — must NOT raise.
-        results = search_vec(db_path, "anything", table="all")
+        # A connection subclass that records any "embedding MATCH ?" query that
+        # raises OperationalError, then re-raises so _vec_channel_rows's own
+        # `except sqlite3.OperationalError` still handles it exactly as in
+        # production. sqlite3.Connection is a C type — its methods can't be
+        # monkeypatched on the instance or the class (both raise TypeError), so
+        # this goes through search_vec's `conn=` parameter instead.
+        dim_mismatch_errors: list[str] = []
+
+        class _SpyConnection(sqlite3.Connection):
+            def execute(self, sql, *args, **kwargs):
+                try:
+                    return super().execute(sql, *args, **kwargs)
+                except sqlite3.OperationalError as exc:
+                    if "embedding MATCH" in sql:
+                        dim_mismatch_errors.append(str(exc))
+                    raise
+
+        spy_conn = sqlite3.connect(str(db_path), factory=_SpyConnection)
+        spy_conn.row_factory = sqlite3.Row
+        try:
+            # Query with the 256-d backend against 384-d tables — must NOT raise.
+            results = search_vec(db_path, "anything", table="all", conn=spy_conn)
+        finally:
+            spy_conn.close()
+
         assert results == []
+        # Positive assertion: the dimension-mismatch branch in
+        # `_vec_channel_rows`'s `except sqlite3.OperationalError` was actually
+        # taken, not skipped via an earlier, unrelated degrade exit.
+        assert dim_mismatch_errors, (
+            "expected sqlite-vec to raise a dimension-mismatch OperationalError "
+            "on the `embedding MATCH ?` query; got none — the stale-dimension "
+            "path was never reached"
+        )
+        assert "dimension mismatch" in dim_mismatch_errors[0].lower()
 
     def test_search_degrades_to_fts_when_vec_extension_unavailable(self, db_path, monkeypatch):
         """#84: search(..., use_vectors=True) falls through to FTS-only results
