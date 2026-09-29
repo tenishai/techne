@@ -245,8 +245,9 @@ def _rerank(
     spread_by_type: dict[str, tuple[float, float]] = {}
     ranks_by_type: dict[str, list[float]] = {}
     for r in candidates:
-        # A row may lack `rank`: a vector-only hit reaching the federation merge
-        # path (merge_and_rank → _rerank) carries `distance`, not BM25 `rank`.
+        # A row may lack `rank`: a vector-only hit carries `distance`, not BM25
+        # `rank`. Federation's merge used to rerank vec rows here; since
+        # techne#1089 it does not, but the guard stays for any caller that does.
         # Skip it here so it neither crashes nor distorts the FTS rows' per-type
         # min-max spread. (techne#401 / #402 review — Prudence.)
         rank = r.get("rank")
@@ -628,11 +629,11 @@ def _and_or_pools(
     separately; see its docstring for why they must stay apart until then.
 
     Every row is tagged ``_match_pass: "and" | "or"`` (techne#1079 review
-    Important 1). This is what lets a LATER pooling step downstream —
-    ``federation.merge_and_rank``, which pools rows from several stores
-    before its own single rerank — tell the two populations apart and rerank
-    them separately too, instead of recreating the #1081 bug one hop further
-    out. Local, single-store consumers (``search_fts`` itself) don't need the
+    Important 1). This is what lets a LATER step downstream —
+    ``federation.merge_and_rank``, which merges pages from several stores
+    (techne#1089) — tell the two populations apart, instead of recreating
+    the #1081 bug one hop further out. Local, single-store consumers
+    (``search_fts`` itself) don't need the
     tag for correctness — the block split already IS the two lists — but
     tagging here rather than in two duplicate places keeps one producer.
     """
@@ -833,9 +834,9 @@ def search_knowledge_conn(
 
     Every row is tagged ``_match_pass: "and" | "or"`` (techne#1079 review
     Important 1) — this is the remote side of federation's fix: `merge_and_rank`
-    pools rows from several stores and reranks once, so it needs to tell each
-    store's AND rows from its OR rows to avoid recreating the #1081 bug one
-    hop further out.
+    merges pages from several stores (techne#1089), and its tier rule needs to
+    tell each store's AND rows from its OR rows to avoid recreating the #1081
+    bug one hop further out.
     """
     candidate_limit = limit * 2  # expansion_ratio=2 (matches search_fts default)
     # #70: OR tops up when AND falls short of candidate_limit (same helper as
@@ -2102,9 +2103,9 @@ def _search_on_conn(
         if fts_row is not None:
             row["match_source"] = "fts+vec"
             # Carry the FTS BM25 `rank` onto the overlap row. Vec rows have only
-            # `distance`, but downstream FTS-aware consumers subscript `rank`
-            # (federation's merge_and_rank → _rerank). Pre-#401 the overlap row
-            # WAS the fts row, so it had `rank`; vec-first makes it a vec-row
+            # `distance`, but FTS-aware consumers read `rank` (federation's
+            # merge_and_rank fed it to _rerank until techne#1089). Pre-#401 the
+            # overlap row WAS the fts row, so it had `rank`; vec-first makes it a vec-row
             # copy, so restore `rank` explicitly. (#402 review — Prudence.)
             if "rank" in fts_row:
                 row["rank"] = fts_row["rank"]

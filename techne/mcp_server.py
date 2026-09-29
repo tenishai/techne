@@ -716,15 +716,9 @@ def _techne_recall(args: dict, config: Config) -> dict:
             min_shared_keywords=config.conflict.min_shared_keywords,
         )
 
-        # Step D — merge + rank (per-type BM25 normalisation handles cross-store, #56)
-        merged = merge_and_rank(
-            local_results,
-            remote_deduped,
-            limit=10,
-            recency_weight=config.search.recency_weight,
-            bm25_weight=config.search.bm25_weight,
-            half_life_days=config.knowledge_confidence_half_life_days,
-        )
+        # Step D — page-level merge: the local page keeps its order and reserved
+        # seats, remote rows interleave by their own store's order (techne#1089).
+        merged = merge_and_rank(local_results, remote_deduped, limit=10)
     except Exception:
         log.warning(
             "federation: fan-out/merge failed — degrading to local-only recall", exc_info=True
