@@ -145,6 +145,16 @@ def test_a_word_like_term_must_clear_a_stricter_bar(db):
     assert _rare(db, "well-known b2dcdd2", fraction=0.12)[0] == ["well-known", "b2dcdd2"]
 
 
+def test_an_underscore_alone_earns_the_full_bar(db):
+    """`emit_max_chars` has no digit; the underscore is what marks it as code, so
+    it keeps the full threshold rather than the word-like half (Prudence, #1082 r2)."""
+    _obs(db, [f"set emit_max_chars {i}" for i in range(5)])
+    _obs(db, [f"filler row {i}" for i in range(95)])  # 100 rows in scope
+
+    # threshold 8, word-like bar 4: 5 matches is rare only on the full bar
+    assert _rare(db, "emit_max_chars", fraction=0.08)[0] == ["emit_max_chars"]
+
+
 def test_rarity_is_counted_in_the_searched_scope(db):
     """The per-turn hook searches knowledge alone: its threshold comes from the
     knowledge row count, not the whole store's."""
