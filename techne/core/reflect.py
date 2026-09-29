@@ -625,6 +625,19 @@ def persist_unsaved_threads(
     and an answered one also drains its new queue row. Without this every thread a
     past drain answered by `obs_key` would be offered again.
 
+    ON EVERY PASS, FOR EVERY THREAD THAT RESOLVES, not only the ones this call writes
+    (techne#1106). An `obs_key` answer can land after the emit that persisted its
+    thread: a batch rendered on the fallback path and ingested later. Carrying the
+    ledger only for new rows left that thread's queue row owed, and the #900 heal
+    served it again. Doing it here, rather than resolving the key at ingest, costs a
+    hash per thread in a detection emit already ran; ingest would have to re-detect
+    the session per item. It also covers a thread some other writer persisted
+    (`persist_detection` carries no ledger). The drain waits for the next emit, which
+    is the only place the heal runs, so nothing is re-offered in between.
+
+    A thread id that several detected threads resolve to (the #733 collision) drains
+    only when every one of their keys is answered, since emit renders them as one item.
+
     Returns the ids newly written.
     """
     from techne.core.extension_state import get_state, set_state
@@ -637,41 +650,57 @@ def persist_unsaved_threads(
 
     obs_by_thread = _bucket_observations(threads, observations)
     missing: list[Thread] = []
+    #: obs- key -> the thread id it now resolves to, for every emittable thread.
     keys: dict[str, str] = {}
     for t in threads:
         t_obs = obs_by_thread.get(t.thread_num, [])
         if len(t_obs) < config.reflect.min_observations_per_thread:
             continue
-        if persisted_thread_id(config.db_path, session_id, t) is not None:
-            continue
-        missing.append(t)
+        tid = persisted_thread_id(config.db_path, session_id, t)
+        if tid is None:
+            missing.append(t)
+            tid = thread_row_id(session_id, t)
         obs_key = _observations_key(t_obs)
         if obs_key:
-            keys[obs_key] = thread_row_id(session_id, t)
-    if not missing:
-        return []
+            keys[obs_key] = tid
 
-    parent_links = link_threads(missing, session_id, config.db_path, config)
     new_ids = [thread_row_id(session_id, t) for t in missing]
+    parent_links = link_threads(missing, session_id, config.db_path, config) if missing else None
     conn = connect(config.db_path)
     try:
-        save_threads(missing, session_id, config.db_path, parent_links=parent_links, conn=conn)
-        enqueue_reflection_debt(config.db_path, session_id, thread_ids=new_ids, conn=conn)
+        if missing:
+            save_threads(missing, session_id, config.db_path, parent_links=parent_links, conn=conn)
+            enqueue_reflection_debt(config.db_path, session_id, thread_ids=new_ids, conn=conn)
         marker = get_state(conn, f"reflect:emitted:{session_id}")
-        if marker and keys:
+        held = {k for f in ("emitted", "declined", "answered") for k in (marker or {}).get(f, [])}
+        if marker and held & set(keys):
+            before = marker
             marker = dict(marker)
             answered = set(marker.get("answered", []))
-            paid = [keys[k] for k in keys if k in answered]
+            by_tid: dict[str, set[str]] = {}
+            for k, tid in keys.items():
+                by_tid.setdefault(tid, set()).add(k)
+            paid = [tid for tid, ks in by_tid.items() if ks <= answered]
+            moved = {k for tid in paid for k in by_tid[tid]}
             for field in ("emitted", "declined"):
                 marker[field] = sorted({keys.get(k, k) for k in marker.get(field, [])})
-            marker["answered"] = sorted(answered - set(keys))
+            marker["answered"] = sorted(answered - moved)
             if paid:
                 conn.executemany(
                     "UPDATE reflection_queue SET drained_at = CURRENT_TIMESTAMP "
                     "WHERE thread_id = ? AND drained_at IS NULL",
                     [(tid,) for tid in paid],
                 )
-            set_state(conn, f"reflect:emitted:{session_id}", marker, commit=False)
+            # A collided id with an unanswered key keeps its answered keys, so the
+            # marker can match again with nothing to change; skip the rewrite then.
+            if marker != before:
+                set_state(conn, f"reflect:emitted:{session_id}", marker, commit=False)
+            log.debug(
+                "persist_unsaved_threads: %s carried %d obs- key(s), drained %s",
+                session_id,
+                len(held & set(keys)),
+                paid,
+            )
         conn.commit()
     except Exception:
         conn.rollback()

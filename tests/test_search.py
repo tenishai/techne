@@ -847,8 +847,9 @@ class TestSearchVec:
         # raises OperationalError, then re-raises so _vec_channel_rows's own
         # `except sqlite3.OperationalError` still handles it exactly as in
         # production. sqlite3.Connection is a C type — its methods can't be
-        # monkeypatched on the instance or the class (both raise TypeError), so
-        # this goes through search_vec's `conn=` parameter instead.
+        # monkeypatched on the instance (AttributeError: read-only attribute) or
+        # the class (TypeError: immutable type), so this goes through
+        # search_vec's `conn=` parameter instead.
         dim_mismatch_errors: list[str] = []
 
         class _SpyConnection(sqlite3.Connection):

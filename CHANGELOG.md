@@ -105,6 +105,13 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- **A late `obs_key` answer no longer re-offers its thread** (#1106). An answer
+  ingested by `obs_key` after the emit that persisted its thread (a batch rendered on
+  the fallback path and ingested later) was recorded under the `obs-` key, but the
+  thread's queue row stayed owed, so the next emit served it once more. Emit now moves
+  the `obs-` ledger for every thread that resolves to a row on each pass, not only the
+  ones it just wrote, and drains the row of an answered one. Measured on the test
+  fixture: 4 late-answered threads re-offered before, 0 after.
 - **Federated recall keeps the local page's order and reserved seats** (#1089). With
   connections configured, `techne_recall` re-scored the local `search()` page by BM25,
   recency and decay when merging remote rows, discarding the vec-first order and the

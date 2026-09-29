@@ -496,10 +496,11 @@ def merge_and_rank(
     `_rerank` (BM25 / recency / decay) over the pool. The local rows are a
     `search()` page that is already fused: vec-first head, the #1078
     `identifier_head` and #946 `curated_head` reservations, the #827 `lexical_tail`
-    floor. Re-scoring threw all of that away. On the 2026-09-28 snapshot, with no
-    remote rows at all, the page's #1 stayed #1 in 3 of 40 real prompts. Each
-    remote's rows are also already ranked, by `search_knowledge_conn` (AND block,
-    then OR block). So both inputs arrive in order, and the merge keeps both orders.
+    floor. Re-scoring threw all of that away. On the 2026-09-28 snapshot (measured
+    at bc729b5, frozen clock), with no remote rows at all, the page's #1 stayed #1
+    in 6 of 40 real prompts. Each remote's rows are also already ranked, by
+    `search_knowledge_conn` (AND block, then OR block). So both inputs arrive in
+    order, and the merge keeps both orders.
 
     THE RULE:
       1. A local row tagged `reserved_slot` keeps its index on the page. Remote
@@ -519,7 +520,11 @@ def merge_and_rank(
     same tags (INVARIANT 1). Remote rows take seats from the local rows that sat
     lowest among the unreserved seats; a reserved row stays where `search()` put
     it (INVARIANT 2). A `lexical_tail` row on a page shorter than `limit` keeps its
-    index too, so remote rows can land after it.
+    index too, so remote rows can land after it. An `identifier_head` row that
+    `search()` did not move (it already sat at that vec-first index) carries no
+    `reserved_slot` tag, so it is not pinned and can shift down when remote rows
+    are present: at index 1, with first-tier remote heads, it lands at seat k+1 for
+    k remote stores.
 
     THE TIER RULE STILL APPLIES ACROSS STORES (techne#1079 review Important 1),
     between stream heads: a first-tier head always goes before a second-tier head,
