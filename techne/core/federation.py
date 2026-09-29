@@ -496,11 +496,51 @@ def merge_and_rank(
     can be under-ranked relative to a from-scratch cross-corpus normalisation.
     This affects ordering only (never inclusion/exclusion), and true cross-corpus
     BM25 calibration is out of MVP scope. Do NOT invent ad-hoc normalisation here.
+
+    AND ROWS FROM EVERY STORE ARE RERANKED TOGETHER, THEN OR ROWS FILL WHAT'S
+    LEFT (techne#1079 review Important 1). A single pooled `_rerank` call over
+    `local_results + remote_deduped` recreates the #1081 bug one hop further
+    out: `search_fts` and `search_knowledge_conn` already keep their own AND
+    and OR rows in separate blocks, tagged `_match_pass`, precisely so a short
+    OR row's BM25+recency can't outscore a long exact AND row — but pooling
+    everyone's rows back into one list here and reranking ONCE erases that
+    separation, since `_rerank` re-normalises BM25 per `source_table` across
+    the reunited AND+OR rows. Measured (Prudence's probe): a stale long
+    exact-match row and a fresh short partial-match row, correctly ordered
+    `[and, or]` by both `search_knowledge_conn` and `search()`, came out
+    `[or, and]` through this function. Fixed the same way as the two
+    producers: rerank every store's AND-tagged rows as one block, then fill
+    the remaining slots with every store's OR-tagged (or untagged) rows as a
+    second block, and concatenate AND-first.
+
+    A ROW WITHOUT `_match_pass` — a local vec-only match (never went through
+    the FTS AND/OR split at all: `search()`'s vec-first fusion builds most
+    page rows from `search_vec`, not `search_fts`, and copies only `rank`
+    across an fts+vec overlap, not this tag), or a remote on a version that
+    predates this tag — is treated as OR-tier, same as an explicit `"or"`.
+    Precedence here means "confirmed to match every query term, lexically";
+    a vector-only match carries no such confirmation, so it gets no more
+    benefit of the doubt than a partial lexical match does. This never drops
+    a row, only orders it: an untagged row still competes for, and can win,
+    an OR-tier slot on its own recency/BM25/decay score.
     """
     from techne.core.search import _rerank
 
-    pooled = list(local_results) + list(remote_deduped)
-    return _rerank(pooled, limit, recency_weight, bm25_weight, half_life_days=half_life_days)
+    and_rows = [r for r in local_results if r.get("_match_pass") == "and"]
+    and_rows += [r for r in remote_deduped if r.get("_match_pass") == "and"]
+    or_rows = [r for r in local_results if r.get("_match_pass") != "and"]
+    or_rows += [r for r in remote_deduped if r.get("_match_pass") != "and"]
+
+    and_ranked = _rerank(
+        and_rows, limit, recency_weight, bm25_weight, half_life_days=half_life_days
+    )
+    remaining = limit - len(and_ranked)
+    or_ranked = (
+        _rerank(or_rows, remaining, recency_weight, bm25_weight, half_life_days=half_life_days)
+        if remaining > 0 and or_rows
+        else []
+    )
+    return and_ranked + or_ranked
 
 
 # ---------------------------------------------------------------------------

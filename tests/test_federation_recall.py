@@ -231,6 +231,71 @@ class TestMergesTeamResults:
         for r in merged:
             assert "_norm_bm25" not in r and "_combined" not in r
 
+    def test_merge_and_rank_and_row_outranks_a_joint_rerank_or_row(self, tmp_path):
+        """Prudence's #1088 review Important 1: merge_and_rank pools
+        local_results and remote_deduped and used to make ONE _rerank call,
+        recreating #1081's joint rerank one hop further out — the fix that
+        made search_fts/search_knowledge_conn structural (AND rows and OR
+        rows never scored against each other) did not reach this pooling
+        step. Same fixture as the search_fts/search_knowledge_conn guards:
+        one long, stale, exact (AND) row and one short, fresh, partial (OR)
+        row, tagged `_match_pass` by their producer. Run through both inputs
+        merge_and_rank takes — a local set (via search(), which falls back to
+        search_fts's tagged output when no vector backend answers) and a
+        remote set (via search_knowledge_conn) — since the bug reproduces on
+        either side of the pool.
+        """
+        from techne.core.federation import merge_and_rank
+        from techne.core.search import search, search_knowledge_conn
+
+        local_db = tmp_path / "local.db"
+        _init_team_db(local_db)
+
+        long_and = "alpha beta " + " ".join(f"filler{i}" for i in range(80))
+        id_and = store(local_db, long_and, type="fact")
+        id_or = store(local_db, "alpha short note", type="fact")
+        conn = connect(local_db)
+        try:
+            conn.execute(
+                "UPDATE knowledge SET updated_at = '2000-01-01 00:00:00' WHERE id = ?",
+                (id_and,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Local side: search() with no vector backend in this test env falls
+        # back to search_fts's tagged, already-correct [and, or] order.
+        local_results = search(
+            local_db, "alpha beta", table="knowledge", limit=2, use_vectors=False
+        )
+        assert [r["id"] for r in local_results] == [id_and, id_or], (
+            "fixture sanity: local search must already be AND-first"
+        )
+        merged_local = merge_and_rank(
+            local_results, [], limit=2, recency_weight=0.3, bm25_weight=0.7,
+            half_life_days=30.0,
+        )
+        assert [r["id"] for r in merged_local] == [id_and, id_or], (
+            f"merge_and_rank must not reorder local AND/OR rows; got "
+            f"{[r['id'] for r in merged_local]}"
+        )
+
+        # Remote side: search_knowledge_conn's tagged rows as remote_deduped.
+        conn = connect(local_db)
+        try:
+            remote_rows = search_knowledge_conn(conn, "alpha beta", 2)
+        finally:
+            conn.close()
+        merged_remote = merge_and_rank(
+            [], remote_rows, limit=2, recency_weight=0.3, bm25_weight=0.7,
+            half_life_days=30.0,
+        )
+        assert [r["id"] for r in merged_remote] == [id_and, id_or], (
+            f"merge_and_rank must not reorder remote AND/OR rows either; got "
+            f"{[r['id'] for r in merged_remote]}"
+        )
+
     def test_team_rows_tagged_with_store_and_role(self, tmp_path):
         """Remote rows carry _store (connection name) and _role ('team')."""
         from techne.core.federation import fan_out_search

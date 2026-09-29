@@ -497,6 +497,15 @@ def _and_or_pools(
     Returns ``(and_pool, or_pool)``, NEITHER reranked NOR capped to any
     display ``limit`` — ``search_fts`` reranks and concatenates each block
     separately; see its docstring for why they must stay apart until then.
+
+    Every row is tagged ``_match_pass: "and" | "or"`` (techne#1079 review
+    Important 1). This is what lets a LATER pooling step downstream —
+    ``federation.merge_and_rank``, which pools rows from several stores
+    before its own single rerank — tell the two populations apart and rerank
+    them separately too, instead of recreating the #1081 bug one hop further
+    out. Local, single-store consumers (``search_fts`` itself) don't need the
+    tag for correctness — the block split already IS the two lists — but
+    tagging here rather than in two duplicate places keeps one producer.
     """
     sub_tables = ("threads", "observations", "knowledge") if table == "all" else (table,)
     and_pool: list[dict] = []
@@ -516,6 +525,10 @@ def _and_or_pools(
             want=candidate_limit,
             key=lambda r: (r["source_table"], r["id"]),
         )
+        for r in and_rows:
+            r["_match_pass"] = "and"
+        for r in or_rows:
+            r["_match_pass"] = "or"
         and_pool.extend(and_rows)
         or_pool.extend(or_rows)
     return and_pool, or_pool
@@ -672,6 +685,12 @@ def search_knowledge_conn(
 
     table='knowledge' only — this function is intentionally knowledge-scoped.
     For multi-table hybrid search use ``search()`` or ``search_fts()``.
+
+    Every row is tagged ``_match_pass: "and" | "or"`` (techne#1079 review
+    Important 1) — this is the remote side of federation's fix: `merge_and_rank`
+    pools rows from several stores and reranks once, so it needs to tell each
+    store's AND rows from its OR rows to avoid recreating the #1081 bug one
+    hop further out.
     """
     candidate_limit = limit * 2  # expansion_ratio=2 (matches search_fts default)
     # #70: OR tops up when AND falls short of candidate_limit (same helper as
@@ -687,6 +706,10 @@ def search_knowledge_conn(
         want=candidate_limit,
         key=lambda r: (r["source_table"], r["id"]),
     )
+    for r in and_rows:
+        r["_match_pass"] = "and"
+    for r in or_rows:
+        r["_match_pass"] = "or"
 
     # Enrich with event_at from the base knowledge table, ONE query covering
     # both blocks. _fts_match_rows omits event_at from its knowledge SELECT
@@ -1275,12 +1298,28 @@ def _curated_first(fts_only: list[dict]) -> list[dict]:
 
     The partition is STABLE on both sides, so BM25 order is preserved within
     curated rows and within the rest; this reorders the tail and never reranks.
+
+    PARTITIONED WITHIN EACH `_match_pass` BLOCK, NOT ACROSS THEM (techne#1079
+    review Nit 3). A plain curated/rest partition over the whole list would
+    let a curated OR row (partial match) jump ahead of a non-curated AND row
+    (all-terms match) — the same AND-precedence problem Important 1 fixed for
+    `merge_and_rank`, showing up here as a smaller, tail-only case. `fts_only`
+    is `search_fts`'s own output, already AND-block-then-OR-block and every
+    row tagged, so splitting on `_match_pass` first and partitioning each
+    half is enough; there is no untagged case to decide here the way
+    `merge_and_rank` has one.
     """
-    curated = [r for r in fts_only if r.get("source_table") in _CURATED_TABLES]
-    if not curated:
+    if not any(r.get("source_table") in _CURATED_TABLES for r in fts_only):
         return fts_only
-    rest = [r for r in fts_only if r.get("source_table") not in _CURATED_TABLES]
-    return curated + rest
+
+    def _curated_partition(rows: list[dict]) -> list[dict]:
+        curated = [r for r in rows if r.get("source_table") in _CURATED_TABLES]
+        rest = [r for r in rows if r.get("source_table") not in _CURATED_TABLES]
+        return curated + rest
+
+    and_block = [r for r in fts_only if r.get("_match_pass") == "and"]
+    or_block = [r for r in fts_only if r.get("_match_pass") != "and"]
+    return _curated_partition(and_block) + _curated_partition(or_block)
 
 
 #: Head slots a `table="all"` page reserves for curated rows arriving on the VECTOR
@@ -2537,11 +2576,14 @@ def fts_with_or_fallback(
     ``run``'s own SQL ``LIMIT``, so the cap never trims a real result).
 
     Safe for a caller that does NOT rerank its result afterward — AND rows
-    precede OR rows in the returned list unconditionally, so precedence
-    survives regardless of what a later sort does. A caller that DOES rerank
+    precede OR rows in the returned list unconditionally, so precedence holds
+    as long as the caller does not re-sort. A caller that DOES rerank
     (``search_fts``, ``search_knowledge_conn``) must call
     :func:`fts_and_or_split` directly and rerank each block separately
-    instead — see that function's docstring for why.
+    instead — see that function's docstring for why. A caller that pools this
+    function's OUTPUT with another list and reranks the pool (as
+    ``federation.merge_and_rank`` used to) hits the same problem one hop
+    further out — see its docstring.
     """
     and_rows, topup = fts_and_or_split(query, run, want=want, key=key)
     results = and_rows + topup

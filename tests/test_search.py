@@ -456,6 +456,36 @@ class TestBuildOrFtsQuery:
 # ---------------------------------------------------------------------------
 
 
+def _make_joint_rerank_regression_fixture(db_path) -> tuple[int, int]:
+    """One long, stale, exact (AND) row and one short, fresh, partial (OR) row
+    for the "would a joint rerank flip them?" guard — reused by every site
+    that reranks AND/OR blocks (techne#1079 review Important 1/2): search_fts,
+    search_knowledge_conn, federation.merge_and_rank. Returns (id_and, id_or).
+
+    Verified directly (mutation-checked per call site) that merging the two
+    into one pool and reranking ONCE — the #1081 shape — puts the OR row
+    first; a correct split-and-rerank keeps the AND row first regardless.
+    """
+    from techne.core.database import connect
+
+    long_and = "alpha beta " + " ".join(f"filler{i}" for i in range(80))
+    id_and = store_knowledge(db_path, long_and, type="fact")
+    id_or = store_knowledge(db_path, "alpha short note", type="fact")
+
+    conn = connect(db_path)
+    try:
+        # Stale the AND row and leave the OR row fresh — the combination
+        # that, measured, flips a JOINT rerank in the OR row's favour.
+        conn.execute(
+            "UPDATE knowledge SET updated_at = '2000-01-01 00:00:00' WHERE id = ?",
+            (id_and,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return id_and, id_or
+
+
 class TestOrFallback:
     def test_multiword_topic_recovered_via_or_fallback(self, db_path):
         """The canonical #70 case: a natural-language topic where implicit-AND
@@ -569,40 +599,39 @@ class TestOrFallback:
         queries from rank 1 to 2 or 3 and lost `reflect-drain` from the hybrid
         path entirely. That PR was reverted and techne#1079 reopened over it.
 
-        This fixture reproduces the exact shape: the AND row contains BOTH
-        query terms but is long (BM25-diluting filler) and stale (old
-        `updated_at`); the OR row contains only ONE term but is short and
-        fresh. Verified directly (see this test file's mutation-check
-        instructions) that merging the two into one pool and reranking ONCE —
-        the #1081 shape — puts the OR row first. The fix must keep the AND
-        row first regardless, because precedence here is structural (AND
-        rows are reranked and concatenated as their own block, before any OR
-        row is even considered), not a side effect of these particular
-        scores.
+        The fix must keep the AND row first regardless, because precedence
+        here is structural (AND rows are reranked and concatenated as their
+        own block, before any OR row is even considered), not a side effect
+        of these particular scores.
         """
-        from techne.core.database import connect
-
-        long_and = "alpha beta " + " ".join(f"filler{i}" for i in range(80))
-        id_and = store_knowledge(db_path, long_and, type="fact")
-        id_or = store_knowledge(db_path, "alpha short note", type="fact")
-
-        conn = connect(db_path)
-        try:
-            # Stale the AND row and leave the OR row fresh — the combination
-            # that, measured, flips a JOINT rerank in the OR row's favour.
-            conn.execute(
-                "UPDATE knowledge SET updated_at = '2000-01-01 00:00:00' WHERE id = ?",
-                (id_and,),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        id_and, id_or = _make_joint_rerank_regression_fixture(db_path)
 
         results = search_fts(db_path, "alpha beta", table="knowledge", limit=2)
         ids = [r["id"] for r in results]
         assert ids == [id_and, id_or], (
             f"AND row (matches both terms) must rank before the OR row "
             f"(matches only 'alpha'), regardless of recency/length; got {ids}"
+        )
+
+    def test_search_knowledge_conn_and_row_outranks_a_joint_rerank_or_row(self, db_path):
+        """Prudence's #1088 review Important 2: search_knowledge_conn — the
+        federation entrypoint — is the second site this issue fixed, and it
+        had no guard of its own; reverting it to the joint-rerank shape (like
+        #1081) failed no test. Same fixture as the search_fts guard above,
+        called through search_knowledge_conn directly."""
+        from techne.core.search import search_knowledge_conn
+
+        id_and, id_or = _make_joint_rerank_regression_fixture(db_path)
+
+        conn = connect(db_path)
+        try:
+            results = search_knowledge_conn(conn, "alpha beta", 2)
+        finally:
+            conn.close()
+        ids = [r["id"] for r in results]
+        assert ids == [id_and, id_or], (
+            f"AND row must rank before the OR row through search_knowledge_conn "
+            f"too, regardless of recency/length; got {ids}"
         )
 
 
