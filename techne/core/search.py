@@ -344,10 +344,11 @@ def _drop_clamped_or_terms(conn: sqlite3.Connection, fts_table: str, or_query: s
     ``_CLAMPED_TERM_MAX_BM25`` to any row's score, so dropping it can only
     reorder rows whose scores on the kept terms are within that amount (two
     rows tying on every kept term can swap), and it removes rows that match
-    NOTHING BUT clamped terms, which rank below every row matching a kept term.
-    :func:`_fts_match_rows` guards the LIMIT boundary against both. At 20% the
-    prune was measured lossy (FTS-only pages 26/49 identical), so do not lower
-    it. bm25's ``N`` is FTS5's ``nTotalRow`` (the averages record in
+    NOTHING BUT clamped terms, which rank below every row whose kept-term
+    score exceeds the slack. :func:`_fts_match_rows` guards the LIMIT
+    boundary against both. At 20% the prune was measured lossy (FTS-only
+    pages 26/49 identical), so do not lower it. bm25's ``N`` is FTS5's
+    ``nTotalRow`` (the averages record in
     ``<fts>_data``); ``<fts>_docsize`` has one row per indexed document and
     equals it while the index is consistent. It is the whole index, not a
     filtered count.
