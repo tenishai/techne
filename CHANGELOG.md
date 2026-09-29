@@ -112,6 +112,16 @@ All notable changes to techne are documented here. Format loosely follows
   the `obs-` ledger for every thread that resolves to a row on each pass, not only the
   ones it just wrote, and drains the row of an answered one. Measured on the test
   fixture: 4 late-answered threads re-offered before, 0 after.
+- **The eval-vec retrieval diff works for a PR that adds a `search()` kwarg** (#1086).
+  The diff step runs HEAD's tests against origin/main's `search()`, and the harness
+  passed `identifier_head_slots` on every call, so any base without that kwarg died with
+  `TypeError` and wrote no metrics (PR #1082, run 36490769983). The harness now passes
+  an optional kwarg only when a task sets it. On the base leg (`TECHNE_EVAL_BASE_LEG=1`)
+  a task whose kwargs the base `search()` does not accept, checked with
+  `inspect.signature`, is skipped and listed under `skipped_no_base`. The comparer
+  prints it as "new in HEAD, no base" and diffs the rest, with class means over the
+  tasks both legs ran. Outside the base leg an unsupported kwarg still fails the gate,
+  and the #857 refusal still fires for any shortfall the skip list does not explain.
 - **Federated recall keeps the local page's order and reserved seats** (#1089). With
   connections configured, `techne_recall` re-scored the local `search()` page by BM25,
   recency and decay when merging remote rows, discarding the vec-first order and the
