@@ -44,6 +44,11 @@ from techne.core.search import backfill_vectors, search
 _EVAL_DIR = Path(__file__).parent
 sys.path.insert(0, str(_EVAL_DIR))
 from scoring import aggregate_gold, false_positive_rate, mrr, recall_at_k  # noqa: E402
+from search_kwargs import (  # noqa: E402
+    BASE_LEG_ENV,
+    task_search_kwargs,
+    unsupported_kwargs,
+)
 from seed_eval_db import seed  # noqa: E402
 
 pytestmark = pytest.mark.eval_vec
@@ -77,7 +82,7 @@ def _resolve_ids(keys: list[str], gold: dict[str, str]) -> set[str]:
 _METRICS_ENV = "TECHNE_EVAL_METRICS_OUT"
 
 
-def _emit_metrics(rows: list[dict], per_class: dict) -> None:
+def _emit_metrics(rows: list[dict], per_class: dict, skipped_no_base: dict | None = None) -> None:
     """Write per-task + per-class metrics to $TECHNE_EVAL_METRICS_OUT, if set.
 
     PER-TASK IS THE HALF THAT MATTERS, and it is why this is not just a nicer
@@ -90,6 +95,11 @@ def _emit_metrics(rows: list[dict], per_class: dict) -> None:
     the eval side: #977's filler row took `paraphrase-dbpool` to zero and the class
     read 0.833 until techne#1083 fixed the row and raised the floor to 0.85. A diff
     over per-task rows sees the collapse at full amplitude.
+
+    `skipped_no_base` (techne#1086) names the tasks the BASE leg could not run
+    because its search() lacks a kwarg they set. The comparer reports them as
+    "new in HEAD, no base" and diffs the rest. Written only when non-empty, so a
+    normal run's payload is unchanged.
 
     Deliberately NOT a committed baseline file. A baseline pinned in the repo
     would carry this machine's numbers to every other machine and re-introduce
@@ -105,6 +115,8 @@ def _emit_metrics(rows: list[dict], per_class: dict) -> None:
         "per_task": {r["id"]: r for r in rows},
         "per_class": per_class,
     }
+    if skipped_no_base:
+        payload["skipped_no_base"] = skipped_no_base
     out = Path(dest)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(payload, indent=2, sort_keys=True))
@@ -121,10 +133,28 @@ def test_retrieval_gate_vec(pinned_model2vec, tmp_path, capsys):
     k_values = cfg["k_values"]
     fpr_k = max(k_values)
 
+    base_leg = bool(os.environ.get(BASE_LEG_ENV))
     rows: list[dict] = []
+    skipped_no_base: dict[str, dict] = {}
     for task in tasks:
         expected = _resolve_ids(task.get("expected_keys", []), gold)
         forbidden = _resolve_ids(task.get("forbidden_keys", []), gold)
+
+        # techne#1086: optional kwargs go to search() only when the task sets them
+        # (techne#1078: lexical-ticket-identifier pins identifier_head_slots=0 to
+        # isolate the #827 tail). CI's base leg runs these tests against MAIN's
+        # search(), which may predate a kwarg a task uses; there the task is
+        # skipped and named rather than killing the leg with a TypeError.
+        # Anywhere else an unsupported kwarg is a broken task and fails.
+        extra = task_search_kwargs(task)
+        missing = unsupported_kwargs(search, extra)
+        if missing:
+            assert base_leg, (
+                f"task {task['id']} sets {missing}, which this search() does not accept. "
+                f"Only CI's base leg ({BASE_LEG_ENV}) may skip such a task."
+            )
+            skipped_no_base[task["id"]] = {"class": task["class"], "missing_kwargs": missing}
+            continue
 
         retrieved = search(
             db_path,
@@ -133,9 +163,7 @@ def test_retrieval_gate_vec(pinned_model2vec, tmp_path, capsys):
             limit=10,
             use_vectors=True,
             half_life_days=_HALF_LIFE_DAYS,
-            # techne#1078: a task may pin the identifier head off to isolate the
-            # #827 tail (lexical-ticket-identifier does). None is the default.
-            identifier_head_slots=task.get("identifier_head_slots"),
+            **extra,
         )
         ranked = [f"{r['source_table']}:{r['id']}" for r in retrieved]
         # techne#935: which CHANNEL served each hit, keyed the same way as `ranked`.
@@ -172,6 +200,8 @@ def test_retrieval_gate_vec(pinned_model2vec, tmp_path, capsys):
                 f"{r['recall_at_5']:>5} {r['recall_at_10']:>5} {r['mrr']:>5} "
                 f"{r['fpr']:>5} {r['n_results']:>3}"
             )
+        for tid, info in skipped_no_base.items():
+            print(f"{tid:<30} {info['class']:<11} SKIPPED: search() lacks {info['missing_kwargs']}")
         print("-" * 76)
         print("per-class means (r@5 / r@10 / mrr / fpr):")
         for cls in sorted(per_class):
@@ -202,7 +232,7 @@ def test_retrieval_gate_vec(pinned_model2vec, tmp_path, capsys):
     # movement between two runs on one machine is the CODE. Zero tolerance.
     #
     # Off by default: no env var, no file, behaviour identical to pre-#832.
-    _emit_metrics(rows, per_class)
+    _emit_metrics(rows, per_class, skipped_no_base)
 
     # --- frozen per-class kill-gates (techne#399, ratcheted #401) ---
     # Unlike #385, paraphrase IS gated here — vec-first hybrid recall is

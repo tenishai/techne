@@ -691,6 +691,9 @@ jobs:
           BASE_METRICS: ${{ runner.temp }}/eval-base.json
           HEAD_METRICS: ${{ runner.temp }}/eval-head.json
           BASE_WT: ${{ runner.temp }}/base-worktree
+          # A variable only so the script below can be run as-is against another
+          # base when demonstrating it locally (#1086). CI always diffs origin/main.
+          BASE_REF: origin/main
         run: |
           set -euo pipefail
           # Never inherit either leftover from an earlier job on this runner.
@@ -725,7 +728,7 @@ jobs:
             echo "::error::the eval_vec step produced no head metrics (did it skip?)"
             exit 1; }
 
-          git worktree add --detach --force "$BASE_WT" origin/main
+          git worktree add --detach --force "$BASE_WT" "$BASE_REF"
           # Constant harness: BASE's library, HEAD's tests.
           rm -rf "$BASE_WT/tests"
           cp -R tests "$BASE_WT/tests"
@@ -746,8 +749,17 @@ jobs:
           # guard this flag would convert a loud collection failure into a
           # quiet comparison over unequal case sets, which is techne#832's own
           # defect in a new hat. Do not keep one without the other.
+          #
+          # TECHNE_EVAL_BASE_LEG (#1086): a PR that adds a search() kwarg and a gold
+          # task that sets it would make MAIN's search() raise TypeError at call
+          # time, which no collection flag can catch, and the leg would write no
+          # metrics. With this set, the harness skips such a task (checked with
+          # inspect.signature), lists it under `skipped_no_base`, and the comparer
+          # names it "new in HEAD, no base" and diffs the rest. Only this leg sets
+          # it; on any other run an unsupported kwarg fails the gate.
           ( cd "$BASE_WT" \
-            && TECHNE_EVAL_METRICS_OUT="$BASE_METRICS" \
+            && TECHNE_EVAL_BASE_LEG=1 \
+               TECHNE_EVAL_METRICS_OUT="$BASE_METRICS" \
                "$GITHUB_WORKSPACE/techne/.venv-ci/bin/python" -m pytest -m eval_vec -q \
                   --continue-on-collection-errors ) \
             || echo "::warning::base run did not pass its own kill-gates; diffing anyway"

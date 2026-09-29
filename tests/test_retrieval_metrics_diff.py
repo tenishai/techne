@@ -199,3 +199,103 @@ def test_equal_case_counts_still_reach_the_regression_check(tmp_path):
     assert r.returncode == 1, r.stdout + r.stderr
     assert "CANNOT DIFF" not in r.stdout
     assert "REGRESSION vs base" in r.stdout
+
+
+# ---------------------------------------------------------------------------
+# techne#1086 — a task that needs a search() kwarg origin/main lacks.
+#
+# The base leg runs HEAD's tests against MAIN's search(). A task that sets a
+# kwarg main's search() does not accept is skipped there and listed under
+# `skipped_no_base`. The comparer must name it, diff everything else, and
+# still refuse any shortfall the list does not explain.
+# ---------------------------------------------------------------------------
+
+
+def _row(cls: str, r10: float, mrr: float) -> dict:
+    return {"class": cls, "recall_at_5": r10, "recall_at_10": r10, "mrr": mrr, "fpr": 0.0}
+
+
+def _legs(new_task_r10: float = 0.0, old_r10: float = 1.0) -> tuple[dict, dict]:
+    """Base measured `lexical-old`; head measured it plus `lexical-new`."""
+    base = {
+        "schema": 1, "gate": "retrieval_vec",
+        "per_task": {"lexical-old": _row("lexical", 1.0, 1.0)},
+        "per_class": {"lexical": {"recall_at_5": 1.0, "recall_at_10": 1.0, "mrr": 1.0,
+                                  "fpr": 0.0, "n": 1}},
+        "skipped_no_base": {"lexical-new": {"class": "lexical",
+                                            "missing_kwargs": ["identifier_head_slots"]}},
+    }
+    head_tasks = {"lexical-old": _row("lexical", old_r10, old_r10),
+                  "lexical-new": _row("lexical", new_task_r10, new_task_r10)}
+    mean = round((old_r10 + new_task_r10) / 2, 3)
+    head = {
+        "schema": 1, "gate": "retrieval_vec", "per_task": head_tasks,
+        "per_class": {"lexical": {"recall_at_5": mean, "recall_at_10": mean, "mrr": mean,
+                                  "fpr": 0.0, "n": 2}},
+    }
+    return base, head
+
+
+def _write(tmp_path: Path, base: dict, head: dict) -> tuple[Path, Path]:
+    b, h = tmp_path / "b.json", tmp_path / "h.json"
+    b.write_text(json.dumps(base))
+    h.write_text(json.dumps(head))
+    return b, h
+
+
+def test_a_task_new_in_head_is_named_and_the_rest_diffed(tmp_path):
+    """The #1086 acceptance criterion: no TypeError-shaped refusal, the skipped
+    task named, and a verdict over the tasks both legs ran."""
+    r = _run(*_write(tmp_path, *_legs()))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "new in HEAD, no base" in r.stdout
+    assert "lexical-new" in r.stdout and "identifier_head_slots" in r.stdout
+    assert "CANNOT DIFF" not in r.stdout
+    assert "No regression" in r.stdout
+
+
+def test_the_skipped_task_does_not_drag_the_class_mean(tmp_path):
+    """Head's class mean includes the new task (0.0 here, so 0.5). Diffed raw
+    against base's 1.0 it would read as a regression the code did not cause."""
+    r = _run(*_write(tmp_path, *_legs(new_task_r10=0.0)))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "recall_at_10=1.0->1.0" in r.stdout
+
+
+def test_a_real_regression_beside_a_skipped_task_still_fails(tmp_path):
+    r = _run(*_write(tmp_path, *_legs(old_r10=0.0)))
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "REGRESSION vs base" in r.stdout
+    assert "lexical-old" in r.stdout
+
+
+def test_a_shortfall_the_skip_list_does_not_explain_is_still_refused(tmp_path):
+    """#857's guard must survive: skipping one task cannot excuse a second
+    missing one."""
+    base, head = _legs()
+    head["per_task"]["lexical-other"] = _row("lexical", 1.0, 1.0)
+    head["per_class"]["lexical"]["n"] = 3
+    r = _run(*_write(tmp_path, base, head))
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "CANNOT DIFF" in r.stdout
+    assert "base n=1, head n=2" in r.stdout
+
+
+def test_a_class_that_exists_only_through_skipped_tasks_is_not_drift(tmp_path):
+    base, head = _legs()
+    base["skipped_no_base"]["ident-new"] = {"class": "identifier",
+                                            "missing_kwargs": ["identifier_head_slots"]}
+    head["per_task"]["ident-new"] = _row("identifier", 1.0, 1.0)
+    head["per_class"]["identifier"] = {"recall_at_5": 1.0, "recall_at_10": 1.0, "mrr": 1.0,
+                                       "fpr": 0.0, "n": 1}
+    r = _run(*_write(tmp_path, base, head))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "ident-new" in r.stdout
+
+
+def test_a_skip_list_naming_a_task_head_never_ran_is_refused(tmp_path):
+    base, head = _legs()
+    base["skipped_no_base"]["ghost"] = {"class": "lexical", "missing_kwargs": ["x"]}
+    r = _run(*_write(tmp_path, base, head))
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "ghost" in r.stdout and "CANNOT DIFF" in r.stdout
