@@ -1965,8 +1965,10 @@ def search(
     The FTS channel, the vector channel, the #1078 identifier pool and the #946
     curated pool all read through the connection opened here, and the query is
     embedded once for both vector calls. Each channel used to open its own:
-    measured 3.08 connections, 1.73 extension loads and 1.73 embeds per
-    ``table="all"`` call, each connection starting with a cold page cache. The
+    3.08 connections, 1.73 extension loads and 1.73 embeds per ``table="all"``
+    call (issue #1094's measurement, operator-store snapshot 2026-09-29 03:30;
+    the arch card's 3.02 / 1.63 / 1.63 is PR #1100's run on the 2026-09-28
+    16:51 snapshot), each connection starting with a cold page cache. The
     connection is closed on every path, including an exception.
 
     ``conn`` (techne#1095): run on the caller's connection and leave it open. The

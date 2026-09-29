@@ -182,7 +182,14 @@ def handle_request(request: dict, config: Config) -> dict:
 #: Underscore row keys that ARE part of recall's output: federation provenance.
 #: `_store`/`_role` name the store a row came from, and callers and tests read them
 #: off `search_results`. Every other underscore key on a row is ranking plumbing.
+#: DEPRECATED on the output (techne#1102): recall now also emits them as `store` /
+#: `role`, and the underscore names go in a future release. Internal code
+#: (`tiers.tier_of`, the freshness filter below) keeps reading the underscore keys,
+#: which are set before this boundary and are not affected by the rename.
 _PUBLIC_UNDERSCORE_KEYS = frozenset({"_store", "_role"})
+
+#: Deprecated output key -> its public name (techne#1102). Additive: both are emitted.
+_PROVENANCE_ALIASES = (("_store", "store"), ("_role", "role"))
 
 
 def _public_rows(rows: list[dict], keep: frozenset = frozenset()) -> list[dict]:
@@ -196,6 +203,21 @@ def _public_rows(rows: list[dict], keep: frozenset = frozenset()) -> list[dict]:
     so the caller's list is untouched.
     """
     return [{k: v for k, v in r.items() if not k.startswith("_") or k in keep} for r in rows]
+
+
+def _with_public_provenance(rows: list[dict]) -> list[dict]:
+    """Copy `_store`/`_role` to `store`/`role` on each row that has them (techne#1102).
+
+    The additive half of the rename: the underscore keys stay, so an existing
+    caller keeps working, and a row without them (the unfederated path, a folded-in
+    library document) gets no public key either. Mutates and returns ``rows``; call
+    it on the copies `_public_rows` returns, never on rows internal code still holds.
+    """
+    for r in rows:
+        for old, new in _PROVENANCE_ALIASES:
+            if old in r:
+                r[new] = r[old]
+    return rows
 
 
 #: The server's long-lived READ connection (techne#1095). ``main()`` sets it and
@@ -655,7 +677,9 @@ def _techne_recall(args: dict, config: Config) -> dict:
             archivist_binding,
             {"identity_matches": _identity_matches()},
         )
-        out["search_results"] = _public_rows(out["search_results"], _PUBLIC_UNDERSCORE_KEYS)
+        out["search_results"] = _with_public_provenance(
+            _public_rows(out["search_results"], _PUBLIC_UNDERSCORE_KEYS)
+        )
         return out
 
     # ---- Federation path (techne#222) ----
@@ -746,7 +770,9 @@ def _techne_recall(args: dict, config: Config) -> dict:
         {"identity_matches": _identity_matches()},
     )
     # After the merge and the tier ladder, both of which read row tags.
-    out["search_results"] = _public_rows(out["search_results"], _PUBLIC_UNDERSCORE_KEYS)
+    out["search_results"] = _with_public_provenance(
+        _public_rows(out["search_results"], _PUBLIC_UNDERSCORE_KEYS)
+    )
 
     # Step E — surface conflict prompts; recall itself does NOT write.
     # A COUNT BY DEFAULT, THE ITEMS ON REQUEST (techne#863). Each item carries its
@@ -1076,7 +1102,11 @@ TOOLS = [
             "moved/deleted/unknown) — spend verification effort only on those rather "
             "than re-checking every result by hand. An entry with no `freshness` "
             "tag needs no file check: it is either non-anchored or "
-            "anchored-and-unchanged (anchored entries carry an `anchor_path` field)."
+            "anchored-and-unchanged (anchored entries carry an `anchor_path` field). "
+            "On a federated recall each memory row names its source: `store` (the "
+            "connection name, or `local`) and `role` (that connection's role). "
+            "`_store`/`_role` carry the same values and are DEPRECATED: read "
+            "`store`/`role`; the underscore names will be removed in a future release."
         ),
         "inputSchema": {
             "type": "object",

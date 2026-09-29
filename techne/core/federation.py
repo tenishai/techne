@@ -523,8 +523,12 @@ def merge_and_rank(
     index too, so remote rows can land after it. An `identifier_head` row that
     `search()` did not move (it already sat at that vec-first index) carries no
     `reserved_slot` tag, so it is not pinned and can shift down when remote rows
-    are present: at index 1, with first-tier remote heads, it lands at seat k+1 for
-    k remote stores.
+    are present: at index 1, with first-tier remote heads, it lands at seat k+1 or
+    later for k remote stores. Exactly k+1 when the local row ahead of it (index 0)
+    is first tier: that row wins the tie at seat 0, then the k remote heads go
+    before the row at local position 1. If local row 0 is OR-only, every first-tier
+    remote row outranks it on tier, so more than k remote rows can go first and k+1
+    is only a lower bound.
 
     THE TIER RULE STILL APPLIES ACROSS STORES (techne#1079 review Important 1),
     between stream heads: a first-tier head always goes before a second-tier head,

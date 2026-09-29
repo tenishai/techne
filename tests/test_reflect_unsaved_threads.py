@@ -346,7 +346,7 @@ def test_a_collided_thread_id_drains_only_when_every_key_is_answered(
     them as ONE item. If only one of their `obs-` keys was answered, draining that id
     would stamp the other thread's observations paid without anyone reading them."""
     import techne.core.thread_orchestrator as orch
-    from techne.core.extension_state import set_state
+    from techne.core.extension_state import get_state, set_state
     from techne.core.reflect import (
         _bucket_observations,
         _observations_key,
@@ -384,3 +384,22 @@ def test_a_collided_thread_id_drains_only_when_every_key_is_answered(
         assert drained is not None, "every key answered, but the shared row stayed owed"
     else:
         assert drained is None, "one unanswered thread's observations were marked paid"
+        # techne#1110: a doubly late #733 collision. key_b's answer arrives after the
+        # persist above, and the row must drain on the next one. That depends on the
+        # persist keeping key_a in `answered` (it strips only the keys it moved); if it
+        # stripped every key it saw, key_a is gone, the pair never completes, and the
+        # item is re-offered once.
+        conn = connect(cfg.db_path)
+        try:
+            marker = get_state(conn, f"reflect:emitted:{sid}")
+            assert key_a in marker["answered"], "an unpaid key was dropped from `answered`"
+            marker["answered"] = sorted({*marker["answered"], key_b})
+            set_state(conn, f"reflect:emitted:{sid}", marker)
+        finally:
+            conn.close()
+
+        persist_unsaved_threads(cfg, sid, threads, observations)
+        (drained,) = _rows(
+            cfg, "SELECT drained_at FROM reflection_queue WHERE thread_id = ?", tid
+        )[0]
+        assert drained is not None, "both keys answered across two persists, row still owed"

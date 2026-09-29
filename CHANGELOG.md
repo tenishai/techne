@@ -5,6 +5,16 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Deprecated
+
+- **`techne_recall`'s `_store` / `_role` row keys are deprecated; read `store` / `role`**
+  (#1102). They are public federation provenance (the connection a row came from and
+  its role) but were named like the internal keys the MCP boundary strips. Recall now
+  emits `store` / `role` with the same values alongside them, on every row that has
+  them. Nothing is removed or renamed in this release; the underscore names will be
+  removed in a future release. Internal readers (`tiers.tier_of`, the freshness filter)
+  are unchanged.
+
 ### Docs
 
 - **Two lines stopped saying every hook config change needs a new session** (#1032).
