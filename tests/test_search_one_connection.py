@@ -2,7 +2,10 @@
 
 Before this, each channel opened its own connection: the FTS channel, the vector
 channel, the #1078 identifier pool and the #946 curated pool. Measured 3.08
-connections, 1.73 extension loads and 1.73 embeds per `search(table="all")`.
+connections, 1.73 extension loads and 1.73 embeds per `search(table="all")` in
+issue #1094, on the operator-store snapshot of 2026-09-29 03:30. The arch card
+(docs/arch/search-embeddings.md) quotes 3.02 / 1.63 / 1.63: PR #1100's run on the
+2026-09-28 16:51 snapshot.
 
 The counting test runs a REAL vec store with a stub embedding backend, and checks
 that both extra paths fired (identifier pool, curated pool). Without that, a

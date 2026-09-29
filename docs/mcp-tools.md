@@ -18,6 +18,8 @@ For the CLI equivalents see the [README](../README.md); for what is switched on
 
 Call this before relying on an assumption about this project, person, or past decision — to retrieve context for a specific topic across all layers including identity. Git-anchored knowledge results that need attention carry an explicit `freshness` tag (modified/diverged/moved/deleted/unknown) — spend verification effort only on those rather than re-checking every result by hand. An entry with no…
 
+Each federated memory row names its source: `store` (the connection name, or `local`) and `role` (that connection's role). The same values also appear as `_store`/`_role`, which are **deprecated** and will be removed in a future release; read `store`/`role`. Unfederated recall rows carry neither (they are local by construction) (techne#1102).
+
 ### `techne_search`
 
 Call this when you need breadth across history — search across sessions, threads, knowledge, and identity. (For focused topic context, prefer techne_recall.)
