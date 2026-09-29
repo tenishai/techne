@@ -240,10 +240,10 @@ class TestMergesTeamResults:
         step. Same fixture as the search_fts/search_knowledge_conn guards:
         one long, stale, exact (AND) row and one short, fresh, partial (OR)
         row, tagged `_match_pass` by their producer. Run through both inputs
-        merge_and_rank takes — a local set (via search(), which falls back to
-        search_fts's tagged output when no vector backend answers) and a
-        remote set (via search_knowledge_conn) — since the bug reproduces on
-        either side of the pool.
+        merge_and_rank takes — a local set (via search() with use_vectors=False,
+        i.e. search_fts's tagged output directly) and a remote set (via
+        search_knowledge_conn) — since the bug reproduces on either side of
+        the pool.
         """
         from techne.core.federation import merge_and_rank
         from techne.core.search import search, search_knowledge_conn
@@ -264,8 +264,8 @@ class TestMergesTeamResults:
         finally:
             conn.close()
 
-        # Local side: search() with no vector backend in this test env falls
-        # back to search_fts's tagged, already-correct [and, or] order.
+        # Local side: use_vectors=False returns search_fts's tagged,
+        # already-correct [and, or] order directly (no vector fusion at all).
         local_results = search(
             local_db, "alpha beta", table="knowledge", limit=2, use_vectors=False
         )
@@ -294,6 +294,85 @@ class TestMergesTeamResults:
         assert [r["id"] for r in merged_remote] == [id_and, id_or], (
             f"merge_and_rank must not reorder remote AND/OR rows either; got "
             f"{[r['id'] for r in merged_remote]}"
+        )
+
+    def test_merge_and_rank_does_not_empty_the_page_of_untagged_local_rows(self, tmp_path):
+        """Prudence's #1088 review round 2 Important 1 — reproducing her probe.
+
+        Round 1 demoted ANY untagged row to OR-tier (`== "and"` / `!= "and"`).
+        An untagged row can still be strong evidence — an `fts+vec` overlap
+        row matched every query term lexically, same as an AND row, but
+        before this round's `_as_page_row` fix it carried `rank` without the
+        tag — and round 1 gave it no way to earn a spot in the AND bucket,
+        no matter how good a match it was. When a remote's AND pass alone
+        already fills `limit` (12 AND-tagged rows here, against limit=10),
+        `and_ranked` consumes the WHOLE page and no untagged local row can
+        ever appear — `remaining` is 0 before the OR bucket (holding every
+        local row) is even considered. That is a federated page with zero
+        local content, regardless of how the untagged rows would have
+        scored on their own merits.
+
+        The fix (demote ONLY an explicit `"or"` tag) puts untagged rows in
+        the SAME bucket as the remote's AND rows, so they compete for the
+        page on recency/BM25 instead of being excluded categorically. Local
+        rows are left fresh and the remote is staled, so local wins on
+        recency — deterministic without depending on cross-corpus BM25
+        magnitudes.
+        """
+        from techne.core.federation import merge_and_rank
+        from techne.core.search import search_knowledge_conn
+
+        local_db = tmp_path / "local.db"
+        remote_db = tmp_path / "remote.db"
+        _init_team_db(local_db)
+        _init_team_db(remote_db)
+
+        for i in range(8):
+            store(local_db, f"alpha beta local fact number {i}", type="fact")
+        for i in range(12):
+            store(remote_db, f"alpha beta remote fact number {i}", type="fact")
+
+        # Stale the remote store's rows; local rows keep their fresh default
+        # updated_at — the tiebreak that makes "local wins" deterministic.
+        remote_conn = connect(remote_db)
+        try:
+            remote_conn.execute("UPDATE knowledge SET updated_at = '2000-01-01 00:00:00'")
+            remote_conn.commit()
+            remote_deduped = search_knowledge_conn(remote_conn, "alpha beta", 10)
+        finally:
+            remote_conn.close()
+        assert len(remote_deduped) == 10, "fixture sanity: the remote AND pass must fill limit=10"
+        assert all(r.get("_match_pass") == "and" for r in remote_deduped), (
+            "fixture sanity: every remote row must be AND-tagged"
+        )
+
+        # Local rows RE-SHAPED THE WAY `_as_page_row` SHAPED AN `fts+vec`
+        # OVERLAP ROW BEFORE THIS ROUND'S FIX (Prudence's probe methodology):
+        # `rank` kept, `_match_pass` removed. These rows matched every term
+        # lexically — the tag is what's missing, not the evidence.
+        local_conn = connect(local_db)
+        try:
+            local_rows_raw = search_knowledge_conn(local_conn, "alpha beta", 10)
+        finally:
+            local_conn.close()
+        # Local and remote are separate autoincrement id spaces (both 1-N), so
+        # ids collide across stores — discriminate by content instead.
+        local_results = []
+        for r in local_rows_raw:
+            r = dict(r)
+            r.pop("_match_pass", None)
+            r["match_source"] = "fts+vec"
+            local_results.append(r)
+
+        merged = merge_and_rank(
+            local_results, remote_deduped, limit=10, recency_weight=0.3,
+            bm25_weight=0.7, half_life_days=30.0,
+        )
+        survivors = [r for r in merged if "local fact" in (r.get("content") or "")]
+        assert survivors, (
+            "at least one untagged local row must survive the "
+            "merge — round 1's `== \"and\"` rule emptied the page of them "
+            "whenever a remote's AND pass alone filled `limit`"
         )
 
     def test_team_rows_tagged_with_store_and_role(self, tmp_path):

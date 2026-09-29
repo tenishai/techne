@@ -509,27 +509,40 @@ def merge_and_rank(
     exact-match row and a fresh short partial-match row, correctly ordered
     `[and, or]` by both `search_knowledge_conn` and `search()`, came out
     `[or, and]` through this function. Fixed the same way as the two
-    producers: rerank every store's AND-tagged rows as one block, then fill
-    the remaining slots with every store's OR-tagged (or untagged) rows as a
-    second block, and concatenate AND-first.
+    producers: rerank every store's rows NOT explicitly tagged `"or"` as one
+    block, then fill the remaining slots with every store's `"or"`-tagged
+    rows as a second block, and concatenate AND-first. See the next
+    paragraph for why untagged rows join the first block, not the second.
 
-    A ROW WITHOUT `_match_pass` — a local vec-only match (never went through
-    the FTS AND/OR split at all: `search()`'s vec-first fusion builds most
-    page rows from `search_vec`, not `search_fts`, and copies only `rank`
-    across an fts+vec overlap, not this tag), or a remote on a version that
-    predates this tag — is treated as OR-tier, same as an explicit `"or"`.
-    Precedence here means "confirmed to match every query term, lexically";
-    a vector-only match carries no such confirmation, so it gets no more
-    benefit of the doubt than a partial lexical match does. This never drops
-    a row, only orders it: an untagged row still competes for, and can win,
-    an OR-tier slot on its own recency/BM25/decay score.
+    A ROW WITHOUT `_match_pass` IS FIRST-TIER, NOT DEMOTED (techne#1079 review
+    round 2 — round 1 shipped the opposite rule and it was wrong). ONLY a row
+    explicitly tagged `"or"` is demoted; anything else — untagged included —
+    is bucketed with the AND rows. The tag means "went through the lexical
+    AND/OR split and landed in the OR pass"; its ABSENCE means "unknown
+    provenance", never "known to be a partial match", and the two must not be
+    treated alike. A local `search()` page with vectors on is mostly `vec` and
+    `fts+vec` rows, and NEITHER carries the tag — `_as_page_row` copies
+    `_match_pass` from the underlying FTS row now (search.py, techne#1079
+    round 2), same as it already copied `rank`, but a pure vec-only row has
+    no FTS row to copy from at all. An `fts+vec` OVERLAP row matched every
+    query term lexically — strictly stronger evidence than an AND row from a
+    single-channel FTS-only store — so demoting it below a remote's AND rows
+    was backwards, not merely conservative. MEASURED (Prudence's probe): a
+    remote returning close to `limit` AND-tagged rows, pooled with a local
+    hybrid page whose vec/fts+vec rows were left untagged, produced an
+    all-remote page under the round-1 `== "and"` rule (`team x10`) where the
+    pre-#1079 single-rerank shape on `main` gave `local x8, team x2` — every
+    local vector hit pushed off the page by a remote's lexical rows it had no
+    real ranking edge over. `!= "or"` restores that composition while still
+    fixing the #1081 inversion, since every OR row is tagged `"or"` by its
+    producer regardless of which bucket untagged rows join.
     """
     from techne.core.search import _rerank
 
-    and_rows = [r for r in local_results if r.get("_match_pass") == "and"]
-    and_rows += [r for r in remote_deduped if r.get("_match_pass") == "and"]
-    or_rows = [r for r in local_results if r.get("_match_pass") != "and"]
-    or_rows += [r for r in remote_deduped if r.get("_match_pass") != "and"]
+    and_rows = [r for r in local_results if r.get("_match_pass") != "or"]
+    and_rows += [r for r in remote_deduped if r.get("_match_pass") != "or"]
+    or_rows = [r for r in local_results if r.get("_match_pass") == "or"]
+    or_rows += [r for r in remote_deduped if r.get("_match_pass") == "or"]
 
     and_ranked = _rerank(
         and_rows, limit, recency_weight, bm25_weight, half_life_days=half_life_days

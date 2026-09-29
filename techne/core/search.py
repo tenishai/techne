@@ -1808,6 +1808,15 @@ def search(
             # copy, so restore `rank` explicitly. (#402 review — Prudence.)
             if "rank" in fts_row:
                 row["rank"] = fts_row["rank"]
+            # Same for `_match_pass` (techne#1079 review round 2): an fts+vec
+            # overlap row matched every query term lexically as an AND row (or
+            # was topped up as an OR row) before the vector channel found it
+            # too — that provenance must survive onto the merged page row, not
+            # just onto the fts-only rows the tail/curated/identifier code
+            # paths copy directly. Without it, federation's merge_and_rank
+            # could not tell an fts+vec AND row from a pure vec-only row.
+            if "_match_pass" in fts_row:
+                row["_match_pass"] = fts_row["_match_pass"]
         else:
             row["match_source"] = "vec"
         row["fusion"] = "vec_first"
@@ -2572,8 +2581,13 @@ def fts_with_or_fallback(
     key: Callable[[dict], Hashable] = lambda r: r.get("id"),
 ) -> list:
     """:func:`fts_and_or_split`, merged back into one AND-then-OR list and
-    capped to ``want`` (a no-op today: every caller's ``want`` already equals
-    ``run``'s own SQL ``LIMIT``, so the cap never trims a real result).
+    capped to ``want`` — and the cap is NOT a no-op (Prudence, #1088 review
+    round 2 Nit 2 — an earlier draft of this sentence claimed it was, and was
+    wrong). ``run``'s own SQL ``LIMIT`` is ``want`` for BOTH the AND pass and
+    the OR pass, so when the AND pass returns even one row, the OR pass can
+    still return up to ``want`` MORE — ``and_rows + topup`` can exceed
+    ``want``, and the cap is what trims it back down to the caller's
+    intended pool size, dropping real OR rows to do it.
 
     Safe for a caller that does NOT rerank its result afterward — AND rows
     precede OR rows in the returned list unconditionally, so precedence holds
