@@ -1878,6 +1878,8 @@ def search(
     curated_head_slots: int | None = None,
     identifier_head_slots: int | None = None,
     identifier_rare_fraction: float | None = None,
+    *,
+    conn: sqlite3.Connection | None = None,
 ) -> list[dict]:
     """Hybrid search: BM25 (FTS5) + vector (cosine) combined by a vec-first
     union (techne#401).
@@ -1965,12 +1967,20 @@ def search(
     measured 3.08 connections, 1.73 extension loads and 1.73 embeds per
     ``table="all"`` call, each connection starting with a cold page cache. The
     connection is closed on every path, including an exception.
+
+    ``conn`` (techne#1095): run on the caller's connection and leave it open. The
+    MCP server passes its long-lived read connection (``core/read_conn.py``) so
+    the page cache and the sqlite-vec load survive across tool calls. The caller
+    owns that connection's freshness: it must not hold a read transaction open
+    between calls. Without ``conn`` this opens and closes its own, as before.
     """
     if not use_vectors and prepare_fts_query(query) is None:
         # Nothing to run: search_fts returns [] before touching the store, and
         # this keeps that true for the call as a whole.
         return []
-    conn = connect(db_path)
+    own_conn = conn is None
+    if own_conn:
+        conn = connect(db_path)
     try:
         return _search_on_conn(
             conn,
@@ -1988,7 +1998,8 @@ def search(
             identifier_rare_fraction=identifier_rare_fraction,
         )
     finally:
-        conn.close()
+        if own_conn:
+            conn.close()
 
 
 def _search_on_conn(

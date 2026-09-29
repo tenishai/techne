@@ -197,14 +197,36 @@ def _public_rows(rows: list[dict], keep: frozenset = frozenset()) -> list[dict]:
     return [{k: v for k, v in r.items() if not k.startswith("_") or k in keep} for r in rows]
 
 
-def _techne_search(args: dict, config: Config) -> dict:
+#: The server's long-lived READ connection (techne#1095). ``main()`` sets it and
+#: closes it on exit, so only the server process ever holds one; everywhere else
+#: (the CLI, tests calling a handler directly) it stays None and search opens its
+#: own connection per call, as before.
+_READER = None
+
+
+def _local_search(config: Config, query: str, **kwargs) -> list[dict]:
+    """``search()`` on the local store, through ``_READER`` when the server set one.
+
+    The reader passes its connection, or None when it cannot use it (replaced
+    file, busy, errored), and ``search(conn=None)`` opens a fresh one. Only the
+    search reads go through it; writes keep their own connections.
+    """
     from techne.core.search import search
 
+    reader = _READER
+    if reader is None:
+        return search(config.db_path, query, **kwargs)
+    return reader.run(
+        config.db_path, lambda conn: search(config.db_path, query, conn=conn, **kwargs)
+    )
+
+
+def _techne_search(args: dict, config: Config) -> dict:
     query = args.get("query", "")
     table = args.get("table", "all")
     limit = args.get("limit", 20)
-    results = search(
-        config.db_path,
+    results = _local_search(
+        config,
         query,
         table=table,
         limit=limit,
@@ -553,7 +575,6 @@ def _techne_recall(args: dict, config: Config) -> dict:
     from techne.core.archivist import ARCHIVIST_CONNECTION_NAME
     from techne.core.identity import list_entries as list_identity
     from techne.core.knowledge import annotate_uncertain
-    from techne.core.search import search
 
     topic = args.get("topic", "")
 
@@ -603,8 +624,8 @@ def _techne_recall(args: dict, config: Config) -> dict:
     # ---- Noop gate (techne#222 §2): nothing to fan out to → local-only ----
     if not fan_out_connections:
         # techne#216: DEFAULT recall excludes soft-archived knowledge.
-        results = search(
-            config.db_path,
+        results = _local_search(
+            config,
             topic,
             table="all",
             limit=10,
@@ -649,8 +670,8 @@ def _techne_recall(args: dict, config: Config) -> dict:
     # to local-only rather than losing the local results entirely. fan_out_search
     # already guards each remote's open+query internally (one bad remote → skipped),
     # but the pooling/detection steps below are wrapped too as defence in depth.
-    local_results = search(
-        config.db_path,
+    local_results = _local_search(
+        config,
         topic,
         table="all",
         limit=10,
@@ -2857,6 +2878,23 @@ def main():
     except Exception:  # noqa: BLE001 — a diagnostic must never cost the server its start
         _RUNTIME_WATCH = None
 
+    # techne#1095 — one long-lived read connection for search, for this process's
+    # life. Tool calls are dispatched one at a time by the loop below (no threads,
+    # no asyncio); `ReadConnection` locks anyway and falls back to a fresh
+    # connection rather than share. Closed on the way out, EOF or exception.
+    global _READER
+    from techne.core.read_conn import ReadConnection
+
+    _READER = ReadConnection()
+    try:
+        _serve(config)
+    finally:
+        reader, _READER = _READER, None
+        reader.close()
+
+
+def _serve(config: Config) -> None:
+    """The stdio request loop: one JSON-RPC request per line, answered in order."""
     for line in sys.stdin:
         line = line.strip()
         if not line:
