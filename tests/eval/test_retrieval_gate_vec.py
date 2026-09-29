@@ -86,8 +86,10 @@ def _emit_metrics(rows: list[dict], per_class: dict) -> None:
     for drift. That is precisely what a draft of #827's fix did: `paraphrase-dbpool`
     went to zero and the class still read 0.833, over a 0.8 floor. It never reached
     `main` — PR #829's own body records the measurement and its review rounds
-    ablated the draft before merge. A diff over per-task rows sees the collapse at
-    full amplitude.
+    ablated the draft before merge. The same collapse DID reach `main` later, from
+    the eval side: #977's filler row took `paraphrase-dbpool` to zero and the class
+    read 0.833 until techne#1083 fixed the row and raised the floor to 0.85. A diff
+    over per-task rows sees the collapse at full amplitude.
 
     Deliberately NOT a committed baseline file. A baseline pinned in the repo
     would carry this machine's numbers to every other machine and re-introduce

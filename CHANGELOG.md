@@ -105,6 +105,16 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- **`paraphrase-dbpool` scores 1.0 again in the vector eval, and losing any one
+  paraphrase task now fails the gate** (#1083). Since #977 the lexical-tail task's
+  padded gold row used infrastructure prose ("connection pooling ... sixty four
+  sockets") as filler. Its averaged vector reached the page of 18 other tasks and took
+  rank 1 on `paraphrase-dbpool`, pushing that gold off the page. The paraphrase class
+  read r@10 0.833 over a 0.8 floor, so the gate stayed green. The filler is now sailing
+  prose that appears on no other task's page; paraphrase is back at r@5 0.667 / r@10 1.0
+  / MRR 0.546, the #401 bar, and the lexical task still arrives via `fts` in the
+  `lexical_tail` slot at rank 10. The paraphrase r@10 floor is 0.85, so one lost task
+  (0.833) fails. Eval only; no search code changed.
 - **A late `obs_key` answer no longer re-offers its thread** (#1106). An answer
   ingested by `obs_key` after the emit that persisted its thread (a batch rendered on
   the fallback path and ingested later) was recorded under the `obs-` key, but the

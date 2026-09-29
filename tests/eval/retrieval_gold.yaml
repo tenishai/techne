@@ -116,9 +116,22 @@ config_vec:
   #     slip (mean → ~0.463) still passes; a relapse toward RRF (0.144) trips
   #     hard. This floor is only non-vacuous BECAUSE the fix moved observed MRR
   #     from 0.144 to 0.546 (the pre-fix -0.15 tolerance went negative → dead).
+  #
+  # recall_at_10 RAISED 0.8 -> 0.85 for techne#1083. The "single gold slipping
+  # rank 10->11 still passes" tolerance above is what hid a real regression:
+  # #977's filler row pushed paraphrase-dbpool off the page, the class read
+  # 0.833 over the 0.8 floor, and main stayed green with one task at 0.0 from
+  # #977 until #1083. With n=6 a lost task moves the mean 1.0 -> 0.833, so the
+  # floor has to sit above that to bite (the same arithmetic #977 applied to
+  # the negative class). The cost is the drift tolerance: measured, the closest
+  # gold (dbpool, vector rank 9) leads the rank-10 row by 0.0045 in L2 distance,
+  # far above float noise, and the leg is byte-deterministic on one machine.
+  # If cross-machine drift ever flips a gold across rank 10, that is a baseline
+  # change under EVAL.md's procedure, not a reason to reopen the tolerance.
+  # techne#1085 generalises this to per-task gating for every deterministic class.
   paraphrase:
     recall_at_5_floor: 0.5
-    recall_at_10_floor: 0.8
+    recall_at_10_floor: 0.85
     mrr_floor: 0.4
   # techne#935 — THE CLASS THAT MAKES THE FUSION TAIL OBSERVABLE.
   #
