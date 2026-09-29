@@ -179,6 +179,23 @@ def handle_request(request: dict, config: Config) -> dict:
 
 # --- Tool implementations ---
 
+#: Underscore row keys that ARE part of recall's output: federation provenance.
+#: `_store`/`_role` name the store a row came from, and callers and tests read them
+#: off `search_results`. Every other underscore key on a row is ranking plumbing.
+_PUBLIC_UNDERSCORE_KEYS = frozenset({"_store", "_role"})
+
+
+def _public_rows(rows: list[dict], keep: frozenset = frozenset()) -> list[dict]:
+    """Drop underscore-prefixed internal keys from result rows at the tool boundary.
+
+    `_match_pass` (techne#1079/#1088) tags a row's FTS pass so
+    `federation.merge_and_rank` can rerank AND and OR rows apart; it has no meaning
+    to a caller and was reaching `techne_search` output verbatim. It is stripped
+    HERE, after any merge, and never inside `search()`, because the merge still
+    reads it. Copies each row, so the caller's list is untouched.
+    """
+    return [{k: v for k, v in r.items() if not k.startswith("_") or k in keep} for r in rows]
+
 
 def _techne_search(args: dict, config: Config) -> dict:
     from techne.core.search import search
@@ -202,6 +219,7 @@ def _techne_search(args: dict, config: Config) -> dict:
         identifier_head_slots=config.search.identifier_head_slots,
         identifier_rare_fraction=config.search.identifier_rare_fraction,
     )
+    results = _public_rows(results)
     return {"results": results, "count": len(results)}
 
 
@@ -606,7 +624,7 @@ def _techne_recall(args: dict, config: Config) -> dict:
         # attach an `uncertainty` marker. Distinct key from `freshness`; a row can
         # carry both.
         annotate_uncertain(config.db_path, results)
-        return _with_ladder(
+        out = _with_ladder(
             config,
             topic,
             _fold_in_documents(config, topic, results),
@@ -615,6 +633,8 @@ def _techne_recall(args: dict, config: Config) -> dict:
             archivist_binding,
             {"identity_matches": _identity_matches()},
         )
+        out["search_results"] = _public_rows(out["search_results"], _PUBLIC_UNDERSCORE_KEYS)
+        return out
 
     # ---- Federation path (techne#222) ----
     from techne.core.federation import (
@@ -709,6 +729,8 @@ def _techne_recall(args: dict, config: Config) -> dict:
         archivist_binding,
         {"identity_matches": _identity_matches()},
     )
+    # After the merge and the tier ladder, both of which read row tags.
+    out["search_results"] = _public_rows(out["search_results"], _PUBLIC_UNDERSCORE_KEYS)
 
     # Step E — surface conflict prompts; recall itself does NOT write.
     # A COUNT BY DEFAULT, THE ITEMS ON REQUEST (techne#863). Each item carries its

@@ -684,8 +684,14 @@ def search_fts(
     include_archived: bool = True,
     include_uncertain: bool = False,
     row_chars: int | None = None,
+    *,
+    conn: sqlite3.Connection | None = None,
 ) -> list[dict]:
     """Full-text search across techne tables.
+
+    ``conn`` (techne#1094): run on the caller's connection and leave it open.
+    ``search()`` passes the one connection it holds for the whole call. Without
+    it this opens its own connection and closes it before returning.
 
     ``row_chars`` caps each KNOWLEDGE row's content, defaulting to
     ``_ROW_CHAR_CAP`` when None (techne#842). It does NOT move observation or
@@ -725,7 +731,9 @@ def search_fts(
         # Empty or all-punctuation query (e.g. "\") → no searchable terms; MATCH '' would
         # crash. Single guard shared with documents/patterns/codegraph (techne#143/#168).
         return []
-    conn = connect(db_path)
+    own_conn = conn is None
+    if own_conn:
+        conn = connect(db_path)
     candidate_limit = limit * expansion_ratio
 
     try:
@@ -786,7 +794,8 @@ def search_fts(
         results = and_ranked + or_ranked
 
     finally:
-        conn.close()
+        if own_conn:
+            conn.close()
 
     return results
 
@@ -947,43 +956,23 @@ def take_vec_channel_error() -> str | None:
     return err
 
 
-def search_vec(
-    db_path: Path,
-    query: str,
-    table: SearchTable = "all",
-    limit: int = 10,
-    include_archived: bool = True,
-    include_uncertain: bool = False,
-    row_chars: int | None = None,
-) -> list[dict]:
-    """Semantic vector search. Requires sqlite-vec and an embedding backend
-    (model2vec or fastembed — techne#601/#602; see core/embeddings.py).
+def _query_embedding(query: str):
+    """Embed ``query`` for the vector channel, or None when the channel is off.
 
-    ``row_chars`` caps each KNOWLEDGE row's content, defaulting to
-    ``_ROW_CHAR_CAP`` when None (techne#842). It does NOT move observation or
-    thread rows: those are the tool ledger, and a caller raising its recall
-    budget wants more of the curated row, not more transcript. A caller that
-    renders a truncation marker should ask for one character MORE than it will
-    show — at exactly the cap a severed row is indistinguishable from a whole
-    one.
-
-    Falls back gracefully if vector dependencies aren't installed.
-
-    ``include_archived`` (techne#216): when False, soft-archived knowledge rows
-    are excluded from the vector channel too, so search()'s DEFAULT-recall
-    exclusion holds regardless of which channel surfaced the row.
+    None covers every degrade exit that comes before the store is touched: no
+    sqlite-vec, no embedding backend, or a model that cannot be built without a
+    download. ``search()`` calls this ONCE per call and hands the vector to every
+    ``search_vec`` it makes (techne#1094); ``search_vec`` calls it itself when no
+    vector is passed. An exception from ``model.embed`` propagates, as it always has.
     """
-    # The caller's cap wins for KNOWLEDGE rows; the ledger tables keep
-    # `_ROW_CHAR_CAP` regardless (techne#842).
-    _cap = row_chars if row_chars is not None else _ROW_CHAR_CAP
     try:
-        import sqlite_vec
+        import sqlite_vec  # noqa: F401
     except ImportError:
-        return []
+        return None
     if not embeddings_mod.backend_available():
         # Neither model2vec nor fastembed importable — degrade to FTS-only,
         # same as the pre-#601 fastembed-only probe (techne#601/#602).
-        return []
+        return None
 
     import numpy as np
 
@@ -1029,20 +1018,114 @@ def search_vec(
                 f"or not buildable ({exc}); run `techne vectors backfill`",
                 file=sys.stderr,
             )
-        return []
-    q_emb = np.stack(list(model.embed([query])))[0]
-    q_bytes = q_emb.astype("float32").tobytes()
+        return None
+    return np.stack(list(model.embed([query])))[0]
 
-    conn = connect(db_path)
+
+def _ensure_sqlite_vec(conn: sqlite3.Connection, sqlite_vec) -> bool:
+    """Load sqlite-vec into ``conn`` unless it is already there. False when it cannot load.
+
+    The probe is what makes the load happen once per connection (techne#1094):
+    ``search()`` shares one connection between its main vector query and the #946
+    curated pool, and each goes through ``search_vec``.
+    """
+    try:
+        conn.execute("SELECT vec_version()").fetchone()
+        return True
+    except sqlite3.OperationalError:
+        pass  # not loaded on this connection yet
     try:
         conn.enable_load_extension(True)
         sqlite_vec.load(conn)
         conn.enable_load_extension(False)
     except (AttributeError, sqlite3.OperationalError, sqlite3.NotSupportedError):
         # Interpreter built without loadable-extension support — degrade to FTS.
-        conn.close()
-        return []
+        return False
+    return True
 
+
+def search_vec(
+    db_path: Path,
+    query: str,
+    table: SearchTable = "all",
+    limit: int = 10,
+    include_archived: bool = True,
+    include_uncertain: bool = False,
+    row_chars: int | None = None,
+    *,
+    conn: sqlite3.Connection | None = None,
+    query_vec=None,
+) -> list[dict]:
+    """Semantic vector search. Requires sqlite-vec and an embedding backend
+    (model2vec or fastembed — techne#601/#602; see core/embeddings.py).
+
+    ``row_chars`` caps each KNOWLEDGE row's content, defaulting to
+    ``_ROW_CHAR_CAP`` when None (techne#842). It does NOT move observation or
+    thread rows: those are the tool ledger, and a caller raising its recall
+    budget wants more of the curated row, not more transcript. A caller that
+    renders a truncation marker should ask for one character MORE than it will
+    show — at exactly the cap a severed row is indistinguishable from a whole
+    one.
+
+    Falls back gracefully if vector dependencies aren't installed.
+
+    ``include_archived`` (techne#216): when False, soft-archived knowledge rows
+    are excluded from the vector channel too, so search()'s DEFAULT-recall
+    exclusion holds regardless of which channel surfaced the row.
+
+    ``conn`` and ``query_vec`` (techne#1094) let ``search()`` reuse one
+    connection and one query embedding across its vector calls. With ``conn``,
+    sqlite-vec is loaded into it if it is not already, and the connection is left
+    open. ``query_vec`` is the query's embedding (``_query_embedding``); without
+    it the query is embedded here.
+    """
+    try:
+        import sqlite_vec
+    except ImportError:
+        return []
+    if query_vec is None:
+        query_vec = _query_embedding(query)
+        if query_vec is None:
+            return []
+
+    import numpy as np
+
+    q_bytes = np.asarray(query_vec, dtype="float32").tobytes()
+
+    own_conn = conn is None
+    if own_conn:
+        conn = connect(db_path)
+    try:
+        if not _ensure_sqlite_vec(conn, sqlite_vec):
+            return []
+        return _vec_channel_rows(
+            conn,
+            q_bytes,
+            table,
+            limit,
+            include_archived=include_archived,
+            include_uncertain=include_uncertain,
+            row_chars=row_chars,
+        )
+    finally:
+        if own_conn:
+            conn.close()
+
+
+def _vec_channel_rows(
+    conn: sqlite3.Connection,
+    q_bytes: bytes,
+    table: SearchTable,
+    limit: int,
+    *,
+    include_archived: bool,
+    include_uncertain: bool,
+    row_chars: int | None,
+) -> list[dict]:
+    """``search_vec``'s ANN queries on a connection with sqlite-vec loaded."""
+    # The caller's cap wins for KNOWLEDGE rows; the ledger tables keep
+    # `_ROW_CHAR_CAP` regardless (techne#842).
+    _cap = row_chars if row_chars is not None else _ROW_CHAR_CAP
     results = []
     try:
         if table in ("threads", "all"):
@@ -1174,10 +1257,8 @@ def search_vec(
         # (_ensure_vec_backend_identity, run from backfill_vectors) is what
         # actually reconciles them; until an operator re-embeds we must NEVER crash
         # the top-level recall path — degrade to FTS-only, matching this module's
-        # existing extension-load fallback above.
+        # existing extension-load fallback in `_ensure_sqlite_vec`.
         return []
-    finally:
-        conn.close()
 
 
 RRF_K = 60  # Cormack et al. 2009 — smoothing constant
@@ -1722,6 +1803,7 @@ def _identifier_pool(
     include_archived: bool = True,
     include_uncertain: bool = False,
     row_chars: int | None = None,
+    conn: sqlite3.Connection | None = None,
 ) -> list[dict]:
     """Rows to seat in the identifier head, best first (techne#1078).
 
@@ -1738,14 +1820,17 @@ def _identifier_pool(
 
     Returns ``[]`` without opening the store when no term is identifier-shaped, and
     on any SQLite error: failing open to the ordinary vec-first page is the safe
-    direction.
+    direction. ``conn`` is ``search()``'s shared connection (techne#1094), left
+    open; without it the pool opens and closes its own.
     """
     if slots <= 0 or not _identifier_terms(query):
         return []
-    try:
-        conn = connect(db_path)
-    except sqlite3.Error:
-        return []
+    own_conn = conn is None
+    if own_conn:
+        try:
+            conn = connect(db_path)
+        except sqlite3.Error:
+            return []
     try:
         rare, keys = _rare_identifier_terms(conn, query, table, fraction)
         if not rare:
@@ -1762,7 +1847,8 @@ def _identifier_pool(
     except sqlite3.Error:
         return []
     finally:
-        conn.close()
+        if own_conn:
+            conn.close()
     scoped.sort(key=lambda r: r["rank"])
     return [r for r in fts_results if (r["source_table"], r["id"]) in keys] + scoped
 
@@ -1871,7 +1957,57 @@ def search(
     ``include_archived`` (techne#216): when False, soft-archived knowledge rows
     are excluded from BOTH channels — this is the DEFAULT-recall path (techne_recall).
     Default True: EXPLICIT search (techne_search) still returns archived entries.
+
+    ONE CONNECTION, ONE sqlite-vec LOAD, ONE QUERY EMBED PER CALL (techne#1094).
+    The FTS channel, the vector channel, the #1078 identifier pool and the #946
+    curated pool all read through the connection opened here, and the query is
+    embedded once for both vector calls. Each channel used to open its own:
+    measured 3.08 connections, 1.73 extension loads and 1.73 embeds per
+    ``table="all"`` call, each connection starting with a cold page cache. The
+    connection is closed on every path, including an exception.
     """
+    if not use_vectors and prepare_fts_query(query) is None:
+        # Nothing to run: search_fts returns [] before touching the store, and
+        # this keeps that true for the call as a whole.
+        return []
+    conn = connect(db_path)
+    try:
+        return _search_on_conn(
+            conn,
+            db_path,
+            query,
+            table=table,
+            limit=limit,
+            use_vectors=use_vectors,
+            half_life_days=half_life_days,
+            include_archived=include_archived,
+            include_uncertain=include_uncertain,
+            row_chars=row_chars,
+            curated_head_slots=curated_head_slots,
+            identifier_head_slots=identifier_head_slots,
+            identifier_rare_fraction=identifier_rare_fraction,
+        )
+    finally:
+        conn.close()
+
+
+def _search_on_conn(
+    conn: sqlite3.Connection,
+    db_path: Path,
+    query: str,
+    *,
+    table: SearchTable,
+    limit: int,
+    use_vectors: bool,
+    half_life_days: float,
+    include_archived: bool,
+    include_uncertain: bool,
+    row_chars: int | None,
+    curated_head_slots: int | None,
+    identifier_head_slots: int | None,
+    identifier_rare_fraction: float | None,
+) -> list[dict]:
+    """``search()``'s body, on the one connection ``search()`` owns (techne#1094)."""
     fts_results = search_fts(
         db_path,
         query,
@@ -1881,11 +2017,17 @@ def search(
         include_archived=include_archived,
         include_uncertain=include_uncertain,
         row_chars=row_chars,
+        conn=conn,
     )
 
     if not use_vectors:
         return fts_results
 
+    # Embedded once, for this call and the #946 curated pool below. None means the
+    # channel is off here (no sqlite-vec, no backend, model not cached); search_vec
+    # is still called, because it is the one place that decides the channel's
+    # answer, and without a vector it resolves the model itself and returns [].
+    query_vec = _query_embedding(query)
     vec_results = search_vec(
         db_path,
         query,
@@ -1894,6 +2036,8 @@ def search(
         include_archived=include_archived,
         include_uncertain=include_uncertain,
         row_chars=row_chars,
+        conn=conn,
+        query_vec=query_vec,
     )
     if not vec_results:
         return fts_results
@@ -2001,6 +2145,7 @@ def search(
         include_archived=include_archived,
         include_uncertain=include_uncertain,
         row_chars=row_chars,
+        conn=conn,
     )
     if pool:
         vec_by_key = {(r["source_table"], r["id"]): r for r in vec_results}
@@ -2102,6 +2247,8 @@ def search(
                 include_archived=include_archived,
                 include_uncertain=include_uncertain,
                 row_chars=row_chars,
+                conn=conn,
+                query_vec=query_vec,
             )
             promoted: list[dict] = []
             for r in curated_pool:
