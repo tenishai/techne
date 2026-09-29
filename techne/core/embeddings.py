@@ -17,6 +17,11 @@ fastembed's `TextEmbedding` or model2vec's `StaticModel` behind one interface:
     .dim: int                                            # output width
     .name: str                                           # stable identity string
 
+The model2vec side is usually NOT a `StaticModel` (techne#1096): `_build_backend`
+first builds a `static_direct.DirectStaticModel` from the cached files, which
+produces the same vectors without the ~350 ms model2vec import, and falls back to
+`StaticModel` for anything it cannot reproduce exactly. See core/static_direct.py.
+
 Callers are unchanged: `np.stack(list(model.embed(texts)))` works identically
 against either backend. `.name` is what search.py's vec-table migration stamps
 to detect a backend/model swap (see search.py `_ensure_vec_table`).
@@ -112,7 +117,7 @@ EXISTS, NO CONFIG SURFACE". An earlier draft of this note counted it; #705
 review r3 caught that, and the card had already said so.
 
 The live site takes the permissive `allow_download=True` default, and
-`backend_available()` does not save it: that is an IMPORT probe, so it passes
+`backend_available()` does not save it: that is a PACKAGE probe, so it passes
 on a cold HF cache and the download is attempted anyway.
 
 Unlike backfill this is an in-repo call site with no CLI in between, so there
@@ -127,6 +132,7 @@ rather than riding along here.
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from pathlib import Path
@@ -151,6 +157,8 @@ _DEFAULT_MODEL2VEC_MODEL = "minishlab/potion-base-8M"
 _DEFAULT_FASTEMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 _embedding_model: "EmbeddingBackend | None" = None
+
+_log = logging.getLogger(__name__)
 
 
 class EmbeddingBackend:
@@ -219,11 +227,20 @@ def _l2_normalize_rows(vecs: "np.ndarray", np) -> "np.ndarray":
 
 
 def _model2vec_importable() -> bool:
-    try:
-        import model2vec  # noqa: F401
+    """Is model2vec INSTALLED? Answered with find_spec, not an import (techne#1096).
 
-        return True
-    except ImportError:
+    `import model2vec` costs ~130 ms (huggingface_hub, joblib, tqdm) and this probe
+    runs on every per-turn hook via `backend_available()`, which would spend the
+    time `static_direct` exists to save. A module already in sys.modules (or set to
+    None there, the usual way to simulate "not installed") answers from that entry.
+    """
+    import importlib.util
+
+    if "model2vec" in sys.modules:
+        return sys.modules["model2vec"] is not None
+    try:
+        return importlib.util.find_spec("model2vec") is not None
+    except (ImportError, ValueError):
         return False
 
 
@@ -341,7 +358,19 @@ def _build_backend(
         # blocking on a real download. Scoped to just this call (restored in
         # `finally`) so it can't leak into an unrelated concurrent download
         # elsewhere in the process.
-        import os
+        # FAST PATH FIRST (techne#1096): read the cached files with tokenizers +
+        # safetensors and skip the ~350 ms model2vec import chain. Same vectors,
+        # same identity string, local files only; see core/static_direct.py.
+        # Anything it cannot reproduce exactly (or a cache miss) falls through to
+        # model2vec below, which is also the only place a download can happen.
+        from techne.core import static_direct
+
+        try:
+            impl = static_direct.load(model_name)
+        except Exception as exc:  # noqa: BLE001 — any failure means "let model2vec do it"
+            _log.debug("static_direct unavailable for %s, using model2vec: %r", model_name, exc)
+        else:
+            return EmbeddingBackend("model2vec", model_name, impl, impl.dim)
 
         from model2vec import StaticModel
 

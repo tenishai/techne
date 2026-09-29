@@ -564,6 +564,19 @@ jobs:
         working-directory: techne
         run: .venv-ci/bin/python -c "from model2vec import StaticModel; StaticModel.from_pretrained('minishlab/potion-base-8M', force_download=False)"
 
+      # techne#1096 — the direct potion loader must match model2vec bit for bit.
+      # Only THIS job has model2vec (py3.14) and the cached model; the `test` legs
+      # (3.12/3.13, fastembed) skip tests/test_static_direct.py whole. A skip here
+      # would mean the pin checks nothing, so it fails the step instead.
+      - name: static_direct equality vs model2vec (#1096)
+        working-directory: techne
+        run: |
+          set -euo pipefail
+          .venv-ci/bin/python -m pytest tests/test_static_direct.py -q -rs | tee "$RUNNER_TEMP/static-direct.log"
+          if grep -q SKIPPED "$RUNNER_TEMP/static-direct.log"; then
+            echo "::error::tests/test_static_direct.py skipped a test on the model2vec leg"; exit 1
+          fi
+
       - name: eval_vec gate (#399/#401 — vector/hybrid retrieval + ablation)
         working-directory: techne
         env:
