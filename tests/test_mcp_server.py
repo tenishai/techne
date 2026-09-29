@@ -839,3 +839,44 @@ def test_blast_radius_passes_its_walk_bound_rather_than_mirroring_it(tmp_path, c
     # proven nodes sort late enough to fall outside one cap window but not the other.
     # Filed rather than half-built: an assertion that cannot fail is the decoration this
     # suite keeps catching. (Prudence, #722 nit.)
+
+
+class TestNoInternalKeysInToolOutput:
+    """`_match_pass` (#1079/#1088) is ranking plumbing for `merge_and_rank`. It is
+    stripped at the tool boundary, never inside `search()`, so the merge can still
+    read it. These pin the boundary through the real JSON-RPC path."""
+
+    def _seed(self, db_path):
+        from techne.core.knowledge import store
+
+        store(db_path, "alpha beta gamma full match", type="fact")
+        store(db_path, "alpha only partial match", type="fact")
+
+    def _rows(self, config, name, arguments, key):
+        response = handle_request(
+            {"id": 9, "method": "tools/call", "params": {"name": name, "arguments": arguments}},
+            config,
+        )
+        assert "isError" not in response["result"], response
+        return json.loads(response["result"]["content"][0]["text"])[key]
+
+    def test_search_result_rows_carry_no_underscore_key(self, config, db_path):
+        from techne.core.search import search
+
+        self._seed(db_path)
+        raw = search(db_path, "alpha beta", include_uncertain=True)
+        assert any("_match_pass" in r for r in raw), "precondition: search() tags the rows"
+
+        rows = self._rows(config, "techne_search", {"query": "alpha beta"}, "results")
+        assert rows, "fixture sanity: the query must return rows"
+        leaked = sorted({k for r in rows for k in r if k.startswith("_")})
+        assert leaked == [], f"internal keys reached techne_search output: {leaked}"
+
+    def test_recall_result_rows_carry_only_provenance_underscore_keys(self, config, db_path):
+        self._seed(db_path)
+        rows = self._rows(config, "techne_recall", {"topic": "alpha beta"}, "search_results")
+        assert any(r.get("origin") == "memory" for r in rows), "fixture sanity: memory rows"
+        leaked = sorted(
+            {k for r in rows for k in r if k.startswith("_") and k not in {"_store", "_role"}}
+        )
+        assert leaked == [], f"internal keys reached techne_recall output: {leaked}"
