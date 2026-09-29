@@ -40,7 +40,10 @@ vectors = [
     # (model2vec on 3.14+, fastembed on <3.14) — see EmbeddingBackend. Mirrors the
     # fastembed marker above so `[vectors]` gets a working backend on both sides
     # of the 3.14 boundary.
-    "model2vec>=0.8.0; python_version >= '3.14'",
+    # Capped, not open-ended: a bump past 0.9.x is deliberate, and
+    # tests/test_static_direct.py is the equality tripwire that catches drift
+    # in the encode() steps static_direct.py reimplements (Prudence, #1097 r1).
+    "model2vec>=0.8.0,<0.10; python_version >= '3.14'",
     # Direct import in core/search.py and core/inference.py; currently satisfied
     # transitively via fastembed/model2vec but declared here to make the
     # dependency explicit.

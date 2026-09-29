@@ -344,20 +344,6 @@ def _build_backend(
         # (~/.cache/huggingface) by default, same convention operators already
         # have configured for other HF downloads. Nothing to mkdir.
         #
-        # force_download=False is NOT optional here regardless of allow_download:
-        # model2vec's own default is force_download=True (verified against
-        # installed 0.8.2 — StaticModel.from_pretrained's signature literally
-        # defaults to True), which re-hits the Hub to re-validate/re-fetch every
-        # file on EVERY call, cache or no cache.
-        #
-        # allow_download=False additionally sets HF_HUB_OFFLINE=1 for the
-        # duration of the call: model2vec has no first-class local_files_only
-        # kwarg of its own (unlike fastembed's TextEmbedding), so the HF-Hub-
-        # standard env var is the mechanism — it makes an uncached model raise
-        # LocalEntryNotFoundError immediately (~0.2s, verified) instead of
-        # blocking on a real download. Scoped to just this call (restored in
-        # `finally`) so it can't leak into an unrelated concurrent download
-        # elsewhere in the process.
         # FAST PATH FIRST (techne#1096): read the cached files with tokenizers +
         # safetensors and skip the ~350 ms model2vec import chain. Same vectors,
         # same identity string, local files only; see core/static_direct.py.
@@ -372,6 +358,20 @@ def _build_backend(
         else:
             return EmbeddingBackend("model2vec", model_name, impl, impl.dim)
 
+        # force_download=False is NOT optional here regardless of allow_download:
+        # model2vec's own default is force_download=True (verified against
+        # installed 0.8.2 — StaticModel.from_pretrained's signature literally
+        # defaults to True), which re-hits the Hub to re-validate/re-fetch every
+        # file on EVERY call, cache or no cache.
+        #
+        # allow_download=False additionally sets HF_HUB_OFFLINE=1 for the
+        # duration of the call: model2vec has no first-class local_files_only
+        # kwarg of its own (unlike fastembed's TextEmbedding), so the HF-Hub-
+        # standard env var is the mechanism — it makes an uncached model raise
+        # LocalEntryNotFoundError immediately (~0.2s, verified) instead of
+        # blocking on a real download. Scoped to just this call (restored in
+        # `finally`) so it can't leak into an unrelated concurrent download
+        # elsewhere in the process.
         from model2vec import StaticModel
 
         prior_offline = os.environ.get("HF_HUB_OFFLINE")
