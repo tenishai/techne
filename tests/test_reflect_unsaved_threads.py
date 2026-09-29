@@ -298,3 +298,89 @@ def test_a_rendered_unanswered_obs_key_is_still_offered_once_persisted(cfg, monk
     restore()
     items = emit_reflection_pass(cfg, sid)["batch"]
     assert len(items) == total and all(i["thread_id"] for i in items)
+
+
+def test_an_obs_key_answer_ingested_after_its_thread_is_persisted_drains_its_row(cfg, monkeypatch):
+    """techne#1106. The carry-over above runs only in the emit that first persists a
+    thread. A batch rendered on the fallback path and ingested by `obs_key` AFTER that
+    emit (an `emit -o file` / `ingest file` round trip spanning a failed persist and a
+    successful one) records the `obs-` key, but the thread's queue row stays owed. On
+    main the next emit's #900 heal served it again under its thread id."""
+    from techne.core.reflect import emit_reflection_pass, ingest_reflection_batch
+
+    sid = _session_that_outgrew_its_detection(cfg)
+    missing = _unpersisted_count(cfg, sid)
+    restore = _fallback_off(monkeypatch)
+    held = emit_reflection_pass(cfg, sid)["batch"]  # rendered on the fallback path
+    late = [i for i in held if i["thread_id"] is None]
+    assert len(late) == missing and all(i.get("obs_key") for i in late)
+
+    restore()
+    emit_reflection_pass(cfg, sid)  # persists the threads; nothing answered yet
+    assert _unpersisted_count(cfg, sid) == 0
+    for item in held:
+        item["raw_response"] = ANSWER
+    ingest_reflection_batch(cfg, held)  # the late answers arrive by obs_key
+
+    again = emit_reflection_pass(cfg, sid)
+    assert again["count"] == 0, (
+        f"late-answered threads re-offered: {[i['thread_num'] for i in again['batch']]}"
+    )
+    owed = _rows(
+        cfg,
+        "SELECT thread_id FROM reflection_queue WHERE session_id = ? AND drained_at IS NULL",
+        sid,
+    )
+    assert owed == [], "a late obs_key answer left its thread's queue row owed"
+    (payload,) = _rows(
+        cfg, "SELECT payload_json FROM extension_state WHERE name = ?", f"reflect:emitted:{sid}"
+    )[0]
+    assert json.loads(payload)["answered"] == [], "moved obs- keys left behind in `answered`"
+
+
+@pytest.mark.parametrize("answered_both", [False, True])
+def test_a_collided_thread_id_drains_only_when_every_key_is_answered(
+    cfg, monkeypatch, answered_both
+):
+    """Two detected threads can resolve to one thread id (#733), and emit then renders
+    them as ONE item. If only one of their `obs-` keys was answered, draining that id
+    would stamp the other thread's observations paid without anyone reading them."""
+    import techne.core.thread_orchestrator as orch
+    from techne.core.extension_state import set_state
+    from techne.core.reflect import (
+        _bucket_observations,
+        _observations_key,
+        load_session_for_reflection,
+        persist_unsaved_threads,
+    )
+
+    sid = _session_that_outgrew_its_detection(cfg, saved_days=2, later_days=0)
+    threads, observations = load_session_for_reflection(cfg, sid)
+    a, b = threads[0], threads[1]
+    real = orch.persisted_thread_id
+    tid = real(cfg.db_path, sid, a)
+    assert tid and _rows(cfg, "SELECT 1 FROM reflection_queue WHERE thread_id = ?", tid)
+    monkeypatch.setattr(
+        orch,
+        "persisted_thread_id",
+        lambda db, s, t, **k: tid if t.thread_num == b.thread_num else real(db, s, t, **k),
+    )
+    by_num = _bucket_observations(threads, observations)
+    key_a, key_b = (_observations_key(by_num[t.thread_num]) for t in (a, b))
+    answered = [key_a, key_b] if answered_both else [key_a]
+    conn = connect(cfg.db_path)
+    try:
+        set_state(
+            conn,
+            f"reflect:emitted:{sid}",
+            {"key": "thread_id", "emitted": [key_a, key_b], "answered": answered},
+        )
+    finally:
+        conn.close()
+
+    persist_unsaved_threads(cfg, sid, threads, observations)
+    (drained,) = _rows(cfg, "SELECT drained_at FROM reflection_queue WHERE thread_id = ?", tid)[0]
+    if answered_both:
+        assert drained is not None, "every key answered, but the shared row stayed owed"
+    else:
+        assert drained is None, "one unanswered thread's observations were marked paid"

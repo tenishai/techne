@@ -162,8 +162,9 @@ def test_search_hybrid_vec_first_union(db_path, monkeypatch) -> None:
     assert all(r["fusion"] == "vec_first" for r in results)
     assert all("rrf_score" not in r for r in results)
     # Layer 1 (techne#402 review): the fts+vec overlap row carries the FTS
-    # `rank` forward so downstream FTS-aware consumers (federation's
-    # merge_and_rank → _rerank) still see it; a pure vec row has only distance.
+    # `rank` forward so a downstream FTS-aware consumer still sees it (federation's
+    # merge_and_rank read it through `_rerank` until techne#1089 removed the rerank);
+    # a pure vec row has only distance.
     assert by_id[1]["rank"] == -1.0
     assert "rank" not in by_id[3]
 

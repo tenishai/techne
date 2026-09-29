@@ -189,10 +189,11 @@ def _public_rows(rows: list[dict], keep: frozenset = frozenset()) -> list[dict]:
     """Drop underscore-prefixed internal keys from result rows at the tool boundary.
 
     `_match_pass` (techne#1079/#1088) tags a row's FTS pass so
-    `federation.merge_and_rank` can rerank AND and OR rows apart; it has no meaning
-    to a caller and was reaching `techne_search` output verbatim. It is stripped
-    HERE, after any merge, and never inside `search()`, because the merge still
-    reads it. Copies each row, so the caller's list is untouched.
+    `federation.merge_and_rank` can put first-tier stream heads before second-tier
+    ones (techne#1089 removed the rerank); it has no meaning to a caller and was
+    reaching `techne_search` output verbatim. It is stripped HERE, after any merge,
+    and never inside `search()`, because the merge still reads it. Copies each row,
+    so the caller's list is untouched.
     """
     return [{k: v for k, v in r.items() if not k.startswith("_") or k in keep} for r in rows]
 
