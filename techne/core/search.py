@@ -1396,11 +1396,13 @@ def _rare_identifier_terms(
     """The identifier-shaped terms of ``query`` RARE in the searched scope, and the
     keys of every row matching one.
 
-    Rare means at least one and fewer than ``max(IDENTIFIER_MIN_DF, ceil(rows *
-    fraction))`` rows match the term as an FTS phrase, where ``rows`` counts the
-    tables ``table`` searches. Each lookup is bounded by that threshold, so a common
-    term like `techne.db` costs at most that many rowids per table, and the key set
-    is at most threshold-sized per rare term.
+    Rare means at least one and fewer than ``bar`` rows match the term as an FTS
+    phrase. ``max_df = max(IDENTIFIER_MIN_DF, ceil(rows * fraction))``, where
+    ``rows`` counts the tables ``table`` searches. A term with a digit or an
+    underscore uses ``bar = max_df``; a word-like term (neither) uses the stricter
+    ``bar = max(2, max_df // IDENTIFIER_WORDLIKE_DIVISOR)``. Each lookup is bounded
+    by ``bar``, so a common term like `techne.db` costs at most that many rowids per
+    table, and the key set is at most bar-sized per rare term.
     """
     terms = _identifier_terms(query)
     if not terms or fraction <= 0:
