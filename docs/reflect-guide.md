@@ -257,8 +257,9 @@ what separates them is what happens on the next `emit`.
 - **Unpersisted** — a thread with no row in `threads`, so no queue row either: a session
   whose detection never ran, or one whose observations or detector moved on since it was
   saved. Since techne#1091 `emit` writes the missing rows (and their queue rows) before it
-  renders, so its items carry a real `thread_id`; answers recorded earlier under an
-  `obs_key` move to the new id and are not offered again. An item still comes out with
+  renders, so its items carry a real `thread_id`; answers recorded under an `obs_key`,
+  before or after that write, move to the new id on the next `emit` and are not offered
+  again. An item still comes out with
   `thread_id: null` and an `obs_key` only if that write failed (emit logs a warning). Such a
   thread works like the others: the cursor records its answers under `obs_key`, the next
   empty `emit` re-offers one that was rendered and never answered, and `undecline` reaches
