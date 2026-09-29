@@ -910,24 +910,29 @@ jobs:
   # PUBLISHED tag); it moves the packaging-defect signal from "after tagging" to
   # "on the PR".
   #
-  # HOSTED, DELIBERATELY (#461/#556): a hosted runner is fine here because the
-  # job's only inputs are `uv`, a stock interpreter and the PR's own
-  # pyproject.toml — none of the self-hosted image's baked interpreters or uv
-  # install are needed, so there is no reason to spend the small pool's
-  # capacity on it.
+  # SELF-HOSTED, NOT HOSTED — a deliberate departure from the issue's literal
+  # proposal ("hosted runner"), and worth recording why. The job's own needs
+  # would have been satisfied by `ubuntu-latest` (it only builds a wheel and
+  # installs it — nothing the self-hosted image bakes in is required). But
+  # this file's OWN RULE, stated at the top just below `jobs:`, is "every job
+  # on the TRUSTED path is self-hosted — do not add a hosted one there", with
+  # exactly one exception (`fork-pr`, a security boundary, not a preference).
+  # This job has no security reason to leave the trusted path, so it follows
+  # that rule rather than the issue text. MEASURED, not theoretical: the first
+  # version of this job WAS hosted, and its first two runs on this PR both hit
+  # "The job was not started because recent account payments have failed or
+  # your spending limit needs to be increased" — the exact `ubuntu-latest`
+  # failure mode this file's header already documents from July/August 2026.
+  # Self-hosted made it possible to actually observe this job pass on this PR.
   #
-  # STILL CARRIES THE SAME `if:` AS THE SELF-HOSTED JOBS ABOVE, though — this is
-  # `TRUSTED_POOL`'s trigger scope (push / workflow_dispatch / non-fork PR)
-  # borrowed for what it actually says, not for the self-hosted trust boundary
-  # #556 coined it for. `tests/test_ci_workflow_triggers.py::
-  # test_the_two_guards_are_complements_not_overlaps` requires every job to
-  # carry one of the two exact expressions, so a job that is neither
-  # self-hosted nor fork-only still has to pick one — and this one is not
-  # fork-only, so it takes the other. THE PRICE: a fork PR does not get this
-  # job, same trade `eval-vec`/`arch-cards` already made and `fork-pr`'s
-  # trailing comment already lists — see the third bullet added there.
+  # CARRIES THE SAME `if:` AS ITS SELF-HOSTED NEIGHBOURS, which is the ordinary
+  # case here (unlike a hosted job borrowing the expression for its trigger
+  # semantics alone) — `tests/test_ci_workflow_triggers.py::
+  # test_no_fork_reachable_job_runs_on_self_hosted` requires exactly this.
+  # THE PRICE: a fork PR does not get this job, same trade `eval-vec` and
+  # `arch-cards` already made — see `fork-pr`'s trailing comment.
   acceptance:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, techne-ci]
     if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
     timeout-minutes: 15
     steps:
@@ -936,18 +941,9 @@ jobs:
         with:
           path: techne
 
-      # A hosted runner bakes in neither uv nor a pinned interpreter — provided
-      # here, same as `fork-pr` below. setup-python puts the interpreter on PATH
-      # as a SYSTEM one, so the workflow-level UV_PYTHON_PREFERENCE=only-system /
-      # UV_PYTHON_DOWNLOADS=never pin (see env: above `jobs:`) still applies.
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Install uv
-        run: python -m pip install --upgrade uv
-
+      # uv and the 3.12/3.13/3.14 interpreters are baked into this image
+      # (see the note above `jobs:`) — scripts/acceptance.sh calls `uv build` /
+      # `uv venv` / `uv pip install` directly and needs nothing set up first.
       - name: Installed-artifact acceptance (core + recommended)
         working-directory: techne
         run: bash scripts/acceptance.sh
@@ -1065,14 +1061,13 @@ jobs:
       #   - arch-cards — invokes `python3.13` by versioned name against a runner
       #                 image proven to carry it; that is a property of the
       #                 self-hosted image, not of ubuntu-latest.
-      #   - acceptance (#1059) — not a runner-image limit like the two above;
-      #                 it took `TRUSTED_POOL`'s trigger scope only because
-      #                 every job must pick one of the two exact guards
-      #                 (test_the_two_guards_are_complements_not_overlaps), and
-      #                 it is not fork-only. Could be reproduced here — it is
-      #                 hosted already — but doubling wheel-build-and-install
-      #                 into a job whose own working code is not what packaging
-      #                 correctness is about did not seem worth the runtime.
+      #   - acceptance (#1059) — self-hosted, like this job's neighbours, so it
+      #                 is excluded from fork PRs the same way they are. Its
+      #                 own steps (`uv build`, `uv venv`, `uv pip install`)
+      #                 would run fine on ubuntu-latest given the "Install uv"
+      #                 step above, but reproducing it here would mean
+      #                 building and installing the wheel twice in this one
+      #                 job — worth its own issue if a fork PR ever needs it.
       # A fork PR therefore gets the full suite and the deterministic gates, but
       # NOT the vector gate, the card-freshness gate, or the installed-artifact
       # smoke test. All three still run on every push to main, so nothing merges
