@@ -186,10 +186,7 @@ class TestMergesTeamResults:
         )
 
         remote_deduped = _cross_store_dedup(local_results, remote_results)
-        merged = merge_and_rank(
-            local_results, remote_deduped, limit=20, recency_weight=0.3, bm25_weight=0.7,
-            half_life_days=30.0
-        )
+        merged = merge_and_rank(local_results, remote_deduped, limit=20)
 
         contents = [r.get("content") or "" for r in merged]
         assert any("asyncio" in c for c in contents), "Team row must be in merged result"
@@ -222,10 +219,7 @@ class TestMergesTeamResults:
         ]
 
         # Must not raise, and must preserve every row (ranking only, no drops).
-        merged = merge_and_rank(
-            local_results, [], limit=20, recency_weight=0.3, bm25_weight=0.7,
-            half_life_days=30.0,
-        )
+        merged = merge_and_rank(local_results, [], limit=20)
         assert {r["id"] for r in merged} == {1, 2, 3}
         # Scratch keys _rerank uses must be cleaned off the returned rows.
         for r in merged:
@@ -272,10 +266,7 @@ class TestMergesTeamResults:
         assert [r["id"] for r in local_results] == [id_and, id_or], (
             "fixture sanity: local search must already be AND-first"
         )
-        merged_local = merge_and_rank(
-            local_results, [], limit=2, recency_weight=0.3, bm25_weight=0.7,
-            half_life_days=30.0,
-        )
+        merged_local = merge_and_rank(local_results, [], limit=2)
         assert [r["id"] for r in merged_local] == [id_and, id_or], (
             f"merge_and_rank must not reorder local AND/OR rows; got "
             f"{[r['id'] for r in merged_local]}"
@@ -287,10 +278,7 @@ class TestMergesTeamResults:
             remote_rows = search_knowledge_conn(conn, "alpha beta", 2)
         finally:
             conn.close()
-        merged_remote = merge_and_rank(
-            [], remote_rows, limit=2, recency_weight=0.3, bm25_weight=0.7,
-            half_life_days=30.0,
-        )
+        merged_remote = merge_and_rank([], remote_rows, limit=2)
         assert [r["id"] for r in merged_remote] == [id_and, id_or], (
             f"merge_and_rank must not reorder remote AND/OR rows either; got "
             f"{[r['id'] for r in merged_remote]}"
@@ -313,11 +301,11 @@ class TestMergesTeamResults:
         scored on their own merits.
 
         The fix (demote ONLY an explicit `"or"` tag) puts untagged rows in
-        the SAME bucket as the remote's AND rows, so they compete for the
-        page on recency/BM25 instead of being excluded categorically. Local
-        rows are left fresh and the remote is staled, so local wins on
-        recency — deterministic without depending on cross-corpus BM25
-        magnitudes.
+        the SAME tier as the remote's AND rows, so they share the page
+        instead of being excluded categorically. Since techne#1089 the merge
+        alternates same-tier rows by their own store's order rather than
+        re-scoring them, so the recency setup below is no longer what decides
+        it; the test still pins that local rows are not squeezed out.
         """
         from techne.core.federation import merge_and_rank
         from techne.core.search import search_knowledge_conn
@@ -364,10 +352,7 @@ class TestMergesTeamResults:
             r["match_source"] = "fts+vec"
             local_results.append(r)
 
-        merged = merge_and_rank(
-            local_results, remote_deduped, limit=10, recency_weight=0.3,
-            bm25_weight=0.7, half_life_days=30.0,
-        )
+        merged = merge_and_rank(local_results, remote_deduped, limit=10)
         survivors = [r for r in merged if "local fact" in (r.get("content") or "")]
         assert survivors, (
             "at least one untagged local row must survive the "
@@ -450,10 +435,7 @@ class TestMergesTeamResults:
             remote_conn.close()
         assert len(remote_deduped) == 10, "fixture sanity: the remote AND pass must fill limit=10"
 
-        merged = merge_and_rank(
-            local_results, remote_deduped, limit=10, recency_weight=0.3,
-            bm25_weight=0.7, half_life_days=30.0,
-        )
+        merged = merge_and_rank(local_results, remote_deduped, limit=10)
         survivor = next(
             (
                 r for r in merged
@@ -1745,9 +1727,7 @@ class TestNoDoubleLocalSearch:
             local_db, connections, "database postgres sqlite", limit=10, half_life_days=30.0
         )
         deduped_a = _cross_store_dedup(local_a, remote_a)
-        merged_a = merge_and_rank(
-            local_a, deduped_a, limit=10, recency_weight=0.3, bm25_weight=0.7, half_life_days=30.0
-        )
+        merged_a = merge_and_rank(local_a, deduped_a, limit=10)
 
         # Path B: caller precomputes local and passes it in (#254 fix path)
         precomputed = search(
@@ -1762,9 +1742,7 @@ class TestNoDoubleLocalSearch:
             local_results=precomputed,
         )
         deduped_b = _cross_store_dedup(local_b, remote_b)
-        merged_b = merge_and_rank(
-            local_b, deduped_b, limit=10, recency_weight=0.3, bm25_weight=0.7, half_life_days=30.0
-        )
+        merged_b = merge_and_rank(local_b, deduped_b, limit=10)
 
         # The content sets must be identical (order may differ due to independent sorts)
         contents_a = sorted(r.get("content", "") for r in merged_a)

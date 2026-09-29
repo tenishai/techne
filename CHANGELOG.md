@@ -105,6 +105,15 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- **Federated recall keeps the local page's order and reserved seats** (#1089). With
+  connections configured, `techne_recall` re-scored the local `search()` page by BM25,
+  recency and decay when merging remote rows, discarding the vec-first order and the
+  `identifier_head`, `curated_head` and `lexical_tail` seats. On the 2026-09-28 snapshot,
+  with no remote rows at all, the page's #1 stayed #1 in 6 of 40 real prompts. The merge
+  now keeps every reserved row at its index and fills the other seats by alternating the
+  local page's rows with each remote store's rows, each in its own order, local first.
+  With no remote rows the federated page is the local page. Local-only recall is
+  unchanged.
 - **Reflect emit no longer serves `thread_id: null` items** (#1091). Emit re-detects a
   session's threads from its observations, and that detection could run ahead of the
   last persisted one: observations recorded after the final `session_end` detection, or
