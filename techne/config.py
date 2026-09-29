@@ -1,15 +1,29 @@
 """Configuration management for techne."""
 
+import copy
 import logging
 import os
 import sys
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import MISSING as _NO_FACTORY
+from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any, Literal, get_args
 
 import yaml
 
+from techne.config_migration import (
+    CONFIG_VERSION,
+    MISSING,
+    RETIRED_KEYS,
+    VERSION_KEY,
+    ConfigMigration,
+    backup_config,
+    is_section,
+    migrate_raw,
+    needs_migration,
+    same_value,
+)
 from techne.security import config_trust
 from techne.security.config_trust import TrustVerdict
 
@@ -142,8 +156,6 @@ def _warn_if_outside_home(key: str, value: Path, home: Path) -> None:
 class SyncConfig:
     adapter: str = "noop"
     url: str = ""
-    auth: str = ""
-    audience: str = ""
     path: str = ""
     #: Permit a sync adapter that is NOT one of techne's built-ins (techne#389).
     #: Defaults False, i.e. DEFAULT-DENY. See `sync.adapter.load_adapter` for why
@@ -151,7 +163,11 @@ class SyncConfig:
     #: originally sketched. Governed by the operator layer: `sync` is a whole-block
     #: entry in EGRESS_KEYS, so this sub-key is covered with it.
     allow_unlisted_adapter: bool = False
-    extra: dict[str, Any] = field(default_factory=dict)
+    # `auth`, `audience` and an `extra` catch-all for other `sync:` keys lived here
+    # until techne#1074 and reached nothing: every `load_adapter` call passes only
+    # `url`, `path` and `allow_unlisted`. A config.yaml that still carries them
+    # keeps them on disk (Config.save writes unrecognised keys back unchanged);
+    # techne does not read them.
 
 
 @dataclass
@@ -536,7 +552,10 @@ class ArchitectConfig:
 class SearchConfig:
     recency_weight: float = 0.3
     bm25_weight: float = 0.7
-    expansion_ratio: int = 2
+    # `expansion_ratio` was here until techne#1074. It was parsed and saved but
+    # passed to no search function (search_fts has its own default of 2, and
+    # search() hard-codes limit * 2), so setting it changed nothing. A config.yaml
+    # carrying it still loads; the key is dropped (config_migration.RETIRED_KEYS).
     # Embedding backend override (techne#601/#602). "" = auto-select (model2vec
     # on py3.14+/fastembed-absent, else fastembed) — see core/embeddings.py.
     # Explicit values: "model2vec" or "fastembed".
@@ -926,6 +945,16 @@ class Config:
     #: filesystem question is free to disagree with the one that actually
     #: produced these values.
     loaded_from: Path | None = None
+    #: config.yaml AS THE FILE SAYS IT, after the #1070 migration and before the
+    #: egress gate. `save` reads it for two things: which keys the operator pinned
+    #: (written back even when they equal today's default) and which keys this
+    #: version does not recognise (written back unchanged). Never serialized.
+    file_raw: dict[str, Any] = field(default_factory=dict, repr=False)
+    #: What the #1070 migration un-pinned when this Config was loaded from a legacy
+    #: full config.yaml; None when the file was already sparse or absent.
+    config_migration: ConfigMigration | None = None
+    #: Where `save` copied a legacy config.yaml before overwriting it, if it did.
+    config_backup: Path | None = None
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Config":
@@ -956,11 +985,21 @@ class Config:
             pre_stamp = None
         with open(path) as f:
             raw = yaml.safe_load(f) or {}
+        # IN MEMORY ON EVERY LOAD, NOT A FILE WRITE (techne#1070). Hooks load config
+        # on every event; making one of them rewrite config.yaml would put a writer
+        # in every hook process. The file is rewritten, with a backup, by the next
+        # save (`techne init`); until then each load applies the same pure rewrite.
+        migration = None
+        if needs_migration(raw):
+            raw, migration = migrate_raw(raw, cls().to_yaml_dict(), home)
+        file_raw = copy.deepcopy(raw) if isinstance(raw, dict) else {}
         trust, preserved = cls._gate_egress(raw, home)
         cfg = cls._from_dict(raw, home=home)
         cfg.egress_trust = trust
         cfg.preserved_egress = preserved
         cfg.loaded_from = path
+        cfg.file_raw = file_raw
+        cfg.config_migration = migration
         cfg._refresh_fast_cache(home=home, source=path, stamp=pre_stamp)
         return cfg
 
@@ -1160,23 +1199,8 @@ class Config:
             cfg.sync = SyncConfig(
                 adapter=s.get("adapter", "noop"),
                 url=s.get("url", ""),
-                auth=s.get("auth", ""),
-                audience=s.get("audience", ""),
                 path=s.get("path", ""),
                 allow_unlisted_adapter=bool(s.get("allow_unlisted_adapter", False)),
-                extra={
-                    k: v
-                    for k, v in s.items()
-                    if k
-                    not in (
-                        "adapter",
-                        "url",
-                        "auth",
-                        "audience",
-                        "path",
-                        "allow_unlisted_adapter",
-                    )
-                },
             )
 
         if "threads" in raw and isinstance(raw["threads"], dict):
@@ -1270,17 +1294,19 @@ class Config:
 
         if "heuristic" in raw and isinstance(raw["heuristic"], dict):
             h = raw["heuristic"]
+            _hed = HeuristicConfig()  # fallbacks follow the dataclass, not a copy of it (#1070)
             cfg.heuristic = HeuristicConfig(
-                boundary_threshold=float(h.get("boundary_threshold", 0.7)),
-                user_prompt_score=float(h.get("user_prompt_score", 0.3)),
+                boundary_threshold=float(h.get("boundary_threshold", _hed.boundary_threshold)),
+                user_prompt_score=float(h.get("user_prompt_score", _hed.user_prompt_score)),
             )
 
         if "custodian" in raw and isinstance(raw["custodian"], dict):
             cu = raw["custodian"]
-            rails = cu.get("rails", []) or []
+            _cud = CustodianConfig()  # fallbacks follow the dataclass, not a copy of it (#1070)
+            rails = cu.get("rails", _cud.rails) or []
             if not isinstance(rails, list) or not all(isinstance(r, str) for r in rails):
                 raise ValueError("custodian.rails must be a list of rail names.")
-            rail_models = cu.get("rail_models", {}) or {}
+            rail_models = cu.get("rail_models", _cud.rail_models) or {}
             if not isinstance(rail_models, dict):
                 raise ValueError("custodian.rail_models must be a mapping of rail -> model.")
             # VALIDATED AGAINST THE REGISTRY, not just for type. A typo'd rail name in
@@ -1302,8 +1328,8 @@ class Config:
             # `_make_generate_fn`'s `if getattr(config, "llm_timeout", 0)` skips the
             # timeout kwarg entirely and an unattended run can hang forever. A config
             # that turns off a protection must say so, not imply it.
-            max_items = int(cu.get("max_items_per_rail", 20))
-            timeout = int(cu.get("timeout_seconds", 120))
+            max_items = int(cu.get("max_items_per_rail", _cud.max_items_per_rail))
+            timeout = int(cu.get("timeout_seconds", _cud.timeout_seconds))
             if max_items < 1:
                 raise ValueError(
                     f"custodian.max_items_per_rail must be >= 1, got {max_items}. "
@@ -1317,7 +1343,7 @@ class Config:
                     "can hang forever with nobody watching."
                 )
             cfg.custodian = CustodianConfig(
-                model=cu.get("model", ""),
+                model=cu.get("model", _cud.model),
                 rails=rails,
                 rail_models={str(k): str(v) for k, v in rail_models.items()},
                 max_items_per_rail=max_items,
@@ -1326,29 +1352,36 @@ class Config:
 
         if "reflect" in raw and isinstance(raw["reflect"], dict):
             r = raw["reflect"]
-            write_to = r.get("write_to", "candidates")
+            _rd = ReflectConfig()  # fallbacks follow the dataclass, not a copy of it (#1070)
+            write_to = r.get("write_to", _rd.write_to)
             if write_to not in ("candidates", "live"):
                 raise ValueError(
                     f"Invalid reflect.write_to '{write_to}'. Must be 'candidates' or 'live'."
                 )
-            min_conf = r.get("min_confidence", "medium")
+            min_conf = r.get("min_confidence", _rd.min_confidence)
             if min_conf not in ("low", "medium", "high"):
                 raise ValueError(
                     f"Invalid reflect.min_confidence '{min_conf}'. "
                     "Must be 'low', 'medium', or 'high'."
                 )
             cfg.reflect = ReflectConfig(
-                enabled=bool(r.get("enabled", False)),
-                min_observations_per_thread=int(r.get("min_observations_per_thread", 8)),
+                enabled=bool(r.get("enabled", _rd.enabled)),
+                min_observations_per_thread=int(
+                    r.get("min_observations_per_thread", _rd.min_observations_per_thread)
+                ),
                 min_confidence=min_conf,
-                max_candidates_per_thread=int(r.get("max_candidates_per_thread", 5)),
-                model=str(r.get("model", "")),
-                include_existing_knowledge=bool(r.get("include_existing_knowledge", True)),
-                existing_knowledge_k=int(r.get("existing_knowledge_k", 10)),
+                max_candidates_per_thread=int(
+                    r.get("max_candidates_per_thread", _rd.max_candidates_per_thread)
+                ),
+                model=str(r.get("model", _rd.model)),
+                include_existing_knowledge=bool(
+                    r.get("include_existing_knowledge", _rd.include_existing_knowledge)
+                ),
+                existing_knowledge_k=int(r.get("existing_knowledge_k", _rd.existing_knowledge_k)),
                 write_to=write_to,
-                log_raw_response=bool(r.get("log_raw_response", True)),
-                emit_max_threads=int(r.get("emit_max_threads", 25)),
-                emit_max_chars=int(r.get("emit_max_chars", 45_000)),
+                log_raw_response=bool(r.get("log_raw_response", _rd.log_raw_response)),
+                emit_max_threads=int(r.get("emit_max_threads", _rd.emit_max_threads)),
+                emit_max_chars=int(r.get("emit_max_chars", _rd.emit_max_chars)),
             )
 
         if "architect" in raw and isinstance(raw["architect"], dict):
@@ -1369,29 +1402,40 @@ class Config:
             )
         if "search" in raw and isinstance(raw["search"], dict):
             s = raw["search"]
+            _sd = SearchConfig()  # fallbacks follow the dataclass, not a copy of it (#1070)
             cfg.search = SearchConfig(
-                recency_weight=float(s.get("recency_weight", 0.3)),
-                bm25_weight=float(s.get("bm25_weight", 0.7)),
-                expansion_ratio=int(s.get("expansion_ratio", 2)),
-                embedding_backend=str(s.get("embedding_backend", "")),
-                embedding_model=str(s.get("embedding_model", "")),
-                recall_documents_limit=int(s.get("recall_documents_limit", 3)),
-                curated_head_slots=int(s.get("curated_head_slots", 3)),
-                identifier_head_slots=int(s.get("identifier_head_slots", 2)),
-                identifier_rare_fraction=float(s.get("identifier_rare_fraction", 0.002)),
+                recency_weight=float(s.get("recency_weight", _sd.recency_weight)),
+                bm25_weight=float(s.get("bm25_weight", _sd.bm25_weight)),
+                embedding_backend=str(s.get("embedding_backend", _sd.embedding_backend)),
+                embedding_model=str(s.get("embedding_model", _sd.embedding_model)),
+                recall_documents_limit=int(
+                    s.get("recall_documents_limit", _sd.recall_documents_limit)
+                ),
+                curated_head_slots=int(s.get("curated_head_slots", _sd.curated_head_slots)),
+                identifier_head_slots=int(
+                    s.get("identifier_head_slots", _sd.identifier_head_slots)
+                ),
+                identifier_rare_fraction=float(
+                    s.get("identifier_rare_fraction", _sd.identifier_rare_fraction)
+                ),
             )
 
         if "injection" in raw and isinstance(raw["injection"], dict):
             i = raw["injection"]
+            _ind = InjectionConfig()  # fallbacks follow the dataclass, not a copy of it (#1070)
             cfg.injection = InjectionConfig(
-                enabled=bool(i.get("enabled", True)),
-                char_budget=int(i.get("char_budget", 2000)),
-                max_active_threads=int(i.get("max_active_threads", 3)),
-                max_recent_threads=int(i.get("max_recent_threads", 5)),
-                thread_char_budget=int(i.get("thread_char_budget", 1500)),
-                thread_per_item_chars=int(i.get("thread_per_item_chars", 200)),
-                recent_reserve_frac=float(i.get("recent_reserve_frac", 0.4)),
-                correction_reserve_frac=float(i.get("correction_reserve_frac", 0.3)),
+                enabled=bool(i.get("enabled", _ind.enabled)),
+                char_budget=int(i.get("char_budget", _ind.char_budget)),
+                max_active_threads=int(i.get("max_active_threads", _ind.max_active_threads)),
+                max_recent_threads=int(i.get("max_recent_threads", _ind.max_recent_threads)),
+                thread_char_budget=int(i.get("thread_char_budget", _ind.thread_char_budget)),
+                thread_per_item_chars=int(
+                    i.get("thread_per_item_chars", _ind.thread_per_item_chars)
+                ),
+                recent_reserve_frac=float(i.get("recent_reserve_frac", _ind.recent_reserve_frac)),
+                correction_reserve_frac=float(
+                    i.get("correction_reserve_frac", _ind.correction_reserve_frac)
+                ),
             )
 
         if "staleness_hours" in raw:
@@ -1407,7 +1451,8 @@ class Config:
 
         if "posture" in raw and isinstance(raw["posture"], dict):
             p = raw["posture"]
-            mode = p.get("mode", "observe")
+            _pd = PostureConfig()  # fallbacks follow the dataclass, not a copy of it (#1070)
+            mode = p.get("mode", _pd.mode)
             # Raise on an invalid mode rather than silently clamping to 'observe'
             # — a typo'd posture would otherwise un-gate the unattended writer
             # without telling anyone. Consistent with every other enum validator
@@ -1418,7 +1463,7 @@ class Config:
                 )
             cfg.posture = PostureConfig(
                 mode=mode,
-                cc_memory_detected=bool(p.get("cc_memory_detected", False)),
+                cc_memory_detected=bool(p.get("cc_memory_detected", _pd.cc_memory_detected)),
             )
 
         if "conflict" in raw and isinstance(raw["conflict"], dict):
@@ -1461,7 +1506,7 @@ class Config:
         dict makes the real surface testable without writing a file.
 
         MANY KEYS ARE CONDITIONAL — `llm_api_base`, `llm_api_key`, `identity_dir`,
-        `stores`, `connections`, `sources` and the `sync.*` extras are emitted only
+        `stores`, `connections`, `sources` and the optional `sync.*` keys are emitted only
         when set, and `db_path`/`data_dir` only when they differ from the TECHNE_HOME
         default (techne#947) — so a DEFAULT Config does not contain every governed key. A caller
         checking coverage has to populate them first, or it will read "absent
@@ -1550,7 +1595,6 @@ class Config:
             "search": {
                 "recency_weight": self.search.recency_weight,
                 "bm25_weight": self.search.bm25_weight,
-                "expansion_ratio": self.search.expansion_ratio,
                 # embedding_backend/embedding_model are parsed by _from_dict but
                 # must also be serialized here, else `techne init`'s load→save
                 # round-trip silently drops an operator's backend override — the
@@ -1640,10 +1684,6 @@ class Config:
             }
         if self.sync.url:
             data["sync"]["url"] = self.sync.url
-        if self.sync.auth:
-            data["sync"]["auth"] = self.sync.auth
-        if self.sync.audience:
-            data["sync"]["audience"] = self.sync.audience
         if self.sync.path:
             data["sync"]["path"] = self.sync.path
         # Emitted only when True: the default is deny, and writing `false` into
@@ -1651,12 +1691,6 @@ class Config:
         # built-in posture (techne#389).
         if self.sync.allow_unlisted_adapter:
             data["sync"]["allow_unlisted_adapter"] = True
-        # Preserve adapter-specific extras that came in via _from_dict's
-        # "kwargs" sweep, so load/save is a real round-trip.
-        if self.sync.extra:
-            for k, v in self.sync.extra.items():
-                if k not in data["sync"]:
-                    data["sync"][k] = v
         # DEFAULT PATHS ARE NOT WRITTEN (techne#947). `techne init` is a load->save
         # round-trip, and writing the resolved default pinned this home's absolute
         # path into the file: a copied home kept pointing at the original store.
@@ -1669,10 +1703,101 @@ class Config:
             data.pop("data_dir", None)
         return data
 
+    def pinned_keys(self) -> list[str]:
+        """Dotted keys config.yaml sets, i.e. what does NOT follow the shipped default.
+
+        Read from :attr:`file_raw`, so it describes the file this Config was loaded
+        from (after the #1070 migration), not values changed in memory since.
+        """
+        defaults = type(self)().to_yaml_dict()
+        out: list[str] = []
+        for key, value in self.file_raw.items():
+            if key == VERSION_KEY:
+                continue
+            if is_section(defaults, key) and isinstance(value, dict):
+                out.extend(f"{key}.{sub}" for sub in value)
+            else:
+                out.append(str(key))
+        return out
+
+    def _unrecognised(self) -> list[tuple[tuple[str, ...], Any]]:
+        """Keys in :attr:`file_raw` this version has no field for, minus retired ones.
+
+        Written back by :meth:`save` unchanged: a key from a newer techne, an
+        adapter-specific `sync:` key, or a typo the operator has yet to notice is
+        theirs, and a load->save round-trip (`techne init`) must not delete it.
+        """
+        sections: dict[str, set[str]] = {}
+        top: set[str] = {VERSION_KEY}
+        for f in fields(type(self)):
+            top.add(f.name)
+            fac = f.default_factory
+            if fac is not _NO_FACTORY and isinstance(fac, type) and is_dataclass(fac):
+                sections[f.name] = {g.name for g in fields(fac)}
+        out: list[tuple[tuple[str, ...], Any]] = []
+        for key, value in self.file_raw.items():
+            if key in RETIRED_KEYS:
+                continue
+            if key in sections:
+                if isinstance(value, dict):
+                    for sub, sval in value.items():
+                        if sub not in sections[key] and f"{key}.{sub}" not in RETIRED_KEYS:
+                            out.append(((key, sub), sval))
+                continue
+            if key not in top:
+                out.append(((key,), value))
+        return out
+
+    def to_sparse_yaml_dict(self) -> dict[str, Any]:
+        """What `save` writes: only keys the operator set (techne#1070).
+
+        A key is written when the loaded file set it, or when its value differs
+        from the shipped default. The first rule is why this is not a plain diff
+        against defaults: a value somebody pinned on purpose that happens to equal
+        today's default stays pinned, so a later default change does not move it.
+        A Config built in code (no file) falls back to the diff alone. Keys the file
+        carried that this version does not recognise are written back unchanged.
+        """
+        defaults = type(self)().to_yaml_dict()
+        pinned = set(self.pinned_keys())
+        data: dict[str, Any] = {VERSION_KEY: CONFIG_VERSION}
+        for key, value in self.to_yaml_dict().items():
+            if is_section(defaults, key) and isinstance(value, dict):
+                dsec = defaults[key]
+                sub = {
+                    k: v
+                    for k, v in value.items()
+                    if f"{key}.{k}" in pinned or not same_value(v, dsec.get(k, MISSING))
+                }
+                if sub:
+                    data[key] = sub
+            elif key in pinned or not same_value(value, defaults.get(key, MISSING)):
+                data[key] = value
+        for path, value in self._unrecognised():
+            if len(path) == 1:
+                data[path[0]] = value
+            else:
+                section = data.setdefault(path[0], {})
+                if isinstance(section, dict):
+                    section.setdefault(path[1], value)
+        return data
+
     def save(self, path: Path | None = None):
         path = path or (techne_home() / "config.yaml")
         path.parent.mkdir(parents=True, exist_ok=True)
-        data = self.to_yaml_dict()
+        data = self.to_sparse_yaml_dict()
+        # BACK UP A LEGACY FULL FILE BEFORE THE FIRST SPARSE WRITE (techne#1070).
+        # Decided from what is ON DISK, not from how this Config was loaded, so
+        # any save over a legacy file keeps the original, and a second save (the
+        # file is sparse by then) makes no second copy.
+        if path.exists():
+            try:
+                with open(path) as f:
+                    on_disk = yaml.safe_load(f)
+            except (OSError, yaml.YAMLError):
+                on_disk = None
+            if needs_migration(on_disk):
+                self.config_backup = backup_config(path)
         # Never write the egress set back down into the agent-writable file while
         # an operator layer is in force (techne#393). `techne init` is a
         # load→save round-trip, so without this the operator's pinned values

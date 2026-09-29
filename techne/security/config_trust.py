@@ -219,6 +219,13 @@ _NOT_A_DESTINATION: tuple[str, ...] = (
     "egress_trust",
     "preserved_egress",
     "loaded_from",
+    # Bookkeeping for the sparse config.yaml (techne#1070): the file as read, what
+    # the legacy migration un-pinned, and where a backup went. They record how the
+    # file was read; `save` writes none of them, and the egress keys inside
+    # `file_raw` are still stripped and replayed by `save` the same way as before.
+    "file_raw",
+    "config_migration",
+    "config_backup",
     # DOTTED ENTRIES BELOW EXIST BECAUSE A PARTIALLY-GOVERNED BLOCK MUST BE
     # JUDGED FIELD BY FIELD (techne#588). `reflect.model` and `conflict.model`
     # are in EGRESS_KEYS, and the completeness check used to treat that as

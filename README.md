@@ -570,7 +570,13 @@ Personal `techne.db` deliberately stays raw-SQLite and local-only. techne is **S
 
 ## Configuration
 
-Lives at `~/.techne/config.yaml`. Example — see the
+Lives at `~/.techne/config.yaml`. It holds only the keys you set: `techne init` writes a
+key only when you changed it or the file already set it, so every other key follows the
+defaults of the version you run, including defaults a later release changes. `techne
+doctor` lists the keys your file pins. A file from 0.17.0 or earlier, which pinned every
+key, is migrated on upgrade; see the CHANGELOG's Upgrading note (#1070).
+
+Example — see the
 [operator guide](docs/operator-guide.md#recommended-configuration) for why each
 default-on hook is on, what it costs, and how to turn it off:
 
@@ -610,7 +616,6 @@ threads:
 search:
   recency_weight: 0.3         # how much a recent row is favoured in the fused rank
   bm25_weight: 0.7            # ...against lexical relevance
-  expansion_ratio: 2          # over-fetch factor before fusion trims to `limit`
   embedding_backend: ""       # "" means AUTO-SELECT, not disabled — read the live backend
                               #   from `techne vectors status`, not from this being empty.
   embedding_model: ""         # "" = the backend's default
@@ -727,6 +732,9 @@ names the tier in force and the lever that actually applies to it.
 > does not fall back to `config.yaml`. Watch `stores` especially: an omitted store DSN does
 > not error — it opens a new empty database at `<data_dir>/<domain>.db`, so domain memory
 > *looks* intact and is not.
+
+**Removed (#1074):** `search.expansion_ratio`, and the `sync.auth` / `sync.audience` fields.
+None of them reached any code. Configs carrying them still load.
 
 **Removed in 0.13.0:** `search.mmr_lambda`. It round-tripped through `config.yaml` and was
 never passed to any search function, so setting it was a silent no-op. Existing configs
