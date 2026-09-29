@@ -66,7 +66,11 @@ previous `@vX.Y.Z` — README and ARCHITECTURE.md carry install lines pinned to 
 stale one sends new users to the previous release.
 
 **4. Green the gates.** Full suite, `scripts/check_arch_cards.py`, and `ruff check` on
-changed files. An out-of-sync architecture-card anchor is a hard CI failure.
+changed files. An out-of-sync architecture-card anchor is a hard CI failure. Also run
+`scripts/acceptance.sh` — it builds the wheel, installs it fresh, and proves the
+*installed* artifact rather than the checkout (techne#1059); CI's `acceptance` job already
+runs it on every PR, so a green PR covers this, but re-run it by hand against the tag
+after step 6 to catch anything CI's build couldn't see (e.g. a stale local cache).
 
 **5. Merge the PR**, squash, with the PR body as the commit message.
 
