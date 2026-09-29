@@ -2887,34 +2887,29 @@ def main():
 
     _READER = ReadConnection()
     try:
-        _serve(config)
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                request = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            # A well-formed JSON scalar/array (e.g. `null`, `42`, `[]`) parses fine but
+            # isn't a JSON-RPC request object; handle_request does request.get(...) and
+            # would crash the whole server on it. Skip anything that isn't an object.
+            # (techne#166)
+            if not isinstance(request, dict):
+                continue
+
+            response = handle_request(request, config)
+            if response is not None:
+                sys.stdout.write(json.dumps(response) + "\n")
+                sys.stdout.flush()
     finally:
         reader, _READER = _READER, None
         reader.close()
-
-
-def _serve(config: Config) -> None:
-    """The stdio request loop: one JSON-RPC request per line, answered in order."""
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            request = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-
-        # A well-formed JSON scalar/array (e.g. `null`, `42`, `[]`) parses fine but
-        # isn't a JSON-RPC request object; handle_request does request.get(...) and
-        # would crash the whole server on it. Skip anything that isn't an object.
-        # (techne#166)
-        if not isinstance(request, dict):
-            continue
-
-        response = handle_request(request, config)
-        if response is not None:
-            sys.stdout.write(json.dumps(response) + "\n")
-            sys.stdout.flush()
 
 
 if __name__ == "__main__":
