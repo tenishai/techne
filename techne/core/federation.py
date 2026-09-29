@@ -11,7 +11,8 @@ conflict.py). Five steps per recall:
   C — Cross-store contradiction detection: for each remaining remote knowledge row,
       find entity-overlapping LOCAL rows via select_conflict_candidates (id=None proxy),
       build conflict prompts via run_conflict_check. Anti-re-proposal guard against local db.
-  D — Merge + rank: pool + _rerank (per-type BM25 normalisation handles cross-store, techne#56).
+  D — Merge: keep the local page's order and reserved seats, interleave each remote's
+      rows by their own store's order (techne#1089; no cross-store re-scoring).
   E — The ingest tool writes LOCAL db only (never foreign); all candidates pending.
 
 Sovereignty invariants (§4 in the proposal):
@@ -473,96 +474,93 @@ def detect_cross_store_contradictions(
 # ---------------------------------------------------------------------------
 
 
+def _second_tier(r: dict) -> bool:
+    """A row whose SOLE evidence is a partial lexical match (techne#1079 round 3).
+
+    `_match_pass == "or"` AND `match_source != "fts+vec"`. Every other row is first
+    tier: an AND row, an untagged row (vec-only, or a remote predating the tag), and
+    an OR row the vector channel also found. Two earlier rules got this wrong in
+    opposite directions; `docs/arch/search-embeddings.md` keeps that history.
+    """
+    return r.get("_match_pass") == "or" and r.get("match_source") != "fts+vec"
+
+
 def merge_and_rank(
     local_results: list[dict],
     remote_deduped: list[dict],
     limit: int,
-    recency_weight: float,
-    bm25_weight: float,
-    half_life_days: float,
 ) -> list[dict]:
-    """Pool local + deduped remote results and re-rank.
+    """Merge the local search() page with each remote's page. Nothing is re-scored.
 
-    _rerank's per-type BM25 normalisation (#56) puts local and remote knowledge
-    rows into ONE min-max bucket so their (negative) BM25 magnitudes become
-    linearly combinable with recency/decay — without it the raw cross-store BM25
-    spread would swamp the other signals.
+    MERGED AT THE PAGE LEVEL (techne#1089). This used to pool every row and run
+    `_rerank` (BM25 / recency / decay) over the pool. The local rows are a
+    `search()` page that is already fused: vec-first head, the #1078
+    `identifier_head` and #946 `curated_head` reservations, the #827 `lexical_tail`
+    floor. Re-scoring threw all of that away. On the 2026-09-28 snapshot, with no
+    remote rows at all, the page's #1 stayed #1 in 3 of 40 real prompts. Each
+    remote's rows are also already ranked, by `search_knowledge_conn` (AND block,
+    then OR block). So both inputs arrive in order, and the merge keeps both orders.
 
-    CAVEAT (LOW, ranking-quality only — NOT the same as #56): #56 normalised
-    cross-*table* rows drawn from ONE corpus. Here the two sets come from TWO
-    INDEPENDENT corpora (local + remote) with independent IDF / doc-length stats.
-    Min-maxing them into a single bucket means a systematically-weaker remote
-    corpus gets compressed toward the low end of the combined range — remote rows
-    can be under-ranked relative to a from-scratch cross-corpus normalisation.
-    This affects ordering only (never inclusion/exclusion), and true cross-corpus
-    BM25 calibration is out of MVP scope. Do NOT invent ad-hoc normalisation here.
+    THE RULE:
+      1. A local row tagged `reserved_slot` keeps its index on the page. Remote
+         rows never displace one.
+      2. Every other seat, in page order, takes the next row from one of the
+         streams: the local page's unreserved rows (in page order), then one stream
+         per remote store (in that store's order; stores in connection order).
+      3. Which stream goes next: the smallest `(tier, position, stream)` among the
+         stream heads. `tier` is 0 for first tier, 1 for `_second_tier`;
+         `position` is the head's index within its own stream; the local stream is
+         0 and wins ties. With one remote and one tier this alternates local,
+         remote, local, remote, starting with local.
+      4. Stop at `limit`.
 
-    AND ROWS FROM EVERY STORE ARE RERANKED TOGETHER, THEN OR ROWS FILL WHAT'S
-    LEFT (techne#1079 review Important 1). A single pooled `_rerank` call over
-    `local_results + remote_deduped` recreates the #1081 bug one hop further
-    out: `search_fts` and `search_knowledge_conn` already keep their own AND
-    and OR rows in separate blocks, tagged `_match_pass`, precisely so a short
-    OR row's BM25+recency can't outscore a long exact AND row — but pooling
-    everyone's rows back into one list here and reranking ONCE erases that
-    separation, since `_rerank` re-normalises BM25 per `source_table` across
-    the reunited AND+OR rows. Measured (Prudence's probe): a stale long
-    exact-match row and a fresh short partial-match row, correctly ordered
-    `[and, or]` by both `search_knowledge_conn` and `search()`, came out
-    `[or, and]` through this function. Fixed by reranking every store's
-    FIRST-TIER rows as one block, then filling the remaining slots with
-    every store's SECOND-TIER rows as a second block, and concatenating
-    AND-first — the tier rule is below.
+    Only stream HEADS are compared, so no stream's internal order ever changes.
+    With no remote rows the output is the local page itself: same rows, same order,
+    same tags (INVARIANT 1). Remote rows take seats from the local rows that sat
+    lowest among the unreserved seats; a reserved row stays where `search()` put
+    it (INVARIANT 2). A `lexical_tail` row on a page shorter than `limit` keeps its
+    index too, so remote rows can land after it.
 
-    THE TIER RULE, STATED ONCE HERE (techne#1079 review round 3 — the arch
-    card and the two producers point back to this docstring rather than
-    restating the rule, so it drifts in one place if it ever changes again).
-    A row is SECOND TIER only when its SOLE evidence is a partial lexical
-    match: `_match_pass == "or"` AND `match_source != "fts+vec"`. Every other
-    row is FIRST TIER — an AND-tagged row, an untagged row (no lexical pass
-    at all: a pure vec-only match, or a remote on a version that predates the
-    tag), and an OR-tagged row that ALSO has independent vector agreement
-    (`match_source == "fts+vec"`).
+    THE TIER RULE STILL APPLIES ACROSS STORES (techne#1079 review Important 1),
+    between stream heads: a first-tier head always goes before a second-tier head,
+    whichever store each comes from. It is never used to reorder a stream, so a
+    local first-tier row sitting behind a local OR-only row stays behind it: that
+    order is the page `search()` decided.
 
-    TWO ROUNDS GOT THIS WRONG BEFORE THE `match_source` CHECK, IN OPPOSITE
-    DIRECTIONS. Round 1 demoted any untagged row (`_match_pass != "and"`):
-    a local hybrid page is mostly untagged `vec`/`fts+vec` rows, so a remote
-    filling `limit` with AND rows could empty a federated page of local
-    content entirely — measured, `team x10` where `main` gave `local x8,
-    team x2`. Round 2 fixed that (`_match_pass == "or"` is the only demotion
-    trigger) but promoted an OR-tagged row unconditionally, including one the
-    vector channel ALSO ranked highly once `_as_page_row` started copying the
-    tag onto `fts+vec` overlaps (search.py, techne#1079 round 2) — so an
-    `fts+vec` OR row (partial lexical match PLUS vector agreement, strictly
-    MORE evidence) ended up ranked below an untagged vec-only row (NO lexical
-    match at all). MEASURED (Prudence's probe): a local page whose vector
-    channel's #1 hit was a partial-match row (`fts+vec`, tagged `"or"`),
-    against a remote filling `limit` with AND rows — round 2's rule dropped
-    every `fts+vec` OR row from the merged page, including that #1 hit, where
-    the pre-#1079 single-rerank shape on `main` kept it. Checking
-    `match_source` closes both directions at once: an OR row is demoted only
-    when it has no vector corroboration either, so "more evidence never
-    ranks lower" holds without reopening either round's bug.
+    `_store` / `_role` are copied through untouched. BM25 magnitudes from two
+    corpora are never compared, so the old cross-corpus normalisation caveat is gone.
     """
-    from techne.core.search import _rerank
+    page = local_results[:limit]
+    pinned = {i: r for i, r in enumerate(page) if r.get("reserved_slot")}
+    streams: list[list[dict]] = [[r for r in page if not r.get("reserved_slot")]]
+    by_store: dict = {}
+    for r in remote_deduped:
+        by_store.setdefault(r.get("_store"), []).append(r)
+    streams += list(by_store.values())
+    heads = [0] * len(streams)
 
-    def _second_tier(r: dict) -> bool:
-        return r.get("_match_pass") == "or" and r.get("match_source") != "fts+vec"
-
-    tier1 = [r for r in local_results if not _second_tier(r)]
-    tier1 += [r for r in remote_deduped if not _second_tier(r)]
-    tier2 = [r for r in local_results if _second_tier(r)]
-    tier2 += [r for r in remote_deduped if _second_tier(r)]
-
-    tier1_ranked = _rerank(
-        tier1, limit, recency_weight, bm25_weight, half_life_days=half_life_days
+    merged: list[dict] = []
+    while len(merged) < limit:
+        if len(merged) in pinned:
+            merged.append(pinned.pop(len(merged)))
+            continue
+        live = [s for s in range(len(streams)) if heads[s] < len(streams[s])]
+        if not live:
+            break
+        s = min(live, key=lambda s: (_second_tier(streams[s][heads[s]]), heads[s], s))
+        merged.append(streams[s][heads[s]])
+        heads[s] += 1
+    # Unreachable while `page` supplies its own unreserved rows (each pinned index
+    # is below len(page)), kept so a reserved row can never be lost silently.
+    merged += [pinned[i] for i in sorted(pinned)][: limit - len(merged)]
+    log.debug(
+        "federation: merged %d local + %d remote row(s) into %d (%d reserved kept)",
+        len(page),
+        len(remote_deduped),
+        len(merged),
+        sum(1 for r in merged if r.get("reserved_slot")),
     )
-    remaining = limit - len(tier1_ranked)
-    tier2_ranked = (
-        _rerank(tier2, remaining, recency_weight, bm25_weight, half_life_days=half_life_days)
-        if remaining > 0 and tier2
-        else []
-    )
-    return tier1_ranked + tier2_ranked
+    return merged
 
 
 # ---------------------------------------------------------------------------
