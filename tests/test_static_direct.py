@@ -110,9 +110,14 @@ class TestEquality:
 
     def test_batches_match_across_the_1024_boundary(self, tiny):
         """A zero row promotes its whole 1024-sentence batch to float64 in model2vec,
-        so batching changes the low bits. The direct loader must batch the same way."""
+        so batching changes the low bits. The direct loader must batch the same way.
+
+        xs[0] pins the batch size: the batch that contains index 0 spans a
+        different extent under 1024 vs. any other batch size (e.g. 512), so a
+        drifted _BATCH_SIZE changes which rows get promoted to float64."""
         m2v = _model2vec()
         xs = ["alpha beta"] * 1030
+        xs[0] = ""  # the batch containing index 0 has a different extent per batch size
         xs[1027] = ""  # the empty row lands in the SECOND batch only
         ours = static_direct.load(str(tiny))
         ref = m2v.StaticModel.from_pretrained(str(tiny), force_download=False)

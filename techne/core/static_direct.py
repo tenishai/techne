@@ -24,8 +24,9 @@ through model2vec is not re-embedded. tests/test_static_direct.py pins that
 against the installed model2vec; if a model2vec release changes `encode`, that
 test is what fails.
 
-ANYTHING THIS DOES NOT FULLY UNDERSTAND RAISES `Unsupported`, and the caller
-falls back to model2vec: a vocabulary-quantized model (`weights`/`mapping`
+ANYTHING THIS DOES NOT FULLY UNDERSTAND RAISES `Unsupported` (or the parser's
+own error on a corrupt file; `_build_backend`'s broad except handles both),
+and the caller falls back to model2vec: a vocabulary-quantized model (`weights`/`mapping`
 tensors), a sentence-transformers layout, a `model_type` other than model2vec,
 a vocab/table size mismatch, a missing file. Falling back costs ~350 ms; a
 wrong vector costs silent recall damage, so the bar for the fast path is "the
