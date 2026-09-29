@@ -419,15 +419,30 @@ def seed(db_path: Path) -> dict[str, str]:
     # property this contingent cannot be protected by a recall number; if any
     # change moves the row onto the vector channel the task silently stops testing
     # the tail, and only the channel assertion notices.
+    #
+    # THE FILLER'S TOPIC IS DELIBERATELY FAR FROM EVERY OTHER TASK (techne#1083).
+    # The first filler was infrastructure prose (service mesh, TLS, "connection
+    # pooling ... sixty four sockets", retries, metrics): the same vocabulary as
+    # the #385 golds. Its averaged vector landed on the page of 18 other tasks,
+    # at rank 1 for paraphrase-dbpool, pushing that gold from vector rank 9 to
+    # 10, where the reserved lexical slot took it off the page. paraphrase-dbpool
+    # read 0.0 from #977 until this change, and the 0.8 floor hid it.
+    #
+    # Replaced with sailing prose that shares no topic with any gold. Measured
+    # with the same pinned model: at x4, x5, x6 and x8 this row still arrives
+    # match_source="fts" at rank 10 via lexical_tail for CHG-7742-KM, and it
+    # appears on NO other task's page. paraphrase-dbpool is back at rank 9, 1.0.
+    # Keep it that way: a filler that reads like any gold's topic will compete
+    # with that gold on the vector channel.
     _G935_FILLER = (
-        "The service mesh terminates TLS at the sidecar and forwards plaintext over "
-        "the loopback interface. Connection pooling is tuned per upstream with a "
-        "ceiling of sixty four sockets. Health probes run every five seconds and mark "
-        "an instance unready after three consecutive failures. Structured logs are "
-        "shipped to the collector with trace identifiers attached so a request can be "
-        "followed across hops. Retries are budgeted per route rather than per call so "
-        "a slow dependency cannot amplify load. Metrics are aggregated at one minute "
-        "granularity and retained for thirteen months in the long term store. "
+        "The sailboat left the harbour at dawn with a light westerly breeze and a "
+        "crew of four. By noon the coastline had faded into haze and dolphins "
+        "followed the bow wave for an hour. The skipper reefed the mainsail when the "
+        "swell grew and the galley served lentil stew with bread. At dusk the "
+        "lighthouse on the headland blinked green twice every ten seconds. They "
+        "anchored in a sheltered cove, rowed the dinghy ashore and gathered "
+        "driftwood for a beach fire. Stars filled the sky and gulls slept on the "
+        "rocks below the cliffs. "
     )
     gold["g935_lexical_ticket"] = "knowledge:%d" % store(
         db_path,
