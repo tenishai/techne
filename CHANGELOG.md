@@ -105,6 +105,18 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- **Reflect emit no longer serves `thread_id: null` items** (#1091). Emit re-detects a
+  session's threads from its observations, and that detection could run ahead of the
+  last persisted one: observations recorded after the final `session_end` detection, or
+  a detector change since the session was saved. Those threads went out with no
+  `thread_id`, the overnight drain read that as "cannot ingest", and the #954 heal
+  re-offered them every pass, so 13 of 95 sessions stopped partial. Emit now writes the
+  missing `threads` rows (and their reflection-queue rows) before rendering, so every
+  item has a real id and candidates get their `source_thread_id`. Rows that already
+  exist are left alone. A thread answered, declined or rendered earlier under its
+  `obs-` key keeps that state under its new id, so nothing a past drain answered is
+  offered again. If the write fails, emit logs a warning and falls back to the
+  `obs_key` path, which ingest still accepts.
 - **Exact identifier lookups land at the top of the page** (#1078). A query carrying a
   rare identifier-shaped token (`emit_max_chars`, `b2dcdd2`, `reflect-drain --go`) now
   seats up to two rows FTS matched on that token at the head of the `search()` page,
