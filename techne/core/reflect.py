@@ -596,6 +596,94 @@ def emittable_thread_ids(
     return ids
 
 
+def persist_unsaved_threads(
+    config: Config,
+    session_id: str,
+    threads: list[Thread],
+    observations: list[dict],
+) -> list[str]:
+    """Give every emittable thread a `threads` row before emit renders it (techne#1091).
+
+    Emit re-detects from observations, and that detection can run ahead of the last
+    one persisted: observations recorded after the final `session_end` detection
+    (18200f28: saved at 323 observations, 446 now, threads 28-34 never written), or a
+    detector change since the session was saved (2db12bfe: 11 saved thread numbers,
+    28 detected today). Such a thread went out with `thread_id: null`, which an
+    agent reads as "cannot be ingested" because the MCP schema requires the field, and
+    the #954 heal then re-offered it forever — an unattended drain never reached 0.
+
+    WRITES ONLY WHAT IS MISSING. Threads that already resolve through
+    `persisted_thread_id` are left alone, and nothing is pruned: replacing the whole
+    detection is `persist_detection`'s job, and doing it here would re-key threads a
+    drain already paid for under their old ids. The same upsert (`save_threads`) and
+    the same enqueue `persist_detection` uses, in one transaction, so a saved thread
+    always has its queue row (#514) and the #900 heal can re-offer it if unanswered.
+
+    CARRIES THE #954 LEDGER OVER. A thread answered, rendered or declined while
+    unpersisted is recorded in the emit marker under its `obs-` key. Once it has a
+    row, emit keys it on the thread id, so each `obs-` entry is rewritten to the id,
+    and an answered one also drains its new queue row. Without this every thread a
+    past drain answered by `obs_key` would be offered again.
+
+    Returns the ids newly written.
+    """
+    from techne.core.extension_state import get_state, set_state
+    from techne.core.thread_orchestrator import (
+        link_threads,
+        persisted_thread_id,
+        save_threads,
+        thread_row_id,
+    )
+
+    obs_by_thread = _bucket_observations(threads, observations)
+    missing: list[Thread] = []
+    keys: dict[str, str] = {}
+    for t in threads:
+        t_obs = obs_by_thread.get(t.thread_num, [])
+        if len(t_obs) < config.reflect.min_observations_per_thread:
+            continue
+        if persisted_thread_id(config.db_path, session_id, t) is not None:
+            continue
+        missing.append(t)
+        obs_key = _observations_key(t_obs)
+        if obs_key:
+            keys[obs_key] = thread_row_id(session_id, t)
+    if not missing:
+        return []
+
+    parent_links = link_threads(missing, session_id, config.db_path, config)
+    new_ids = [thread_row_id(session_id, t) for t in missing]
+    conn = connect(config.db_path)
+    try:
+        save_threads(missing, session_id, config.db_path, parent_links=parent_links, conn=conn)
+        enqueue_reflection_debt(config.db_path, session_id, thread_ids=new_ids, conn=conn)
+        marker = get_state(conn, f"reflect:emitted:{session_id}")
+        if marker and keys:
+            marker = dict(marker)
+            answered = set(marker.get("answered", []))
+            paid = [keys[k] for k in keys if k in answered]
+            for field in ("emitted", "declined"):
+                marker[field] = sorted({keys.get(k, k) for k in marker.get(field, [])})
+            marker["answered"] = sorted(answered - set(keys))
+            if paid:
+                conn.executemany(
+                    "UPDATE reflection_queue SET drained_at = CURRENT_TIMESTAMP "
+                    "WHERE thread_id = ? AND drained_at IS NULL",
+                    [(tid,) for tid in paid],
+                )
+            set_state(conn, f"reflect:emitted:{session_id}", marker, commit=False)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    log.debug(
+        "persist_unsaved_threads: %s wrote %d thread(s): %s", session_id, len(new_ids), new_ids
+    )
+    return new_ids
+
+
 def enqueue_reflection_debt(
     db_path: Path, session_id: str, *, thread_ids: list[str], conn=None
 ) -> int:
@@ -1469,6 +1557,14 @@ def emit_reflection_pass(
         return {"batch": [], "count": 0, "note": "no session with unreflected work"}
 
     threads, observations = load_session_for_reflection(config, session_id)
+    # PERSIST BEFORE RENDERING (techne#1091), so no item goes out with a null
+    # thread_id. Must run before the marker is read below: it rewrites `obs-` keys.
+    # A failure leaves those threads on the #954 obs_key fallback, which ingest still
+    # accepts, rather than failing the whole emit.
+    try:
+        persist_unsaved_threads(config, session_id, threads, observations)
+    except Exception as e:
+        log.warning("reflect emit: could not persist unsaved threads for %s: %s", session_id, e)
     batch = emit_reflection_batch(config, session_id, threads, observations)
     total = len(batch)
     #: Every key this session can render RIGHT NOW. The cursor is reconciled against
