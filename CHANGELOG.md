@@ -146,6 +146,17 @@ All notable changes to techne are documented here. Format loosely follows
   commits against `origin/main`, so pre-existing content already on `main` is
   never re-flagged — only what a PR newly adds. Documented in CONTRIBUTING.md so
   contributors can also run it locally, staged, as a pre-commit check.
+- **Per-turn recall no longer searches on harness frames** (#1080). A subagent
+  hand-back reaches `UserPromptSubmit` as `<agent-message from="…">`, a harness
+  paragraph ("[Subagent hand-back] … The report follows:") and the indented report.
+  Recall searched the frame, and its rare tokens (`agent-message`, `hand-back`) pulled
+  rows about hand-backs and took #1078's identifier-head slots. Recall now drops the
+  tag and frame and searches the report the way inbound recall searches a tool result:
+  techne's own rows stripped, then its question lines, else its opening. A
+  `<cross-session-message>` loses its tag (socket path, name, mode) and keeps the
+  peer's text the same way, and a `<task-notification>` sent with typed text is
+  dropped while the typed text is searched. Prompts with none of these frames build
+  the same query as before: 38 of 38 plain prompts in a 40-prompt sample.
 - **`paraphrase-dbpool` scores 1.0 again in the vector eval, and losing any one
   paraphrase task now fails the gate** (#1083). Since #977 the lexical-tail task's
   padded gold row used infrastructure prose ("connection pooling ... sixty four
