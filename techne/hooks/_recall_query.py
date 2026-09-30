@@ -51,19 +51,25 @@ _TASK_NOTIFICATION = re.compile(r"<task-notification>.*?</task-notification>", r
 # text below is the final report ... The report follows:"), then the report with
 # every line indented by the harness. The frame's tokens (agent-message,
 # hand-back) are rare and identifier-shaped, so they steered recall to rows about
-# hand-backs and tripped #1078's identifier head. The body runs to the closing tag,
-# or to the end of the prompt when there is none. The harness always writes
-# from="…"; requiring it keeps a typed mention of the tag from framing the prompt.
-_AGENT_MESSAGE = re.compile(
-    r'<agent-message from="[^"]*"[^>]*>(.*?)(?:</agent-message>|\Z)', re.DOTALL
+# hand-backs and tripped #1078's identifier head. A peer session's message: the
+# tag carries a socket path, a name and a mode; the body is the peer's text.
+#
+# The harness writes these tags at the start of a line and always with from="…",
+# and its closing tag at column zero; the report is indented, so a closing tag the
+# report quotes cannot end the frame. Requiring all of that keeps a typed or
+# quoted mention of a tag from framing the prompt.
+_FRAME_OPEN = re.compile(
+    r'(?m)^(?P<agent><agent-message from="[^"]*"[^>]*>)'
+    r'|^(?P<peer><cross-session-message from="[^"]*"[^>]*>)'
+    r"|(?P<note><task-notification>)"
 )
+_FRAME_CLOSE = {
+    "agent": re.compile(r"(?m)^</agent-message>"),
+    "peer": re.compile(r"(?m)^</cross-session-message>"),
+    "note": re.compile(r"</task-notification>"),
+}
+_PASTE_CLOSE = re.compile(r'</pasted_content id="[^"]*">')
 _HANDBACK_FRAME = "[Subagent hand-back]"
-# A peer session's message: the tag carries a socket path, a name and a mode;
-# the body is the peer's text.
-_CROSS_SESSION = re.compile(
-    r'<cross-session-message from="[^"]*"[^>]*>(.*?)(?:</cross-session-message>|\Z)',
-    re.DOTALL,
-)
 
 # What techne's rails render into context, by shape. tests/test_recall_query.py
 # renders the recall and codex rails with their real code; the session-start,
@@ -183,6 +189,26 @@ def _handback_report(body: str) -> str:
     return textwrap.dedent("\n".join(line for line in lines if not line or line[:1].isspace()))
 
 
+def _unclosed_handback_end(prompt: str, start: int, limit: int) -> int:
+    """Where a hand-back with no closing tag ends: after its frame line and the
+    indented report, at the first column-zero line that follows. What comes after
+    is text the harness did not indent, so it goes back to the operator's words."""
+    pos = prompt.find("\n", start, limit)
+    if pos < 0:
+        return limit
+    pos += 1
+    while pos < limit and prompt.startswith(_HANDBACK_FRAME, pos):
+        nl = prompt.find("\n", pos, limit)
+        pos = limit if nl < 0 else nl + 1
+    while pos < limit:
+        nl = prompt.find("\n", pos, limit)
+        line = prompt[pos : limit if nl < 0 else nl]
+        if line.strip() and not line[:1].isspace():
+            break
+        pos = limit if nl < 0 else nl + 1
+    return pos
+
+
 def _split_harness_frames(prompt: str) -> tuple[str, list[str]] | None:
     """Split a prompt into (text outside harness frames, the frames' bodies), or None.
 
@@ -190,23 +216,46 @@ def _split_harness_frames(prompt: str) -> tuple[str, list[str]] | None:
     A <task-notification> is dropped whole (ids, output path, status: nothing
     asked, per #1045). An <agent-message> keeps its report and a
     <cross-session-message> its body; both are model output rather than the
-    operator's words, so they are returned apart and searched like inbound text.
+    operator's words, so they are returned apart, in text order, and searched like
+    inbound text.
+
+    The operator's words are never dropped. Frames are read left to right, and a
+    frame is never read past the closing tag of the paste it opens in, nor into
+    another frame's body. A hand-back with no closing tag ends after its indented
+    report (a logged trigger is cut at 200 characters, so the store holds such
+    prompts); a peer message or notification with no closing tag is not taken as
+    a frame, since nothing marks where the peer's text stops: only the peer's
+    opening tag is dropped.
     """
+    outside: list[str] = []
     bodies: list[str] = []
-
-    def keep(fn):
-        def sub(m: re.Match) -> str:
-            bodies.append(fn(m.group(1)))
-            return "\n"
-
-        return sub
-
-    rest, n_agent = _AGENT_MESSAGE.subn(keep(_handback_report), prompt)
-    rest, n_peer = _CROSS_SESSION.subn(keep(lambda b: b), rest)
-    rest, n_note = _TASK_NOTIFICATION.subn("\n", rest)
-    if not (n_agent or n_peer or n_note):
+    pos, found = 0, False
+    while m := _FRAME_OPEN.search(prompt, pos):
+        kind = m.lastgroup
+        paste_close = _PASTE_CLOSE.search(prompt, m.end())
+        limit = paste_close.start() if paste_close else len(prompt)
+        close = _FRAME_CLOSE[kind].search(prompt, m.end(), limit)
+        if close is None and kind == "note":
+            outside.append(prompt[pos : m.end()])
+            pos = m.end()
+            continue
+        outside.append(prompt[pos : m.start()] + "\n")
+        found = True
+        if close is not None:
+            body, pos = prompt[m.end() : close.start()], close.end()
+        elif kind == "agent":
+            end = _unclosed_handback_end(prompt, m.end(), limit)
+            body, pos = prompt[m.end() : end], end
+        else:  # an unclosed peer message: drop the tag, keep its text
+            body, pos = "", m.end()
+        if kind == "agent":
+            bodies.append(_handback_report(body))
+        elif kind == "peer" and body:
+            bodies.append(body)
+    if not found:
         return None
-    return rest.strip(), bodies
+    outside.append(prompt[pos:])
+    return "".join(outside).strip(), bodies
 
 
 def build_recall_query(prompt: str, long_prompt_chars: int) -> str:
