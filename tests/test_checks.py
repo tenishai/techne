@@ -140,7 +140,14 @@ class TestBuiltinChecks:
 
         This is the shape of the 2026-07-31 incident (techne#942): sessions kept
         being recorded while two rails sat dead, and nothing distinguished them.
+
+        EXCEPT `pre_compact`/`post_compact` (techne#1075): they fire only on a
+        compaction, which this store has no independent way to confirm ever
+        happened, so "never marked" is not undecidable for them the way it is
+        for every other hook here — it reads DORMANT ("idle"), asserted
+        separately in `TestCompactionHooksReportIdleNotStale`.
         """
+        from techne.core.checks import _EVENT_DRIVEN_NO_SIGNAL
         from techne.core.database import connect
 
         # Enable every config-gated rail, so this covers the whole cohort —
@@ -161,8 +168,13 @@ class TestBuiltinChecks:
         results = run_checks(config)
         hooks = [r for r in results if r.name.startswith("hook:")]
         _assert_no_hook_is_gated_off(hooks)
-        assert all(r.verdict is Verdict.UNOBSERVABLE for r in hooks)
-        assert not any(r.ok for r in hooks)
+        undecidable = [r for r in hooks if r.name.split(":", 1)[1] not in _EVENT_DRIVEN_NO_SIGNAL]
+        event_driven = [r for r in hooks if r.name.split(":", 1)[1] in _EVENT_DRIVEN_NO_SIGNAL]
+        assert undecidable, "expected at least one non-event-driven hook in this cohort"
+        assert all(r.verdict is Verdict.UNOBSERVABLE for r in undecidable)
+        assert not any(r.ok for r in undecidable)
+        assert event_driven and all(r.verdict is Verdict.DORMANT for r in event_driven)
+        assert all(r.ok for r in event_driven)
 
     def test_hook_marker_makes_it_live(self, config):
         from techne.hooks._liveness import record_hook_run
@@ -1808,6 +1820,91 @@ class TestCoreRailsAreInstrumented:
             elif _real_calls(src) == 0:
                 missing.append(hook)
         assert not missing, f"expected a liveness marker, found no record_hook_run call: {missing}"
+
+
+class TestCompactionHooksReportIdleNotStale:
+    """techne#1075 — `pre_compact`/`post_compact` fire only on a compaction, and
+    this store has no independent way to confirm one happened (no persisted
+    SessionStart `source`, no transcript `compact_boundary` parsing — see
+    `_EVENT_DRIVEN_NO_SIGNAL`'s docstring). An aged-out or never-set marker on
+    these two hooks must therefore read as idle, not as the STALE warning a
+    generic temporal check would raise on any other rail.
+    """
+
+    @staticmethod
+    def _seed_session(config, session_id="s1", started_at="2026-08-01 00:00:00"):
+        """A session row so the `sessions == 0` branches (which answer a
+        different question — did the WHOLE STORE ever run — not "did this
+        one hook's event occur") do not pre-empt the branch under test."""
+        from techne.core.database import connect
+
+        conn = connect(config.db_path)
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO sessions (id, started_at) VALUES (?, ?)",
+                (session_id, started_at),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    @pytest.mark.parametrize("hook", ["pre_compact", "post_compact"])
+    def test_marker_older_than_the_window_is_idle_not_stale(self, config, hook):
+        from techne.hooks._liveness import record_hook_run
+
+        self._seed_session(config)
+        record_hook_run(config.db_path, hook, outcome="ok", ts=_iso(timedelta(days=9)))
+
+        result = next(r for r in run_checks(config) if r.name == f"hook:{hook}")
+        assert result.verdict is Verdict.DORMANT, result.detail
+        assert result.ok
+        assert "idle: no compaction since" in result.detail
+
+    @pytest.mark.parametrize("hook", ["pre_compact", "post_compact"])
+    def test_never_fired_with_an_active_store_is_idle_not_unobservable(self, config, hook):
+        """The marker has NEVER been written, but sessions exist and are
+        active — plain `temporal_verdict(None, ...)` would read UNOBSERVABLE
+        (a FAILING state), which is wrong here: under 1M-context sessions a
+        compaction may legitimately never have happened yet."""
+        self._seed_session(config)
+
+        result = next(r for r in run_checks(config) if r.name == f"hook:{hook}")
+        assert result.verdict is Verdict.DORMANT, result.detail
+        assert result.ok
+        assert "idle" in result.detail and "no compaction recorded yet" in result.detail
+
+    @pytest.mark.parametrize("hook", ["pre_compact", "post_compact"])
+    def test_marker_inside_the_window_still_reads_live(self, config, hook):
+        """The fix narrows STALE to idle; it must not blunt LIVE — a hook that
+        ran recently is still confirmed working, not merely excused."""
+        from techne.hooks._liveness import record_hook_run
+
+        self._seed_session(config)
+        record_hook_run(config.db_path, hook, outcome="ok", ts=_iso(timedelta(hours=2)))
+
+        result = next(r for r in run_checks(config) if r.name == f"hook:{hook}")
+        assert result.verdict is Verdict.LIVE, result.detail
+
+    @pytest.mark.parametrize("hook", ["pre_compact", "post_compact"])
+    def test_a_run_that_actually_failed_is_still_flagged(self, config, hook):
+        """The idle branch must not swallow a real failure: a hook that WAS
+        invoked (a compaction happened) and raised is still BROKEN, since
+        `err` is checked before the event-driven branch is ever reached."""
+        from techne.hooks._liveness import record_hook_run
+
+        self._seed_session(config)
+        record_hook_run(
+            config.db_path,
+            hook,
+            outcome="failed",
+            error={"stage": "checkpoint", "msg": "boom"},
+            ts=_iso(timedelta(days=9)),
+        )
+
+        result = next(r for r in run_checks(config) if r.name == f"hook:{hook}")
+        assert result.verdict is Verdict.BROKEN, result.detail
+        assert not result.ok
+        assert "boom" in result.detail
 
 
 class TestRuntimeRevision:

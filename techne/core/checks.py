@@ -418,8 +418,9 @@ _HOOK_EXPECTATIONS = {
     # an 18h window, because the interval is only reachable on a store with fewer
     # than two settled sessions. 18h is chosen for that thin case — tight enough
     # to be useful on a near-new store, loose enough that a quiet evening is not
-    # an alert. pre_compact stays generous: a compaction is an event an operator
-    # may legitimately go a week without triggering. (#479 review 1.)
+    # an alert. The 7-day figure below for pre_compact/post_compact is a LIVE
+    # window only, not a staleness deadline — see _EVENT_DRIVEN_NO_SIGNAL
+    # (#479 review 1, revisited techne#1075).
     "post_tool_use": (timedelta(hours=18), "captures observations — techne is dead without it"),
     "user_prompt_submit": (timedelta(hours=18), "per_turn_recall / per_turn_seed"),
     "pre_compact": (timedelta(days=7), "checkpoints before compaction"),
@@ -429,6 +430,14 @@ _HOOK_EXPECTATIONS = {
 #: wall-clock — for these, "days since last fire" measures how recently the
 #: operator worked, not whether the hook works.
 _SESSION_SCOPED = {"session_start", "session_end", "post_tool_use", "user_prompt_submit"}
+
+#: Hooks whose trigger is an EXTERNAL EVENT (a compaction) this store cannot
+#: independently confirm happened — SessionStart's `source="compact"` (#906) is
+#: read but never persisted, and nothing here parses transcript compaction
+#: markers either. So an aged or never-set marker is idle, not stale
+#: (techne#1075); see docs/arch/liveness.md for the full reasoning, and
+#: `check_hook_drift` for the mis-registered case this set does not cover.
+_EVENT_DRIVEN_NO_SIGNAL = {"pre_compact", "post_compact"}
 
 #: How long a store may exist without any session before "nothing has run yet"
 #: stops being a plausible explanation. Below this the store is genuinely new;
@@ -670,6 +679,20 @@ def check_hooks(config) -> list[CheckResult]:
                 verdict = Verdict.UNOBSERVABLE
                 age = f"{int(store_age.days)}d" if store_age else "unknown age"
                 detail = f"store is {age} old and has NEVER recorded a session"
+            elif hook in _EVENT_DRIVEN_NO_SIGNAL:
+                # techne#1075: no independent signal confirms whether the
+                # triggering event (a compaction) happened, so an aged-out
+                # marker is idle, not stale — see _EVENT_DRIVEN_NO_SIGNAL.
+                marker_age = _age(last)
+                if marker_age is not None and marker_age <= interval:
+                    verdict = Verdict.LIVE
+                    detail = f"{note}; last outcome: {outcome or 'unknown'}"
+                elif last:
+                    verdict = Verdict.DORMANT
+                    detail = f"{note}; idle: no compaction since {last}"
+                else:
+                    verdict = Verdict.DORMANT
+                    detail = f"{note}; idle — no compaction recorded yet"
             else:
                 verdict = temporal_verdict(last, interval)
                 detail = f"{note}; last outcome: {outcome or 'never recorded'}"
