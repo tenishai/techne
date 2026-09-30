@@ -2,7 +2,7 @@
 
 WHY THESE SHIP WITH THE TOOL AND THE RESEARCH SKILLS DO NOT. `self-care` and
 `techne-promote` drive techne's own CLI and know this version's store layout —
-`self-care` sweeps the outbox, prunes backups/snapshots and VACUUMs; `promote`
+`self-care` sweeps the outbox, prunes backups and VACUUMs; `promote`
 drives `reflect emit`/`ingest`. A procedure written against 0.12 can be WRONG for
 0.14, so shipping them in a separate marketplace repo guarantees drift from the
 tool they operate. `investigate-url` and `survey-field` ship with techne too, but not
@@ -71,6 +71,7 @@ KNOWN_SHIPPED_HASHES: dict[str, tuple[str, ...]] = {
         "1c83ce7cdb5bbaf3b5ddb736931edc47a092ecd5efaa3f22096f09d99d27fd66",  # 2026-08-24 #752
         "92b256bc9a871d4e83d1b5349955dc35f2f0ef5565b06a52fc4e4e3e3d4cc434",  # 2026-08-25 #755
         "39f47760159288cfbabd014494c81e61ba7e6afcb6772a790cd2d11fb6cdc0c1",  # 2026-08-25 #771
+        "a6d6cdc4b3ed086dda1e2a462404ef159a703a292314df27a9097af372b58a3f",  # 2026-09-30 #1068
     ),
     "techne-promote": (
         "85c3a86dd8240b6f78a9a43a6325c0f7c414d1c8bfbd9fa605e740b3105db00b",  # 2026-08-17 #650
@@ -87,7 +88,7 @@ KNOWN_SHIPPED_HASHES: dict[str, tuple[str, ...]] = {
 #: every name, so any content edit fails that test until the editor moves the
 #: OUTGOING hash into KNOWN_SHIPPED_HASHES and updates this pin to the new one.
 CURRENT_SHIPPED_HASHES: dict[str, str] = {
-    "self-care": "a6d6cdc4b3ed086dda1e2a462404ef159a703a292314df27a9097af372b58a3f",  # #1068
+    "self-care": "e89dc076d46ef5b78d051465557ce55d113dd7926b87385764b6f87a58b05a54",  # hygiene
     "techne-promote": "6042d2cb42dcf080e6d3ef226ed8072b0f793eb2439716ad93ce28a3a1cb9851",  # #1064
 }
 

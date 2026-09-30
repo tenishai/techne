@@ -190,8 +190,8 @@ Compute the transitive reachability (blast radius) of a Codex symbol. direction 
 
 `archivist`, `librarian`, `architect` and `codex` are techne's four knowledge
 domains, and the vocabulary is deliberate: an operator learns these four names in
-techne and keeps them when the infrastructure grows into liminal and cabal, where a
-local librarian may become a persona and later a deployed service. Every domain
+techne and keeps them when a store moves from a local file to a team service, where a
+local librarian may become a shared one. Every domain
 answer carries the `binding` it resolved to (`absent` / `local` / `store`), so the
 call stays the same while the infrastructure underneath changes.
 

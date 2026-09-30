@@ -147,7 +147,7 @@ This is where the earlier "pattern lift" and the design question converge: the `
 
 ---
 
-## 6. Open decisions (for Richard)
+## 6. Open decisions (for the maintainer)
 
 1. **Source of truth for cold** — (B) document-canonical (my rec) vs (A) row-canonical / doc-as-backup. §2.
 2. **Granularity** — *resolved by the graduate/cold-store split (2026-07-09)*: graduate **per-row** (cheap, 1:1, reversible), then **cluster into chapters at the aging→cold transition** (C1b), not on graduation. Open sub-question: chapter boundaries — by topic/entity, by source-thread, or by time window?

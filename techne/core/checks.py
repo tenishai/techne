@@ -1302,7 +1302,7 @@ def check_instance_identity(config) -> CheckResult | None:
             remedy="set instance_name: your-agent@your-cabal in config.yaml",
         )
     agent, sep, cabal = name.partition("@")
-    # BOTH SIDES MUST BE REAL. `"@" in name` blessed `archivist@`, `@dimartin` and `@`
+    # BOTH SIDES MUST BE REAL. `"@" in name` blessed `archivist@`, `@alice` and `@`
     # — an empty qualifier qualifies nothing, so `archivist@` collides with every other
     # cabal's `archivist@` exactly as `archivist` does. It also blessed
     # `archivist@<cabal>`: an operator following this check's own remedy literally lands
@@ -1325,14 +1325,14 @@ def check_instance_identity(config) -> CheckResult | None:
                 "'@' collides with the same persona in every other cabal writing here"
             ),
             # NOT "has no '@'" — this branch fires for six names that HAVE one
-            # (`archivist@`, `@dimartin`, `@`, and the placeholder forms). That string
+            # (`archivist@`, `@alice`, `@`, and the placeholder forms). That string
             # was left over from the presence-only test and was the last place the
             # check contradicted its own rule.
             evidence=f"instance_name={name!r} lacks a real value on both sides of '@'",
             # NEVER SUBSTITUTE A PLACEHOLDER BACK IN. `agent or '<agent>'` printed
             # `<agent>@your-cabal` whenever the agent side was empty or itself a
             # placeholder — a remedy the guard three lines above rejects, so
-            # `@dimartin`, `@`, `<agent>@<cabal>` and `<agent>@dimartin` dead-looped.
+            # `@alice`, `@`, `<agent>@<cabal>` and `<agent>@alice` dead-looped.
             # Closing "the check blesses its own remedy" opened its mirror image.
             # Reuse the operator's own agent side only when it is real.
             remedy=(

@@ -170,8 +170,8 @@ row* the moment both numbering spaces exist in the same conversation.
 The rule that matters for anything a **machine** parses — PR bodies, commit
 messages, issue bodies, review comments — is narrower than a style
 preference: GitHub's closing keywords (`Closes #N`, `Closes owner/repo#N`)
-match only that exact shape. A PR body once wrote `Closes 🎫techne#831` and
-bound no issue at all — it merged with issue #831 still open, past several
+match only that exact shape. A PR body once decorated the reference
+after `Closes` with an emoji marker and bound no issue at all — it merged with issue #831 still open, past several
 review passes, because the text reads correctly to a person and fails
 silently for the parser. Use plain `issue #N` and `knowledge #N` (or
 `owner/repo#N` for a closing keyword) in anything machine-read. A decorated

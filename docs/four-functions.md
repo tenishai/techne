@@ -20,8 +20,8 @@ Each section below gives both.
 
 > **Why learn four names instead of one search box?** Because the names outlive this
 > tool. An operator learns *archivist, librarian, architect, codex* in techne and keeps
-> them when the work grows into liminal and cabal, where a local librarian may become a
-> persona and later a deployed service. The call you type does not change. What it
+> them when a store moves from a local file to a team service, where a local librarian
+> may become a shared one. The call you type does not change. What it
 > resolves to does, and it tells you.
 
 ---
@@ -415,16 +415,9 @@ and that is the one case where the answer is genuinely "not from here".
 Things this vocabulary does **not** do yet. You should hear them from us rather than
 discover them.
 
-**It is techne-only.** The four names are addressable in techne, and nothing here
-wires them into liminal or cabal. The argument for learning them now is that they are
-designed to carry — not that the carrying is built.
-
-**"Librarian" means something narrower in cabal, today.** techne's librarian answers
-*"what is written down"* — including your own files and transcripts. cabal's Librarian
-persona currently means **external** documentation, with your own files assigned to
-*its* Archivist. Same word, smaller scope, and you will meet the difference when you
-move between them. That is cabal's prompt to widen rather than techne's meaning to
-narrow, but until it does, the mapping is not one-to-one. Tracked in techne#724.
+**It is techne-only.** The four names are addressable in techne. The argument for
+learning them now is that they are designed to carry to other tools — not that any
+other tool carries them yet.
 
 **The codex is experimental and manually indexed by default.** `techne codex index` is a
 thing you run, and between runs the graph is a snapshot with a date on it. Two switches opt
