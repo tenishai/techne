@@ -34,13 +34,30 @@ Design:
   ``"vec_distance"``; where it is ``"bm25"`` the score is an input to placement,
   not placement itself — see ``_retrieval_signal``, and do not build a floor
   without reading it.
+- **Bounded** (techne#1073) — every write also deletes a bounded batch of rows
+  older than ``RETENTION_DAYS``. See that constant for why the window is 180 days.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
+import sys
 from typing import Any
+
+log = logging.getLogger(__name__)
+
+#: Rows older than this are deleted (techne#1073); every write prunes. 180 days
+#: outlasts every reader (re-send suppression, `techne audit`, usefulness_audit,
+#: #1024); the per-reader reasoning is in PR #1139. A constant, like the other
+#: retention windows, not a config key.
+RETENTION_DAYS = 180
+
+#: Most rows one prune looks at. The prune runs on every write, so it must cost
+#: the same on a store with a million rows as on an empty one. A store upgrading
+#: with a long backlog drains it BATCH rows per injection.
+PRUNE_BATCH = 500
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS context_injections (
@@ -298,7 +315,43 @@ def log_context_injection(
                 ),
             )
             conn.commit()
+            # After the commit and in its own guard, so a failed prune never costs
+            # the row just written.
+            try:
+                prune_context_injections(conn)
+            except Exception as e:  # noqa: BLE001 — retention must never break the hook
+                print(f"techne: context_injections prune skipped: {e}", file=sys.stderr)
         finally:
             conn.close()
     except Exception:  # noqa: BLE001 — instrumentation must never break the hook
         pass
+
+
+def prune_context_injections(
+    conn: sqlite3.Connection,
+    *,
+    retention_days: int | None = None,
+    batch: int | None = None,
+) -> int:
+    """Delete up to *batch* rows older than *retention_days*. Returns the count.
+
+    Idempotent, and bounded: it examines only the *batch* lowest ids, so a store
+    with nothing to prune pays a short rowid walk rather than a scan of the whole
+    table. That relies on ids and timestamps rising together, which holds because
+    ``timestamp`` is ``CURRENT_TIMESTAMP`` at insert and no writer supplies it.
+    Commits its own work.
+    """
+    # Defaults resolve at call time so a test can move the module constants.
+    retention_days = RETENTION_DAYS if retention_days is None else retention_days
+    batch = PRUNE_BATCH if batch is None else batch
+    cur = conn.execute(
+        "DELETE FROM context_injections"
+        " WHERE id IN (SELECT id FROM context_injections ORDER BY id LIMIT ?)"
+        "   AND timestamp < datetime('now', ?)",
+        (int(batch), f"-{int(retention_days)} days"),
+    )
+    conn.commit()
+    n = cur.rowcount
+    if n:
+        log.debug("context_injections: pruned %d row(s) older than %d days", n, retention_days)
+    return n

@@ -1,13 +1,17 @@
 ---
 card: arch-card:techne-utilization
-updated: 2026-09-21
+updated: 2026-09-30
 anchor: techne/core/utilization.py sha=23c7ed6188d144e8db87da3b62c91ce2863f0d51
 ---
 # utilization — is the read path earning its tokens? (techne#329)
 
 WHAT: techne writes constantly and reads rarely. This seam MEASURES the read side — what we inject into an agent's context, and whether the agent then did anything that suggests the injection mattered. It exists because #329's audit found we were write-mostly and the auto-recall rail was **unmeasurable**: 306 memory writes to 116 reads, 43 code-graph queries against 3,296 hand edits, and `pattern_search` never called at all. The rule that came out of it — INSTRUMENT READS BEFORE ADDING RETRIEVAL — is why this module exists and why ranking work (#349, #442) is gated behind it.
 
-SURFACE: `techne audit` (`cli.py`, text + `--json`). Four functions, all read-only over `context_injections` + `observations`, all accepting `since_days`:
+SURFACE: `techne audit` (`cli.py`, text + `--json`). Four functions, all read-only over `context_injections` + `observations`, all accepting `since_days`.
+
+RETENTION (#1073): `context_injections` keeps 180 days (`_injection_log.RETENTION_DAYS`); every write deletes up to `PRUNE_BATCH` older rows. So `since_days=None` means "every retained row", not all-time, and any window past 180 days reads the same as 180. `observations` has no such bound. PR #1139 lists each reader and why 180 covers it.
+
+The four functions:
 
 - `injection_utilization` — per-source volume and token cost. What the rails SPENT.
 - `read_write_ledger` — read-vs-write ratios per domain. #329's original audit, re-runnable.

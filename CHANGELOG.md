@@ -5,6 +5,19 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **`context_injections` now has a retention bound** (#1073). The table had none, and
+  #1020 turned per-turn recall on by default, so every install gained several rows per
+  turn forever. Each write now deletes up to 500 rows older than 180 days. 180 days
+  covers every reader: re-send suppression reads only the current session, and `techne
+  audit` with no `--since` now means "every retained row" rather than all-time. Two
+  per-session `extension_state` families had no prune either and now get the 7-day one
+  the others use: `session_start:deferred:<session>` and `heuristic_threads.<session>`.
+  A third, `reflect:emitted:<session>`, stays unbounded on purpose: it is the reflect
+  emit cursor, and a missing marker reads as "never emitted", so pruning it would put
+  old sessions back up for reflection.
+
 ## [0.18.0] — 2026-09-30
 
 ### Deprecated
