@@ -567,8 +567,9 @@ All notable changes to techne are documented here. Format loosely follows
   techne server received a list of projects it could not see. It is now
   `architect.pattern_targets`, defaulting to `["techne"]`.
 
-  **UPGRADING AN EXISTING STORE NEEDS ONE LINE OF CONFIG.** This set is validation as
-  well as documentation: tagging drops a target that is not on the list, silently,
+  **An existing store may need one line of config** (step 7 of Upgrading). This set is
+  validation as well as documentation: tagging drops a target that is not on the list,
+  silently,
   because an unknown token is nearly always a typo. If your store has patterns tagged
   with anything other than `techne`, new patterns will stop being tagged with those
   names until you configure them. Nothing already stored is lost, and nothing becomes
