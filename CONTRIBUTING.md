@@ -35,8 +35,12 @@ A few things worth knowing before you spend effort:
   issue and the PR, not in code that reads as current forever. It reads the staged
   diff, so run it after `git add`: `bash scripts/check_comment_blocks.sh`. Wire it as
   your own pre-commit hook if you want it to run automatically; CI runs it too, on
-  what your PR adds relative to `origin/main`. Deliberate exception:
-  `ALLOW_LONG_COMMENT=1 git commit ...`.
+  what your PR adds relative to `origin/main`. Deliberate exception locally:
+  `ALLOW_LONG_COMMENT=1 git commit ...` — **this has no CI counterpart.** A block
+  committed with the escape passes locally and then turns `arch-cards` red on the
+  PR; this repo has no branch protection, so that red does not block a merge, and
+  a maintainer who judges the exception warranted merges anyway. If that becomes
+  a recurring need, add a real CI-side escape rather than reaching for this one.
 - **Schema changes have their own rules**, below. Read that section before touching
   anything that creates or alters a table — picking the wrong mechanism either leaves
   existing databases broken or burns a version bump that was not needed.

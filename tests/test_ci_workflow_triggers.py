@@ -1196,7 +1196,8 @@ def test_comment_block_gate_runs_in_ci_against_a_real_base():
     import shlex
 
     jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
-    steps = jobs["arch-cards"]["steps"]
+    arch_cards = jobs["arch-cards"]
+    steps = arch_cards["steps"]
 
     def _invokes_the_gate(step) -> list[str] | None:
         if step.get("if") is not None:
@@ -1210,16 +1211,38 @@ def test_comment_block_gate_runs_in_ci_against_a_real_base():
                 return tok
         return None
 
-    invocations = [argv for s in steps if (argv := _invokes_the_gate(s)) is not None]
+    invocations = [(s, _invokes_the_gate(s)) for s in steps]
+    invocations = [(s, argv) for s, argv in invocations if argv is not None]
     assert invocations, "arch-cards must run scripts/check_comment_blocks.sh, unconditionally"
-    assert len(invocations) == 1, f"expected one invocation, found {invocations}"
-    (argv,) = invocations
+    assert len(invocations) == 1, f"expected one invocation, found {[a for _, a in invocations]}"
+    (gate_step, argv) = invocations[0]
+
+    # continue-on-error AT EITHER SCOPE makes a failing gate read green (Prudence,
+    # PR #1120 review nit 1) — pinned at the step (this call) and at the job
+    # (every step in it), since either one swallows the same exit code.
+    assert not gate_step.get("continue-on-error"), (
+        "the gate step sets continue-on-error — a real violation would still pass"
+    )
+    assert not arch_cards.get("continue-on-error"), (
+        "the arch-cards JOB sets continue-on-error — same effect at job scope"
+    )
+
     script_idx = next(i for i, t in enumerate(argv) if Path(t).name == "check_comment_blocks.sh")
     args_after = argv[script_idx + 1 :]
     assert args_after, (
         "check_comment_blocks.sh called with no base-ref argument — it will diff "
         "`--cached`, which is empty in a CI checkout, and the step passes having "
         "checked nothing (the exact silent-no-op this issue is about)"
+    )
+
+    # THE FETCH STEP IS WHAT MAKES THE BASE REF ABOVE RESOLVE (Prudence, PR #1120
+    # review, Important 1). Without it, a fresh `pull_request` checkout (depth 1)
+    # has no local `origin/main` at all — the script now fails loudly rather than
+    # silently passing (its own `git rev-parse --verify` guard), but that failure
+    # should show up HERE, on a workflow-file change, not on the next PR's red run.
+    assert any(_fetches_origin_main(s) for s in steps), (
+        "arch-cards has no step fetching origin/main — the comment-block gate's "
+        "base ref cannot resolve on a fresh checkout"
     )
 
 

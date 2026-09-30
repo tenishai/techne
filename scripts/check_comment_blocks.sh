@@ -16,13 +16,30 @@
 # ancestor locally (see test.yml's `origin/main` fetch step for the same
 # caveat), and `git diff A...B` needs a merge base to exist. `git diff A B`
 # does not — it compares the two trees directly, which is also the right
-# question here ("what does HEAD add that the base does not have").
+# question here ("what does HEAD add that the base does not have"). Two known
+# rough edges, deliberately not fixed here: a `workflow_dispatch` run of a
+# branch BEHIND main can two-dot-diff a block main already trimmed as if this
+# branch added it (`pull_request`'s merge-ref HEAD does not have this); and the
+# merge ref can move between checkout and the fetch step (a race). Both are
+# rare and FAIL CLOSED (the ref-resolution check below turns "cannot compare"
+# into a hard error, never a silent pass), so noted rather than engineered around.
 set -uo pipefail
 
 MAX="${COMMENT_BLOCK_MAX:-12}"
 [[ -n "${ALLOW_LONG_COMMENT:-}" ]] && exit 0
 
 if [[ $# -ge 1 ]]; then
+  # FAIL CLOSED ON A BASE REF THAT DOESN'T RESOLVE (Prudence, PR #1120 review).
+  # Without this, a bad/absent ref (e.g. the fetch step above it deleted, or
+  # `origin/main` simply not fetched) made every `git diff` below print
+  # `fatal: ambiguous argument` to stderr and return nothing — an empty file
+  # list, rc=0, green, having checked nothing. That is the exact silent no-op
+  # this whole issue is about, one door further in than the no-arg case the
+  # tests already covered.
+  git rev-parse --verify --quiet "$1^{commit}" >/dev/null || {
+    echo "check_comment_blocks: base ref '$1' does not resolve" >&2
+    exit 2
+  }
   diff_range=("$1" "HEAD")
 else
   diff_range=("--cached")
