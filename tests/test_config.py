@@ -286,38 +286,33 @@ def test_reflect_emit_bounds_round_trip(tmp_path):
 
 
 def test_sync_round_trip_preserves_all_fields(tmp_path):
-    """Config.save() previously wrote only sync.adapter (plus url/auth/path if
-    truthy), silently dropping sync.audience and sync.extra. A round-trip on a
-    fully-populated sync block should be lossless."""
+    """Config.save() once wrote only sync.adapter (plus url/auth/path if truthy),
+    silently dropping sync.audience and adapter-specific keys. techne#1074 removed
+    the `auth`/`audience`/`extra` fields because nothing read them, but the FILE
+    must still round-trip losslessly: save writes unrecognised keys back as-is."""
     f = tmp_path / "in.yaml"
-    f.write_text(
-        yaml.dump(
-            {
-                "sync": {
-                    "adapter": "team-archivist",
-                    "url": "https://archivist.example.com",
-                    "auth": "token-xyz",
-                    "audience": "techne.archivist",
-                    "path": "/var/data/sync",
-                    "tenant_id": "t-42",  # adapter-specific extra
-                    "region": "us-east",  # adapter-specific extra
-                }
-            }
-        )
-    )
+    sync = {
+        "adapter": "team-archivist",
+        "url": "https://archivist.example.com",
+        "auth": "token-xyz",
+        "audience": "techne.archivist",
+        "path": "/var/data/sync",
+        "tenant_id": "t-42",  # adapter-specific key
+        "region": "us-east",  # adapter-specific key
+    }
+    f.write_text(yaml.dump({"sync": sync}))
     cfg = Config.load(f)
-    assert cfg.sync.audience == "techne.archivist"
-    assert cfg.sync.extra == {"tenant_id": "t-42", "region": "us-east"}
+    assert not hasattr(cfg.sync, "auth")
+    assert not hasattr(cfg.sync, "audience")
+    assert not hasattr(cfg.sync, "extra")
 
     out = tmp_path / "out.yaml"
     cfg.save(out)
+    assert yaml.safe_load(out.read_text())["sync"] == sync
     reloaded = Config.load(out)
     assert reloaded.sync.adapter == "team-archivist"
     assert reloaded.sync.url == "https://archivist.example.com"
-    assert reloaded.sync.auth == "token-xyz"
-    assert reloaded.sync.audience == "techne.archivist"
     assert reloaded.sync.path == "/var/data/sync"
-    assert reloaded.sync.extra == {"tenant_id": "t-42", "region": "us-east"}
 
 
 def test_posture_config_defaults():

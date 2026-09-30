@@ -1,0 +1,92 @@
+# Written by `techne init --platform standalone` from the v0.17.0 tag in a scratch
+# TECHNE_HOME (techne#1070 test fixture). __TECHNE_HOME__ stands for that home.
+platform: standalone
+standalone: true
+archivist: ''
+archivist_db_path: ''
+instance_name: ''
+model: claude-haiku-4-5-20251001
+sync:
+  adapter: noop
+threads:
+  min_observations: 15
+  link_threshold: 0.05
+  stale_after_days: 30
+  complete_after_hours: 48
+  detector: heuristic
+  summarizer: heuristic
+hooks:
+  post_tool_use: true
+  capture_bash: false
+  capture_read: false
+  timeout_s: 5.0
+  codex_grep_assist: false
+  codex_grep_assist_limit: 8
+  codex_reindex_on_edit: false
+  codex_edit_rail: false
+  codex_edit_rail_min_deps: 3
+  codex_edit_rail_limit: 10
+  per_turn_recall: false
+  per_turn_recall_limit: 5
+  per_turn_recall_chars: 450
+  per_turn_recall_log: true
+  per_turn_recall_floor_vec_distance: null
+  per_turn_recall_floor_bm25: null
+  defer_session_start_context: true
+  per_turn_seed: false
+  startup_directive: false
+heuristic:
+  boundary_threshold: 0.7
+  user_prompt_score: 0.3
+custodian:
+  model: ''
+  rails: []
+  rail_models: {}
+  max_items_per_rail: 20
+  timeout_seconds: 120
+reflect:
+  enabled: false
+  min_observations_per_thread: 8
+  min_confidence: medium
+  max_candidates_per_thread: 5
+  model: ''
+  include_existing_knowledge: true
+  existing_knowledge_k: 10
+  write_to: candidates
+  log_raw_response: true
+  emit_max_threads: 25
+  emit_max_chars: 100000
+architect:
+  surveyed_by: operator
+  lens: infra
+search:
+  recency_weight: 0.3
+  bm25_weight: 0.7
+  expansion_ratio: 2
+  embedding_backend: ''
+  embedding_model: ''
+  recall_documents_limit: 3
+posture:
+  mode: observe
+  cc_memory_detected: false
+injection:
+  enabled: true
+  char_budget: 2000
+  max_active_threads: 3
+  max_recent_threads: 5
+  thread_char_budget: 1500
+  thread_per_item_chars: 200
+  recent_reserve_frac: 0.4
+  correction_reserve_frac: 0.3
+staleness_hours: 12
+tag_threshold: 0.42
+knowledge_confidence_half_life_days: 30.0
+archive:
+  confidence_floor: 0.1
+  reaffirmation_window_days: 180
+conflict:
+  model: ''
+  max_comparison_candidates: 20
+  min_shared_keywords: 1
+  max_items_per_emit: 20
+  log_raw_response: true
