@@ -1866,6 +1866,134 @@ def _identifier_head_reservation(head_budget: int, slots: int) -> int:
     return min(slots, head_budget - 1)
 
 
+#: A query phrase counts as rare when fewer rows than this FRACTION of the searched
+#: scope hold it (techne#1142), the #1078 rule applied to a span of query terms
+#: instead of one token. CHOSEN ON A HELD-OUT SET, not on the issue's two queries:
+#: 115 short queries, each quoting a phrase sampled (seeds 1142 and 11421) from a
+#: row of the 2026-09-28 snapshot (63,155 rows at `table="all"`), gold = that
+#: source row. Bars swept: df below 2, 4, 7, 13, 26, 61, 131. The rule, fixed
+#: before the run: the tightest bar reaching the maximum source-row MRR@10 at
+#: limit 10, ties to the tighter. MRR@10 was 0.478 with no seat, 0.523 at df <= 1,
+#: and rose to 0.540 at df <= 130, the loosest bar swept, which the rule picked.
+#: 0.00207 gives a bar of 131 there. Measured, not argued; the sweep's ceiling bounded
+#: the pick, so a looser bar was not ruled out, only not measured.
+PHRASE_RARE_FRACTION_DEFAULT = 0.00207
+
+#: The phrase bar never drops below this, so a small store (the eval corpus, a
+#: fresh install) still treats a phrase in a handful of rows as rare. Same floor as
+#: `IDENTIFIER_MIN_DF`.
+PHRASE_MIN_DF = 5
+
+#: The phrase seat is skipped for a query with more FTS terms than this
+#: (techne#1142). A long query is a description, not a quoted phrase.
+PHRASE_SEAT_MAX_TERMS = 8
+
+#: Words that cannot anchor a phrase span on their own (techne#1142). A bigram
+#: needs both words outside this set, a longer span at least one, so `the extra`
+#: or `does not` never counts as a phrase however rare the row holding it.
+_PHRASE_STOP = frozenset(
+    "a an the and or but if of to in on at by for with from as is are was were be been "
+    "being do does did not no it its this that these those i we you he she they me us "
+    "my our your so than then there here what why how when where which who can could "
+    "should would will just all any some have has had into out up about over".split()
+)
+
+#: First words that make a query a question (techne#1142). A question is asked in
+#: the searcher's own words, so a rare span in it is not a phrase they are quoting.
+_QUESTION_WORDS = frozenset(
+    "what why how when where which who whom whose is are was were do does did can "
+    "could should would will has have had may might shall am isn't aren't doesn't "
+    "don't didn't can't won't".split()
+)
+
+
+def _is_question(query: str) -> bool:
+    """Question form: ends in ``?`` or opens with a wh-word or an auxiliary."""
+    q = query.strip()
+    if q.endswith("?"):
+        return True
+    words = q.split()
+    return bool(words) and words[0].lower().strip(_IDENTIFIER_STRIP) in _QUESTION_WORDS
+
+
+def _phrase_seat_row(
+    conn: sqlite3.Connection,
+    query: str,
+    table: SearchTable,
+    fraction: float,
+    include_archived: bool = True,
+    include_uncertain: bool = False,
+    row_chars: int | None = None,
+) -> dict | None:
+    """The one row to seat for a RARE contiguous span of the query (techne#1142).
+
+    A span is 2 or more consecutive query terms (`_fts_terms`, the split
+    `search_fts` quotes into its MATCH), matched as one FTS5 phrase, so the
+    store's tokenizer and porter stemming apply (`replicate` matches
+    `replicates`). A bigram needs both words outside `_PHRASE_STOP`, a longer span
+    at least one. Rare means at least one and fewer than
+    ``bar = max(PHRASE_MIN_DF, ceil(rows * fraction))`` rows hold it, ``rows``
+    counting the tables ``table`` searches, the #1078 arithmetic.
+
+    Spans are probed bottom-up: an n-span only when both its (n-1)-subspans
+    matched a row, so a query costs at most a few probes past its bigrams, each
+    bounded by ``bar`` rowids. The row returned holds the LONGEST rare span, best
+    BM25 first among rows holding a span of that length. Returns None for a
+    question-form query, one of more than `PHRASE_SEAT_MAX_TERMS` terms, no rare
+    span, or any SQLite error: the ordinary page is the safe direction.
+    """
+    terms = _fts_terms(query)
+    if len(terms) < 2 or len(terms) > PHRASE_SEAT_MAX_TERMS or _is_question(query):
+        return None
+    names = _IDENTIFIER_SCOPES if table == "all" else (table,)
+    scopes = [_IDENTIFIER_SCOPES[n] for n in names]
+    words = [t.replace('""', '"').strip(_IDENTIFIER_STRIP).lower() for t in terms]
+    try:
+        n_rows = sum(
+            conn.execute(f"SELECT count(*) FROM {base}").fetchone()[0] for base, _, _ in scopes
+        )
+        bar = max(PHRASE_MIN_DF, math.ceil(n_rows * fraction))
+
+        def df(phrase: str) -> int:
+            found = 0
+            for _, _, sql in scopes:
+                found += len(conn.execute(sql, (phrase, bar - found)).fetchall())
+                if found >= bar:
+                    break
+            return found
+
+        alive: set[tuple[int, int]] = set()
+        rare: dict[int, list[str]] = {}
+        for n in range(2, len(terms) + 1):
+            for i in range(len(terms) - n + 1):
+                if n > 2 and not ((i, n - 1) in alive and (i + 1, n - 1) in alive):
+                    continue
+                phrase = '"' + " ".join(terms[i : i + n]) + '"'
+                d = df(phrase)
+                if d:
+                    alive.add((i, n))
+                content = sum(1 for w in words[i : i + n] if w and w not in _PHRASE_STOP)
+                if content >= (2 if n == 2 else 1) and 0 < d < bar:
+                    rare.setdefault(n, []).append(phrase)
+        for n in sorted(rare, reverse=True):
+            # A span's rows can all be filtered out here (archived, uncertain,
+            # superseded) though the df probe counted them; fall back a length.
+            rows = _fts_match_rows(
+                conn,
+                " OR ".join(rare[n]),
+                table,
+                1,
+                include_archived=include_archived,
+                include_uncertain=include_uncertain,
+                row_chars=row_chars,
+            )
+            if rows:
+                return min(rows, key=lambda r: r["rank"])
+    except sqlite3.Error:
+        return None
+    return None
+
+
 def search(
     db_path: Path,
     query: str,
@@ -1881,6 +2009,7 @@ def search(
     identifier_rare_fraction: float | None = None,
     *,
     conn: sqlite3.Connection | None = None,
+    phrase_seat: bool = False,
 ) -> list[dict]:
     """Hybrid search: BM25 (FTS5) + vector (cosine) combined by a vec-first
     union (techne#401).
@@ -1941,14 +2070,31 @@ def search(
     pre-#1078 one. Ordinary words can be identifier-shaped (`well-known`, a date), so
     that is narrower than "plain English is unaffected"; see `_is_identifier_shaped`.
 
+    A RARE QUOTED PHRASE GETS THE SEAT AFTER THE TOP RESULT, ON REQUEST ONLY
+    (techne#1142). With ``phrase_seat=True``, a query holding a contiguous span of
+    two or more terms that fewer than `PHRASE_RARE_FRACTION_DEFAULT` of the
+    searched rows contain seats ONE row holding it right after vec-first's first
+    head row (after any identifier head), from `_phrase_seat_row`. Vec-first had
+    left such rows off the page: `litestream replicate techne.db exec` never
+    reached the top 200 on the 2026-09-28 snapshot. Skipped for a question-form
+    query and one of more than `PHRASE_SEAT_MAX_TERMS` terms. A displacement like
+    #1078's, sized the same way. DEFAULT OFF: the explicit surfaces
+    (``techne_search``, ``techne search``, ``techne_recall``) turn it on; the
+    per-turn and inbound recall rails do not, because in the issue's measurement
+    phase none of the seats on real per-turn prompts beat the row it displaced.
+    With it off, or when it finds no rare span, the page is byte-identical to the
+    pre-#1142 one. At any limit the top result is the seat-off page's: while the
+    seat holds a row, the #946 promotion may not displace vec #1.
+
     Returned rows include:
 
       - ``match_source``: ``"fts"``, ``"vec"``, or ``"fts+vec"``
       - ``fusion``: ``"vec_first"`` — how order was decided. Unchanged by the
         floor: the vector channel still decides the head of the page.
       - ``reserved_slot``: present ONLY on a row that is on the page because a
-        reservation put it there — ``"identifier_head"`` (#1078), ``"curated_head"``
-        (#946) or ``"lexical_tail"`` (#827). Absent means the row earned its place on
+        reservation put it there — ``"identifier_head"`` (#1078),
+        ``"phrase_head"`` (#1142), ``"curated_head"`` (#946) or ``"lexical_tail"``
+        (#827). Absent means the row earned its place on
         rank. This is the field that makes a ranking complaint answerable without
         re-deriving arithmetic, which is the property a fused score prior would have
         destroyed.
@@ -1999,6 +2145,7 @@ def search(
             curated_head_slots=curated_head_slots,
             identifier_head_slots=identifier_head_slots,
             identifier_rare_fraction=identifier_rare_fraction,
+            phrase_seat=phrase_seat,
         )
     finally:
         if own_conn:
@@ -2020,6 +2167,7 @@ def _search_on_conn(
     curated_head_slots: int | None,
     identifier_head_slots: int | None,
     identifier_rare_fraction: float | None,
+    phrase_seat: bool = False,
 ) -> list[dict]:
     """``search()``'s body, on the one connection ``search()`` owns (techne#1094)."""
     fts_results = search_fts(
@@ -2193,6 +2341,56 @@ def _search_on_conn(
     # counting it did both and changed a page that should have been identical.
     n_moved = sum(1 for r in ident_head if r.get("reserved_slot") == "identifier_head")
 
+    # PHRASE SEAT (techne#1142), requested by the explicit surfaces only. ONE row
+    # holding a rare contiguous span of the query, seated right AFTER the first vec
+    # head row, so it never displaces the top result. In the issue's measurement
+    # phase (2026-09-28 snapshot, a df <= 5 bigram bar) a seat in front changed the
+    # top result on 5 of 40 real pages and one after vec #1 on none; at the shipped
+    # bar the top result changes on none either. It takes a head slot, and keeps one
+    # for the vector channel, as the identifier head does.
+    phrase_row: dict | None = None
+    if phrase_seat and vec_budget > 1:
+        cand = _phrase_seat_row(
+            conn,
+            query,
+            table,
+            PHRASE_RARE_FRACTION_DEFAULT,
+            include_archived=include_archived,
+            include_uncertain=include_uncertain,
+            row_chars=row_chars,
+        )
+        # The head as vec-first would fill it from here, without the seat.
+        rest = []
+        for r in vec_results:
+            k = (r["source_table"], r["id"])
+            if k not in seen and k not in rest:
+                rest.append(k)
+        rest = rest[:vec_budget]
+        key = None if cand is None else (cand["source_table"], cand["id"])
+        # Already seated by the identifier head, or already the top vec row: the
+        # page gives it that place on its own, so there is nothing to move.
+        if key is not None and key not in seen and rest[:1] != [key]:
+            seen.add(key)
+            vec_by_key = {(r["source_table"], r["id"]): r for r in vec_results}
+            if key in vec_by_key:
+                phrase_row = _as_page_row(vec_by_key[key])
+            else:
+                # The FTS channel's own copy when it has one: that carries the
+                # reranked `rank` and `_match_pass` federation's tier rule reads.
+                phrase_row = dict(fts_by_key.get(key, cand))
+                phrase_row["match_source"] = "fts"
+                phrase_row["fusion"] = "vec_first"
+            # Tagged when the seat changed its place: a row vec-first already put
+            # second is there on rank, the #1078 rule.
+            if rest[1:2] != [key]:
+                phrase_row["reserved_slot"] = "phrase_head"
+            vec_budget -= 1
+            # Counted as a displacement only when it came from OUTSIDE the natural
+            # head. One moved up from inside it leaves the head's row set as it was,
+            # so it must not bump a vec row or shrink the #946 curated budget.
+            if key not in rest:
+                n_moved += 1
+
     for r in vec_results:
         if len(head) >= vec_budget:
             break
@@ -2237,7 +2435,11 @@ def _search_on_conn(
         else 0
     )
     if reserve:
-        in_head = sum(1 for r in ident_head + head if r.get("source_table") in _CURATED_TABLES)
+        in_head = sum(
+            1
+            for r in ident_head + head + ([phrase_row] if phrase_row else [])
+            if r.get("source_table") in _CURATED_TABLES
+        )
         deficit = reserve - in_head
         if deficit > 0:
             # THE CANDIDATES COME FROM A SCOPED QUERY, NOT FROM `vec_results`, AND
@@ -2282,8 +2484,19 @@ def _search_on_conn(
                 # land at the end of the head: they are on the page by reservation,
                 # not by distance, and the order says so.
                 keep, dropped, displaced = [], 0, []
+                # VEC #1 STAYS FIRST WHILE A PHRASE ROW IS HELD (techne#1142, Prudence
+                # #1143 r1). The seat lowers `vec_budget`, so at limit 3 (or 2 with no
+                # FTS-only row) `head` is vec #1 alone and this loop displaced it:
+                # the top result moved on a page where the phrase row was already
+                # second. Guarded only when the seat holds a row, so a seat-off page
+                # runs this loop exactly as before.
+                protected = head[0] if phrase_row is not None and head else None
                 for row in reversed(head):
-                    if dropped < len(promoted) and row.get("source_table") not in _CURATED_TABLES:
+                    if (
+                        dropped < len(promoted)
+                        and row.get("source_table") not in _CURATED_TABLES
+                        and row is not protected
+                    ):
                         dropped += 1
                         # KEEP THE DISPLACED ROW AS OVERFLOW, do not drop it
                         # (Prudence, #966 r1). The promotion pool is not deduped
@@ -2344,6 +2557,12 @@ def _search_on_conn(
     # back through the #946 promotion, but promoting it displaces a row into
     # `overflow`, which takes the page's last free slot first, so the duplicate is
     # always cut by `[:limit]`.
+    # The phrase row joins the head only now, after vec #1 (techne#1142). Held apart
+    # until here so the #946 promotion, which displaces from the back of `head`,
+    # cannot evict it, and so the tail's `len(head) >= vec_budget` test reads the
+    # vec rows alone.
+    if phrase_row is not None:
+        head.insert(min(1, len(head)), phrase_row)
     return (ident_head + head + tail + overflow + bumped)[:limit]
 
 

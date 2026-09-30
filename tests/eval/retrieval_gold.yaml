@@ -173,6 +173,16 @@ config_vec:
     recall_at_5_floor: 0.85
     recall_at_10_floor: 0.85
     mrr_floor: 0.85
+  # techne#1142 — exact-phrase lookups at table=all with phrase_seat on (the
+  # explicit surfaces). Observed: r@5=1.0, r@10=1.0, mrr=0.5, both golds at rank 2,
+  # right after vec #1, which is where the seat puts them by design. With the seat
+  # off (the per-turn page) r@5=0.0, r@10=0.5, mrr=0.05: pypi in the lexical_tail
+  # slot at rank 10, litestream off the page. mrr_floor 0.45 sits under the
+  # rank-2 value by the house 0.05 margin; losing either task fails r@5 and r@10.
+  phrase:
+    recall_at_5_floor: 0.85
+    recall_at_10_floor: 0.85
+    mrr_floor: 0.45
   negative:
     fpr_ceiling: 0.0
     # techne#935: see test_retrieval_gate_vec.py for why 0.85 and not lower.
@@ -428,4 +438,38 @@ tasks:
     query: "--skip-warmup cache warmup deploy"
     table: all
     expected_keys: [g1078_flag]
+    forbidden_keys: []
+
+  # --- exact phrase (techne#1142) --------------------------------------------
+  # The issue's two queries, on rows built to the live-store shape (seed_eval_db.py,
+  # _G1142_TASKS). `phrase_seat: true` is what techne_search, `techne search` and
+  # techne_recall pass; the per-turn and inbound rails do not. The gate asserts
+  # each gold arrives through the `phrase_head` seat.
+  - id: phrase-litestream-exact
+    class: phrase
+    query: "litestream replicate techne.db exec"
+    table: all
+    phrase_seat: true
+    expected_keys: [g1142_litestream]
+    forbidden_keys: []
+
+  - id: phrase-pypi-wrong-pkg-exact
+    class: phrase
+    query: "techne does not provide the extra vec"
+    table: all
+    phrase_seat: true
+    expected_keys: [g1142_pypi]
+    forbidden_keys: []
+
+  # A query of COMMON phrases must get no seat: `cache warmup` sits in nine rows
+  # and `during deploy` in eight (the #1078 flag rows; the gold says "cache warmup
+  # does not block"), both over the eval corpus's bar of 5.
+  # The gate asserts no negative-class page carries a `phrase_head` row, which is
+  # the only thing this task can show: it has no gold of its own.
+  - id: negative-phrase-common-bigram
+    class: negative
+    query: "cache warmup during deploy notes"
+    table: all
+    phrase_seat: true
+    expected_keys: []
     forbidden_keys: []

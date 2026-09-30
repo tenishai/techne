@@ -1081,6 +1081,7 @@ def search(ctx, query, table, limit):
         curated_head_slots=config.search.curated_head_slots,
         identifier_head_slots=config.search.identifier_head_slots,
         identifier_rare_fraction=config.search.identifier_rare_fraction,
+        phrase_seat=True,  # techne#1142: explicit query, like techne_search
     )
     if not results:
         click.echo("No results.")

@@ -495,10 +495,11 @@ def merge_and_rank(
     MERGED AT THE PAGE LEVEL (techne#1089). This used to pool every row and run
     `_rerank` (BM25 / recency / decay) over the pool. The local rows are a
     `search()` page that is already fused: vec-first head, the #1078
-    `identifier_head` and #946 `curated_head` reservations, the #827 `lexical_tail`
-    floor. Re-scoring threw all of that away. On the 2026-09-28 snapshot (measured
-    at bc729b5, frozen clock), with no remote rows at all, the page's #1 stayed #1
-    in 6 of 40 real prompts. Each remote's rows are also already ranked, by
+    `identifier_head`, #1142 `phrase_head` and #946 `curated_head` reservations,
+    the #827 `lexical_tail` floor. Re-scoring threw all of that away. On the
+    2026-09-28 snapshot (measured at bc729b5, frozen clock), with no remote rows at
+    all, the page's #1 stayed #1 in 6 of 40 real prompts. Each remote's rows are
+    also already ranked, by
     `search_knowledge_conn` (AND block, then OR block). So both inputs arrive in
     order, and the merge keeps both orders.
 

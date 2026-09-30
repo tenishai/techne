@@ -240,3 +240,42 @@ def test_a_reserved_seat_past_the_merge_keeps_its_index():
         ("a", 11),
         ("a", 12),
     ]
+
+
+# --- techne#1142: the phrase seat is pinned like the others -------------------------
+
+
+def test_a_phrase_head_seat_keeps_its_index():
+    """`merge_and_rank` pins any `reserved_slot`; the #1142 tag is one of them."""
+    local = _rows("local", [1]) + _rows("local", [2], reserved_slot="phrase_head")
+    local += _rows("local", [3, 4])
+    remote = _rows("a", [10, 11])
+
+    assert _merge(local, remote, 5) == [
+        ("local", 1),
+        ("local", 2),
+        ("a", 10),
+        ("local", 3),
+        ("a", 11),
+    ]
+
+
+def test_recall_keeps_the_phrase_seat_in_place_with_remote_rows(tmp_path, pinned_page, monkeypatch):
+    """End to end: techne_recall asks for the phrase seat, the local page carries it
+    right after vec #1, and federated remote rows never take that seat."""
+
+    def _phrase(_conn, _query, _table, _fraction, **_kw):
+        return _row("observations", 600)
+
+    monkeypatch.setattr(search_mod, "_phrase_seat_row", _phrase)
+    local_db = _db(tmp_path / "local.db")
+    team_db = _db(tmp_path / "team.db")
+    for i in range(10):
+        store(team_db, f"team note {i}: emit_max_chars is set in config.yaml", type="fact")
+
+    local_only = _recall(_cfg(local_db))
+    federated = _recall(_cfg(local_db, team_db))
+
+    assert _reserved(local_only)[2] == ("observations", 600, "phrase_head")
+    assert sum(r.get("_store") == "team" for r in federated) > 0, "fixture: remote rows merged"
+    assert _reserved(federated) == _reserved(local_only)
