@@ -208,22 +208,16 @@ All notable changes to techne are documented here. Format loosely follows
   install in a `uv`-created venv (no pip at all) now reads `INSTALLER` from the
   dist-info and gets `uv pip install --python <python> -e ".[recommended]"`
   instead of a `-m pip install -e` that would fail outright.
-- **`techne init` says so when Claude Code is not installed** (#1123). A bare
+- **`techne init` says so when Claude Code is not installed** (#1123, #1137). A bare
   `techne init` on a machine without Claude Code still registers the hooks, the
   skills and the MCP server (in `~/.claude.json`, which is where Claude Code reads
   user-scope MCP servers), so installing Claude Code afterwards needs no second
   init. It now prints "Claude Code not found; techne's hooks are registered and take
   effect when you install it" with the `--platform standalone` alternative, and no
   longer claims Claude Code auto-memory is on or offers to turn it off. Claude Code
-  counts as present when `claude` is on PATH or its `projects/` dir exists.
-  Nothing changes on a machine that has it.
-- **A second `techne init` no longer claims Claude Code auto-memory is on when Claude
-  Code is not installed** (#1137). The #1123 check counted an existing `~/.claude` as
-  "installed", but the first init creates that dir, so every rerun (which the
-  Upgrading steps ask for) said "Claude Code auto-memory is on" and, on a terminal,
-  offered to turn it off. init now asks whether Claude Code has run here: `claude` on
-  PATH, or its `projects/` dir, which Claude Code writes each session and techne never
-  creates. A `~/.claude` holding only settings is no longer enough.
+  counts as present when `claude` is on PATH or its `projects/` dir exists (which
+  Claude Code writes and techne never creates), so a rerun of `techne init` gets the
+  same answer. Nothing changes on a machine that has it.
 - **init's semantic-recall hint matches how techne was installed** (#1124). An
   editable install was told to `pipx install --force "techne[recommended] @ git+..."`,
   which puts a second, older, non-editable copy beside the checkout. It now gets
