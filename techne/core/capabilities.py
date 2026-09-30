@@ -312,6 +312,12 @@ def _probe_single_memory_layer(config: Config) -> bool | None:
     # (techne#107), so auto-memory being on there is the chosen setup, not a gap.
     if config.platform != CLAUDE_CODE or config.posture.mode == "spool-primary":
         return None
+    from techne.platforms.claude_code.paths import claude_code_has_run
+
+    # Without Claude Code there is no auto-memory beside techne, only the absence
+    # of a settings key saying it is off (same false claim #1123 fixed in init).
+    if not claude_code_has_run():
+        return None
     from techne.platforms.claude_code.hooks import auto_memory_enabled
 
     return not auto_memory_enabled()

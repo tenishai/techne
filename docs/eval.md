@@ -1,6 +1,6 @@
 # Recall-Effectiveness Eval (#68)
 
-**Status:** accepted; **M1 + M2 shipped** (frozen baseline + enforced kill-gate live). Author: Raven, 2026-06-17.
+**Status:** accepted; **M1 + M2 shipped** (frozen baseline + enforced kill-gate live). Written 2026-06-17.
 
 ## Why
 techne's unit suite proves code correctness but never measures whether the

@@ -33,8 +33,8 @@ underneath it changes. `techne bindings` reports all four at once.
 
 The point of learning four names rather than four file paths is that the names
 outlive this tool: an operator learns *archivist, librarian, architect, codex* here
-and keeps them when the work grows into liminal and cabal, where a local librarian may
-become a persona and later a deployed service.
+and keeps them when a store moves from a local file to a team service, where a local
+librarian may become a shared one.
 
 **→ [The four functions](docs/four-functions.md)** — the tutorial: ask each one, read
 the `binding`, and watch the same call answer from a different store. Start there.
@@ -646,10 +646,11 @@ search:
                               #   token is unaffected (hyphenated words and dates can be
                               #   identifier-shaped; rarity keeps most of them out).
   identifier_rare_fraction: 0.002  # a token is "rare" when fewer than this fraction of the
-                              #   searched tables' rows match it (floor 5): ~127 rows at
-                              #   table="all" on a 63k-row store, so `techne.db` (~2,900
-                              #   rows) never triggers the head. Word-like terms (no digit
-                              #   or underscore: `well-known`, `reflect-drain`) need half that
+                              #   searched tables' rows match it (floor 5): e.g. on a
+                              #   63k-row store the cutoff is ~127 rows at table="all",
+                              #   so a common word like `techne` never qualifies.
+                              #   Word-like terms (no digit or underscore: `well-known`,
+                              #   `reflect-drain`) need half that
 
 hooks:
   post_tool_use: true         # capture tool use as observations
@@ -798,7 +799,7 @@ session_id = init_session_for_external_id(
     config,
     external_id="a2a-task-abc-123",
     project_path="/my/project",
-    agent_identity="rook-primus",
+    agent_identity="my-agent",
 )
 # ... agent does work ...
 run_session_end(config, session_id)
@@ -889,22 +890,14 @@ Semantic versioning. **Full release history: [`CHANGELOG.md`](CHANGELOG.md).**
 
 ## Who's who
 
-The docs and `CHANGELOG.md` cite people and agents by first name — enough that
-an outside reader hits them before knowing what they mean:
+The docs and `CHANGELOG.md` cite people and agents by first name:
 
-- **Richard** (also "Rich") — tenishai's maintainer. Cited for design and
-  policy decisions ("Richard's call, 2026-08-17") and as a co-author on
-  design proposals under `docs/proposals/`.
-- **Raven** and **Poe** — named Claude (Opus 4.7/4.8) session identities that
-  paired with Richard on specific design docs, cited as authors in
-  `docs/proposals/` and `docs/roadmap.md`. Not products or tools of their
-  own — a way of tracking which session wrote which document.
-- **Prudence** — an automated code-review agent, part of tenishai's review
-  fleet (`tenishai/agents`, private). A citation like "Prudence, #872 r2" (see
-  `docs/arch/codex.md`, `CHANGELOG.md`) means a specific finding from a
-  specific automated review round on that pull request — evidence, not a
-  person's opinion. Prudence has two sibling review passes, Temperance and
-  Constance; together they're "the Fates."
+- **Richard** (also "Rich") is tenishai's maintainer, cited for design and policy
+  decisions ("Richard's call, 2026-08-17").
+- **Prudence, Raven, Poe** and similar names refer to the maintainer's automated
+  reviewers and paired agent sessions. A citation like "Prudence, #872 r2" means a
+  specific finding from one automated review round on that pull request: evidence,
+  not a person's opinion.
 
 ## License
 

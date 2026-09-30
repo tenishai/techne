@@ -2,7 +2,6 @@
 
 **Status**: Decision record — **IMPLEMENTED** across v0.7.0–v0.8.0 (originally drafted 2026-06-20, pre-implementation). Librarian/Architect/Codex all ship behind `StoreAdapter`; the once-open questions below are resolved as built.
 **Tracking**: reframes [#88](https://github.com/tenishai/techne/issues/88) (was: in-db domain registration), ties in [#87](https://github.com/tenishai/techne/issues/87) (StoreAdapter / patterns) and [#89](https://github.com/tenishai/techne/issues/89) (codex graph).
-**Decision recorded**: techne knowledge#327.
 
 ---
 
