@@ -519,6 +519,26 @@ All notable changes to techne are documented here. Format loosely follows
   `techne knowledge list` (`list_entries`) now also hides `status = 'archived'` rows
   from its default view, consistent with how archived rows are already hidden from
   default recall and egress.
+- Follow-ups from reviews of #1116 and #1115 (#1119). `scripts/acceptance.sh`'s
+  bundled-guides check now loops over every `techne.docs` `_MANIFEST` entry instead of
+  two hardcoded names, and a new hook-modules check loops over every module a
+  registered Claude Code hook bakes in (`_BAKED_IN_MODULES`) — both catch a dropped
+  force-include or package file in general, the v0.16.0 defect class, rather than only
+  the two cases already exercised. The script no longer parses `techne --version`'s
+  output (`build_identity`'s docstring says nothing in this repo does that); it still
+  runs `--version` as a smoke test and compares the installed version against
+  `pyproject.toml` via `importlib.metadata` instead. Per-turn recall's paste-close and
+  task-notification frame detection (`techne/hooks/_recall_query.py`) are now anchored
+  to column zero (`(?m)^`), matching how the harness actually emits both: a hand-back
+  report that quotes either tag's literal text mid-line, or a typed mention of
+  `<task-notification>`, can no longer be mistaken for the real tag and truncate the
+  report or drop text between two unrelated mentions. A frame's paste-close bound is
+  also now depth-tracked (`_enclosing_paste_close`) rather than "the next textual
+  close anywhere after it", so it is set only when the frame is genuinely nested
+  inside a paste — depth-tracked with an OPEN tag anchored to column zero in the
+  forward scan too (Prudence, PR #1127 r1): an unanchored open there let a report's
+  own quote of one inflate the depth past what the real close could bring back down,
+  which could silently drop the operator's own text after the paste.
 
 ### Changed
 

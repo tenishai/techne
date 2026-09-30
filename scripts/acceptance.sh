@@ -1,28 +1,13 @@
 #!/usr/bin/env bash
-# Acceptance test for the INSTALLED artifact (techne#1059).
+# Acceptance test for the INSTALLED artifact — the packaging defect class an
+# editable install can't see (missing package data, a broken entry point).
+# Builds the wheel, installs it into fresh venvs (core, then the
+# `recommended` extra), and smoke-tests each from a dir that can't shadow the
+# install with the checkout. Full rationale and the incident that prompted
+# this: techne#1059.
 #
-# Every job in test.yml installs techne editable (`uv pip install -e .`), so
-# pytest always runs with the checkout importable. That can't see a packaging
-# defect: a module or package-data file missing from the wheel, a wrong
-# `[project.scripts]` target, or a broken `techne.sync_adapters` entry point —
-# because the source tree always satisfies the import regardless of what the
-# wheel actually contains. v0.16.0 already reached external partners with
-# exactly this class of defect (knowledge #2836: a hook template segment
-# missing from the wheel, fixed in 0.16.1).
-#
-# This script builds the wheel from the checkout, installs it into a FRESH venv
-# (twice — once core-only, once with the `recommended` extra the README's
-# blessed pipx install line uses), and `cd`s into a fresh temp dir before
-# running anything, so the checkout can never shadow the installed package on
-# `sys.path`. It then runs the documented smoke: `--version`, every entry
-# point (tests/test_entry_points.py, standalone), two bundled guides (package
-# data), and `init --help` / `doctor --help`.
-#
-# CALLED FROM TWO PLACES, deliberately: the `acceptance` job in
-# .github/workflows/test.yml, on every PR — and docs/releasing.md's SOP, by
-# hand, before tagging. Prior art: mothrag (juliangeymonat-jpg/mothrag),
-# architect pattern 39f2293a7dd1a50d — its 0.6.0 declared a console_script
-# whose module wasn't in the wheel, and every source-tree test stayed green.
+# Called from the `acceptance` job in .github/workflows/test.yml on every PR,
+# and by hand from docs/releasing.md's SOP before tagging.
 #
 # Usage:
 #   scripts/acceptance.sh                 # Python 3.12, the `recommended` extra
@@ -81,21 +66,40 @@ run_pass() {
     # either — a fresh, scoped-to-this-pass directory under $WORKDIR.
     export TECHNE_HOME="$scratch/techne-home"
 
+    # Smoke only — build_identity's docstring says the string this prints must
+    # never be parsed, so this script never does; see the pyproject-comparison
+    # step below instead.
     echo "  + techne --version"
     out="$("$venv/bin/techne" --version)"
     echo "    -> $out"
-    got_version="$(echo "$out" | grep -Eo 'version [^ ]+' | awk '{print $2}')"
+
+    echo "  + installed package version matches pyproject"
+    got_version="$("$venv/bin/python" -c "import importlib.metadata as m; print(m.version('techne'))")"
     [ "$got_version" = "$EXPECTED_VERSION" ] \
-      || fail "$label: techne --version reported '$got_version', pyproject declares '$EXPECTED_VERSION' (full output: $out)"
+      || fail "$label: importlib.metadata reports techne==$got_version, pyproject declares $EXPECTED_VERSION"
 
     echo "  + entry points (console_scripts, techne.sync_adapters)"
     "$venv/bin/python" "$REPO_ROOT/tests/test_entry_points.py"
 
-    echo "  + bundled guides (package data)"
-    "$venv/bin/techne" guide investigating >/dev/null \
-      || fail "$label: 'techne guide investigating' failed — package data missing from the wheel?"
-    "$venv/bin/techne" guide welcome >/dev/null \
-      || fail "$label: 'techne guide welcome' failed — package data missing from the wheel?"
+    echo "  + bundled guides (package data) — every techne.docs _MANIFEST entry"
+    "$venv/bin/python" -c "
+from techne.docs import _MANIFEST, bundled_guide
+
+for name in _MANIFEST:
+    assert len(bundled_guide(name)) > 500, f'{name}: resolved to something implausibly short'
+print(f'    -> {len(_MANIFEST)} guides present')
+" || fail "$label: a bundled guide is missing from the wheel"
+
+    echo "  + hook modules (package files) — every module a registered hook bakes in"
+    "$venv/bin/python" -c "
+import importlib
+
+from techne.platforms.claude_code.hooks import _BAKED_IN_MODULES
+
+for module in _BAKED_IN_MODULES:
+    importlib.import_module(module)
+print(f'    -> {len(_BAKED_IN_MODULES)} hook modules import cleanly')
+" || fail "$label: a hook module is missing from the wheel"
 
     echo "  + CLI wiring"
     "$venv/bin/techne" init --help >/dev/null || fail "$label: 'techne init --help' failed"

@@ -499,3 +499,65 @@ def test_every_column_zero_line_of_a_closed_handback_is_frame():
     frame = HANDBACK_FRAME.replace(" Notes above", "\nNotes above")
     prompt = _handback().replace(HANDBACK_FRAME, frame)
     assert build_recall_query(prompt, LIMIT) == REPORT
+
+
+# --- techne#1119 (Prudence, PR #1115 r2): anchor the paste-close and the
+# task-notification opener, so an unrelated quote can't bound or fake a frame ----
+
+
+def test_a_paste_close_tag_quoted_in_the_report_does_not_end_the_handback():
+    """The hand-back is not itself inside any paste, so a paste-close tag its
+    report quotes (mid-line, indented, exactly as the harness would emit one)
+    must not bound the frame's extraction — the paste-close case of the same
+    failure `test_a_closing_tag_quoted_in_the_report_does_not_end_the_handback`
+    covers for `</agent-message>`."""
+    report = (
+        f'{REPORT}\nsee the tag: </pasted_content id="ab12"> in the transcript\n'
+        "and the rest follows."
+    )
+    assert build_recall_query(_handback(report), LIMIT) == report
+
+
+def test_a_paste_close_tag_quoted_in_the_report_still_bounds_a_nested_handback():
+    """The other half: when the hand-back genuinely IS inside a paste, its own
+    report can quote a paste-close tag without that quote being mistaken for
+    the REAL enclosing close either — the extraction still stops at the
+    paste's true (depth-tracked) end, not at the quote and not past it."""
+    report = f'{REPORT}\nquoting: </pasted_content id="zz99"> mid-report.'
+    prompt = f"look at this\n{_paste(_handback(report, close=False))}\nwhy is this happening?"
+    query = build_recall_query(prompt, LIMIT)
+    assert query == f"look at this\n\nwhy is this happening? {report}"
+
+
+def test_an_open_tag_quoted_in_a_nested_report_does_not_drop_the_operators_question():
+    """Prudence, PR #1127 r1. `_enclosing_paste_close`'s forward scan counted
+    OPEN tags unanchored: a quoted `<pasted_content …>` in the report of an
+    unclosed hand-back nested in a paste inflated the depth past what the
+    real close could bring back down, so the target was never reached,
+    `_enclosing_paste_close` returned None, and `^</agent-message>` went on to
+    match the close of the LATER hand-back — well past the paste, swallowing
+    the operator's own question in between. Both tags are anchored in the
+    forward scan now, so a quoted open is no more special than a quoted close."""
+    inner_report = f'{REPORT}\nit mentions <pasted_content id="zz"> mid-line'
+    prompt = (
+        f"{_paste(_handback(inner_report, close=False), 'p1')}\n"
+        "OPERATOR QUESTION about widget rollback?\n"
+        f"{_handback('second report line')}"
+    )
+    query = build_recall_query(prompt, LIMIT)
+    assert query == (
+        "OPERATOR QUESTION about widget rollback? "
+        f"{inner_report} second report line"
+    )
+
+
+def test_a_task_notification_tag_quoted_mid_line_is_not_treated_as_one():
+    """Unanchored, the opener matched `<task-notification>` wherever it occurred;
+    with a later `</task-notification>`-shaped mention in the same sentence, the
+    text between the two read as a dropped notification body. Anchored, neither
+    typed mention starts a line, so nothing here is a frame at all."""
+    typed = (
+        "why does the parser drop everything between <task-notification> and "
+        "</task-notification> in a report?"
+    )
+    assert build_recall_query(typed, LIMIT) == typed
