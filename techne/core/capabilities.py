@@ -226,6 +226,21 @@ def _editable_dir(direct_url: dict | None) -> str | None:
     return unquote(url.path) if url.scheme == "file" and url.path else None
 
 
+def _installer() -> str | None:
+    """The dist-info `INSTALLER` marker ("pip", "uv", ...), or None if unreadable.
+
+    uv-created venvs (`uv venv`) have no pip at all, so an editable install's
+    reinstall command needs `uv pip install`, not `-m pip install` (#1128).
+    """
+    from importlib.metadata import distribution
+
+    try:
+        raw = distribution("techne").read_text("INSTALLER")
+    except Exception:  # noqa: BLE001 — an install hint must never fail its caller
+        return None
+    return raw.strip() if raw else None
+
+
 def _install_context() -> dict:
     """How this techne was installed: the inputs `install_command_for` reads.
 
@@ -239,6 +254,7 @@ def _install_context() -> dict:
         "prefix": sys.prefix,
         "base_prefix": sys.base_prefix,
         "executable": sys.executable,
+        "installer": _installer(),
     }
 
 
@@ -256,6 +272,7 @@ def install_command_for(
     prefix: str,
     base_prefix: str,
     executable: str,
+    installer: str | None = None,
 ) -> str:
     """The install-the-extra command for one kind of install (#1124).
 
@@ -263,6 +280,8 @@ def install_command_for(
     copy beside the checkout being developed.
 
     - editable (PEP 610 `dir_info.editable`): reinstall the checkout with the extra.
+      A `uv`-created venv (dist-info `INSTALLER` == "uv") has no pip at all, so that
+      case gets `uv pip install -e` instead (#1128).
     - pipx venv: the pipx form, as before.
     - uv tool venv: `uv tool install` (those venvs have no pip).
     - any other venv: that venv's pip, with the git URL. Never plain
@@ -275,7 +294,10 @@ def install_command_for(
     python = shlex.quote(executable)
     checkout = _editable_dir(direct_url)
     if checkout:
-        return f'cd {shlex.quote(checkout)} && {python} -m pip install -e ".[recommended]"'
+        cd = f"cd {shlex.quote(checkout)} && "
+        if installer == "uv":
+            return f'{cd}uv pip install --python {python} -e ".[recommended]"'
+        return f'{cd}{python} -m pip install -e ".[recommended]"'
 
     tag = f"v{version}" if re.fullmatch(r"\d+\.\d+\.\d+", version) else "<tag>"
     spec = f'"techne[recommended] @ git+https://github.com/tenishai/techne.git@{tag}"'

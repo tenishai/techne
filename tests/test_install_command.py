@@ -6,6 +6,8 @@ older, non-editable copy beside the checkout being developed.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from click.testing import CliRunner
 
@@ -94,3 +96,85 @@ def test_init_gives_an_editable_install_the_editable_command(isolated, monkeypat
     want = 'cd /work/techne && /work/techne/.venv/bin/python -m pip install -e ".[recommended]"'
     assert want in result.output
     assert "pipx" not in result.output
+
+
+# --- techne#1128: the REAL _install_context()/_direct_url(), not the pinned seam ---
+#
+# Every test above (and every hint test elsewhere in the suite) runs against
+# conftest's `_pin_install_context`, which replaces `_install_context` wholesale —
+# so `_direct_url()`'s own read of `direct_url.json` never runs at all. A mutant
+# that read "direct-url.json" instead passed all of them. These tests opt out of
+# the pin (`real_install_context`, see conftest.py) and fake only the layer below
+# `_direct_url()`: `importlib.metadata.distribution`.
+
+
+class _FakeDistribution:
+    """Stands in for `importlib.metadata.distribution("techne")`.
+
+    Real `Distribution.read_text(filename)` returns None for a dist-info file that
+    isn't there; this mirrors that instead of raising, so a caller that asks for
+    the wrong filename (the #1128 mutation) sees the same "not present" shape a
+    real install would give it.
+    """
+
+    def __init__(self, files: dict[str, str | None]):
+        self._files = files
+
+    def read_text(self, filename: str) -> str | None:
+        return self._files.get(filename)
+
+
+@pytest.mark.real_install_context
+def test_the_real_direct_url_reads_an_editable_payload(monkeypatch):
+    payload = json.dumps({"url": "file:///work/techne", "dir_info": {"editable": True}})
+    fake_dist = _FakeDistribution({"direct_url.json": payload})
+    monkeypatch.setattr("importlib.metadata.distribution", lambda name: fake_dist)
+    monkeypatch.setattr("sys.prefix", "/work/techne/.venv")
+    monkeypatch.setattr("sys.base_prefix", "/usr")
+    monkeypatch.setattr("sys.executable", "/work/techne/.venv/bin/python")
+
+    ctx = caps._install_context()
+    assert ctx["direct_url"] == {"url": "file:///work/techne", "dir_info": {"editable": True}}
+
+    out = install_command_for("0.17.0", **ctx)
+    assert out == (
+        'cd /work/techne && /work/techne/.venv/bin/python -m pip install -e ".[recommended]"'
+    )
+
+
+@pytest.mark.real_install_context
+def test_the_real_direct_url_reads_a_non_editable_payload(monkeypatch):
+    payload = json.dumps(
+        {"url": "https://github.com/tenishai/techne.git", "vcs_info": {"commit_id": "a" * 40}}
+    )
+    fake_dist = _FakeDistribution({"direct_url.json": payload})
+    monkeypatch.setattr("importlib.metadata.distribution", lambda name: fake_dist)
+    monkeypatch.setattr("sys.prefix", "/home/u/venv")
+    monkeypatch.setattr("sys.base_prefix", "/usr")
+    monkeypatch.setattr("sys.executable", "/home/u/venv/bin/python")
+
+    ctx = caps._install_context()
+    assert not (ctx["direct_url"].get("dir_info") or {}).get("editable")
+
+    out = install_command_for("0.17.0", **ctx)
+    assert out == f"/home/u/venv/bin/python -m pip install {GIT}"
+
+
+@pytest.mark.real_install_context
+def test_a_uv_created_venvs_editable_install_uses_uv_pip(monkeypatch):
+    """Optional half of #1128: a uv venv has no pip, so `-m pip install -e` fails."""
+    payload = json.dumps({"url": "file:///work/techne", "dir_info": {"editable": True}})
+    fake_dist = _FakeDistribution({"direct_url.json": payload, "INSTALLER": "uv\n"})
+    monkeypatch.setattr("importlib.metadata.distribution", lambda name: fake_dist)
+    monkeypatch.setattr("sys.prefix", "/work/techne/.venv")
+    monkeypatch.setattr("sys.base_prefix", "/usr")
+    monkeypatch.setattr("sys.executable", "/work/techne/.venv/bin/python")
+
+    ctx = caps._install_context()
+    assert ctx["installer"] == "uv"
+
+    out = install_command_for("0.17.0", **ctx)
+    assert out == (
+        'cd /work/techne && uv pip install --python /work/techne/.venv/bin/python '
+        '-e ".[recommended]"'
+    )
