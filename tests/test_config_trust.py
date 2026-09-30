@@ -801,17 +801,22 @@ class TestTheDetailNeverLeaksACredential:
         return check_config_trust(config).detail
 
     def test_a_newly_governed_key_reports_presence_not_value(self, tmp_path, monkeypatch):
-        """The simulated future round: a credential-bearing key joins the set."""
+        """The simulated future round: a credential-bearing key joins the set.
+
+        Simulated on `sync.auth` until techne#1074 removed that field (nothing
+        read it). `instance_name` stands in: a plain string field with no
+        printable rendering, which is exactly the shape a new secret would have.
+        """
         monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
-        (tmp_path / "config.yaml").write_text(
-            yaml.dump({"sync": {"adapter": "http", "auth": "sk-BRAND-NEW-SECRET"}})
+        (tmp_path / "config.yaml").write_text(yaml.dump({"instance_name": "sk-BRAND-NEW-SECRET"}))
+        monkeypatch.setattr(
+            config_trust, "EGRESS_KEYS", (*config_trust.EGRESS_KEYS, "instance_name")
         )
-        monkeypatch.setattr(config_trust, "EGRESS_KEYS", (*config_trust.EGRESS_KEYS, "sync.auth"))
 
         detail = self._detail(Config.load())
 
         assert "sk-BRAND-NEW-SECRET" not in detail
-        assert "sync.auth set" in detail
+        assert "instance_name set" in detail
 
     def test_llm_api_base_reports_presence_because_a_url_can_carry_credentials(
         self, tmp_path, monkeypatch
@@ -833,31 +838,42 @@ class TestTheDetailNeverLeaksACredential:
         past their own default. Name the departed fields, never their values."""
         monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
         (tmp_path / "config.yaml").write_text(
-            yaml.dump({"sync": {"adapter": "noop", "url": "https://x.example", "auth": "sk-tok"}})
+            yaml.dump(
+                {"sync": {"adapter": "noop", "url": "https://x.example", "path": "/srv/sk-tok"}}
+            )
         )
 
         detail = self._detail(Config.load())
 
         assert "sk-tok" not in detail and "x.example" not in detail
-        assert "+url, auth" in detail
+        assert "+url, path" in detail
 
-    def test_an_unrecognised_sync_subkey_is_named_not_swallowed(self, tmp_path, monkeypatch):
-        """`SyncConfig.extra` catches EVERY unrecognised key under `sync:` — the
-        one field that collects what the code does not know about. The
-        hand-kept four-name list did not cover it, so a departed block rendered
-        a bare `sync.adapter=noop`. Derived from `dataclasses.fields` now.
-        (Prudence, PR #508 r4 — executed, not proposed.)
+    def test_an_unrecognised_sync_subkey_never_leaks_and_selects_nothing(
+        self, tmp_path, monkeypatch
+    ):
+        """An unrecognised key under `sync:` is kept on disk and read by nothing.
+
+        It used to land in `SyncConfig.extra`, and the renderer named it
+        (Prudence, PR #508 r4). techne#1074 removed `extra` because no adapter
+        call passes it on, so such a key no longer selects any destination and
+        "all destinations at built-in values" is the true report. The property
+        that must survive is the one this class exists for: the value never
+        reaches the detail.
         """
         monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
         (tmp_path / "config.yaml").write_text(
             yaml.dump({"sync": {"adapter": "noop", "token": "ghp_LIVE_SECRET"}})
         )
 
-        detail = self._detail(Config.load())
+        cfg = Config.load()
+        detail = self._detail(cfg)
 
         assert "ghp_LIVE_SECRET" not in detail
-        assert detail.count("sync.adapter=noop") == 0 or "+" in detail
-        assert "extra" in detail or "token" in detail
+        assert "all destinations at built-in values" in detail
+        cfg.save()
+        assert yaml.safe_load((tmp_path / "config.yaml").read_text())["sync"]["token"] == (
+            "ghp_LIVE_SECRET"
+        )
 
     def test_archivist_db_path_reports_presence_whatever_shape_its_value_takes(
         self, tmp_path, monkeypatch
@@ -1080,7 +1096,16 @@ def _load_raw(tmp_path, raw: dict, monkeypatch):
     cfg = Config.load(path)
     state = _dc.asdict(cfg)
     # Volatile: identify the file and the verdict, not the governed values.
-    for volatile in ("loaded_from", "egress_trust", "preserved_egress"):
+    # file_raw / config_migration / config_backup record how the file was read
+    # (techne#1070), so a key the loader ignores still shows up in file_raw.
+    for volatile in (
+        "loaded_from",
+        "egress_trust",
+        "preserved_egress",
+        "file_raw",
+        "config_migration",
+        "config_backup",
+    ):
         state.pop(volatile, None)
     return state
 

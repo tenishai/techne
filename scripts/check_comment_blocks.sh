@@ -15,8 +15,7 @@
 # compares trees directly ("what does HEAD add"). Known, unfixed edge cases:
 # `workflow_dispatch` on a branch BEHIND main can flag a block main already
 # trimmed, and the merge ref can move between checkout and fetch (a race).
-# Both rare; the ref-resolution check below turns either into a hard error,
-# never a silent pass.
+# Both rare, and both fail closed (a spurious red, never a silent pass).
 set -uo pipefail
 
 MAX="${COMMENT_BLOCK_MAX:-12}"

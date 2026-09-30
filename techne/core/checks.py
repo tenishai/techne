@@ -2511,13 +2511,12 @@ def _describe_destination(key: str, value, default=None) -> str:
     """
     if key == "sync":
         # DERIVED FROM THE DATACLASS, not from a hand-kept name list. The list
-        # version read four fields and SyncConfig has five: `extra`, which
-        # `Config._from_dict` fills with EVERY unrecognised key under `sync:` —
-        # i.e. precisely the catch-all for things this code does not know about.
-        # So `sync: {token: ghp_LIVE_SECRET}` departed from default and rendered
-        # a bare `sync.adapter=noop`, the same "true and useless" string this
-        # renderer was just rewritten to kill, at the one field that catches
-        # everything. Not hypothetical — executed. (Prudence, PR #508 r4.)
+        # version read four fields and SyncConfig then had five: `extra`, a
+        # catch-all for every unrecognised key under `sync:`, so
+        # `sync: {token: ghp_LIVE_SECRET}` departed from default and rendered a
+        # bare `sync.adapter=noop`. (Prudence, PR #508 r4.) techne#1074 removed
+        # `extra`, `auth` and `audience` because no adapter call reads them; an
+        # unrecognised `sync:` key now stays on disk and selects nothing.
         import dataclasses
 
         base = default if default is not None else type(value)()

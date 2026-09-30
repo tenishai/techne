@@ -437,6 +437,16 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Changed
 
+- **`config.yaml` holds only the keys you set** (#1070). `techne init` wrote every field,
+  so a default changed in a later release never reached an install that had run it: the
+  file pinned the old value. #993's `reflect.emit_max_chars` 100000 -> 45000 and #1020's
+  hooks were both inert on existing installs for this reason. `Config.save` now writes a
+  key only when the file already set it or its value differs from the default, plus
+  `config_version: 2`; keys this version does not recognise are written back unchanged.
+  An old full file is migrated as described under Upgrading. `techne doctor` lists the
+  keys the file pins. The hook fast-path cache (`.config.env`) is now also invalidated
+  when `techne/config.py` changes, since a default can change without config.yaml doing so.
+
 - **`techne_recall` returns a count of federation conflicts, not the items** (#863).
   Each item carries an adjudication prompt with no cap; ten of them were 90% of a
   103,091-char recall that overflowed the tool-output limit. Recall now returns
@@ -481,13 +491,19 @@ All notable changes to techne are documented here. Format loosely follows
   get a worse techne because they never heard of a flag. The codex rails do nothing
   outside an indexed repo.
 
-  **UPGRADING:** an existing `config.yaml` that does not set these keys picks up the
-  new values. `capture_bash`, `codex_edit_rail` and `codex_reindex_on_edit` take
-  effect immediately: they are checked inside the PostToolUse hook every install
-  already has (`capture_bash` grows the observation log; read-only navigation commands
-  are still filtered). `per_turn_recall` and `codex_grep_assist` are separate hooks:
-  they register on the next `techne init` and load from the next session. To keep the old
-  behaviour, set any of them to `false` explicitly.
+  **UPGRADING:** this note first said an existing `config.yaml` "that does not set these
+  keys" picks up the new values. Every existing `config.yaml` set them: `techne init`
+  wrote every key, so the old `false` was pinned and the new defaults reached no old
+  install (#1070). They reach it now through the sparse-config migration (see
+  Upgrading below), which un-pins a key still holding an old default. `capture_bash`,
+  `codex_edit_rail` and `codex_reindex_on_edit` then take effect on the next tool call:
+  they are checked inside the PostToolUse hook every install already has (`capture_bash`
+  grows the observation log; read-only navigation commands are still filtered).
+  `per_turn_recall` and `codex_grep_assist` are separate hooks: they register on the next
+  `techne init` and load from the next session. To keep the old behaviour, run
+  `techne init` first, then set any of them to `false`. Set before that `init`, a
+  `false` is un-pinned again on every load while the file is still in the old format;
+  set after it, it stays pinned.
 
 - **`techne init` downloads the embedding model** (#1021). A fresh install never got
   semantic search: the SessionStart backfill passes `--no-download` (#815) so a cold
@@ -520,6 +536,45 @@ All notable changes to techne are documented here. Format loosely follows
   nor present in the store, instead of zero results — a rejected target reading as "no
   patterns exist" was #674's original defect. A target that IS present is served, with a
   notice, because the roster governs writing and the store governs reading.
+
+### Removed
+
+- **`search.expansion_ratio`** (#1074). Parsed and saved, passed to no search function:
+  `search_fts` has its own default of 2 and `search()` hard-codes `limit * 2`. Search
+  behaviour is unchanged. A config carrying the key still loads; the key is dropped.
+- **`SyncConfig.auth`, `.audience` and `.extra`** (#1074). No sync adapter call passed
+  them on (`load_adapter` gets `url`, `path` and `allow_unlisted` only). Values under
+  `sync:` in config.yaml stay in the file and are not read, as before.
+
+### Upgrading
+
+**An old `config.yaml` is migrated to the sparse form (#1070).** A file written by an
+older `techne init` has every key and no `config_version`. On load, techne removes each
+key whose value equals a default that key has ever shipped with, so it follows today's
+default and future ones. A value no release shipped is kept as your choice, and so is any
+key techne does not recognise. The table of past defaults is `PAST_DEFAULTS` in
+`techne/config_migration.py`. What changes on an install set up with 0.17.0 or earlier:
+
+- `reflect.emit_max_chars` 100000 -> 45000 (#993)
+- `hooks.per_turn_recall`, `capture_bash`, `codex_grep_assist`, `codex_edit_rail`,
+  `codex_reindex_on_edit` false -> true, and `hooks.per_turn_recall_chars` 200 or 450
+  -> 1000 (#1020)
+
+This applies in memory from the first load after upgrading, in every hook and command.
+The file itself is rewritten on the next `techne init`, which first copies it to
+`config.yaml.bak-<timestamp>` and prints one line naming the keys that changed value.
+
+**Run `techne init` before you change any key.** Until init rewrites the file, every load
+migrates it again, so a value you type that was once a default (`per_turn_recall: false`,
+`capture_bash: false`, `emit_max_chars: 100000`) is un-pinned again and the file says one
+thing while another is in effect. Until then, `techne doctor` and the session-start banner
+name every key whose value in the file is not the value in effect. After init, set the keys
+you want; a key set after the rewrite stays pinned.
+
+**One case the migration cannot tell apart:** if you set a key by hand to a value that
+was also its default at some point (for example `per_turn_recall: false` before #1020),
+it is un-pinned. Check the line `techne init` prints, and set the key again after init if
+you meant it.
 
 ## [0.17.0] — 2026-09-18
 
