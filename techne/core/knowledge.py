@@ -419,17 +419,20 @@ def retire(db_path: Path, old_id: int, survivor_id: int) -> int:
 # direction and does not match (`supersedes?` needs `:` or whitespace next), and
 # other repos' refs (`cabal#12`) do not match either.
 #
-# `ref_word` (techne#1065) captures which marker matched: a literal "techne#N" is
-# AMBIGUOUS — since 2026-08-31 (REF_CONVENTION_DATE) the convention is that
-# "techne#N" names a GitHub issue and a knowledge row is written as "knowledge #N"
-# or with the brain sigil, but nothing stops an entry's prose from typing
-# "techne#N" while actually meaning the issue, not this row. `techne doctor` ran
-# on 2026-09-28 against two entries that did exactly that (knowledge 1769 read
-# "a correction to techne#621's own rationale" — issue #621 — and matched live,
-# unrelated knowledge row 621; knowledge 3537 similarly matched row 896 via
-# "CORRECTS techne#896's ... framing", issue #896). A bare "#N", "knowledge #N",
-# or the brain sigil carries no such ambiguity and is never flagged.
-_REF = r"(?:(?P<ref_word>techne|knowledge)\s*#|#|\N{BRAIN})\s*(?P<ref_id>\d{1,9})\b"
+# `ref_word` / `ref_brain` (techne#1065) capture which marker matched: a literal
+# "techne#N" is AMBIGUOUS — since 2026-08-31 (REF_CONVENTION_DATE) the convention
+# is that "techne#N" names a GitHub issue and a knowledge row is written as
+# "knowledge #N" or with the brain sigil, but nothing stops an entry's prose from
+# typing "techne#N" while actually meaning the issue, not this row. `techne
+# doctor` ran on 2026-09-28 against two entries that did exactly that (knowledge
+# 1769 read "a correction to techne#621's own rationale" — issue #621 — and
+# matched live, unrelated knowledge row 621; knowledge 3537 similarly matched row
+# 896 via "CORRECTS techne#896's ... framing", issue #896). A bare "#N",
+# "knowledge #N", or the brain sigil carries no such ambiguity and is never
+# flagged — UNLESS it's an unmarked continuation of a `techne#N` list (see
+# `_declared_targets_with_ambiguity`: a Prudence review on this PR caught that
+# "techne#1 and #2" left `#2` confident, the 2026-09-28 incident with one more id).
+_REF = r"(?:(?P<ref_word>techne|knowledge)\s*#|(?P<ref_brain>\N{BRAIN})|#)\s*(?P<ref_id>\d{1,9})\b"
 _DECLARATION = re.compile(
     r"\b(?:supersedes?|corrects|correction\s+(?:to|of))\s*:?\s+" + _REF,
     re.IGNORECASE,
@@ -448,27 +451,54 @@ DECLARATION_WINDOW = 400
 REF_CONVENTION_DATE = "2026-08-31"
 
 
+def _ref_is_ambiguous(match: re.Match, *, opener_ambiguous: bool) -> bool:
+    """True iff *match* (a `_DECLARATION`/`_DECLARATION_MORE` match) is a bare,
+    word-less `techne#N` — the one form a GitHub issue can hide behind.
+
+    A continuation that carries no marker of its own (plain `#N`) is NOT its own
+    fresh, confident reference: it inherits `opener_ambiguous`, the ambiguity of
+    the list's OPENING reference. "SUPERSEDES techne#882, #887 and #995" names
+    882, 887 and 995 the same way — #887 and #995 are exactly as ambiguous as
+    882, whatever marked 882 (techne#1065, Prudence review round 1). Only a
+    continuation with its OWN `knowledge #` word or brain sigil is confident
+    regardless of how the list opened.
+    """
+    word = (match.group("ref_word") or "").lower()
+    marked = bool(word) or match.group("ref_brain") is not None
+    if not marked:
+        return opener_ambiguous
+    return word == "techne"
+
+
 def _declared_targets_with_ambiguity(content: str) -> list[tuple[int, bool]]:
     """Like `declared_targets`, but keeps, per id, whether the match is ambiguous.
 
-    A match is ambiguous when the marker that matched is the literal word
-    "techne" immediately before the `#` — the one form that can equally name a
-    GitHub issue (techne#1065). Ids are deduplicated, keeping the first match's
-    ambiguity (a content block declares each target once in practice).
+    A match is ambiguous when it resolves (via `_ref_is_ambiguous`) to the literal
+    word "techne" immediately before the `#` — the one form that can equally name
+    a GitHub issue (techne#1065) — including an unmarked list continuation that
+    inherits this from the reference that opened the list. Ids are deduplicated
+    across the whole content block: if ANY occurrence of an id is unambiguous
+    (its own `knowledge #` or brain sigil), the id is reported unambiguous — a
+    later, confident restatement should not be shadowed by an earlier, ambiguous
+    one (techne#1065 review nit; e.g. "SUPERSEDES techne#5 and knowledge #5").
     """
     head = (content or "")[:DECLARATION_WINDOW]
     targets: list[tuple[int, bool]] = []
     for m in _DECLARATION.finditer(head):
-        targets.append((int(m.group("ref_id")), (m.group("ref_word") or "").lower() == "techne"))
+        opener_ambiguous = _ref_is_ambiguous(m, opener_ambiguous=False)
+        targets.append((int(m.group("ref_id")), opener_ambiguous))
         pos = m.end()
         while more := _DECLARATION_MORE.match(head, pos):
             targets.append(
-                (int(more.group("ref_id")), (more.group("ref_word") or "").lower() == "techne")
+                (
+                    int(more.group("ref_id")),
+                    _ref_is_ambiguous(more, opener_ambiguous=opener_ambiguous),
+                )
             )
             pos = more.end()
     seen: dict[int, bool] = {}
     for target_id, ambiguous in targets:
-        seen.setdefault(target_id, ambiguous)
+        seen[target_id] = seen[target_id] and ambiguous if target_id in seen else ambiguous
     return list(seen.items())
 
 
@@ -491,16 +521,22 @@ def find_declared_supersessions(db_path: Path) -> list[dict]:
     `_retire_in_conn` needs a LIVE survivor, and in a chain a->b->c retiring b
     first would leave a nothing live to retire into.
 
-    Each pair carries `ambiguous` (techne#1065): True when the ONLY reference that
-    matched the target is a literal "techne#N" — the one marker that can equally
-    name a GitHub issue rather than this knowledge row, and whose ambiguity is not
-    decidable from the text alone. A declarer written on or after
-    `REF_CONVENTION_DATE` gets no such match at all (a bare "techne#N" there is not
-    accepted as a knowledge reference, full stop — see `_declared_targets_with_ambiguity`);
-    for an older declarer it is still accepted, but always comes back `ambiguous`.
-    Callers MUST NOT render an ambiguous pair as a ready-to-run command — it is a
-    check item, not a verdict (techne#1065; two production pairs the day this was
-    found would have retired live, unrelated knowledge if pasted as printed).
+    Each pair carries `ambiguous` (techne#1065): True when EVERY reference that
+    matched the target resolves to a literal "techne#N" — the one marker that can
+    equally name a GitHub issue rather than this knowledge row, and whose
+    ambiguity is not decidable from the text alone (this includes an unmarked
+    list continuation of a `techne#N` opener, which inherits the opener's
+    ambiguity — see `_ref_is_ambiguous`). If ANY occurrence of the id is instead
+    unambiguous (its own "knowledge #N" or the brain sigil), that wins and the
+    pair is reported unambiguous, so a later, confident restatement is never
+    shadowed by an earlier, ambiguous one. A declarer written on or after
+    `REF_CONVENTION_DATE` gets no ambiguous match at all (a bare "techne#N" there
+    is not accepted as a knowledge reference, full stop — see
+    `_declared_targets_with_ambiguity`); for an older declarer it is still
+    accepted, but always comes back `ambiguous`. Callers MUST NOT render an
+    ambiguous pair as a ready-to-run command — it is a check item, not a verdict
+    (techne#1065; two production pairs the day this was found would have retired
+    live, unrelated knowledge if pasted as printed).
     """
     conn = connect(db_path)
     try:

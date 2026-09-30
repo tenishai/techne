@@ -22,7 +22,12 @@ All notable changes to techne are documented here. Format loosely follows
   declarer written on or after that date gets no benefit of the doubt at all: a bare
   `techne#N` there is not accepted as a knowledge reference, so no pair is reported
   for it. An older declarer (e.g. knowledge 1155's "SUPERSEDES techne#882") still
-  needs it and still gets it, just always flagged `ambiguous`.
+  needs it and still gets it, just always flagged `ambiguous`. A review round caught
+  that an unmarked list continuation of a `techne#N` opener (`"techne#1 and #2"`)
+  still counted as confident, reproducing the same incident with one more id; it
+  now inherits the opener's ambiguity, and the reverse case (a later, unambiguous
+  restatement of the same id, e.g. `"techne#5 and knowledge #5"`) is no longer
+  shadowed by the earlier ambiguous one.
 
 ## [0.18.0] — 2026-09-30
 
