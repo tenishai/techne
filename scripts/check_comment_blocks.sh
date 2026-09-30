@@ -8,21 +8,15 @@
 # Refuses rather than warns; a warning is what scrolls past.
 # Escape deliberately:  ALLOW_LONG_COMMENT=1 git commit ...
 #
-# ONE ARG, OPTIONAL (techne#1071): a base ref/sha to diff HEAD against, for CI —
-# there is nothing staged in a checkout, so `--cached` sees nothing and the
-# gate would silently pass every PR. No arg keeps the original pre-commit
-# shape, diffing the INDEX, unchanged. TWO-DOT, not three-dot: CI's shallow,
-# single-branch fetches can leave the base and head histories with no common
-# ancestor locally (see test.yml's `origin/main` fetch step for the same
-# caveat), and `git diff A...B` needs a merge base to exist. `git diff A B`
-# does not — it compares the two trees directly, which is also the right
-# question here ("what does HEAD add that the base does not have"). Two known
-# rough edges, deliberately not fixed here: a `workflow_dispatch` run of a
-# branch BEHIND main can two-dot-diff a block main already trimmed as if this
-# branch added it (`pull_request`'s merge-ref HEAD does not have this); and the
-# merge ref can move between checkout and the fetch step (a race). Both are
-# rare and FAIL CLOSED (the ref-resolution check below turns "cannot compare"
-# into a hard error, never a silent pass), so noted rather than engineered around.
+# ONE ARG, OPTIONAL (techne#1071): a base ref/sha to diff HEAD against, for CI
+# (`--cached` sees nothing in a checkout). No arg keeps the pre-commit shape,
+# diffing the INDEX. TWO-DOT: CI's shallow fetch can leave no common ancestor
+# (see test.yml's `origin/main` fetch step), and two-dot needs none — it
+# compares trees directly ("what does HEAD add"). Known, unfixed edge cases:
+# `workflow_dispatch` on a branch BEHIND main can flag a block main already
+# trimmed, and the merge ref can move between checkout and fetch (a race).
+# Both rare; the ref-resolution check below turns either into a hard error,
+# never a silent pass.
 set -uo pipefail
 
 MAX="${COMMENT_BLOCK_MAX:-12}"
