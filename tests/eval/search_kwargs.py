@@ -19,7 +19,7 @@ from typing import Callable
 
 #: Task fields forwarded to search() as keyword arguments, only when the task sets
 #: them. Add a name here when a task needs a new search() kwarg.
-OPTIONAL_SEARCH_KWARGS: tuple[str, ...] = ("identifier_head_slots",)
+OPTIONAL_SEARCH_KWARGS: tuple[str, ...] = ("identifier_head_slots", "phrase_seat")
 
 #: Set to a non-empty value by CI's base leg (#832), and only there.
 BASE_LEG_ENV = "TECHNE_EVAL_BASE_LEG"

@@ -122,7 +122,15 @@ def _emit_metrics(rows: list[dict], per_class: dict, skipped_no_base: dict | Non
     out.write_text(json.dumps(payload, indent=2, sort_keys=True))
 
 
-def test_retrieval_gate_vec(pinned_model2vec, tmp_path, capsys):
+@pytest.mark.parametrize("phrase_seat_all", [False, True], ids=["as_tasked", "phrase_seat_on"])
+def test_retrieval_gate_vec(pinned_model2vec, tmp_path, capsys, phrase_seat_all):
+    """``phrase_seat_on`` (techne#1142) reruns every task with the phrase seat on,
+    as techne_search, `techne search` and techne_recall run it, so every class is
+    gated on the explicit surfaces' page as well as the per-turn one. Only the
+    ``as_tasked`` run writes metrics: the #832 diff compares one run per leg."""
+    base_leg = bool(os.environ.get(BASE_LEG_ENV))
+    if phrase_seat_all and base_leg:
+        pytest.skip("the base leg's search() predates phrase_seat (techne#1142)")
     db_path = tmp_path / "eval_vec.db"
     gold = seed(db_path)
     # MANDATORY (see module docstring) — without this, the *_vec tables don't
@@ -133,8 +141,11 @@ def test_retrieval_gate_vec(pinned_model2vec, tmp_path, capsys):
     k_values = cfg["k_values"]
     fpr_k = max(k_values)
 
-    base_leg = bool(os.environ.get(BASE_LEG_ENV))
     rows: list[dict] = []
+    #: techne#1142: task id -> how many rows on its page the phrase seat placed.
+    phrase_seats: dict[str, int] = {}
+    #: techne#1142: tasks whose page put a phrase_head row FIRST.
+    phrase_first: list[str] = []
     skipped_no_base: dict[str, dict] = {}
     for task in tasks:
         expected = _resolve_ids(task.get("expected_keys", []), gold)
@@ -147,6 +158,8 @@ def test_retrieval_gate_vec(pinned_model2vec, tmp_path, capsys):
         # skipped and named rather than killing the leg with a TypeError.
         # Anywhere else an unsupported kwarg is a broken task and fails.
         extra = task_search_kwargs(task)
+        if phrase_seat_all:
+            extra.setdefault("phrase_seat", True)
         missing = unsupported_kwargs(search, extra)
         if missing:
             assert base_leg, (
@@ -170,6 +183,9 @@ def test_retrieval_gate_vec(pinned_model2vec, tmp_path, capsys):
         match_sources = {f"{r['source_table']}:{r['id']}": r.get("match_source") for r in retrieved}
         # techne#1078: which RESERVATION seated each hit, if any.
         reserved = {f"{r['source_table']}:{r['id']}": r.get("reserved_slot") for r in retrieved}
+        phrase_seats[task["id"]] = sum(r.get("reserved_slot") == "phrase_head" for r in retrieved)
+        if retrieved and retrieved[0].get("reserved_slot") == "phrase_head":
+            phrase_first.append(task["id"])
 
         row = {
             "id": task["id"],
@@ -232,7 +248,8 @@ def test_retrieval_gate_vec(pinned_model2vec, tmp_path, capsys):
     # movement between two runs on one machine is the CODE. Zero tolerance.
     #
     # Off by default: no env var, no file, behaviour identical to pre-#832.
-    _emit_metrics(rows, per_class, skipped_no_base)
+    if not phrase_seat_all:
+        _emit_metrics(rows, per_class, skipped_no_base)
 
     # --- frozen per-class kill-gates (techne#399, ratcheted #401) ---
     # Unlike #385, paraphrase IS gated here — vec-first hybrid recall is
@@ -265,7 +282,9 @@ def test_retrieval_gate_vec(pinned_model2vec, tmp_path, capsys):
     # The repo already carries this shape at test_retrieval_gate.py's
     # `assert "paraphrase" not in cfg` -- a pin on the config's shape guarding the
     # opposite direction.
-    _EXPECTED_GATED = frozenset({"exact", "filter", "paraphrase", "lexical", "identifier"})
+    _EXPECTED_GATED = frozenset(
+        {"exact", "filter", "paraphrase", "lexical", "identifier", "phrase"}
+    )
     assert set(gated_classes) == _EXPECTED_GATED, (
         f"gated set changed: {sorted(gated_classes)} != {sorted(_EXPECTED_GATED)}. "
         "Adding a class is fine -- update this pin deliberately. Losing one is not."
@@ -343,6 +362,32 @@ def test_retrieval_gate_vec(pinned_model2vec, tmp_path, capsys):
             "every one via 'identifier_head'. Re-derive the distractors in "
             "seed_eval_db.py (_G1078_TASKS) rather than relaxing this."
         )
+
+    # --- techne#1142: phrase golds arrive THROUGH the phrase seat ----------------
+    #
+    # Same reason as the identifier check above: the floors cannot tell a gold the
+    # seat placed from one the corpus drifted into ranking well.
+    phrase_rows = [r for r in rows if r["class"] == "phrase"]
+    if not base_leg:
+        assert phrase_rows, "no phrase task ran; the phrase seat is ungated"
+    for r in phrase_rows:
+        slots = r["gold_reserved_slots"]
+        assert slots and all(s == "phrase_head" for s in slots), (
+            f"KILL-GATE [phrase]: {r['id']} golds seated by {slots!r}, expected every "
+            "one via 'phrase_head'. Re-derive the rows in seed_eval_db.py "
+            "(_G1142_TASKS) rather than relaxing this."
+        )
+    # The seat goes AFTER vec #1 by design: it never takes the top result.
+    assert not phrase_first, f"KILL-GATE [phrase]: the phrase seat took rank 1 on {phrase_first}"
+    # ...and a query of COMMON phrases gets no seat. The negative class is where the
+    # common-bigram task lives; no negative page may carry a phrase_head row.
+    seated_negatives = [
+        r["id"] for r in rows if r["class"] == "negative" and phrase_seats.get(r["id"])
+    ]
+    assert not seated_negatives, (
+        f"KILL-GATE [negative]: the phrase seat fired on {seated_negatives}; a common "
+        "phrase is not rare, so the rarity bar let it through."
+    )
 
     # `negative` gates FPR — leak-prevention is this class's remit regardless of
     # which channel(s) retrieval used.

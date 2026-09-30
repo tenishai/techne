@@ -263,6 +263,9 @@ def _techne_search(args: dict, config: Config) -> dict:
         curated_head_slots=config.search.curated_head_slots,
         identifier_head_slots=config.search.identifier_head_slots,
         identifier_rare_fraction=config.search.identifier_rare_fraction,
+        # techne#1142: an explicit search gets the rare-phrase seat; the per-turn
+        # and inbound rails do not (see search()).
+        phrase_seat=True,
     )
     results = _public_rows(results)
     return {"results": results, "count": len(results)}
@@ -657,6 +660,7 @@ def _techne_recall(args: dict, config: Config) -> dict:
             curated_head_slots=config.search.curated_head_slots,
             identifier_head_slots=config.search.identifier_head_slots,
             identifier_rare_fraction=config.search.identifier_rare_fraction,
+            phrase_seat=True,  # techne#1142: recall is an explicit call
         )
         # Graded staleness (techne#90): grade anchored knowledge results against the
         # current working tree and attach a freshness tag. Non-anchored results are
@@ -705,6 +709,7 @@ def _techne_recall(args: dict, config: Config) -> dict:
         curated_head_slots=config.search.curated_head_slots,
         identifier_head_slots=config.search.identifier_head_slots,
         identifier_rare_fraction=config.search.identifier_rare_fraction,
+        phrase_seat=True,  # techne#1142: recall is an explicit call
     )
     for r in local_results:
         r["_store"] = "local"
