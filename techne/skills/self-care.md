@@ -1,12 +1,12 @@
 ---
 allowed-tools: Bash(techne:*), Bash(du:*), Bash(ls:*), Bash(find:*), Bash(sqlite3:*), Bash(python3:*), Bash(gzip:*), Bash(rm:*), Read, Write, Edit
-description: Periodic hygiene pass on techne's local state — drain the rails, sweep the outbox, prune backups/snapshots, reclaim disk, reschedule itself. Dry-run first, destructive steps gated behind an explicit preview. Run when the "self-care" reminder fires or when a session feels noisy.
+description: Periodic hygiene pass on techne's local state — drain the rails, sweep the outbox, prune backups, reclaim disk, reschedule itself. Dry-run first, destructive steps gated behind an explicit preview. Run when the "self-care" reminder fires or when a session feels noisy.
 disable-model-invocation: false
 ---
 
 You are running techne's periodic hygiene pass. The goal is a store that is **smaller, current, and honest** — not a green checkmark. An honest "step 4 skipped, here's why" is a successful run.
 
-Adapted from the Rook `lean-and-mean` procedure (`~/.claude/memory` + `sessions.db`). Roughly half of that procedure transferred; the steps below are the parts that actually apply to *this* stack, plus three leaks Rook's version never looked for.
+Adapted from an earlier agent-hygiene procedure. Roughly half of it transferred; the steps below are the parts that apply to techne, plus three leaks the original never looked for.
 
 ## Argument
 
@@ -24,11 +24,11 @@ Adapted from the Rook `lean-and-mean` procedure (`~/.claude/memory` + `sessions.
 ```
 techne status
 techne doctor
-du -sh ~/.techne ~/.techne/backups ~/.techne/snapshots ~/.claude/projects
+du -sh ~/.techne ~/.techne/backups ~/.claude/projects
 sqlite3 ~/.techne/techne.db "PRAGMA page_count; PRAGMA freelist_count;"
 ```
 
-Record: observation count, stale rails, outbox pending/dead, freelist pages, and the four directory sizes. This is the before-picture; the summary compares against it. The stale rails and the reflection-debt banner are your work list for step 2.
+Record: observation count, stale rails, outbox pending/dead, freelist pages, and the three directory sizes. This is the before-picture; the summary compares against it. The stale rails and the reflection-debt banner are your work list for step 2.
 
 Then announce, and read what came back:
 
@@ -78,7 +78,7 @@ The banner names what is stale. Work it down:
       if fs: print(f"{len(fs & idx):>4}/{len(fs):<4} {d.name}")
   EOF
   ```
-  Backfill the real project dirs; **skip the `/tmp` scratch ones** (permcheck, gate-test, prudence-review-TEST, stashcheck) — they're throwaway test sessions and each one adds a `document_card` to knowledge that rides recall.
+  Backfill the real project dirs; **skip throwaway ones** (sessions started under `/tmp` or another scratch path) — they're test sessions and each one adds a `document_card` to knowledge that rides recall.
 
   Two things to know before wiring this to a cron: each transcript adds ~1 card to `knowledge` (90 transcripts took it 971 → 1,062), and a *changed* transcript supersedes rather than updates — the old row is retained in full. Re-indexing live, still-growing sessions daily would append a complete copy each run. Index sessions that are done.
 - **Coord inbox** — read with `techne_inbox`, clear with `techne_mark_read`. Unread coordination messages pile into every session's banner, so this is the cheapest noise reduction in the pass.
@@ -86,13 +86,13 @@ The banner names what is stale. Work it down:
 
 ## Step 3 — Transcript compression (GATED, OFF BY DEFAULT)
 
-The tempting step, and the one that will bite. Rook gzips `~/.claude/projects/**/*.jsonl` older than 14 days for ~6x. Here that is **currently unsafe**:
+The tempting step, and the one that will bite. Gzipping `~/.claude/projects/**/*.jsonl` older than 14 days saves ~6x. Here that is **currently unsafe**:
 
-`transcript_library.py` (`self.transcripts_dir.glob("*.jsonl")`) and `transcript_import.py` (`directory.glob("*.jsonl")`, `PROJECTS_DIR.glob(f"*/{session_id}.jsonl")`) match `*.jsonl` only, and there is no gzip handling anywhere in `~/.techne/runtime/techne/`. Gzipping would silently make those sessions invisible to backfill, session recovery, and `recover_transcripts.sh`. Silent invisibility is the worst failure mode in a memory system.
+`transcript_library.py` (`self.transcripts_dir.glob("*.jsonl")`) and `transcript_import.py` (`directory.glob("*.jsonl")`, `PROJECTS_DIR.glob(f"*/{session_id}.jsonl")`) match `*.jsonl` only, and there is no gzip handling anywhere in the techne package. Gzipping would silently make those sessions invisible to backfill and session recovery. Silent invisibility is the worst failure mode in a memory system.
 
 So: **measure, report, do not compress** unless one of these is true:
 
-- `jsonl_records.py` has learned to open `.gz` transparently (re-check — grep for `gzip` in the runtime before trusting this doc), **or**
+- `jsonl_records.py` has learned to open `.gz` transparently (re-check — grep for `gzip` in the installed techne package before trusting this doc), **or**
 - the operator explicitly accepts the tradeoff for a specific, already-imported set.
 
 Measure with the exact mtime predicate — BSD `find -mtime +14` rounds and misses files 14–15 days old:
@@ -111,9 +111,9 @@ EOF
 
 Also note in the report: `cleanupPeriodDays: 90` in `~/.claude/settings.json` means Claude Code prunes its own transcripts at 90 days. Whether its cleanup matches `.gz` files is **unverified** — if it doesn't, gzipping silently opts those sessions out of that retention, which may be a feature or a slow leak. Verify before relying on either reading.
 
-## Step 4 — Backup and snapshot retention
+## Step 4 — Backup retention
 
-Rook's procedure has no step for this; here it is the single biggest reclaim. Three distinct problems, each needing a preview before deletion:
+The original procedure had no step for this; here it is usually the single biggest reclaim. Two distinct problems, each needing a preview before deletion:
 
 **(a) Migration backup pileup.** `~/.techne/backups/` keeps one `.db.bak` per migration run with no retention. A repeated migration leaves near-identical copies (as of first run: 12 × `techne-v18-to-v19` at ~48 MB). Keep the newest per version-pair, drop the rest:
 
@@ -121,26 +121,11 @@ Rook's procedure has no step for this; here it is the single biggest reclaim. Th
 ls ~/.techne/backups/ | sed -E 's/-[0-9]{8}-[0-9]{6}\.db\.bak$//' | sort | uniq -c | sort -rn | head
 ```
 
-**(b) and (c) apply ONLY IF YOU RUN THE AUTHOR'S SNAPSHOT TOOLING, WHICH DOES NOT SHIP WITH
-techne.** `~/.techne/db_snapshot.py` and `db_snapshot.json` are a host-local fleet sweep
-(techne#742). If `ls ~/.techne/snapshots` is empty or absent, **skip to (d)** — you have not
-misconfigured anything, you simply do not have that tool. The shipped equivalent is
-`techne backup`, whose retention is `--keep`.
+Sets written by `techne backup` live in the same dir. Trim those with `techne backup --keep N` (it writes a fresh set first, then keeps the newest N) rather than by hand.
 
-**(b) Orphaned snapshot identities.** `db_snapshot.py` prunes to `keep_per_db` (14) *per identity* — so an identity that stops receiving new snapshots keeps its last 14 forever. Path renames and deleted worktrees strand whole identity families. Find them by newest-snapshot date:
+**(b) Top-level `.bak` files.** `ls -lh ~/.techne/*.bak*` — one-off pre-surgery copies. Keep the most recent and anything guarding an unresolved change; the rest are cheap to drop once the change they guarded has settled.
 
-```
-ls -t ~/.techne/snapshots/*.zst | sed -E 's/.*\///; s/^(.*)-([0-9]{8})-[0-9]{6}\.db\.zst$/\1 \2/' \
-  | sort -k1,1 -k2,2r | awk '!seen[$1]++ {print $2, $1}' | sort | head -30
-```
-
-Any identity whose newest snapshot predates the last path rename, or whose source DB no longer exists, is dead weight. Confirm the source path is really gone before deleting.
-
-**(c) Snapshotting frozen backup dirs.** `exclude_globs` in `~/.techne/db_snapshot.json` has `*/backups/*`, which does **not** match sibling dirs like `backups-pre-runtime-pull-<stamp>/`. Those get snapshotted on every run even though their contents never change. Fix the config (add `*/backups-*/*`) *and* delete the accumulated snapshots — fixing only the config leaves the existing pile.
-
-**(d) Top-level `.bak` files.** `ls -lh ~/.techne/*.bak*` — one-off pre-surgery copies. Keep the most recent and anything guarding an unresolved change; the rest are cheap to drop once the change they guarded has settled.
-
-Keep the retention principle from Rook: recent backups stay. The savings from the pass dwarf what a few recent backups cost.
+Keep the retention principle: recent backups stay. The savings from the pass dwarf what a few recent backups cost.
 
 ## Step 5 — VACUUM
 
@@ -174,14 +159,14 @@ So if `fsck` reports dangling cards now: run `techne cards repair` (dry-run by d
 Then reschedule. There is no reminder CLI; reminders are MCP-only:
 
 ```
-techne_reminder_add(note="/self-care hygiene pass — outbox sweep, rail drain, backup/snapshot prune, vacuum", due_at=<today + 14 days>)
+techne_reminder_add(note="/self-care hygiene pass — outbox sweep, rail drain, backup prune, vacuum", due_at=<today + 14 days>)
 ```
 
 Dismiss the reminder that triggered this run with `techne_reminder_dismiss`, and bank the outcome with `techne_store` (type `procedure`): what you reclaimed, what you skipped, and anything the pass taught you about the store. Next run reads that.
 
 ## Verify and report
 
-Re-run the step 0 measurements and report as a before→after table: `~/.techne` total, backups, snapshots, `~/.claude/projects`, techne.db size, freelist, observation count, stale rails.
+Re-run the step 0 measurements and report as a before→after table: `~/.techne` total, backups, `~/.claude/projects`, techne.db size, freelist, observation count, stale rails.
 
 Then, in plain prose:
 

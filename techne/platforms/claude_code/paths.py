@@ -91,6 +91,16 @@ def claude_code_present() -> bool:
     return _claude_on_path() or claude_config_dir().is_dir()
 
 
+def claude_code_has_run() -> bool:
+    """Has Claude Code run here? The post-init form of ``claude_code_present``.
+
+    After `techne init` the config dir always exists (init writes settings.json
+    into it), so the dir no longer says anything. The projects dir does: Claude
+    Code writes a transcript there every session, and techne never creates it.
+    """
+    return _claude_on_path() or claude_projects_dir().is_dir()
+
+
 def claude_projects_dir() -> Path:
     """The transcripts/projects dir under the (possibly relocated) config dir."""
     return claude_config_dir() / "projects"

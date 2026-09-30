@@ -1,6 +1,6 @@
 """A codex query from inside a `git worktree` must resolve to the PRIMARY index.
 
-tenishai/agents#10. The reviewer runs in a throwaway worktree (techne#740) and the
+The reviewer runs in a throwaway worktree (techne#740) and the
 codex is indexed against the shared checkout, so `find_repo_root` stopped at the
 worktree — a path with no db — and every query answered "no codex index for the active
 repo". Measured across 340 posted reviews, the impact pass ran in 6% of them: her

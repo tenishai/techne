@@ -1,6 +1,6 @@
 # Context architecture: CC coupling, durable context, and the #109/#107 findings
 
-**Status:** Decision record (Richard + Claude, 2026-06-27). Captures a strategic
+**Status:** Decision record (maintainer + Claude, 2026-06-27). Captures a strategic
 investigation that reshaped #109 and surfaced a latent question about what techne is *for*.
 **Confidence:** facts flagged inline; HIGH = official docs / live code / measured.
 
@@ -146,7 +146,7 @@ replaceability/dream/compression sit on top.
 
 ---
 
-## 6. Open decisions (Richard's call — deferred, not yet made)
+## 6. Open decisions (maintainer's call — deferred, not yet made)
 
 1. **Do we want Model B at all**, or is "recall + CC's live transcripts" enough (and B is
    over-building a system just declared done)?

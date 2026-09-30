@@ -2,9 +2,9 @@
 
 > **SUPERSEDED for 0.8.0+ work.** Release history is in [`CHANGELOG.md`](../CHANGELOG.md); current architectural direction is in [`docs/context-architecture.md`](context-architecture.md). This document covers the 0.6.x–0.7.0 arc and earlier; it is kept for historical context only.
 
-**Created**: 2026-06-17 (Raven + Richard). **Updated**: 2026-06-20 (un-shadowing arc → promotion → Librarian → **db-per-domain across 3 domains**). main `f2c884a`.
-**Scope**: techne only — cabal (#11–14) parked as a separate track.
-**Canonical remote**: `origin` = github.com/tenishai/techne. **gitea is archive — do not push there.**
+**Created**: 2026-06-17. **Updated**: 2026-06-20 (un-shadowing arc → promotion → Librarian → **db-per-domain across 3 domains**). main `f2c884a`.
+**Scope**: techne only.
+**Canonical remote**: `origin` = github.com/tenishai/techne.
 
 Status legend: ☐ todo · ◐ in progress · ☑ done · ⏸ parked/blocked
 

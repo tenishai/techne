@@ -217,10 +217,6 @@ nobody chose. If the machine is asleep at the scheduled time, launchd runs it on
   is an ordinary set under `backups/` — deliberately, so retention can reclaim it — so the
   next `--keep N` run counts it as one of the N and it ages out like any other. If you
   want it kept, move it out of `backups/` yourself.
-- **The author's fleet sweep.** `~/.techne/db_snapshot.py` discovers sqlite dbs across
-  arbitrary roots and prunes per identity. It is host-local and **does not ship**
-  (techne#742). `techne backup` covers the four domain dbs, which is what a single-machine
-  operator needs; the sweep exists for a multi-repo fleet and is not part of the package.
 
 ---
 

@@ -1040,7 +1040,7 @@ def _message_bodies(obj) -> list[str]:
 def _inbound_text(tool_response) -> str:
     """The text a tool result brought in, or "".
 
-    Shapes, from observations captured on dev04 (2026-09-25): an Agent result is
+    Shapes, from observations captured on a maintainer machine (2026-09-25): an Agent result is
     a dict whose ``content`` is a list of ``{"type": "text", "text": …}`` blocks
     and whose ``prompt`` is OUR OWN brief to the subagent; WebFetch is a dict with
     the page in ``result``; an MCP tool is a list of text blocks. ``prompt`` is
@@ -1429,7 +1429,7 @@ def main():
     # searches the bodies of the messages that block just delivered. Behind the
     # subagent gate above like the other rails (#930): a subagent's own tool
     # calls never reach here. The Agent result it hands back fires this hook in
-    # the parent session: dev04's observation ledger holds completed hand-backs
+    # the parent session: a maintainer's observation ledger holds completed hand-backs
     # as "Tool: Agent" rows under parent session ids. Supporting, not conclusive,
     # since transcript import writes the same shape. Not checked: that agent_id
     # is absent on that call, which the hooks docs imply ("only when the hook
