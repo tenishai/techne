@@ -920,12 +920,13 @@ have had AI help.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, the Developer Certificate of
 Origin sign-off every commit needs, and the policy on AI tools. Everyone taking
-part is expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md). Report
-security problems privately, as [SECURITY.md](SECURITY.md) describes.
+part is expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md). For
+questions and bug reports, see [SUPPORT.md](SUPPORT.md). Report security
+problems privately, as [SECURITY.md](SECURITY.md) describes.
 
 ## License
 
-Copyright (C) 2026 tenishai
+Copyright (C) 2026 Richard DiMartino and the techne contributors
 
 This program is free software: you can redistribute it and/or modify it under
 the terms of the GNU Affero General Public License as published by the Free

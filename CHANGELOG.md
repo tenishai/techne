@@ -18,16 +18,19 @@ All notable changes to techne are documented here. Format loosely follows
 ### Docs
 
 - **Open-source community files for the go-public release** (tenishai/agora#20).
-  `CODE_OF_CONDUCT.md` is the Contributor Covenant 2.1, verbatim, with
-  security@tenish.ai as the enforcement contact. `CONTRIBUTING.md` gains a
+  `CODE_OF_CONDUCT.md` is the Contributor Covenant 3.0, verbatim except for the
+  reporting line (security@tenish.ai) and one adopter's note removed. `SUPPORT.md` says
+  where questions, bugs and security reports go. `CONTRIBUTING.md` gains a
   "Developer Certificate of Origin" section (sign off with `git commit -s`, the DCO 1.1
   text, how to fix a missing sign-off) and a "Using AI tools" section (AI help welcome,
   disclosure in the PR description required, `Co-Authored-By:` trailer optional). The
   README gains "How this was built" and a short "Contributing" section linking both
   files and SECURITY.md. The AI-disclosure wording is the text approved in
   tenishai/agora discussion #42. Added `.github/ISSUE_TEMPLATE/` (bug report, feature
-  request, and a `config.yml` that sends security reports to SECURITY.md and turns off
-  blank issues) and `.github/pull_request_template.md`.
+  request, question, and a `config.yml` that links SECURITY.md and SUPPORT.md and turns
+  off blank issues) and `.github/pull_request_template.md`. The copyright holder is now
+  "Richard DiMartino and the techne contributors" in NOTICE and the README, and
+  `pyproject.toml`'s `authors` is "Richard DiMartino" (was "tenishai").
 - **README quickstart named the missing system packages and a PATH gap on stock
   Debian/Ubuntu** (#1121, #1122). A fresh `ubuntu:24.04` with only `python3` and `git`
   installed — the README's stated requirements — failed both install paths: the dev

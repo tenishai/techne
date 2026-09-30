@@ -1,7 +1,7 @@
 ---
 card: repo-card:techne
 updated: 2026-09-29
-anchor: pyproject.toml sha=1fa76bdd5893c1fa17cfe686d797cec4e27ab78d
+anchor: pyproject.toml sha=bcd9f80331537c89007590760921cbae07d66357
 ---
 # techne — repo card
 
