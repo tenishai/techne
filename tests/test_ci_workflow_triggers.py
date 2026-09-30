@@ -12,6 +12,8 @@ so it gets a guard that runs in the suite the trigger would have run.
 
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -1275,3 +1277,214 @@ def test_no_tracked_file_names_ci_infrastructure():
         "CI infrastructure is named in files that ship with the public repo "
         f"(#1005); move the detail to the private runbook: {hits}"
     )
+
+
+# --- DCO sign-off check -----------------------------------------------------
+
+DCO_STEP = "DCO sign-off check"
+DCO_JOBS = ("arch-cards", "fork-pr")
+
+
+def _dco_step(job: str) -> dict:
+    steps = [s for s in _job_steps(job) if s.get("name") == DCO_STEP]
+    assert len(steps) == 1, f"{job} must carry exactly one {DCO_STEP!r} step, found {len(steps)}"
+    return steps[0]
+
+
+def test_dco_check_runs_on_both_sides_of_the_trust_split():
+    """In-repo PRs reach only `arch-cards`, fork PRs only `fork-pr`, so the check
+    lives in both and the two copies must not drift apart."""
+    jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
+    trusted, forked = (_dco_step(j) for j in DCO_JOBS)
+    assert trusted == forked, "the DCO step differs between arch-cards and fork-pr"
+
+    step = trusted
+    assert step["if"] == "${{ !cancelled() && github.event_name == 'pull_request' }}"
+    assert step["env"] == {
+        "BASE_SHA": "${{ github.event.pull_request.base.sha }}",
+        "HEAD_SHA": "${{ github.event.pull_request.head.sha }}",
+    }
+    for job in DCO_JOBS:
+        assert not jobs[job].get("continue-on-error"), f"{job} swallows a failing DCO check"
+    assert not step.get("continue-on-error"), "a failing DCO check would read green"
+    assert "uses" not in step, "the check is inline shell reading git metadata, not an action"
+    # No `${{ }}` inside the script: PR-controlled values reach it through env only.
+    assert "${{" not in step["run"]
+    assert "export GIT_NO_REPLACE_OBJECTS=1" in step["run"], "refs/replace could rewrite history"
+
+
+def _runs_no_tree_code(step: dict) -> bool:
+    """True only for a checkout, or a `run:` made purely of git commands."""
+    if "uses" in step:
+        return str(step["uses"]).startswith("actions/checkout@")
+    lines = [ln.strip() for ln in str(step.get("run", "")).splitlines()]
+    lines = [ln for ln in lines if ln and not ln.startswith("#")]
+    return bool(lines) and all(ln.startswith("git ") for ln in lines)
+
+
+@pytest.mark.parametrize("job", DCO_JOBS)
+def test_dco_check_runs_before_anything_executes_the_tree(job):
+    """Any earlier step running PR code could plant a `git` shim via GITHUB_PATH,
+    a BASH_ENV via GITHUB_ENV, or refs/replace, and make the check pass."""
+    steps = _job_steps(job)
+    idx = next(i for i, s in enumerate(steps) if s.get("name") == DCO_STEP)
+    before = [s.get("name") for s in steps[:idx] if not _runs_no_tree_code(s)]
+    assert not before, f"{job}: {before} run before the DCO check and may execute PR code"
+
+
+def _git(repo: Path, *args: str, env: dict, stdin: str | None = None) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args],
+        env=env,
+        input=stdin,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _run_dco(tmp_path: Path, build, tamper=None) -> subprocess.CompletedProcess[str]:
+    """Build a repo with `build(work, commit, env)`, shallow-clone it the way
+    actions/checkout does, fetch origin/main at depth 1 like arch-cards, then run
+    the workflow's own DCO script."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")} | {
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_AUTHOR_NAME": "Ann Author",
+        "GIT_AUTHOR_EMAIL": "ann@example.com",
+        "GIT_COMMITTER_NAME": "Ann Author",
+        "GIT_COMMITTER_EMAIL": "ann@example.com",
+    }
+    work = tmp_path / "work"
+    work.mkdir()
+    _git(work, "init", "-q", "-b", "main", env=env)
+    n = iter(range(1000))
+
+    def commit(
+        msg: str, *, signoff: str | None = "Ann Author <ann@example.com>", footer: str = ""
+    ) -> str:
+        (work / f"f{next(n)}").write_text(msg)
+        _git(work, "add", "-A", env=env)
+        body = msg + (f"\n\nSigned-off-by: {signoff}" if signoff else "") + footer
+        _git(work, "commit", "-q", "-F", "-", env=env, stdin=body)
+        return _git(work, "rev-parse", "HEAD", env=env)
+
+    base, head = build(work, commit, env)
+    bare = tmp_path / "origin.git"
+    subprocess.run(["git", "clone", "-q", "--bare", str(work), str(bare)], env=env, check=True)
+    ci = tmp_path / "ci"
+    subprocess.run(
+        ["git", "clone", "-q", "--depth=1", "--branch", "feature", f"file://{bare}", str(ci)],
+        env=env,
+        check=True,
+    )
+    main_ref = "+refs/heads/main:refs/remotes/origin/main"
+    _git(ci, "fetch", "-q", "--depth=1", "origin", main_ref, env=env)
+    if tamper:
+        tamper(ci, env | {"BASE_SHA": base, "HEAD_SHA": head})
+    script = _dco_step("arch-cards")["run"]
+    return subprocess.run(
+        ["bash", "-c", script],
+        cwd=ci,
+        env=env | {"BASE_SHA": base, "HEAD_SHA": head},
+        capture_output=True,
+        text=True,
+    )
+
+
+def _history(work: Path, commit, env, *, feature: list[dict]) -> tuple[str, str]:
+    # main's history predates DCO: unsigned, and must never be flagged.
+    commit("old main 1", signoff=None)
+    commit("old main 2", signoff=None)
+    base = commit("main tip", signoff=None)
+    _git(work, "checkout", "-q", "-b", "feature", env=env)
+    for c in feature:
+        commit(**c)
+    return base, _git(work, "rev-parse", "HEAD", env=env)
+
+
+def test_dco_check_passes_signed_commits_over_unsigned_history(tmp_path):
+    r = _run_dco(
+        tmp_path, lambda w, c, e: _history(w, c, e, feature=[{"msg": "a"}, {"msg": "b"}])
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "2 commit(s) signed off" in r.stdout
+
+
+def test_dco_check_fails_an_unsigned_commit_and_names_it(tmp_path):
+    shas = {}
+
+    def build(w, c, e):
+        base, head = _history(w, c, e, feature=[{"msg": "a"}, {"msg": "b", "signoff": None}])
+        shas["bad"] = head
+        return base, head
+
+    r = _run_dco(tmp_path, build)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert f"commit {shas['bad'][:12]} has no" in r.stdout
+    assert "Developer Certificate of Origin" in r.stdout
+
+
+def test_dco_check_fails_a_signoff_that_does_not_match_the_author(tmp_path):
+    r = _run_dco(
+        tmp_path,
+        lambda w, c, e: _history(
+            w, c, e, feature=[{"msg": "a", "signoff": "Someone Else <else@example.com>"}]
+        ),
+    )
+    assert r.returncode == 1, r.stdout + r.stderr
+
+
+def test_dco_check_skips_merge_commits(tmp_path):
+    def build(w, c, e):
+        _history(w, c, e, feature=[{"msg": "a"}])
+        _git(w, "checkout", "-q", "main", env=e)
+        base = c("main moves on", signoff=None)  # base.sha is main's tip at event time
+        _git(w, "checkout", "-q", "feature", env=e)
+        _git(w, "merge", "-q", "--no-edit", "main", env=e)  # unsigned merge commit
+        return base, _git(w, "rev-parse", "HEAD", env=e)
+
+    r = _run_dco(tmp_path, build)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_dco_check_finds_a_signoff_outside_the_last_trailer_block(tmp_path):
+    """A prepare-commit-msg hook that appends its own trailer paragraph after
+    `git commit -s` leaves Signed-off-by outside git's trailer block; the
+    sign-off still counts."""
+    footer = "\n\nCo-Authored-By: Someone <someone@example.com>"
+    r = _run_dco(
+        tmp_path, lambda w, c, e: _history(w, c, e, feature=[{"msg": "a", "footer": footer}])
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_dco_check_is_not_fooled_by_sigpipe_on_a_long_message(tmp_path):
+    """Sign-off near the top of a >100 KB message: `grep -q` exits early, `tr`
+    takes SIGPIPE, and under pipefail the commit read as unsigned."""
+    footer = "\n\n" + "\n".join(f"line {i} " + "x" * 60 for i in range(3000))
+    r = _run_dco(
+        tmp_path, lambda w, c, e: _history(w, c, e, feature=[{"msg": "a", "footer": footer}])
+    )
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+
+
+def test_dco_check_ignores_replace_refs(tmp_path):
+    """A `refs/replace/` entry swapping an unsigned commit for a signed lookalike
+    must not make it pass."""
+
+    def tamper(ci, env):
+        _git(ci, "fetch", "-q", "--unshallow", "origin", env["HEAD_SHA"], env=env)
+        head = env["HEAD_SHA"]
+        fake = _git(ci, "cat-file", "commit", head, env=env) + (
+            "\n\nSigned-off-by: Ann Author <ann@example.com>\n"
+        )
+        fake_sha = _git(ci, "hash-object", "-t", "commit", "-w", "--stdin", env=env, stdin=fake)
+        _git(ci, "replace", head, fake_sha, env=env)
+
+    r = _run_dco(
+        tmp_path,
+        lambda w, c, e: _history(w, c, e, feature=[{"msg": "a", "signoff": None}]),
+        tamper=tamper,
+    )
+    assert r.returncode == 1, r.stdout + r.stderr

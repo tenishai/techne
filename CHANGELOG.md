@@ -17,6 +17,19 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Docs
 
+- **Open-source community files for the go-public release** (#1130).
+  `CODE_OF_CONDUCT.md` is the Contributor Covenant 3.0, verbatim except for the
+  reporting line (security@tenish.ai) and one adopter's note removed. `SUPPORT.md` says
+  where questions, bugs and security reports go. `CONTRIBUTING.md` gains a
+  "Developer Certificate of Origin" section (sign off with `git commit -s`, the DCO 1.1
+  text, how to fix a missing sign-off) and a "Using AI tools" section (AI help welcome,
+  disclosure in the PR description required, `Co-Authored-By:` trailer optional). The
+  README gains "How this was built" and a short "Contributing" section linking both
+  files, SUPPORT.md and SECURITY.md. Added `.github/ISSUE_TEMPLATE/` (bug report, feature
+  request, question, and a `config.yml` that links SECURITY.md and SUPPORT.md and turns
+  off blank issues) and `.github/pull_request_template.md`. The copyright holder is now
+  "Richard DiMartino and the techne contributors" in NOTICE and the README, and
+  `pyproject.toml`'s `authors` is "Richard DiMartino" (was "tenishai").
 - **README quickstart named the missing system packages and a PATH gap on stock
   Debian/Ubuntu** (#1121, #1122). A fresh `ubuntu:24.04` with only `python3` and `git`
   installed — the README's stated requirements — failed both install paths: the dev
@@ -82,6 +95,17 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Added
 
+- **CI checks DCO sign-off on every pull request** (#1130). A `DCO sign-off check`
+  step fails when a non-merge commit between the PR's base and head has no
+  `Signed-off-by:` line matching its author, and names each such commit. The line may
+  sit anywhere in the message, so a hook that appends its own trailer paragraph after
+  `git commit -s` does not break it. It runs in `arch-cards` for in-repo PRs and in
+  `fork-pr` for fork PRs, as inline shell that reads commit metadata with replace refs
+  off. In both jobs it runs before any step that installs, imports or executes the PR's
+  tree, so PR code in the same job cannot run before it or change what it sees. A fork
+  PR runs the fork's copy of the workflow, so this does not stop a fork that edits the
+  step itself; that limit is the same one the trust-split comment in `test.yml` records.
+  Commits already on `main` predate the rule and are not checked.
 - **`techne init --allow-worktree`** (#436). Registers even when techne runs from a git
   worktree (a bare repo's worktree may be your only checkout), with a stderr warning
   naming the worktree and what breaks when it is pruned. A flag only; there is no env

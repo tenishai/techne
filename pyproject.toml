@@ -9,7 +9,7 @@ description = "Agentic memory and knowledge system for AI coding agents"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
 requires-python = ">=3.11"
-authors = [{ name = "tenishai" }]
+authors = [{ name = "Richard DiMartino" }]
 keywords = ["ai", "agents", "memory", "knowledge", "claude", "mcp"]
 classifiers = [
     "Development Status :: 3 - Alpha",
