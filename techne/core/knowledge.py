@@ -418,7 +418,18 @@ def retire(db_path: Path, old_id: int, survivor_id: int) -> int:
 # "corrects 2 errors" would name entry 2. "superseded by #N" is the opposite
 # direction and does not match (`supersedes?` needs `:` or whitespace next), and
 # other repos' refs (`cabal#12`) do not match either.
-_REF = r"(?:(?:(?:techne|knowledge)\s*)?#|\N{BRAIN})\s*(\d{1,9})\b"
+#
+# `ref_word` (techne#1065) captures which marker matched: a literal "techne#N" is
+# AMBIGUOUS — since 2026-08-31 (REF_CONVENTION_DATE) the convention is that
+# "techne#N" names a GitHub issue and a knowledge row is written as "knowledge #N"
+# or with the brain sigil, but nothing stops an entry's prose from typing
+# "techne#N" while actually meaning the issue, not this row. `techne doctor` ran
+# on 2026-09-28 against two entries that did exactly that (knowledge 1769 read
+# "a correction to techne#621's own rationale" — issue #621 — and matched live,
+# unrelated knowledge row 621; knowledge 3537 similarly matched row 896 via
+# "CORRECTS techne#896's ... framing", issue #896). A bare "#N", "knowledge #N",
+# or the brain sigil carries no such ambiguity and is never flagged.
+_REF = r"(?:(?P<ref_word>techne|knowledge)\s*#|#|\N{BRAIN})\s*(?P<ref_id>\d{1,9})\b"
 _DECLARATION = re.compile(
     r"\b(?:supersedes?|corrects|correction\s+(?:to|of))\s*:?\s+" + _REF,
     re.IGNORECASE,
@@ -428,18 +439,42 @@ _DECLARATION = re.compile(
 _DECLARATION_MORE = re.compile(r"\s*(?:\([^)]*\)\s*)?(?:,|\band\b|&)\s*" + _REF, re.IGNORECASE)
 DECLARATION_WINDOW = 400
 
+# Since this date the convention is: knowledge refs use "knowledge #N" or the brain
+# sigil, and "techne#N" names a GitHub issue (techne#1065). A declarer written on or
+# after this date gets no benefit of the doubt for a bare "techne#N" — it is not
+# accepted as a knowledge reference at all. A declarer written before this date may
+# still mean a knowledge row by it (e.g. knowledge 1155's "SUPERSEDES techne#882"),
+# so it is still accepted there, just always reported as ambiguous (techne#1065).
+REF_CONVENTION_DATE = "2026-08-31"
+
+
+def _declared_targets_with_ambiguity(content: str) -> list[tuple[int, bool]]:
+    """Like `declared_targets`, but keeps, per id, whether the match is ambiguous.
+
+    A match is ambiguous when the marker that matched is the literal word
+    "techne" immediately before the `#` — the one form that can equally name a
+    GitHub issue (techne#1065). Ids are deduplicated, keeping the first match's
+    ambiguity (a content block declares each target once in practice).
+    """
+    head = (content or "")[:DECLARATION_WINDOW]
+    targets: list[tuple[int, bool]] = []
+    for m in _DECLARATION.finditer(head):
+        targets.append((int(m.group("ref_id")), (m.group("ref_word") or "").lower() == "techne"))
+        pos = m.end()
+        while more := _DECLARATION_MORE.match(head, pos):
+            targets.append(
+                (int(more.group("ref_id")), (more.group("ref_word") or "").lower() == "techne")
+            )
+            pos = more.end()
+    seen: dict[int, bool] = {}
+    for target_id, ambiguous in targets:
+        seen.setdefault(target_id, ambiguous)
+    return list(seen.items())
+
 
 def declared_targets(content: str) -> list[int]:
     """Knowledge ids that *content* says, in its opening, it replaces."""
-    head = (content or "")[:DECLARATION_WINDOW]
-    targets: list[int] = []
-    for m in _DECLARATION.finditer(head):
-        targets.append(int(m.group(1)))
-        pos = m.end()
-        while more := _DECLARATION_MORE.match(head, pos):
-            targets.append(int(more.group(1)))
-            pos = more.end()
-    return list(dict.fromkeys(targets))
+    return [target_id for target_id, _ in _declared_targets_with_ambiguity(content)]
 
 
 def find_declared_supersessions(db_path: Path) -> list[dict]:
@@ -456,30 +491,46 @@ def find_declared_supersessions(db_path: Path) -> list[dict]:
     `_retire_in_conn` needs a LIVE survivor, and in a chain a->b->c retiring b
     first would leave a nothing live to retire into.
 
-    Advisory, never a verdict: `techne#N` in prose can name a GitHub issue rather
-    than a knowledge row, and that ambiguity is not decidable from the text.
+    Each pair carries `ambiguous` (techne#1065): True when the ONLY reference that
+    matched the target is a literal "techne#N" — the one marker that can equally
+    name a GitHub issue rather than this knowledge row, and whose ambiguity is not
+    decidable from the text alone. A declarer written on or after
+    `REF_CONVENTION_DATE` gets no such match at all (a bare "techne#N" there is not
+    accepted as a knowledge reference, full stop — see `_declared_targets_with_ambiguity`);
+    for an older declarer it is still accepted, but always comes back `ambiguous`.
+    Callers MUST NOT render an ambiguous pair as a ready-to-run command — it is a
+    check item, not a verdict (techne#1065; two production pairs the day this was
+    found would have retired live, unrelated knowledge if pasted as printed).
     """
     conn = connect(db_path)
     try:
         rows = conn.execute(
-            "SELECT id, substr(content, 1, ?) AS head, superseded_by, status FROM knowledge",
+            "SELECT id, substr(content, 1, ?) AS head, superseded_by, status, created_at "
+            "FROM knowledge",
             (DECLARATION_WINDOW,),
         ).fetchall()
     finally:
         conn.close()
-    live = {
-        r["id"]: r["head"] for r in rows if r["superseded_by"] is None and r["status"] != "archived"
-    }
-    best: dict[int, int] = {}
-    for declarer, head in live.items():
-        for target in declared_targets(head):
+    live = {r["id"]: r for r in rows if r["superseded_by"] is None and r["status"] != "archived"}
+    best: dict[int, dict] = {}
+    for declarer, row in live.items():
+        declarer_is_post_convention = (row["created_at"] or "") >= REF_CONVENTION_DATE
+        for target, ambiguous in _declared_targets_with_ambiguity(row["head"]):
+            if ambiguous and declarer_is_post_convention:
+                # Post-convention, "techne#N" never means a knowledge row.
+                continue
             if target >= declarer or target not in live:
                 continue
-            if target not in best or declarer > best[target]:
-                best[target] = declarer
+            if target not in best or declarer > best[target]["declarer"]:
+                best[target] = {"declarer": declarer, "ambiguous": ambiguous}
     return [
-        {"target": t, "declarer": d, "target_preview": (live[t] or "")[:80].replace("\n", " ")}
-        for t, d in sorted(best.items())
+        {
+            "target": t,
+            "declarer": info["declarer"],
+            "ambiguous": info["ambiguous"],
+            "target_preview": (live[t]["head"] or "")[:80].replace("\n", " "),
+        }
+        for t, info in sorted(best.items())
     ]
 
 

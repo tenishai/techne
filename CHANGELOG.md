@@ -5,6 +5,25 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **`techne doctor`'s prose-supersession check no longer prints a ready-to-run
+  `techne knowledge supersede` command for a pair it matched only through a bare
+  `techne#N` reference** (#1065). On 2026-09-28 doctor printed exactly that for two
+  live, unrelated knowledge rows: knowledge 1769 read "a correction to techne#621's
+  own rationale" (meaning issue #621, not knowledge row 621, a grep-assist restart
+  checklist), and knowledge 3537 read "CORRECTS techne#896's ... framing" (issue
+  #896, not knowledge row 896, the dev02 hardware profile). `find_declared_supersessions`
+  now marks a pair `ambiguous` when the only match is a literal `techne#N`, and
+  doctor prints those as CHECK items — a sentence naming what to verify, never a
+  copy-pasteable command — while a genuine `knowledge #N` or brain-sigil match still
+  prints as before. Separately, since the 2026-08-31 knowledge-ref convention
+  (`knowledge #N` / the brain sigil for a knowledge row, `techne#N` for an issue), a
+  declarer written on or after that date gets no benefit of the doubt at all: a bare
+  `techne#N` there is not accepted as a knowledge reference, so no pair is reported
+  for it. An older declarer (e.g. knowledge 1155's "SUPERSEDES techne#882") still
+  needs it and still gets it, just always flagged `ambiguous`.
+
 ## [0.18.0] — 2026-09-30
 
 ### Deprecated

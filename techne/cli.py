@@ -549,7 +549,13 @@ def _render_declared_supersessions(db_path) -> int:
     not always remediable: `techne#N` in prose can name a GitHub issue, not a
     knowledge row, and a false match could only be cleared by retiring a row that
     should stay live. A condition you can detect but not remedy belongs in the
-    detail, never the verdict (docs/arch/liveness.md). Returns the count found.
+    detail, never the verdict (docs/arch/liveness.md).
+
+    A pair matched only through a bare `techne#N` reference is printed as a CHECK
+    item, never as a ready-to-run command (techne#1065): on 2026-09-28 doctor
+    printed two such pairs as finished `techne knowledge supersede` commands, and
+    both would have retired live, unrelated knowledge if pasted as-is. Returns the
+    count found (ready + check items).
     """
     from techne.core.knowledge import find_declared_supersessions
 
@@ -563,17 +569,39 @@ def _render_declared_supersessions(db_path) -> int:
     if not pairs:
         click.echo("  ✓ none")
         return 0
-    click.echo(
-        f"  ⚠ {len(pairs)} live entr{'y' if len(pairs) == 1 else 'ies'} named as replaced "
-        "by a newer entry. Check each, then run the command, in this order:"
-    )
-    for p in pairs[:_DECLARED_SUPERSESSIONS_SHOWN]:
+
+    ready = [p for p in pairs if not p["ambiguous"]]
+    ambiguous = [p for p in pairs if p["ambiguous"]]
+
+    if ready:
         click.echo(
-            f"    techne knowledge supersede {p['target']} --by {p['declarer']}"
-            f"   # {p['target_preview']}"
+            f"  ⚠ {len(ready)} live entr{'y' if len(ready) == 1 else 'ies'} named as replaced "
+            "by a newer entry. Check each, then run the command, in this order:"
         )
-    if len(pairs) > _DECLARED_SUPERSESSIONS_SHOWN:
-        click.echo(f"    … and {len(pairs) - _DECLARED_SUPERSESSIONS_SHOWN} more")
+        for p in ready[:_DECLARED_SUPERSESSIONS_SHOWN]:
+            click.echo(
+                f"    techne knowledge supersede {p['target']} --by {p['declarer']}"
+                f"   # {p['target_preview']}"
+            )
+        if len(ready) > _DECLARED_SUPERSESSIONS_SHOWN:
+            click.echo(f"    … and {len(ready) - _DECLARED_SUPERSESSIONS_SHOWN} more")
+
+    if ambiguous:
+        click.echo(
+            f"  ? {len(ambiguous)} pair{'s' if len(ambiguous) != 1 else ''} matched only "
+            "through a bare `techne#N` reference — CHECK, do not run as printed "
+            "(`techne#N` may name a GitHub issue, not knowledge #N):"
+        )
+        for p in ambiguous[:_DECLARED_SUPERSESSIONS_SHOWN]:
+            click.echo(
+                f"    CHECK: entry {p['declarer']} says it replaces techne#{p['target']} — "
+                f"confirm that means knowledge #{p['target']} (not GitHub issue #{p['target']}) "
+                f"before running `techne knowledge supersede {p['target']} --by {p['declarer']}`"
+                f"   # {p['target_preview']}"
+            )
+        if len(ambiguous) > _DECLARED_SUPERSESSIONS_SHOWN:
+            click.echo(f"    … and {len(ambiguous) - _DECLARED_SUPERSESSIONS_SHOWN} more")
+
     click.echo(
         "  (a `#N` in prose may name an issue, not a knowledge entry; not counted as a failure)"
     )
