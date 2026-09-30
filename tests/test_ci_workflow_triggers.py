@@ -12,6 +12,7 @@ so it gets a guard that runs in the suite the trigger would have run.
 
 from __future__ import annotations
 
+import difflib
 import os
 import subprocess
 import sys
@@ -1319,6 +1320,37 @@ def test_dco_check_runs_on_both_sides_of_the_trust_split():
         "fork-pr must not exempt any author string — a fork can forge dependabot[bot]'s identity"
     )
 
+    # Pin the EXACT difference, not just "they differ and the bot string is in
+    # one but not the other" — that weaker shape lets fork-pr's own strict
+    # matching drift (or break) undetected, as long as the change doesn't
+    # mention BOT_AUTHOR (Prudence, PR #1140 round 1, Important 1). A change to
+    # fork-pr outside these three hunks — the skip counter, the bot-skip
+    # block, or the summary line — now fails here even though it never
+    # touches the exemption text.
+    diff = list(
+        difflib.unified_diff(
+            forked["run"].splitlines(), trusted["run"].splitlines(), n=0, lineterm=""
+        )
+    )
+    hunks = [line for line in diff if not line.startswith(("--- ", "+++ "))]
+    assert hunks == [
+        "@@ -13,0 +14 @@",
+        "+skipped=0",
+        "@@ -15,0 +17,5 @@",
+        f'+  if [ "$author" = "{BOT_AUTHOR}" ]; then',
+        '+    echo "DCO: skipping ${c:0:12} as a bot commit ($author)"',
+        "+    skipped=$((skipped + 1))",
+        "+    continue",
+        "+  fi",
+        "@@ -26 +32 @@",
+        '-echo "DCO: $(echo "$commits" | wc -l | tr -d \' \') commit(s) signed off by their authors"',
+        '+echo "DCO: $(($(echo "$commits" | wc -l | tr -d \' \') - skipped)) commit(s) signed off '
+        'by their authors$( [ "$skipped" -gt 0 ] && printf \' (%s skipped as bot commits)\' '
+        '"$skipped" )"',
+    ], "arch-cards' script diverges from fork-pr's by more than the documented exemption:\n" + "\n".join(
+        diff
+    )
+
     for job in DCO_JOBS:
         assert not jobs[job].get("continue-on-error"), f"{job} swallows a failing DCO check"
     for step in (trusted, forked):
@@ -1559,3 +1591,30 @@ def test_dco_check_still_requires_signoff_from_a_human_in_both_jobs(tmp_path):
     for job in DCO_JOBS:
         r = _run_dco(tmp_path / job, build, job=job)
         assert r.returncode == 1, f"{job}: {r.stdout + r.stderr}"
+
+
+def test_dco_check_fork_pr_passes_a_correctly_signed_human_commit(tmp_path):
+    """fork-pr's own strict copy, not just arch-cards, must still pass an
+    ordinary signed-off commit — the behavioural tests above never ran this
+    script on a passing case (Prudence, PR #1140 round 1, Important 1)."""
+    r = _run_dco(
+        tmp_path, lambda w, c, e: _history(w, c, e, feature=[{"msg": "a"}, {"msg": "b"}]),
+        job="fork-pr",
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "2 commit(s) signed off" in r.stdout
+
+
+def test_dco_check_fork_pr_fails_a_mismatched_signoff(tmp_path):
+    """The real Dependabot failure mode (PR #1135's commit 91b9728e2d5a): a
+    Signed-off-by present but under a different address than the commit's
+    author — `dependabot[bot] <support@github.com>` vs. its noreply author
+    email — not a missing trailer. fork-pr carries no exemption for this."""
+    r = _run_dco(
+        tmp_path,
+        lambda w, c, e: _history(
+            w, c, e, feature=[{"msg": "a", "signoff": "Ann Author <support@example.com>"}]
+        ),
+        job="fork-pr",
+    )
+    assert r.returncode == 1, r.stdout + r.stderr

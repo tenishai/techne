@@ -8,9 +8,10 @@ All notable changes to techne are documented here. Format loosely follows
 ### Fixed
 
 - **`DCO sign-off check` no longer fails every Dependabot PR** (PR #1135). Dependabot
-  commits carry no `Signed-off-by:` trailer and Dependabot cannot be told to add one,
-  so the check added in #1130 failed on every dependency-update PR. `arch-cards` (the
-  same-repo job) now skips a commit authored exactly as `dependabot[bot]
+  does sign off, but as `dependabot[bot] <support@github.com>` — an address that never
+  matches its noreply author email, and neither is configurable — so the check added
+  in #1130 failed on every dependency-update PR. `arch-cards` (the same-repo job) now
+  skips a commit authored exactly as `dependabot[bot]
   <49699333+dependabot[bot]@users.noreply.github.com>` and logs which commits it
   skipped as bot commits; `fork-pr` gets no such exemption, because a fork PR can
   forge any commit author, including that one.

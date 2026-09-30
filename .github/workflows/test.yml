@@ -833,14 +833,19 @@ jobs:
       #
       # ARCH-CARDS-ONLY EXEMPTION (PR #1135): a commit authored EXACTLY as
       # `dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>` is
-      # skipped rather than checked for a Signed-off-by trailer. Dependabot
-      # commits carry no such trailer and Dependabot cannot be told to add one,
-      # so every Dependabot PR failed this check until this exemption. Safe only
-      # here: this job runs same-repo PRs, where GitHub itself stamps that
-      # author string on the commit. `fork-pr` gets no exemption — a fork PR can
-      # forge any commit author, including this one, so a fork claiming to be
-      # dependabot still fails. This is the only place the two copies differ;
-      # see tests/test_ci_workflow_triggers.py::
+      # skipped rather than checked for a Signed-off-by trailer. Dependabot DOES
+      # sign off, but as `dependabot[bot] <support@github.com>` — that address
+      # never matches its noreply author email, and neither one is
+      # configurable — so every Dependabot PR failed this check until this
+      # exemption. Safe because same-repo writers are already trusted: anyone
+      # with `contents: write` can already push a commit authored as
+      # dependabot (or amend one without `--reset-author`), and could forge a
+      # matching Signed-off-by under any name just as easily, so skipping this
+      # one exact author adds no real capability. `fork-pr` gets no exemption —
+      # a fork PR is not a trusted writer and can forge any commit author,
+      # including this one, so a fork claiming to be dependabot still fails.
+      # This is the only place the two copies differ; see
+      # tests/test_ci_workflow_triggers.py::
       # test_dco_check_runs_on_both_sides_of_the_trust_split.
       - name: DCO sign-off check
         if: ${{ !cancelled() && github.event_name == 'pull_request' }}
@@ -880,7 +885,7 @@ jobs:
             echo "Sign off with 'git commit -s'. To fix existing commits, see 'Developer Certificate of Origin' in CONTRIBUTING.md."
             exit 1
           fi
-          echo "DCO: $(($(echo "$commits" | wc -l | tr -d ' ') - skipped)) commit(s) signed off by their authors"
+          echo "DCO: $(($(echo "$commits" | wc -l | tr -d ' ') - skipped)) commit(s) signed off by their authors$( [ "$skipped" -gt 0 ] && printf ' (%s skipped as bot commits)' "$skipped" )"
 
       # Keep the versioned name: only python3.12/3.13/3.14 are proven present;
       # a bare `python3` symlink is NOT implied by the image. This step also
@@ -1081,10 +1086,11 @@ jobs:
       # NO BOT EXEMPTION HERE, ON PURPOSE (PR #1135): `arch-cards` skips a
       # commit authored exactly as
       # `dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>`,
-      # because on that trusted same-repo path GitHub itself stamps that
-      # author string. A fork PR can forge any commit author, including this
-      # one, so a fork claiming to be dependabot must still sign off — this
-      # check stays strict here. This is the only
+      # because on that trusted same-repo path anyone who could push that
+      # author string already has write access and could forge a matching
+      # Signed-off-by too. A fork PR is not a trusted writer and can forge any
+      # commit author, including this one, so a fork claiming to be dependabot
+      # must still sign off — this check stays strict here. This is the only
       # place the two copies differ; see tests/test_ci_workflow_triggers.py::
       # test_dco_check_runs_on_both_sides_of_the_trust_split.
       - name: DCO sign-off check
