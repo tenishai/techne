@@ -4,7 +4,7 @@
 # Reasoning goes in the issue and the PR, which are dated and can go stale
 # harmlessly.
 #
-# Counts `#` and `//` runs, and `/* */` in .ts/.js/.go. NOT docstrings — see tenishai/agents-archive#88.
+# Counts `#` and `//` runs, and `/* */` in .ts/.js/.go. NOT docstrings.
 # Refuses rather than warns; a warning is what scrolls past.
 # Escape deliberately:  ALLOW_LONG_COMMENT=1 git commit ...
 #

@@ -37,7 +37,7 @@ _SYSTEM_REMINDER = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTA
 # whole prompt is <task-notification>…</task-notification> (task id, tool-use id,
 # output path, status, summary). It reaches UserPromptSubmit like a typed prompt,
 # but nobody asked anything: searching on it injected unrelated rows on 36% of
-# per-turn recall turns (496 of 1,377 over 14 days on dev04).
+# per-turn recall turns (496 of 1,377 over 14 days on the maintainer's machine).
 _TASK_NOTIFICATION = re.compile(r"<task-notification>.*?</task-notification>", re.DOTALL)
 
 # techne#1080 — other harness frames that reach UserPromptSubmit as the prompt.

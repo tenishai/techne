@@ -1560,7 +1560,7 @@ def guide(ctx, name):
 def bindings(ctx, as_json):
     """What each knowledge domain is bound to (techne#552 part 4).
 
-    Richard's "same feel" question, answered on the axis liminal and cabal answer it
+    The "same feel" question, answered on the axis a larger deployment answers it
     on: the CONNECTION is uniform, whatever is behind it. One question — what is this
     bound to, and can I reach it — asked identically of the archivist, librarian,
     architect and codex.

@@ -608,7 +608,7 @@ def resolve_repo_db_for_query(config: Config, start_path: Path | str) -> Path | 
     read consumers must no-op on None rather than create an empty db.
     """
     ensure_legacy_migrated(config)
-    # PRIMARY, not the worktree (tenishai/agents#10). A `git worktree` checkout has its
+    # PRIMARY, not the worktree. A `git worktree` checkout has its
     # own `.git`, so `find_repo_root` stops there — a path the codex has never indexed,
     # which made every query from inside a review or a worktree-per-session checkout
     # answer "no codex index for the active repo". READ PATH ONLY: the write path still
