@@ -1,6 +1,6 @@
 # Proposal: The Coherence Layer — from *accumulate* to *compound*
 
-**Status**: Draft (design; pre-implementation).
+**Status**: Implemented in large part — the contradiction rail (MCP `techne_conflict_emit` / `_ingest`), decayed ranking in search, and the faithfulness gate (`techne_faithfulness_emit` / `_ingest`) ship; see CHANGELOG.md for what landed when. The design below is the original draft, kept as the record.
 **Author**: Raven (Opus 4.8) + Richard, paired session 2026-07-05.
 **Tracking issue**: TBD (issues proposed in §6).
 **Grounded in** (all 2026-07-04/05): a ground-truth read of techne's own internals; a field survey of 10 production memory systems (mem0, Zep/Graphiti, Letta, MemOS, cognee, Supermemory, Honcho, A-MEM, Memary, memobase); ~20 arxiv papers (see §7); and source-reads of Karpathy's *LLM Wiki*, NirDiamant's *Agent_Memory_Techniques*, and Google's *always-on-memory-agent*.

@@ -116,7 +116,7 @@ CLI: `techne librarian search`, `techne librarian show <id>`, `techne librarian 
 
 The role is the *question* — "what is written down" — not a particular file set. That
 is what lets the corpus grow (transcripts today, a design-docs directory tomorrow)
-without the call changing. See [Using the Librarian](librarian-guide.md) for getting
+without the call changing. See [Using the Librarian](https://github.com/tenishai/techne/blob/main/docs/librarian-guide.md) for getting
 your transcripts in.
 
 ## 3. The architect — what is worth borrowing?
@@ -200,7 +200,7 @@ the one that will mislead you. **Pass `repo` explicitly when it matters, and rea
 **And separately from *which* repo — how *old* it is.** The codex is the one domain that
 will confidently tell you about code you deleted last week if you have not re-indexed.
 Two different axes: the wrong repo above, a stale snapshot here. See
-[codex usage](codex-usage.md) for when to reach for it and when not to.
+[codex usage](https://github.com/tenishai/techne/blob/main/docs/codex-usage.md) for when to reach for it and when not to.
 
 Since 0.17.0 you are told rather than left to remember (#937). The SessionStart banner's
 `codex:freshness` check compares the `indexed_head` recorded at index time against the
@@ -319,6 +319,13 @@ Nothing about the call changed. Not the name, not the arguments, not the shape o
 answer. What changed is `binding` and `target` — and the answer *told you*, so you
 never have to guess which store you are reading.
 
+`techne_recall` does the same per row once `connections` are configured. It merges the
+remote stores' rows into your local page, and each federated row carries `store` (the
+connection name, or `local`) and `role` (that connection's role). The older `_store` /
+`_role` keys carry the same values and are deprecated; read `store` / `role` (#1102). The
+merge keeps your local page's order and its reserved head slots, and interleaves each
+remote store's rows in their own order, local first (#1089).
+
 (One honest caveat, here rather than buried: for the **codex** the call is not quite
 invariant — your working directory is a silent argument to it. §4 has the measurement.)
 
@@ -337,7 +344,7 @@ populate command, and where the filler lives when it is not in this repo.
 
 | domain | enable | populate | filler ships with techne? |
 |---|---|---|---|
-| **archivist** | on by default (`local`); the `[vectors]` extra adds vector search, then `techne vectors backfill` for rows already stored | `techne_store` from your agent, or `techne knowledge add` | **yes** — it is your own memory |
+| **archivist** | on by default (`local`); the `[vectors]` extra adds vector search, then `techne init` (or `techne vectors backfill`) embeds rows already stored | `techne_store` from your agent, or `techne knowledge add` | **yes** — it is your own memory |
 | **librarian** | on by default — **FTS only, by construction** | `techne librarian index-transcripts` · `techne librarian index-markdown DIR` | **yes**, but nothing runs it for you — see below |
 | **architect** | on by default | `techne architect add` for one pattern · `techne architect ingest FILE.md` for a corpus | **yes** — `add` ships, and so do the richer procedures: `techne guide investigating` / `techne guide surveying`, with `investigate-url` / `survey-field` stub skills installed by `techne init --skills` |
 | **codex** | the `[codex]` extra | `techne codex index .` · `codex index-all` · `codex watch` | **yes** |
@@ -349,8 +356,9 @@ The extra adds vector search to the **archivist** — `search_vec`, reached thro
 FTS `MATCH` **by construction rather than by degradation**: there is no vector branch to
 enable and no `documents_vec` table to fill.
 
-And installing it does not embed rows that are already there. Run `techne vectors backfill`
-afterwards, or the vector channel is half-built — which fails in this release's signature
+And installing it does not embed rows that are already there. Run `techne init` afterwards
+(it downloads the model and embeds what is stored; `techne vectors backfill` does the same
+without the rest of init), or the vector channel is half-built — which fails in this release's signature
 way, because **FTS keeps answering**. A partially embedded store returns results, ranks
 them plausibly, and never says that half its corpus is unreachable by meaning.
 
@@ -361,7 +369,7 @@ caller is the CLI command itself. That is the strongest claim the call graph can
 and deliberately not "nothing runs it": deployments wire hooks as shell strings in the
 host's `settings.json`, which no import graph can see. techne#704 forced exactly this
 correction on the identical reasoning about `vectors backfill`
-([`docs/arch/search-embeddings.md`](arch/search-embeddings.md)), so **check your own hooks
+([`docs/arch/search-embeddings.md`](https://github.com/tenishai/techne/blob/main/docs/arch/search-embeddings.md)), so **check your own hooks
 before concluding nothing is indexing.**
 
 If nothing is, techne's own `self-care` skill states the consequence. The quote is the
@@ -420,10 +428,11 @@ learning them now is that they are designed to carry to other tools — not that
 other tool carries them yet.
 
 **The codex is experimental and manually indexed by default.** `techne codex index` is a
-thing you run, and between runs the graph is a snapshot with a date on it. Two switches opt
-out of that — `techne codex watch` re-indexes on file changes, and
-`hooks.codex_reindex_on_edit` re-indexes a touched file after every Write/Edit — both off
-by default. **The codex also resolves from your working directory**, which can answer
+thing you run, and between runs the graph is a snapshot with a date on it, except for
+what the agent edits: `hooks.codex_reindex_on_edit`, on by default, re-indexes a touched
+file after every Write/Edit. Changes made outside the agent wait for the next `codex
+index`, unless you run `techne codex watch`, which re-indexes on file changes and is
+opt-in. **The codex also resolves from your working directory**, which can answer
 confidently about the wrong repo; see §4.
 
 **`techne_recall` is still the default for "what do we know about X".** It escalates
@@ -438,6 +447,6 @@ that recall does better.
 - **`techne bindings`** — the map, any time you want it.
 - **[`docs/mcp-tools.md`](./mcp-tools.md#the-four-domains)** — the four domains as
   agent-facing tools, with the full argument list.
-- **[Using the Librarian](librarian-guide.md)** — the one domain with enough moving
+- **[Using the Librarian](https://github.com/tenishai/techne/blob/main/docs/librarian-guide.md)** — the one domain with enough moving
   parts to need its own guide.
-- **[`docs/codex-usage.md`](./codex-usage.md)** — when the code graph earns its keep.
+- **[`docs/codex-usage.md`](https://github.com/tenishai/techne/blob/main/docs/codex-usage.md)** — when the code graph earns its keep.

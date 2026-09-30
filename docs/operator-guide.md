@@ -1,7 +1,7 @@
 # Operator guide
 
 *Habits we learned running techne on our own machines — read this after
-[welcome.md](welcome.md), alongside the [README](../README.md).*
+[welcome.md](welcome.md), alongside the [README](https://github.com/tenishai/techne/blob/main/README.md).*
 
 The [welcome guide](welcome.md) tours what techne does. This guide is narrower:
 the recommended hook configuration, and five things that cost us real time
@@ -25,13 +25,15 @@ to a no-op on error.
 | `hooks.codex_reindex_on_edit` | Re-indexes just the file you edited, so the two codex rails above don't answer from a stale graph between sessions. | A reindex after each edit. |
 | `hooks.per_turn_recall_chars` | Default is 1000, not the code's historical 450. Longer injected facts mean fewer get cut before the part that matters — a truncated row still ends in `…`, so you can always tell. | Raises the per-prompt ceiling above (1000 vs 450 chars per row, at the same row limit). |
 
-**Two more capabilities exist and are worth knowing, but stay opt-in** — turn
-them on if the shape fits your work, not by default:
+**Three more capabilities exist and are worth knowing, but stay opt-in** — turn
+them on if the shape fits your work, not by default (`capture_read`, above, is the
+fourth):
 
 | Hook | What it does | Why it isn't default |
 |---|---|---|
 | `hooks.per_turn_seed` | Nudges the agent to write down a durable fact or decision the moment it emerges, instead of waiting for the end-of-session reflect pass to reconstruct it from the transcript. | Narrower payoff than `per_turn_recall`, and easy to get chatty if the agent over-triggers it. |
 | `hooks.startup_directive` | On your first prompt of a session, tells the agent how to use techne's tools — once, then silent for the rest of the session. | Most agents pick this up from `AGENTS.md`/`CLAUDE.md` already; the hook is for clients that don't load one. |
+| `hooks.inbound_recall` | Runs recall on content that arrives mid-turn: the results of subagent (`Agent`/`Task`), `WebFetch`, `techne_inbox` and `techne_coord_threads` calls, and coord messages. Injects at most `inbound_recall_limit` rows (2), at most once per user prompt. | It stays **dormant until `hooks.inbound_recall_floor_vec_distance` is also set**, and `techne doctor` reports `hook:inbound_recall` as dormant for that reason. Without a floor every search returns rows, which on text nobody asked a question with is noise, and the right floor for inbound text has not been measured yet. |
 
 Run `techne capabilities` to see this list against **your own store** — what's
 on, what's off, and (for what's off) the actual numbers from your ledger that
@@ -139,6 +141,16 @@ finding, and `techne doctor` can gate CI as-is (techne#877). Its advisory
 sections, such as supersessions declared only in prose, never change the exit
 code.
 
+**`hook:pre_compact` and `hook:post_compact` often read DORMANT**, with `idle: no
+compaction since <date>` or `idle — no compaction recorded yet`. Those hooks run only
+when a session compacts, and a session with a 1M-token context can run a long time
+without one, so no recent run is not a fault (#1075). A compaction hook that ran and failed
+still reads BROKEN.
+
+`techne doctor` also lists the keys your `config.yaml` pins. On an install upgraded from
+0.17.0 or earlier it names any key whose value in the file is not the value in effect,
+until `techne init` rewrites the file.
+
 ---
 
 ## The recall rule, and its limit
@@ -146,18 +158,30 @@ code.
 Tell your agent, in its own instructions file: **call `techne_recall` before
 answering from belief.**
 
-`per_turn_recall` (above) does this automatically, but only for what you
-*typed*. It hooks `UserPromptSubmit`, so pasted content, replayed transcripts,
-handed-back results from another agent, and tool output never trigger it —
-nothing gets searched or injected for those. An agent that relies on the hook
-alone will call `techne_recall` close to never, because the hook is already
-doing the job for typed prompts and there is no remaining prompt to trigger
-it on. Measured: one full session with the hook on made zero explicit
-`techne_recall` calls across roughly 3,500 transcript lines — the hook
-covered every turn that looked like a question, so the agent never had a
-reason to call it by hand (tracked as techne#1018). When the source of truth
-is something other than a typed prompt — a pasted spec, a file you just read,
-another agent's report — say so and call `techne_recall` yourself.
+`per_turn_recall` (above) does part of this automatically. It hooks
+`UserPromptSubmit`, so it searches whatever arrives as a prompt:
+
+- **Typed prompts** are searched as typed.
+- **Pasted content** (a `<pasted_content>` block, or a long paste of a Claude
+  Code transcript) is searched on its question lines, with techne's own
+  injected rows stripped out first, so a pasted recall block does not re-select
+  the rows it already names (#1018).
+- **A subagent hand-back** that arrives as a prompt is searched on the report,
+  with the harness frame around it stripped; so is a peer session's message
+  (#1080).
+
+What never arrives as a prompt gets nothing from this hook: tool results, a file
+the agent just read, a page it fetched. `hooks.inbound_recall` (opt-in, above)
+covers subagent, `WebFetch` and inbox results once you set its floor; nothing
+covers `Read` or `Bash` output.
+
+The rule still matters with all of that on. An agent that relies on the hook
+calls `techne_recall` close to never, because the hook already answers every turn
+that looks like a question. Measured before the paste and hand-back fixes: one
+full session with the hook on made zero explicit `techne_recall` calls across
+roughly 3,500 transcript lines. When the source of truth is something the hook
+did not see — a file you just read, a tool's output, a question buried in a long
+report — say so and call `techne_recall` yourself.
 
 ---
 
@@ -246,10 +270,10 @@ one-line fallback after every import:
 
 - **[welcome.md](welcome.md)** — the first-timer tour: the memory loop, the
   four functions, the features you'd never find on your own.
-- **[README](../README.md)** — the full reference: every CLI command and
+- **[README](https://github.com/tenishai/techne/blob/main/README.md)** — the full reference: every CLI command and
   config key, including the complete `hooks:` block this guide summarizes.
-- **[AGENTS.md](../AGENTS.md)** — the agent-facing version of everything in
-  this guide, short and imperative, plus the doc's own silent-failure
-  triggers.
+- **[AGENTS.md](../AGENTS.md)** (`techne guide AGENTS`) — the agent-facing
+  version of everything in this guide, short and imperative, plus the doc's own
+  silent-failure triggers.
 - **`techne capabilities`** — what's on, what's off, and what turning on the
   rest would buy you, measured against your own store.

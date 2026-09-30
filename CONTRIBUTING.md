@@ -13,22 +13,25 @@ ruff check techne tests    # ADVISORY — see below
 
 Then: branch, commit with `git commit -s` (see [Developer Certificate of
 Origin](#developer-certificate-of-origin)), open a PR. Keep the suite green — CI
-runs pytest on 3.12 and 3.13 on every push.
+runs pytest on 3.12 and 3.13 on every push. CI's `acceptance` job also builds the wheel and tests the
+installed copy, which catches a module or package-data file missing from the package;
+run `bash scripts/acceptance.sh` locally when you add either.
 
 Everyone taking part in this project is expected to follow the
 [Code of Conduct](CODE_OF_CONDUCT.md). Report security problems privately, as
 [SECURITY.md](SECURITY.md) describes, not in a public issue.
 
 **ruff is advisory here, and a clean checkout is not clean.** `ruff check techne
-tests` reports 157 errors on an untouched tree today, and CI runs the identical
-command with `|| true`, so lint never fails the build. Run it to compare against
+tests` reported 158 errors on an untouched tree with ruff 0.16.0 (2026-09-30; the
+count moves with the ruff version, which `ruff>=0.5.0` leaves unpinned), and CI runs
+the identical command with `|| true`, so lint never fails the build. Run it to compare against
 the lines you touched, not as a gate you have to reach zero on. If that surprises
 you, it is the project's state and not your environment.
 
 A few things worth knowing before you spend effort:
 
-- **Tests live beside the code they cover**, in `tests/`, and a behaviour change
-  wants a test that fails without it. "It is covered by an existing test" is worth
+- **Tests live in `tests/`**, and a behaviour change wants a test that fails
+  without it. "It is covered by an existing test" is worth
   checking rather than assuming — reverting your change and watching a test fail is
   the cheap way to know.
 - **Architecture cards.** Load-bearing subsystems have a card in `docs/arch/`, each

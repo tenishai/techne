@@ -86,7 +86,7 @@ trap `stack-graphs` fell into. Two rules if we ever build it:
 | Consumer | Right refresh mechanism |
 |---|---|
 | Automated PR-time check (e.g. blast-radius comment on API-changing PRs) | **CI on the PR branch** |
-| Human/agent doing local brownfield / planning work | local `codex index` / `codex watch` |
+| Human/agent doing local brownfield / planning work | local `codex index` / `codex watch`, plus `hooks.codex_reindex_on_edit` (on by default), which re-indexes each file the agent edits |
 
 For the second row, 0.17.0 closes the loop that made local refresh a thing you had to
 remember: `codex:freshness` on the SessionStart banner compares the index's recorded
@@ -113,9 +113,12 @@ graph engine worth adopting right now.
 
 ## Shelved (do not build on spec)
 
-- **The edge resolver** (`edges.to_symbol` resolution). Revisit *only* once a high-value
-  recurring auto-consumer exists — `stack-graphs` proves a resolution layer built ahead of
-  its consumer gets thrown away.
+- **A full edge resolver** (`edges.to_symbol` resolution). Partly built since this was
+  written: `codex index` binds calls through their imports and same-file definitions on
+  every run, and `codex index --lsp` resolves Python call edges through pyright. A name
+  that neither pass can place still falls back to bare-name matching, marked
+  `name-inferred`. Go further *only* once a high-value recurring auto-consumer exists —
+  `stack-graphs` proves a resolution layer built ahead of its consumer gets thrown away.
 - **A standing cross-project graph.** The architect corpus is the correct cross-project
   store; code edges don't transfer.
 
