@@ -574,7 +574,9 @@ Lives at `~/.techne/config.yaml`. It holds only the keys you set: `techne init` 
 key only when you changed it or the file already set it, so every other key follows the
 defaults of the version you run, including defaults a later release changes. `techne
 doctor` lists the keys your file pins. A file from 0.17.0 or earlier, which pinned every
-key, is migrated on upgrade; see the CHANGELOG's Upgrading note (#1070).
+key, is migrated on upgrade: run `techne init` once to rewrite it before you change any
+key, or a value that was once a default is un-pinned again on every load. See the
+CHANGELOG's Upgrading note (#1070).
 
 Example — see the
 [operator guide](docs/operator-guide.md#recommended-configuration) for why each

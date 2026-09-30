@@ -340,3 +340,96 @@ def test_fast_cache_goes_stale_when_the_defaults_module_changes(home, tmp_path, 
     assert fastconfig.load_fast() is not None
     fake_defaults.write_text("a = 22\n")  # an upgrade rewrote config.py
     assert fastconfig.load_fast() is None
+
+
+# --- hand edits made before `techne init` (Prudence, PR #1118 r1) ---------------
+
+_OPT_OUTS = {
+    ("hooks", "per_turn_recall"): False,
+    ("hooks", "capture_bash"): False,
+    ("reflect", "emit_max_chars"): 100_000,
+}
+
+
+def _hand_edit(home: Path) -> None:
+    data = _file(home)
+    for (section, key), value in _OPT_OUTS.items():
+        data[section][key] = value
+    (home / "config.yaml").write_text(yaml.safe_dump(data, sort_keys=False))
+
+
+def _pending_lines(text: str) -> list[str]:
+    return [ln for ln in text.splitlines() if "not in effect until it is rewritten" in ln]
+
+
+def test_opt_outs_typed_into_a_legacy_file_are_named_until_init(home, capsys):
+    """Upgrade, then set the three keys by hand, no init: the loader un-pins them
+    again, so the file says false while true is in effect. doctor must say so."""
+    from techne.cli import _render_config_pins
+
+    _legacy(home, "v0.17.0")
+    _hand_edit(home)
+    cfg = Config.load()
+    assert cfg.hooks.per_turn_recall is True  # the defect being reported, not fixed
+    _render_config_pins(cfg)
+    (line,) = _pending_lines(capsys.readouterr().out)
+    assert "hooks.per_turn_recall (file: false, in effect: true)" in line
+    assert "hooks.capture_bash (file: false, in effect: true)" in line
+    assert "reflect.emit_max_chars (file: 100000, in effect: 45000)" in line
+    assert "Run `techne init` to rewrite config.yaml, then re-set any key" in line
+
+
+def test_opt_outs_set_after_init_stay_pinned(home, capsys):
+    from techne.cli import _render_config_pins, main
+
+    _legacy(home, "v0.17.0")
+    result = CliRunner().invoke(
+        main, ["init", "--platform", "standalone", "--no-vectors", "--posture", "observe"]
+    )
+    assert result.exit_code == 0, result.output
+    data = _file(home)
+    for (section, key), value in _OPT_OUTS.items():
+        data.setdefault(section, {})[key] = value
+    (home / "config.yaml").write_text(yaml.safe_dump(data, sort_keys=False))
+
+    cfg = Config.load()
+    assert cfg.config_migration is None
+    assert cfg.hooks.per_turn_recall is False
+    assert cfg.hooks.capture_bash is False
+    assert cfg.reflect.emit_max_chars == 100_000
+    _render_config_pins(cfg)
+    assert _pending_lines(capsys.readouterr().out) == []
+    # and a later init keeps them
+    CliRunner().invoke(
+        main, ["init", "--platform", "standalone", "--no-vectors", "--posture", "observe"]
+    )
+    assert Config.load().hooks.per_turn_recall is False
+
+
+def test_the_session_start_banner_names_the_same_keys(home):
+    """Operator surface: systemMessage, where hook drift already goes."""
+    import json
+    import subprocess
+    import sys
+
+    _legacy(home, "v0.17.0")
+    _hand_edit(home)
+    env = {
+        **os.environ,
+        "HOME": str(home.parent),
+        "TECHNE_HOME": str(home),
+        "CLAUDE_CONFIG_DIR": str(home.parent / ".claude"),
+    }
+    r = subprocess.run(
+        [sys.executable, "-m", "techne.hooks.session_start"],
+        input="{}",
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=120,
+    )
+    assert r.returncode == 0, r.stderr
+    banner = json.loads(r.stdout).get("systemMessage", "")
+    (line,) = _pending_lines(banner)
+    assert "hooks.per_turn_recall (file: false, in effect: true)" in line
+    assert "reflect.emit_max_chars (file: 100000, in effect: 45000)" in line

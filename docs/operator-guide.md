@@ -52,7 +52,11 @@ the report, marked as your choice, and stops counting toward the session-start
 capabilities unack <flag>` takes one back. An agent can record the same thing
 through the `techne_capabilities` tool, but only after you've said so.
 
-**Turning any of this off** is one line in `~/.techne/config.yaml`:
+**Turning any of this off** is one line in `~/.techne/config.yaml`. On an install
+upgraded from 0.17.0 or earlier, run `techne init` first: until it rewrites the old
+full config.yaml, each load un-pins a value that was once a default, so a `false` typed
+there does not take effect (`techne doctor` names any such key). After init it stays
+pinned (#1070).
 
 ```yaml
 hooks:

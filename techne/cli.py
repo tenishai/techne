@@ -602,6 +602,9 @@ def _render_config_pins(config) -> None:
             + config.config_migration.summary()
             + ". In effect now; `techne init` rewrites the file and keeps a backup."
         )
+        pending = config.config_migration.pending_line()
+        if pending:
+            click.echo(f"  ⚠ {pending}")
 
 
 @main.command()

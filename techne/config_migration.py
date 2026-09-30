@@ -106,6 +106,26 @@ class ConfigMigration:
     #: RETIRED_KEYS entries dropped.
     retired: list[str] = field(default_factory=list)
 
+    def pending_line(self) -> str | None:
+        """While the file is still legacy: the keys whose value IN THE FILE is not the
+        value in effect, with the remedy. None when there are none.
+
+        An operator who hand-edits a legacy file before `techne init` gets the edit
+        un-pinned again on every load if the value is a past default (for example
+        `per_turn_recall: false`), so the file and the running value disagree. This
+        is the line that says so.
+        """
+        if not self.changed:
+            return None
+        keys = ", ".join(
+            f"{k} (file: {_render(a)}, in effect: {_render(b)})" for k, a, b in self.changed
+        )
+        return (
+            f"config.yaml sets {len(self.changed)} key(s) that are not in effect until it is "
+            f"rewritten: {keys}. Run `techne init` to rewrite config.yaml, then re-set any "
+            "key you want pinned."
+        )
+
     def summary(self, backup: Path | None = None) -> str:
         """The one stdout line `techne init` and `techne doctor` print."""
         parts = [f"un-pinned {len(self.unpinned)} key(s) that held a shipped default"]

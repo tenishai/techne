@@ -436,8 +436,10 @@ All notable changes to techne are documented here. Format loosely follows
   they are checked inside the PostToolUse hook every install already has (`capture_bash`
   grows the observation log; read-only navigation commands are still filtered).
   `per_turn_recall` and `codex_grep_assist` are separate hooks: they register on the next
-  `techne init` and load from the next session. To keep the old behaviour, set any of
-  them to `false` explicitly after upgrading.
+  `techne init` and load from the next session. To keep the old behaviour, run
+  `techne init` first, then set any of them to `false`. Set before that `init`, a
+  `false` is un-pinned again on every load while the file is still in the old format;
+  set after it, it stays pinned.
 
 - **`techne init` downloads the embedding model** (#1021). A fresh install never got
   semantic search: the SessionStart backfill passes `--no-download` (#815) so a cold
@@ -497,12 +499,18 @@ key techne does not recognise. The table of past defaults is `PAST_DEFAULTS` in
 This applies in memory from the first load after upgrading, in every hook and command.
 The file itself is rewritten on the next `techne init`, which first copies it to
 `config.yaml.bak-<timestamp>` and prints one line naming the keys that changed value.
-`techne doctor` prints the same line until then.
+
+**Run `techne init` before you change any key.** Until init rewrites the file, every load
+migrates it again, so a value you type that was once a default (`per_turn_recall: false`,
+`capture_bash: false`, `emit_max_chars: 100000`) is un-pinned again and the file says one
+thing while another is in effect. Until then, `techne doctor` and the session-start banner
+name every key whose value in the file is not the value in effect. After init, set the keys
+you want; a key set after the rewrite stays pinned.
 
 **One case the migration cannot tell apart:** if you set a key by hand to a value that
 was also its default at some point (for example `per_turn_recall: false` before #1020),
-it is un-pinned. Check the line `techne init` prints, and set the key again if you meant
-it; a key set after the rewrite stays pinned.
+it is un-pinned. Check the line `techne init` prints, and set the key again after init if
+you meant it.
 
 ## [0.17.0] — 2026-09-18
 
