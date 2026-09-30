@@ -12,6 +12,7 @@ so it gets a guard that runs in the suite the trigger would have run.
 
 from __future__ import annotations
 
+import difflib
 import os
 import subprocess
 import sys
@@ -1291,26 +1292,78 @@ def _dco_step(job: str) -> dict:
     return steps[0]
 
 
+BOT_AUTHOR = "dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>"
+
+
 def test_dco_check_runs_on_both_sides_of_the_trust_split():
     """In-repo PRs reach only `arch-cards`, fork PRs only `fork-pr`, so the check
-    lives in both and the two copies must not drift apart."""
+    lives in both and the two copies must stay identical except for one
+    documented exemption (PR #1135): `arch-cards` skips a commit authored
+    exactly as dependabot[bot], `fork-pr` does not, because a fork PR can forge
+    any commit author and dependabot[bot]'s is no exception."""
     jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
     trusted, forked = (_dco_step(j) for j in DCO_JOBS)
-    assert trusted == forked, "the DCO step differs between arch-cards and fork-pr"
 
-    step = trusted
-    assert step["if"] == "${{ !cancelled() && github.event_name == 'pull_request' }}"
-    assert step["env"] == {
-        "BASE_SHA": "${{ github.event.pull_request.base.sha }}",
-        "HEAD_SHA": "${{ github.event.pull_request.head.sha }}",
-    }
+    for key in set(trusted) | set(forked):
+        if key == "run":
+            continue
+        assert trusted.get(key) == forked.get(key), (
+            f"DCO step {key!r} differs between arch-cards and fork-pr"
+        )
+    assert trusted["run"] != forked["run"], (
+        "arch-cards must carry the dependabot exemption that fork-pr does not"
+    )
+    assert BOT_AUTHOR in trusted["run"], (
+        "arch-cards must exempt dependabot[bot] by its exact author string"
+    )
+    assert BOT_AUTHOR not in forked["run"], (
+        "fork-pr must not exempt any author string — a fork can forge dependabot[bot]'s identity"
+    )
+
+    # Pin the EXACT difference, not just "they differ and the bot string is in
+    # one but not the other" — that weaker shape lets fork-pr's own strict
+    # matching drift (or break) undetected, as long as the change doesn't
+    # mention BOT_AUTHOR (Prudence, PR #1140 round 1, Important 1). A change to
+    # fork-pr outside these three hunks — the skip counter, the bot-skip
+    # block, or the summary line — now fails here even though it never
+    # touches the exemption text.
+    diff = list(
+        difflib.unified_diff(
+            forked["run"].splitlines(), trusted["run"].splitlines(), n=0, lineterm=""
+        )
+    )
+    hunks = [line for line in diff if not line.startswith(("--- ", "+++ "))]
+    assert hunks == [
+        "@@ -13,0 +14 @@",
+        "+skipped=0",
+        "@@ -15,0 +17,5 @@",
+        f'+  if [ "$author" = "{BOT_AUTHOR}" ]; then',
+        '+    echo "DCO: skipping ${c:0:12} as a bot commit ($author)"',
+        "+    skipped=$((skipped + 1))",
+        "+    continue",
+        "+  fi",
+        "@@ -26 +32 @@",
+        '-echo "DCO: $(echo "$commits" | wc -l | tr -d \' \') commit(s) signed off by their authors"',
+        '+echo "DCO: $(($(echo "$commits" | wc -l | tr -d \' \') - skipped)) commit(s) signed off '
+        'by their authors$( [ "$skipped" -gt 0 ] && printf \' (%s skipped as bot commits)\' '
+        '"$skipped" )"',
+    ], "arch-cards' script diverges from fork-pr's by more than the documented exemption:\n" + "\n".join(
+        diff
+    )
+
     for job in DCO_JOBS:
         assert not jobs[job].get("continue-on-error"), f"{job} swallows a failing DCO check"
-    assert not step.get("continue-on-error"), "a failing DCO check would read green"
-    assert "uses" not in step, "the check is inline shell reading git metadata, not an action"
-    # No `${{ }}` inside the script: PR-controlled values reach it through env only.
-    assert "${{" not in step["run"]
-    assert "export GIT_NO_REPLACE_OBJECTS=1" in step["run"], "refs/replace could rewrite history"
+    for step in (trusted, forked):
+        assert step["if"] == "${{ !cancelled() && github.event_name == 'pull_request' }}"
+        assert step["env"] == {
+            "BASE_SHA": "${{ github.event.pull_request.base.sha }}",
+            "HEAD_SHA": "${{ github.event.pull_request.head.sha }}",
+        }
+        assert not step.get("continue-on-error"), "a failing DCO check would read green"
+        assert "uses" not in step, "the check is inline shell reading git metadata, not an action"
+        # No `${{ }}` inside the script: PR-controlled values reach it through env only.
+        assert "${{" not in step["run"]
+        assert "export GIT_NO_REPLACE_OBJECTS=1" in step["run"], "refs/replace could rewrite history"
 
 
 def _runs_no_tree_code(step: dict) -> bool:
@@ -1343,10 +1396,13 @@ def _git(repo: Path, *args: str, env: dict, stdin: str | None = None) -> str:
     ).stdout.strip()
 
 
-def _run_dco(tmp_path: Path, build, tamper=None) -> subprocess.CompletedProcess[str]:
+def _run_dco(
+    tmp_path: Path, build, tamper=None, job: str = "arch-cards"
+) -> subprocess.CompletedProcess[str]:
     """Build a repo with `build(work, commit, env)`, shallow-clone it the way
     actions/checkout does, fetch origin/main at depth 1 like arch-cards, then run
-    the workflow's own DCO script."""
+    `job`'s own DCO script (default `arch-cards`; pass `job="fork-pr"` to run the
+    strict copy instead)."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")} | {
         "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_CONFIG_NOSYSTEM": "1",
@@ -1356,17 +1412,30 @@ def _run_dco(tmp_path: Path, build, tamper=None) -> subprocess.CompletedProcess[
         "GIT_COMMITTER_EMAIL": "ann@example.com",
     }
     work = tmp_path / "work"
-    work.mkdir()
+    work.mkdir(parents=True)
     _git(work, "init", "-q", "-b", "main", env=env)
     n = iter(range(1000))
 
     def commit(
-        msg: str, *, signoff: str | None = "Ann Author <ann@example.com>", footer: str = ""
+        msg: str,
+        *,
+        signoff: str | None = "Ann Author <ann@example.com>",
+        footer: str = "",
+        author: str | None = None,
     ) -> str:
         (work / f"f{next(n)}").write_text(msg)
         _git(work, "add", "-A", env=env)
         body = msg + (f"\n\nSigned-off-by: {signoff}" if signoff else "") + footer
-        _git(work, "commit", "-q", "-F", "-", env=env, stdin=body)
+        commit_env = env
+        if author is not None:
+            name, _, email = author.rstrip(">").partition(" <")
+            commit_env = env | {
+                "GIT_AUTHOR_NAME": name,
+                "GIT_AUTHOR_EMAIL": email,
+                "GIT_COMMITTER_NAME": name,
+                "GIT_COMMITTER_EMAIL": email,
+            }
+        _git(work, "commit", "-q", "-F", "-", env=commit_env, stdin=body)
         return _git(work, "rev-parse", "HEAD", env=env)
 
     base, head = build(work, commit, env)
@@ -1382,7 +1451,7 @@ def _run_dco(tmp_path: Path, build, tamper=None) -> subprocess.CompletedProcess[
     _git(ci, "fetch", "-q", "--depth=1", "origin", main_ref, env=env)
     if tamper:
         tamper(ci, env | {"BASE_SHA": base, "HEAD_SHA": head})
-    script = _dco_step("arch-cards")["run"]
+    script = _dco_step(job)["run"]
     return subprocess.run(
         ["bash", "-c", script],
         cwd=ci,
@@ -1486,5 +1555,66 @@ def test_dco_check_ignores_replace_refs(tmp_path):
         tmp_path,
         lambda w, c, e: _history(w, c, e, feature=[{"msg": "a", "signoff": None}]),
         tamper=tamper,
+    )
+    assert r.returncode == 1, r.stdout + r.stderr
+
+
+def test_dco_check_exempts_dependabot_in_arch_cards_only(tmp_path):
+    """A dependabot[bot]-authored commit with no Signed-off-by (PR #1135's exact
+    failure) must pass in arch-cards (same-repo PRs) but still fail in fork-pr,
+    where a fork could forge that author string on a commit it wrote itself."""
+
+    def build(w, c, e):
+        return _history(
+            w, c, e, feature=[{"msg": "bump foo", "signoff": None, "author": BOT_AUTHOR}]
+        )
+
+    trusted = _run_dco(tmp_path / "trusted", build, job="arch-cards")
+    assert trusted.returncode == 0, trusted.stdout + trusted.stderr
+    assert "skipping" in trusted.stdout and "bot commit" in trusted.stdout
+    assert "0 commit(s) signed off" in trusted.stdout, (
+        "the lone commit was skipped as a bot commit, not signed off"
+    )
+
+    forked = _run_dco(tmp_path / "forked", build, job="fork-pr")
+    assert forked.returncode == 1, forked.stdout + forked.stderr
+    assert "has no" in forked.stdout and BOT_AUTHOR in forked.stdout
+
+
+def test_dco_check_still_requires_signoff_from_a_human_in_both_jobs(tmp_path):
+    """The exemption is scoped to the exact dependabot[bot] author string — an
+    unsigned human commit must still fail in arch-cards and in fork-pr."""
+
+    def build(w, c, e):
+        return _history(w, c, e, feature=[{"msg": "a", "signoff": None}])
+
+    for job in DCO_JOBS:
+        r = _run_dco(tmp_path / job, build, job=job)
+        assert r.returncode == 1, f"{job}: {r.stdout + r.stderr}"
+
+
+def test_dco_check_fork_pr_passes_a_correctly_signed_human_commit(tmp_path):
+    """fork-pr's own strict copy, not just arch-cards, must still pass an
+    ordinary signed-off commit — the behavioural tests above never ran this
+    script on a passing case (Prudence, PR #1140 round 1, Important 1)."""
+    r = _run_dco(
+        tmp_path, lambda w, c, e: _history(w, c, e, feature=[{"msg": "a"}, {"msg": "b"}]),
+        job="fork-pr",
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "2 commit(s) signed off" in r.stdout
+
+
+def test_dco_check_fork_pr_fails_a_mismatched_signoff(tmp_path):
+    """The real Dependabot failure mode (PR #1135's commit 91b9728e2d5a): a
+    Signed-off-by present but under a different address than the commit's
+    author — `dependabot[bot] <support@github.com>` vs. its noreply author
+    email — not a missing trailer. fork-pr carries no exemption for this."""
+    r = _run_dco(
+        tmp_path,
+        lambda w, c, e: _history(
+            w, c, e, feature=[{"msg": "a", "signoff": "Ann Author <support@example.com>"}]
+        ),
+        job="fork-pr",
     )
     assert r.returncode == 1, r.stdout + r.stderr
