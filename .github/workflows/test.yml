@@ -869,8 +869,10 @@ jobs:
         run: bash scripts/check_comment_blocks.sh origin/main
 
       # DCO (CONTRIBUTING.md): each non-merge commit the PR adds needs a
-      # Signed-off-by matching its author. Reads commit metadata only, runs no
-      # PR code. Kept identical in arch-cards and fork-pr; the suite pins both.
+      # Signed-off-by line matching its author, anywhere in the message (a hook
+      # appending a trailer after it moves it out of git's trailer block).
+      # Reads commit metadata only, runs no PR code. Kept identical in
+      # arch-cards and fork-pr; the suite pins both.
       - name: DCO sign-off check
         if: ${{ !cancelled() && github.event_name == 'pull_request' }}
         working-directory: techne
@@ -892,7 +894,7 @@ jobs:
           bad=0
           for c in $commits; do
             author=$(git log -1 --format='%an <%ae>' "$c")
-            if ! git log -1 --format='%(trailers:key=Signed-off-by,valueonly,unfold)' "$c" | grep -Fxiq -- "$author"; then
+            if ! git log -1 --format=%B "$c" | tr -d '\r' | grep -Fxiq -- "Signed-off-by: $author"; then
               echo "::error::DCO: commit ${c:0:12} has no 'Signed-off-by: $author' trailer"
               bad=1
             fi
@@ -1108,8 +1110,10 @@ jobs:
         run: .venv-ci/bin/python -m pytest -m "eval or eval_gate"
 
       # DCO (CONTRIBUTING.md): each non-merge commit the PR adds needs a
-      # Signed-off-by matching its author. Reads commit metadata only, runs no
-      # PR code. Kept identical in arch-cards and fork-pr; the suite pins both.
+      # Signed-off-by line matching its author, anywhere in the message (a hook
+      # appending a trailer after it moves it out of git's trailer block).
+      # Reads commit metadata only, runs no PR code. Kept identical in
+      # arch-cards and fork-pr; the suite pins both.
       - name: DCO sign-off check
         if: ${{ !cancelled() && github.event_name == 'pull_request' }}
         working-directory: techne
@@ -1131,7 +1135,7 @@ jobs:
           bad=0
           for c in $commits; do
             author=$(git log -1 --format='%an <%ae>' "$c")
-            if ! git log -1 --format='%(trailers:key=Signed-off-by,valueonly,unfold)' "$c" | grep -Fxiq -- "$author"; then
+            if ! git log -1 --format=%B "$c" | tr -d '\r' | grep -Fxiq -- "Signed-off-by: $author"; then
               echo "::error::DCO: commit ${c:0:12} has no 'Signed-off-by: $author' trailer"
               bad=1
             fi

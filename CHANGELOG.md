@@ -70,8 +70,10 @@ All notable changes to techne are documented here. Format loosely follows
 ### Added
 
 - **CI checks DCO sign-off on every pull request** (tenishai/agora#20). A `DCO sign-off
-  check` step fails when a non-merge commit between the PR's base and head lacks a
-  `Signed-off-by:` trailer matching its author, and names each such commit. It runs in
+  check` step fails when a non-merge commit between the PR's base and head has no
+  `Signed-off-by:` line matching its author, and names each such commit. The line may
+  sit anywhere in the message, so a hook that appends its own trailer paragraph after
+  `git commit -s` does not break it. It runs in
   `arch-cards` for in-repo PRs and in `fork-pr` for fork PRs, as inline shell that reads
   commit metadata and executes nothing from the PR. Commits already on `main` predate
   the rule and are not checked.

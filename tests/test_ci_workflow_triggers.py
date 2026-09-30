@@ -1335,10 +1335,12 @@ def _run_dco(tmp_path: Path, build) -> subprocess.CompletedProcess[str]:
     _git(work, "init", "-q", "-b", "main", env=env)
     n = iter(range(1000))
 
-    def commit(msg: str, *, signoff: str | None = "Ann Author <ann@example.com>") -> str:
+    def commit(
+        msg: str, *, signoff: str | None = "Ann Author <ann@example.com>", footer: str = ""
+    ) -> str:
         (work / f"f{next(n)}").write_text(msg)
         _git(work, "add", "-A", env=env)
-        body = msg + (f"\n\nSigned-off-by: {signoff}" if signoff else "")
+        body = msg + (f"\n\nSigned-off-by: {signoff}" if signoff else "") + footer
         _git(work, "commit", "-q", "-m", body, env=env)
         return _git(work, "rev-parse", "HEAD", env=env)
 
@@ -1416,4 +1418,15 @@ def test_dco_check_skips_merge_commits(tmp_path):
         return base, _git(w, "rev-parse", "HEAD", env=e)
 
     r = _run_dco(tmp_path, build)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_dco_check_finds_a_signoff_outside_the_last_trailer_block(tmp_path):
+    """A prepare-commit-msg hook that appends its own trailer paragraph after
+    `git commit -s` leaves Signed-off-by outside git's trailer block; the
+    sign-off still counts."""
+    footer = "\n\nCo-Authored-By: Someone <someone@example.com>"
+    r = _run_dco(
+        tmp_path, lambda w, c, e: _history(w, c, e, feature=[{"msg": "a", "footer": footer}])
+    )
     assert r.returncode == 0, r.stdout + r.stderr
