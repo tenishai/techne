@@ -658,6 +658,7 @@ def seed(db_path: Path) -> dict[str, str]:
     gold["g385_neg_sup_ci_new"] = "knowledge:%d" % _ci_v2
 
     _seed_identifier_rows(db_path, gold)
+    _seed_phrase_rows(db_path, gold)
     return gold
 
 
@@ -731,6 +732,61 @@ def _seed_identifier_rows(db_path: Path, gold: dict[str, str]) -> None:
                 )
             for v, w in zip(_G1078_VERBS, _G1078_FOLLOWUPS):
                 _add_observation_raw(conn, template.format(v=v, w=w))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# --- exact phrase (techne#1142) -----------------------------------------------
+# The two queries from the issue, on rows built to the live-store shape: the row
+# holding the quoted phrase is long (the #1078 filler), so twelve short on-topic
+# rows per task crowd it out of the vector channel and it arrives through FTS only.
+# Measured with the seat off (the pre-#1142 page, and every per-turn page):
+# `pypi` sits in the #827 lexical_tail slot at rank 10, as 47085 did on the
+# 2026-09-28 snapshot; `litestream` is off the page, because a stronger FTS row
+# holding the same four words apart (`_G1142_TAIL_RIVAL`) takes that slot, as a
+# thread row did on the snapshot. With the seat on both sit at rank 2 via
+# `phrase_head`. Observations only, so the table="knowledge" classes see an
+# unchanged corpus; the words avoid the table="all" negative queries (see the
+# #1078 note above).
+_G1142_VERBS = _G1078_VERBS + ("was restarted", "was upgraded", "was patched", "was rebuilt")
+_G1142_FOLLOWUPS = _G1078_FOLLOWUPS + ("pinned", "trimmed", "renamed", "merged")
+_G1142_TASKS = {
+    "litestream": (
+        "Started the replication sidecar: exec litestream replicate -config "
+        "/etc/litestream.yml, watching techne.db.",
+        "The litestream sidecar for techne.db {v} after the replication settings were {w}.",
+    ),
+    "pypi": (
+        "pip install 'techne[vec]' printed: WARNING: techne 0.17.0 does not provide "
+        "the extra 'vec'.",
+        "The optional vector extra for techne {v} after the packaging metadata was {w}.",
+    ),
+}
+#: Holds `exec`, `techne.db`, `litestream` and `replicate` but never two of them
+#: side by side. Shorter than the gold, so FTS ranks it first, and its sailing
+#: filler keeps it out of the vector channel.
+_G1142_TAIL_RIVAL = (
+    "The sailboat left the harbour at dawn with a light westerly breeze and a crew of "
+    "four. By noon the coastline had faded into haze and dolphins followed the bow "
+    "wave for an hour. "
+) * 2 + (
+    "Loose ends: exec bit fixed on the hook, techne.db vacuumed, litestream docs "
+    "skimmed, and we may replicate the config later."
+)
+
+
+def _seed_phrase_rows(db_path: Path, gold: dict[str, str]) -> None:
+    conn = connect(db_path)
+    try:
+        for key, (text, template) in _G1142_TASKS.items():
+            gold[f"g1142_{key}"] = "observation:%d" % _add_observation_raw(
+                conn, _G1078_FILLER * 4 + text, tool_name="Bash"
+            )
+        for v, w in zip(_G1142_VERBS, _G1142_FOLLOWUPS):
+            for _, template in _G1142_TASKS.values():
+                _add_observation_raw(conn, template.format(v=v, w=w))
+        _add_observation_raw(conn, _G1142_TAIL_RIVAL)
         conn.commit()
     finally:
         conn.close()
