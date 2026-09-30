@@ -2741,14 +2741,15 @@ def init(
         click.echo(f"Identity imported from: {config.identity_dir}")
 
     # Platform-specific setup
-    # Measured BEFORE registration, which creates ~/.claude and would make any
-    # later check say yes (#1123).
+    # Not "does ~/.claude exist": registration creates it, so every init after the
+    # first would claim Claude Code is here (#1123, #1137). `claude` on PATH or its
+    # projects/ dir (techne never creates it) says it has actually run.
     cc_present = False
     if platform == "claude-code":
         from techne.platforms.claude_code import register_hooks, register_mcp
-        from techne.platforms.claude_code.paths import claude_code_present
+        from techne.platforms.claude_code.paths import claude_code_has_run
 
-        cc_present = claude_code_present()
+        cc_present = claude_code_has_run()
 
         try:
             register_hooks(config, allow_worktree=allow_worktree)

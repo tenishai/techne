@@ -215,8 +215,15 @@ All notable changes to techne are documented here. Format loosely follows
   init. It now prints "Claude Code not found; techne's hooks are registered and take
   effect when you install it" with the `--platform standalone` alternative, and no
   longer claims Claude Code auto-memory is on or offers to turn it off. Claude Code
-  counts as present when `claude` is on PATH or its config dir existed before init.
+  counts as present when `claude` is on PATH or its `projects/` dir exists.
   Nothing changes on a machine that has it.
+- **A second `techne init` no longer claims Claude Code auto-memory is on when Claude
+  Code is not installed** (#1137). The #1123 check counted an existing `~/.claude` as
+  "installed", but the first init creates that dir, so every rerun (which the
+  Upgrading steps ask for) said "Claude Code auto-memory is on" and, on a terminal,
+  offered to turn it off. init now asks whether Claude Code has run here: `claude` on
+  PATH, or its `projects/` dir, which Claude Code writes each session and techne never
+  creates. A `~/.claude` holding only settings is no longer enough.
 - **init's semantic-recall hint matches how techne was installed** (#1124). An
   editable install was told to `pipx install --force "techne[recommended] @ git+..."`,
   which puts a second, older, non-editable copy beside the checkout. It now gets
