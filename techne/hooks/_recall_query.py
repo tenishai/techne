@@ -57,18 +57,30 @@ _TASK_NOTIFICATION = re.compile(r"<task-notification>.*?</task-notification>", r
 # The harness writes these tags at the start of a line and always with from="…",
 # and its closing tag at column zero; the report is indented, so a closing tag the
 # report quotes cannot end the frame. Requiring all of that keeps a typed or
-# quoted mention of a tag from framing the prompt.
+# quoted mention of a tag from framing the prompt. `<task-notification>` carries
+# no `from="…"` but IS the whole prompt when real (see #1045 above), so it is
+# anchored the same way: a typed mid-line mention of the literal tag opens
+# nothing, rather than being read as a real notification and dropping whatever
+# follows it up to the next stray closing mention.
 _FRAME_OPEN = re.compile(
     r'(?m)^(?P<agent><agent-message from="[^"]*"[^>]*>)'
     r'|^(?P<peer><cross-session-message from="[^"]*"[^>]*>)'
-    r"|(?P<note><task-notification>)"
+    r"|^(?P<note><task-notification>)"
 )
 _FRAME_CLOSE = {
     "agent": re.compile(r"(?m)^</agent-message>"),
     "peer": re.compile(r"(?m)^</cross-session-message>"),
     "note": re.compile(r"</task-notification>"),
 }
-_PASTE_CLOSE = re.compile(r'</pasted_content id="[^"]*">')
+# Anchored: the harness always emits BOTH of a paste's tags at the start of
+# their own line (see the <pasted_content> fixture in tests/test_recall_query.py).
+# A hand-back's indented report can quote either tag's literal text mid-line
+# while describing it; anchoring keeps that quote from ever being read as the
+# tag itself. Used by `_enclosing_paste_close` (its whole scan), not by
+# `_split_paste` (its own tag-counting predates #1080 and is unaffected by
+# this).
+_PASTE_OPEN = re.compile(r'(?m)^<pasted_content id="[^"]*">')
+_PASTE_CLOSE = re.compile(r'(?m)^</pasted_content id="[^"]*">')
 _HANDBACK_FRAME = "[Subagent hand-back]"
 
 # What techne's rails render into context, by shape. tests/test_recall_query.py
@@ -209,6 +221,46 @@ def _unclosed_handback_end(prompt: str, start: int, limit: int) -> int:
     return pos
 
 
+def _enclosing_paste_close(prompt: str, pos: int) -> int | None:
+    """Start of the closing tag of the <pasted_content> that *pos* falls inside,
+    or None when *pos* is not inside one.
+
+    Depth-tracked like `_split_paste`, so a frame nested inside a paste nested
+    inside another paste resolves to the close of the paste it is DIRECTLY
+    inside, not the next textual close regardless of nesting.
+
+    One anchored scan over the whole prompt: only `_PASTE_OPEN` /
+    `_PASTE_CLOSE` (column zero) count, before *pos* as well as after it. The
+    text before *pos* is not only the operator's words once a frame is not the
+    first thing in its paste; an earlier hand-back's report is in there too, and
+    a report can quote either tag's literal text mid-line while describing it.
+    An unanchored quote on either side would move the depth count (Prudence,
+    PR #1127 r1 and r2) and silently drop the operator's later text.
+    """
+    depth = 0
+    prefix = sorted(
+        [(m.start(), False) for m in _PASTE_OPEN.finditer(prompt, 0, pos)]
+        + [(m.start(), True) for m in _PASTE_CLOSE.finditer(prompt, 0, pos)]
+    )
+    for _, is_close in prefix:
+        depth = max(0, depth - 1) if is_close else depth + 1
+    if depth <= 0:
+        return None
+    target = depth - 1
+    events = sorted(
+        [(m.start(), False) for m in _PASTE_OPEN.finditer(prompt, pos)]
+        + [(m.start(), True) for m in _PASTE_CLOSE.finditer(prompt, pos)]
+    )
+    for start, is_close in events:
+        if is_close:
+            depth -= 1
+            if depth == target:
+                return start
+        else:
+            depth += 1
+    return None
+
+
 def _split_harness_frames(prompt: str) -> tuple[str, list[str]] | None:
     """Split a prompt into (text outside harness frames, the frames' bodies), or None.
 
@@ -220,11 +272,12 @@ def _split_harness_frames(prompt: str) -> tuple[str, list[str]] | None:
     inbound text.
 
     The operator's words are never dropped. Frames are read left to right, and a
-    frame is never read past the closing tag of the paste it opens in, nor into
-    another frame's body. A hand-back with no closing tag ends after its indented
-    report (a logged trigger is cut at 200 characters, so the store holds such
-    prompts); a peer message or notification with no closing tag is not taken as
-    a frame, since nothing marks where the peer's text stops: only the peer's
+    frame is never read past the closing tag of the paste it is nested inside (see
+    `_enclosing_paste_close`; a frame not inside any paste has no such bound), nor
+    into another frame's body. A hand-back with no closing tag ends after its
+    indented report (a logged trigger is cut at 200 characters, so the store holds
+    such prompts); a peer message or notification with no closing tag is not taken
+    as a frame, since nothing marks where the peer's text stops: only the peer's
     opening tag is dropped.
     """
     outside: list[str] = []
@@ -232,8 +285,8 @@ def _split_harness_frames(prompt: str) -> tuple[str, list[str]] | None:
     pos, found = 0, False
     while m := _FRAME_OPEN.search(prompt, pos):
         kind = m.lastgroup
-        paste_close = _PASTE_CLOSE.search(prompt, m.end())
-        limit = paste_close.start() if paste_close else len(prompt)
+        paste_close = _enclosing_paste_close(prompt, m.start())
+        limit = paste_close if paste_close is not None else len(prompt)
         close = _FRAME_CLOSE[kind].search(prompt, m.end(), limit)
         if close is None and kind == "note":
             outside.append(prompt[pos : m.end()])
