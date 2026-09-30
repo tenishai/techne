@@ -17,6 +17,15 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Docs
 
+- **README quickstart named the missing system packages and a PATH gap on stock
+  Debian/Ubuntu** (#1121, #1122). A fresh `ubuntu:24.04` with only `python3` and `git`
+  installed — the README's stated requirements — failed both install paths: the dev
+  path's `python3 -m venv .venv` needs `python3-venv` (`sudo apt install python3-venv`),
+  and the pinned-release path's `pipx` needs `sudo apt install pipx` (macOS:
+  `brew install pipx`). Separately, `pipx install ... && techne init` failed with
+  `techne: command not found` — `pipx` puts the binary in `~/.local/bin`, which isn't on
+  PATH until `pipx ensurepath` runs and a new shell starts; the README now says so
+  between the two commands. Found by a literal quickstart run on stock Ubuntu 24.04.
 - **Two lines stopped saying every hook config change needs a new session** (#1032).
   `docs/welcome.md` and `AGENTS.md` both said "a config change doesn't fire until the
   next session" for any hook flag. Only `per_turn_recall` and `codex_grep_assist` are
