@@ -203,18 +203,88 @@ CAPABILITIES: tuple[Capability, ...] = (
 )
 
 
+def _direct_url() -> dict | None:
+    """techne's PEP 610 `direct_url.json`, or None (the file `--version` reads too)."""
+    import json
+    from importlib.metadata import distribution
+
+    try:
+        raw = distribution("techne").read_text("direct_url.json")
+        data = json.loads(raw) if raw else None
+    except Exception:  # noqa: BLE001 — an install hint must never fail its caller
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _editable_dir(direct_url: dict | None) -> str | None:
+    """The checkout an editable install points at, or None if it is not editable."""
+    from urllib.parse import unquote, urlparse
+
+    if not direct_url or not (direct_url.get("dir_info") or {}).get("editable"):
+        return None
+    url = urlparse(str(direct_url.get("url", "")))
+    return unquote(url.path) if url.scheme == "file" and url.path else None
+
+
+def _install_context() -> dict:
+    """How this techne was installed: the inputs `install_command_for` reads.
+
+    A seam: tests pin it, because the answer is the host's (a developer's venv is
+    editable, CI's is a uv venv, a user's is pipx).
+    """
+    import sys
+
+    return {
+        "direct_url": _direct_url(),
+        "prefix": sys.prefix,
+        "base_prefix": sys.base_prefix,
+        "executable": sys.executable,
+    }
+
+
 def vectors_install_command(version: str | None = None) -> str:
     """The one spelling of "install the embedding extra" (also used by `init`)."""
-    import re
-
     if version is None:
         from techne import __version__ as version
+    return install_command_for(version, **_install_context())
+
+
+def install_command_for(
+    version: str,
+    *,
+    direct_url: dict | None,
+    prefix: str,
+    base_prefix: str,
+    executable: str,
+) -> str:
+    """The install-the-extra command for one kind of install (#1124).
+
+    The pipx form given to an editable install put a second, older, non-editable
+    copy beside the checkout being developed.
+
+    - editable (PEP 610 `dir_info.editable`): reinstall the checkout with the extra.
+    - pipx venv: the pipx form, as before.
+    - uv tool venv: `uv tool install` (those venvs have no pip).
+    - any other venv: that venv's pip, with the git URL. Never plain
+      `techne[recommended]`: PyPI `techne` is an unrelated package.
+    - no venv: the pipx form, the documented install.
+    """
+    import re
+    import shlex
+
+    python = shlex.quote(executable)
+    checkout = _editable_dir(direct_url)
+    if checkout:
+        return f'cd {shlex.quote(checkout)} && {python} -m pip install -e ".[recommended]"'
 
     tag = f"v{version}" if re.fullmatch(r"\d+\.\d+\.\d+", version) else "<tag>"
-    return (
-        f'pipx install --force "techne[recommended] @ '
-        f'git+https://github.com/tenishai/techne.git@{tag}"'
-    )
+    spec = f'"techne[recommended] @ git+https://github.com/tenishai/techne.git@{tag}"'
+    venv = prefix.replace("\\", "/")
+    if "/pipx/venvs/" in venv or prefix == base_prefix:
+        return f"pipx install --force {spec}"
+    if "/uv/tools/" in venv:
+        return f"uv tool install --force {spec}"
+    return f"{python} -m pip install {spec}"
 
 
 # Probes answer "is the recommended state in place?": True, False, or None when

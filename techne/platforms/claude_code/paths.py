@@ -73,6 +73,24 @@ def claude_json_path() -> Path:
     return p.with_name(p.name + ".json")
 
 
+def _claude_on_path() -> bool:
+    """A seam: tests pin it, because the answer depends on the host."""
+    import shutil
+
+    return shutil.which("claude") is not None
+
+
+def claude_code_present() -> bool:
+    """Is Claude Code installed here? `claude` on PATH, or its config dir exists (#1123).
+
+    Call it BEFORE `techne init` registers anything: registration creates the
+    config dir, after which this is always True. Either signal is enough, because
+    `claude` may be installed somewhere off PATH (a desktop app, an npm prefix the
+    shell does not export) and the dir alone then says it has run here.
+    """
+    return _claude_on_path() or claude_config_dir().is_dir()
+
+
 def claude_projects_dir() -> Path:
     """The transcripts/projects dir under the (possibly relocated) config dir."""
     return claude_config_dir() / "projects"

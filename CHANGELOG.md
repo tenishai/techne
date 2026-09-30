@@ -125,6 +125,22 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- **`techne init` says so when Claude Code is not installed** (#1123). A bare
+  `techne init` on a machine without Claude Code still registers the hooks, the
+  skills and the MCP server (in `~/.claude.json`, which is where Claude Code reads
+  user-scope MCP servers), so installing Claude Code afterwards needs no second
+  init. It now prints "Claude Code not found; techne's hooks are registered and take
+  effect when you install it" with the `--platform standalone` alternative, and no
+  longer claims Claude Code auto-memory is on or offers to turn it off. Claude Code
+  counts as present when `claude` is on PATH or its config dir existed before init.
+  Nothing changes on a machine that has it.
+- **init's semantic-recall hint matches how techne was installed** (#1124). An
+  editable install was told to `pipx install --force "techne[recommended] @ git+..."`,
+  which puts a second, older, non-editable copy beside the checkout. It now gets
+  `cd <checkout> && <its python> -m pip install -e ".[recommended]"`, read from PEP
+  610 `direct_url.json`. A uv tool install gets `uv tool install --force`, any other
+  venv gets its own pip with the git URL, and pipx or a non-venv install keeps the
+  pipx form. `techne capabilities` uses the same command.
 - **`techne doctor` no longer reports `hook:pre_compact`/`hook:post_compact` STALE
   when nothing has compacted in the window** (#1075). Both fire only on a
   compaction, and this store has no independent way to confirm one happened —
