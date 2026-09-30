@@ -246,14 +246,23 @@ def _pin_claude_on_path(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _pin_install_context(monkeypatch):
+def _pin_install_context(request, monkeypatch):
     """Pin how techne looks installed to a pipx install (#1124).
 
     The embedding-extra hint follows the install kind, and the suite's own install
     is the host's: editable on a developer checkout, a uv venv in CI. The baseline
     is the pipx install the README documents, which every hint test written before
     #1124 assumed. ``tests/test_install_command.py`` covers each kind.
+
+    Tests marked ``real_install_context`` (techne#1128) run the real
+    ``_install_context()``/``_direct_url()`` instead, against a faked
+    ``importlib.metadata.distribution`` — see the ``real_install_context``-marked
+    tests in ``tests/test_install_command.py``. Without that marker, this fixture
+    pins the SEAM one layer up, so a typo in the ``direct_url.json`` filename
+    inside ``_direct_url()`` passes the whole suite silently.
     """
+    if request.node.get_closest_marker("real_install_context"):
+        return
     from techne.core import capabilities as caps
 
     monkeypatch.setattr(

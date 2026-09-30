@@ -191,6 +191,21 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- **The install-the-extra hint now tests the REAL `_install_context()`/`_direct_url()`
+  path, not only the pinned one** (#1128). Every hint test ran against
+  `tests/conftest.py`'s autouse `_pin_install_context`, which replaces
+  `_install_context` wholesale — so `_direct_url()`'s own read of the installed
+  package's `direct_url.json` never ran in the suite at all. A mutant that read
+  `"direct-url.json"` instead passed all 52 hint tests: it would route an editable
+  install to the plain-venv branch, whose `<python> -m pip install
+  "techne[recommended] @ git+..."` replaces the editable checkout with a second,
+  older copy. `tests/test_install_command.py` now has three tests, marked
+  `real_install_context` to opt out of the pin, that fake
+  `importlib.metadata.distribution` and exercise the real functions end to end;
+  reverting the fix (the `direct-url.json` typo) fails them. Also: an editable
+  install in a `uv`-created venv (no pip at all) now reads `INSTALLER` from the
+  dist-info and gets `uv pip install --python <python> -e ".[recommended]"`
+  instead of a `-m pip install -e` that would fail outright.
 - **`techne init` says so when Claude Code is not installed** (#1123). A bare
   `techne init` on a machine without Claude Code still registers the hooks, the
   skills and the MCP server (in `~/.claude.json`, which is where Claude Code reads
