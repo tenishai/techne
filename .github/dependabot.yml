@@ -1,12 +1,20 @@
-# Dependabot version updates. Grouped per ecosystem so a week's bumps land as
-# one PR each, not one per package — test.yml's self-hosted pool is small
-# (techne#424/#461) and does not need N near-identical runs.
+# Dependabot version updates. Grouped so a week's bumps land as one PR, not
+# one per package — test.yml's self-hosted pool is small (techne#424/#461)
+# and does not need N near-identical runs.
 #
 # Dependabot PRs from this config are SAME-REPO PRs (dependabot[bot] pushes to
 # a branch in tenishai/techne, not a fork), so they satisfy test.yml's
 # TRUSTED_POOL guard (tests/test_ci_workflow_triggers.py:703) exactly like a
 # human contributor's PR and run on the self-hosted pool. See the PR body for
 # what that means and why no guard change ships with this file.
+#
+# NO `pip` ECOSYSTEM YET (Richard, 2026-09-30). A dependency-version bump runs
+# arbitrary install-time code the day it's proposed, before review — the same
+# self-hosted-pool exposure as above, but for a much larger and more frequently
+# changing package set than the three pinned Actions. Add it once the repo is
+# public and `dependabot[bot]` PRs can be routed to the hosted `fork-pr` job
+# instead of the trusted pool (an actor check on the guard, or GitHub's
+# `dependabot-updates` deployment environment) — not before.
 version: 2
 updates:
   - package-ecosystem: "github-actions"
@@ -15,14 +23,5 @@ updates:
       interval: "weekly"
     groups:
       github-actions:
-        patterns:
-          - "*"
-
-  - package-ecosystem: "pip"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-    groups:
-      python-dependencies:
         patterns:
           - "*"

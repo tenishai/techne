@@ -639,10 +639,12 @@ each PR's own measurement on a copy of the maintainer's store.
   pinned to a full commit sha, with a `# vX.Y.Z` comment naming the tag it resolves
   to, instead of a mutable `@v4`/`@v5` tag an upstream maintainer (or their compromised
   account) could repoint. Added `.github/dependabot.yml`: weekly, grouped updates for
-  `github-actions` and `pip` (read from `pyproject.toml`), so a bump lands as one PR
-  per ecosystem per week rather than one per package. Ran `pip-audit` once against the
-  full `.[dev,codex,vectors,recommended]` dependency set (109 packages, Python 3.12):
-  no known vulnerabilities. Evaluated ruff's `S` (bandit) rule set as a candidate
+  `github-actions` only for now (Richard, 2026-09-30) — `pip` waits until the repo is
+  public and `dependabot[bot]` PRs can be routed to the hosted `fork-pr` job instead of
+  the self-hosted pool, since Dependabot PRs are same-repo PRs and a version bump runs
+  install-time code before review. Ran `pip-audit` once against the full
+  `.[dev,codex,vectors,recommended]` dependency set (109 packages, Python 3.12): no
+  known vulnerabilities. Evaluated ruff's `S` (bandit) rule set as a candidate
   `static_analysis` control: 9,938 findings against `techne tests` (9,528 of them
   `S101`, assert-in-tests), 132 against `techne/` alone — too many to triage in one
   PR, so it is not enabled here; the existing 158-error baseline is untouched.
