@@ -76,7 +76,7 @@ _FRAME_CLOSE = {
 # their own line (see the <pasted_content> fixture in tests/test_recall_query.py).
 # A hand-back's indented report can quote either tag's literal text mid-line
 # while describing it; anchoring keeps that quote from ever being read as the
-# tag itself. Used by `_enclosing_paste_close`'s forward scan below, not by
+# tag itself. Used by `_enclosing_paste_close` (its whole scan), not by
 # `_split_paste` (its own tag-counting predates #1080 and is unaffected by
 # this).
 _PASTE_OPEN = re.compile(r'(?m)^<pasted_content id="[^"]*">')
@@ -229,20 +229,21 @@ def _enclosing_paste_close(prompt: str, pos: int) -> int | None:
     inside another paste resolves to the close of the paste it is DIRECTLY
     inside, not the next textual close regardless of nesting.
 
-    THE PREFIX (before *pos*) and the FORWARD SCAN (from *pos* on) trust
-    different text, and so count different tags. Before *pos* is the
-    operator's own words, so `_PASTE_TAG` (unanchored, the same tags
-    `_split_paste` already trusts there) is fine. From *pos* on is the
-    harness-generated frame body — a hand-back's report — which can quote
-    either tag's literal text mid-line while describing it: an unanchored
-    OPEN there inflates the depth count exactly as an unanchored CLOSE would
-    resolve it early (Prudence, PR #1127 r1), silently dropping the operator's
-    later text when the inflated target is never reached. Both directions are
-    `_PASTE_OPEN`/`_PASTE_CLOSE` (anchored to column zero) in the forward scan.
+    One anchored scan over the whole prompt: only `_PASTE_OPEN` /
+    `_PASTE_CLOSE` (column zero) count, before *pos* as well as after it. The
+    text before *pos* is not only the operator's words once a frame is not the
+    first thing in its paste; an earlier hand-back's report is in there too, and
+    a report can quote either tag's literal text mid-line while describing it.
+    An unanchored quote on either side would move the depth count (Prudence,
+    PR #1127 r1 and r2) and silently drop the operator's later text.
     """
     depth = 0
-    for m in _PASTE_TAG.finditer(prompt, 0, pos):
-        depth = max(0, depth - 1) if m.group(1) else depth + 1
+    prefix = sorted(
+        [(m.start(), False) for m in _PASTE_OPEN.finditer(prompt, 0, pos)]
+        + [(m.start(), True) for m in _PASTE_CLOSE.finditer(prompt, 0, pos)]
+    )
+    for _, is_close in prefix:
+        depth = max(0, depth - 1) if is_close else depth + 1
     if depth <= 0:
         return None
     target = depth - 1
