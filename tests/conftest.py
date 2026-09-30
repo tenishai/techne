@@ -230,6 +230,46 @@ def _isolate_host_config(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _pin_claude_on_path(monkeypatch):
+    """Pin "is `claude` on PATH" to yes (#1123).
+
+    `techne init` changes its output when Claude Code is absent, and whether the
+    `claude` binary is on PATH is a host detail: a developer laptop has it, CI does
+    not. The baseline is the installed case, which every init test written before
+    #1123 assumed. Tests of the absent case override it
+    (see ``tests/test_init_without_claude_code.py``).
+    """
+    from techne.platforms.claude_code import paths as paths_mod
+
+    # raising=False: eval-vec's base leg runs these tests against main's library.
+    monkeypatch.setattr(paths_mod, "_claude_on_path", lambda: True, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _pin_install_context(monkeypatch):
+    """Pin how techne looks installed to a pipx install (#1124).
+
+    The embedding-extra hint follows the install kind, and the suite's own install
+    is the host's: editable on a developer checkout, a uv venv in CI. The baseline
+    is the pipx install the README documents, which every hint test written before
+    #1124 assumed. ``tests/test_install_command.py`` covers each kind.
+    """
+    from techne.core import capabilities as caps
+
+    monkeypatch.setattr(
+        caps,
+        "_install_context",
+        lambda: {
+            "direct_url": None,
+            "prefix": "/home/u/.local/share/pipx/venvs/techne",
+            "base_prefix": "/usr",
+            "executable": "/home/u/.local/share/pipx/venvs/techne/bin/python",
+        },
+        raising=False,  # eval-vec's base leg runs these tests against main's library
+    )
+
+
+@pytest.fixture(autouse=True)
 def _isolate_install_root(tmp_path, monkeypatch):
     """Pin ``_install_root`` so tests never inherit the checkout's real layout.
 

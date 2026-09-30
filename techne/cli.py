@@ -2740,8 +2740,14 @@ def init(
         click.echo(f"Identity imported from: {config.identity_dir}")
 
     # Platform-specific setup
+    # Measured BEFORE registration, which creates ~/.claude and would make any
+    # later check say yes (#1123).
+    cc_present = False
     if platform == "claude-code":
         from techne.platforms.claude_code import register_hooks, register_mcp
+        from techne.platforms.claude_code.paths import claude_code_present
+
+        cc_present = claude_code_present()
 
         try:
             register_hooks(config, allow_worktree=allow_worktree)
@@ -2756,6 +2762,14 @@ def init(
             raise click.ClickException(str(exc)) from exc
         click.echo("Claude Code hooks registered")
         click.echo("MCP server registered")
+        if not cc_present:
+            # Still wired (#1123): the README's first command is a bare `techne init`,
+            # and a user who installs Claude Code afterwards gets a working setup.
+            click.echo(
+                "Claude Code not found; techne's hooks are registered and take effect "
+                "when you install it. For no Claude Code integration, run "
+                "`techne init --platform standalone`."
+            )
 
         # Operational procedures (techne#641). Deliberately AFTER the two guards
         # above: if register_hooks refuses this install, we have not scattered
@@ -2830,7 +2844,9 @@ def init(
 
     # After the save, so an Abort (EOF, Ctrl-C) at the prompt cannot leave a
     # registered install with no config.yaml (#1030 r1).
-    if platform == "claude-code":
+    # Not when Claude Code is absent: its auto-memory "defaults on" only in the
+    # sense that no settings file says otherwise, and there is nothing to turn off.
+    if platform == "claude-code" and cc_present:
         _offer_auto_memory_off(spool_primary=resolved_mode == "spool-primary")
 
     # Platform-specific next-steps so the operator isn't left guessing.
