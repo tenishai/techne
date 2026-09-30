@@ -48,23 +48,10 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-#: Rows older than this are deleted (techne#1073). Before this the table had no
-#: retention at all, and #1020 turned per_turn_recall on by default, so every
-#: install grew it by several rows per turn, forever.
-#:
-#: WHY 180 DAYS, reader by reader:
-#:   - `_already_sent_this_session` (user_prompt_submit) reads one session's rows
-#:     since its last compaction. Sessions last hours to days; 180 covers any resume.
-#:   - `techne audit` (utilization.py) takes `--since N`, default all-time. All-time
-#:     now means the last 180 days, which is the window its attribution panels are
-#:     read over in practice.
-#:   - scripts/usefulness_audit.py joins rows to transcripts and reads every row.
-#:   - Per-row utilization from `hit_ids` (techne#1024, not built yet) asks which
-#:     rows were never injected. Over a bounded window that becomes "not injected in
-#:     180 days", which is the question a staleness signal needs anyway.
-#: 180 also matches `reaffirmation_window_days`, the other usage-shaped window.
-#: A module constant, not a config key: no other retention window is one (the
-#: outbox sweep's `--retain-days` flag, the hooks' 7-day extension_state TTL).
+#: Rows older than this are deleted (techne#1073); every write prunes. 180 days
+#: outlasts every reader (re-send suppression, `techne audit`, usefulness_audit,
+#: #1024); the per-reader reasoning is in PR #1139. A constant, like the other
+#: retention windows, not a config key.
 RETENTION_DAYS = 180
 
 #: Most rows one prune looks at. The prune runs on every write, so it must cost

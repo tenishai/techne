@@ -9,7 +9,7 @@ WHAT: techne writes constantly and reads rarely. This seam MEASURES the read sid
 
 SURFACE: `techne audit` (`cli.py`, text + `--json`). Four functions, all read-only over `context_injections` + `observations`, all accepting `since_days`.
 
-RETENTION (#1073): `context_injections` keeps 180 days (`_injection_log.RETENTION_DAYS`); every write deletes up to `PRUNE_BATCH` older rows. So `since_days=None` means "every retained row", not all-time, and any window past 180 days reads the same as 180. `observations` has no such bound. The constant's comment lists each reader and why 180 covers it.
+RETENTION (#1073): `context_injections` keeps 180 days (`_injection_log.RETENTION_DAYS`); every write deletes up to `PRUNE_BATCH` older rows. So `since_days=None` means "every retained row", not all-time, and any window past 180 days reads the same as 180. `observations` has no such bound. PR #1139 lists each reader and why 180 covers it.
 
 The four functions:
 
