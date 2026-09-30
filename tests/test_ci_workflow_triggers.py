@@ -135,7 +135,11 @@ def test_every_job_still_lives_in_this_one_workflow():
     # side of the #556 split and carries the same fork guard as its neighbours:
     # the suite SIGKILLs child processes, which is not something to hand a fork
     # PR on a shared runner.
-    assert set(jobs) == {"test", "eval-vec", "arch-cards", "crash-recovery", "fork-pr"}, (
+    # `acceptance` added 2026-09-29 (techne#1059): hosted, but still carries
+    # `TRUSTED_POOL`'s exact guard expression rather than none, because every
+    # job must pick one of the two (test_the_two_guards_are_complements_not_overlaps).
+    expected = {"test", "eval-vec", "arch-cards", "crash-recovery", "acceptance", "fork-pr"}
+    assert set(jobs) == expected, (
         f"job set changed: {sorted(jobs)}. All of them ride this one trigger — and "
         "a new job must also pick a side of the techne#556 trust split."
     )
