@@ -5,6 +5,8 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.18.0] — 2026-09-30
+
 ### Deprecated
 
 - **`techne_recall`'s `_store` / `_role` row keys are deprecated; read `store` / `role`**
@@ -696,19 +698,18 @@ each PR's own measurement on a copy of the maintainer's store.
 
 ### Security
 
-- **CI supply-chain hygiene ahead of the go-public flip** (items S4, S7, Q9 in the
-  go-public readiness pass). Every third-party GitHub Action in `test.yml` is now
-  pinned to a full commit sha, with a `# vX.Y.Z` comment naming the tag it resolves
-  to, instead of a mutable `@v4`/`@v5` tag an upstream maintainer (or their compromised
-  account) could repoint. Added `.github/dependabot.yml`: weekly, grouped updates for
-  `github-actions` only for now (Richard, 2026-09-30) — `pip` waits until the repo is
-  public and `dependabot[bot]` PRs can be routed to the hosted `fork-pr` job instead of
-  the self-hosted pool, since Dependabot PRs are same-repo PRs and a version bump runs
-  install-time code before review. Ran `pip-audit` once against the full
-  `.[dev,codex,vectors,recommended]` dependency set (109 packages, Python 3.12): no
-  known vulnerabilities. Evaluated ruff's `S` (bandit) rule set as a candidate
-  `static_analysis` control: 9,938 findings against `techne tests` (9,528 of them
-  `S101`, assert-in-tests), 132 against `techne/` alone — too many to triage in one
+- **CI supply-chain hygiene ahead of the go-public flip** (#1134). Every third-party
+  GitHub Action in `test.yml` is now pinned to a full commit sha, with a `# vX.Y.Z`
+  comment naming the tag it resolves to, instead of a mutable `@v4`/`@v5` tag an
+  upstream maintainer (or their compromised account) could repoint. Added
+  `.github/dependabot.yml`: weekly, grouped updates for `github-actions` only for now —
+  `pip` waits until the repo is public and `dependabot[bot]` PRs can be routed to the
+  hosted `fork-pr` job instead of the self-hosted pool, since Dependabot PRs are
+  same-repo PRs and a version bump runs install-time code before review. Ran `pip-audit`
+  once against the full `.[dev,codex,vectors,recommended]` dependency set (109 packages,
+  Python 3.12): no known vulnerabilities. Evaluated ruff's `S` (bandit) rule set as a
+  candidate `static_analysis` control: 9,938 findings against `techne tests` (9,528 of
+  them `S101`, assert-in-tests), 132 against `techne/` alone — too many to triage in one
   PR, so it is not enabled here; the existing 158-error baseline is untouched.
 
 ### Upgrading
