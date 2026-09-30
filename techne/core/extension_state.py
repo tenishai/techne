@@ -10,8 +10,11 @@ boundary; callers own the schema of each payload dict.
 """
 
 import json
+import logging
 import sqlite3
 import time
+
+log = logging.getLogger(__name__)
 
 
 def get_state(conn: sqlite3.Connection, name: str) -> dict | None:
@@ -57,3 +60,33 @@ def clear_state(conn: sqlite3.Connection, name: str, *, commit: bool = True) -> 
     if commit:
         conn.commit()
     return cur.rowcount > 0
+
+
+#: Age past which a per-session key is dead weight. Matches the 7 days the hooks'
+#: own per-session families already use (post_tool_use, user_prompt_submit): far
+#: longer than any realistic gap inside one session.
+SESSION_STATE_TTL_SECONDS = 7 * 24 * 60 * 60
+
+
+def prune_stale(
+    conn: sqlite3.Connection,
+    prefix: str,
+    *,
+    max_age_seconds: int = SESSION_STATE_TTL_SECONDS,
+    commit: bool = True,
+) -> int:
+    """Delete keys starting with *prefix* not written for *max_age_seconds*.
+
+    For per-session families (one key per session id), which otherwise gain a row
+    per session forever (techne#1073). Matches the prefix exactly rather than with
+    LIKE, whose ``_`` is a wildcard. Returns the count removed.
+    """
+    cur = conn.execute(
+        "DELETE FROM extension_state WHERE substr(name, 1, ?) = ? AND updated_at < ?",
+        (len(prefix), prefix, int(time.time()) - int(max_age_seconds)),
+    )
+    if commit:
+        conn.commit()
+    if cur.rowcount:
+        log.debug("extension_state: pruned %d stale %r key(s)", cur.rowcount, prefix)
+    return cur.rowcount

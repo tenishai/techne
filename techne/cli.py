@@ -2272,7 +2272,7 @@ def migrate_summaries_cmd(ctx, dry_run: bool):
     "since_days",
     type=int,
     default=None,
-    help="Window to the last N days (default: all-time).",
+    help="Window to the last N days (default: every retained row; injections keep 180 days).",
 )
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
 @click.pass_context
