@@ -849,6 +849,25 @@ jobs:
             exit 1
           fi
 
+      # techne#1071: `hooks.commentblockgate` is a REPO-LOCAL git config key, so
+      # it only ever reached an operator's own pre-commit hook — and this
+      # repo's global hook loader (outside the repo, not this file's concern)
+      # never learned a branch for it, so scripts/check_comment_blocks.sh has
+      # never run anywhere. This is the mechanism that makes it real. Needs
+      # origin/main resolvable, same reason and same fetch as the `test` job.
+      - name: Fetch origin/main for the comment-block gate
+        working-directory: techne
+        run: git fetch --depth=1 origin +refs/heads/main:refs/remotes/origin/main
+
+      # ONE ARG SWITCHES THE SCRIPT FROM ITS PRE-COMMIT SHAPE (diffing the
+      # index) TO A CI SHAPE (diffing a base ref against HEAD) — see the
+      # script's own header. Diffing against `origin/main` means a comment
+      # block already on `main` is never re-flagged here, only one a PR's own
+      # commits add.
+      - name: Comment-block gate
+        working-directory: techne
+        run: bash scripts/check_comment_blocks.sh origin/main
+
   # CRASH-RECOVERY GATE (#388). The `crash` suite SIGKILLs a child mid-write and
   # then proves the store: uncommitted work leaves no trace, committed work
   # survives, a hot WAL replays, an interrupted migration does not stamp its
