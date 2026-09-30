@@ -112,6 +112,16 @@ All notable changes to techne are documented here. Format loosely follows
   `user_prompt_submit` is now one function, `recall_block`, used by both rails. The
   one change to per-turn recall: the query builder now runs just before the hook's
   timeout block rather than inside it.
+- **CI now tests the installed artifact, not just the checkout** (#1059). Every other
+  job installs techne editable, so a module, package-data file, or entry point missing
+  from the wheel is invisible to them — the class of defect that reached external
+  partners in v0.16.0 (knowledge #2836). The new `acceptance` job builds the wheel,
+  installs it into a fresh venv twice (core, then `[recommended]`), and — from a fresh
+  temp dir, so the checkout can't shadow the install — checks `techne --version`
+  against pyproject's version, every `console_scripts`/`techne.sync_adapters` entry
+  point (`tests/test_entry_points.py`, also runnable standalone), two bundled guides,
+  `init --help`/`doctor --help`, and that `techne.__file__` resolves under the venv.
+  `scripts/acceptance.sh` is the same script docs/releasing.md's SOP now calls.
 
 ### Fixed
 

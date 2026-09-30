@@ -888,6 +888,66 @@ jobs:
         working-directory: techne
         run: .venv-ci/bin/python -m pytest -m crash -q -rs -p no:randomly
 
+  # (#1059) PROVE THE ARTIFACT, NOT THE CHECKOUT. Every job above installs techne
+  # EDITABLE (`uv pip install -e ...`), so pytest always runs with the checkout
+  # importable. A packaging defect can't show up there: a module or package-data
+  # file missing from the wheel, a wrong `[project.scripts]` target, or a broken
+  # `techne.sync_adapters` entry point, because the source tree always satisfies
+  # the import regardless of what the wheel actually contains. v0.16.0 already
+  # reached external partners with exactly this class of defect (knowledge #2836:
+  # a hook template segment missing from the wheel, fixed in 0.16.1).
+  #
+  # scripts/acceptance.sh does the rest: builds the wheel with `uv build`,
+  # installs it into a FRESH venv twice (core, then `[recommended]` — the extra
+  # the README's blessed pipx install line uses), `cd`s into a fresh temp dir so
+  # the checkout can never shadow the installed package on `sys.path`, and then
+  # runs `techne --version` against pyproject's version, every entry point the
+  # `techne` distribution declares (tests/test_entry_points.py, which also runs
+  # standalone with no pytest), two bundled guides (package data), `init --help`
+  # / `doctor --help`, and asserts `techne.__file__` resolves under the venv's
+  # site-packages rather than the checkout. Same script docs/releasing.md's SOP
+  # calls before tagging — this job does not replace that step (which checks the
+  # PUBLISHED tag); it moves the packaging-defect signal from "after tagging" to
+  # "on the PR".
+  #
+  # SELF-HOSTED, NOT HOSTED — a deliberate departure from the issue's literal
+  # proposal ("hosted runner"), and worth recording why. The job's own needs
+  # would have been satisfied by `ubuntu-latest` (it only builds a wheel and
+  # installs it — nothing the self-hosted image bakes in is required). But
+  # this file's OWN RULE, stated at the top just below `jobs:`, is "every job
+  # on the TRUSTED path is self-hosted — do not add a hosted one there", with
+  # exactly one exception (`fork-pr`, a security boundary, not a preference).
+  # This job has no security reason to leave the trusted path, so it follows
+  # that rule rather than the issue text. MEASURED, not theoretical: the first
+  # version of this job WAS hosted, and its first two runs on this PR both hit
+  # "The job was not started because recent account payments have failed or
+  # your spending limit needs to be increased" — the exact `ubuntu-latest`
+  # failure mode this file's header already documents from July/August 2026.
+  # Self-hosted made it possible to actually observe this job pass on this PR.
+  #
+  # CARRIES THE SAME `if:` AS ITS SELF-HOSTED NEIGHBOURS, which is the ordinary
+  # case here (unlike a hosted job borrowing the expression for its trigger
+  # semantics alone) — `tests/test_ci_workflow_triggers.py::
+  # test_no_fork_reachable_job_runs_on_self_hosted` requires exactly this.
+  # THE PRICE: a fork PR does not get this job, same trade `eval-vec` and
+  # `arch-cards` already made — see `fork-pr`'s trailing comment.
+  acceptance:
+    runs-on: [self-hosted, linux, x64, techne-ci]
+    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
+    timeout-minutes: 15
+    steps:
+      - name: Checkout techne
+        uses: actions/checkout@v4
+        with:
+          path: techne
+
+      # uv and the 3.12/3.13/3.14 interpreters are baked into this image
+      # (see the note above `jobs:`) — scripts/acceptance.sh calls `uv build` /
+      # `uv venv` / `uv pip install` directly and needs nothing set up first.
+      - name: Installed-artifact acceptance (core + recommended)
+        working-directory: techne
+        run: bash scripts/acceptance.sh
+
   # THE OTHER HALF OF THE TRUST SPLIT (#556). Fork PRs are skipped by every
   # self-hosted job above, so without this they would get an EMPTY Checks tab —
   # which is the exact failure #530 fought: nothing in CI can report a run that
@@ -1001,9 +1061,17 @@ jobs:
       #   - arch-cards — invokes `python3.13` by versioned name against a runner
       #                 image proven to carry it; that is a property of the
       #                 self-hosted image, not of ubuntu-latest.
+      #   - acceptance (#1059) — self-hosted, like this job's neighbours, so it
+      #                 is excluded from fork PRs the same way they are. Its
+      #                 own steps (`uv build`, `uv venv`, `uv pip install`)
+      #                 would run fine on ubuntu-latest given the "Install uv"
+      #                 step above, but reproducing it here would mean
+      #                 building and installing the wheel twice in this one
+      #                 job — worth its own issue if a fork PR ever needs it.
       # A fork PR therefore gets the full suite and the deterministic gates, but
-      # NOT the vector gate or the card-freshness gate. Both still run on every
-      # push to main, so nothing merges unverified — a fork PR is simply verified
-      # less completely than an in-repo one, which is the trade the trust boundary
-      # buys. Widening it means re-platforming those two gates: worth its own issue,
+      # NOT the vector gate, the card-freshness gate, or the installed-artifact
+      # smoke test. All three still run on every push to main, so nothing merges
+      # unverified — a fork PR is simply verified less completely than an
+      # in-repo one, which is the trade the trust boundary buys. Widening it
+      # means re-platforming those gates: worth its own issue,
       # not worth blocking a security fix behind.
