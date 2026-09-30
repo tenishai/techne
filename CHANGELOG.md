@@ -632,6 +632,21 @@ each PR's own measurement on a copy of the maintainer's store.
   them on (`load_adapter` gets `url`, `path` and `allow_unlisted` only). Values under
   `sync:` in config.yaml stay in the file and are not read, as before.
 
+### Security
+
+- **CI supply-chain hygiene ahead of the go-public flip** (items S4, S7, Q9 in the
+  go-public readiness pass). Every third-party GitHub Action in `test.yml` is now
+  pinned to a full commit sha, with a `# vX.Y.Z` comment naming the tag it resolves
+  to, instead of a mutable `@v4`/`@v5` tag an upstream maintainer (or their compromised
+  account) could repoint. Added `.github/dependabot.yml`: weekly, grouped updates for
+  `github-actions` and `pip` (read from `pyproject.toml`), so a bump lands as one PR
+  per ecosystem per week rather than one per package. Ran `pip-audit` once against the
+  full `.[dev,codex,vectors,recommended]` dependency set (109 packages, Python 3.12):
+  no known vulnerabilities. Evaluated ruff's `S` (bandit) rule set as a candidate
+  `static_analysis` control: 9,938 findings against `techne tests` (9,528 of them
+  `S101`, assert-in-tests), 132 against `techne/` alone — too many to triage in one
+  PR, so it is not enabled here; the existing 158-error baseline is untouched.
+
 ### Upgrading
 
 Do these in order. Every step is safe to repeat.
