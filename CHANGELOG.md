@@ -621,7 +621,10 @@ each PR's own measurement on a copy of the maintainer's store.
   `techne_recall`** (#1095, PR #1103). It is memory-mapped and query-only, so the page
   cache and the sqlite-vec load survive between tool calls. Warm `techne_search` p50
   went from about 102 ms to 79 ms for `(all, 10)` and from 16 ms to 8 ms for
-  `(knowledge, 15)`. Writes keep their own connections.
+  `(knowledge, 15)`. Writes keep their own connections. The cost is memory: on a 247 MB
+  store the server's RSS went from about 106 MB to 192 MB. The difference is clean,
+  file-backed mmap pages the kernel can reclaim under pressure; dirty (heap) memory was
+  unchanged (76.1 vs 74.8 MB with and without mmap).
 
 ### Removed
 
@@ -3447,7 +3450,7 @@ Condensed; see the linked issues/PRs and git history for detail.
 - **v0.6.0** — embedding techne in custom runtimes: `llm_api_base`/`llm_api_key`,
   caller-supplied session IDs, `init_session_for_external_id`, `cabal` platform.
 - **v0.5.1** — review pass: 2 blockers + 5 high + 8 medium fixes, +22 tests.
-- **v0.5.0** — first public release: JSONL backfill, dual-column session summary (schema v4),
+- **v0.5.0** — JSONL backfill, dual-column session summary (schema v4),
   user-prompt-anchored thread detection, `threads redetect`, platform package consolidation.
 - **v0.4.1** — hooks rewritten to Claude Code's wrapped `{matcher, hooks:[...]}` shape.
 - **v0.4.0** — heuristic thread detection (no `ANTHROPIC_API_KEY` for the default install);

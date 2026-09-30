@@ -1,13 +1,13 @@
 # The Memory System — Architecture
 
-> **Design record, July 2026.** It describes the maintainer's own multi-agent deployment,
-> including an orchestrator ("cabal") and an MCP gateway ("limenal") that are not part of
-> techne and are not public. For current behaviour see the README and `docs/arch/`.
+> **Design record, July 2026.** It describes the maintainer's own multi-agent deployment
+> as it stood then, including an orchestrator and an MCP gateway that are separate projects,
+> not part of techne. For current behaviour see the README and `docs/arch/`.
 
 **Status:** design synthesis. Captures the decisions from the 2026-07-04/05 design
 sessions (the maintainer and a paired agent session). Mixes **[BUILT]**, **[EXISTS]**,
-and **[NORTH-STAR]** — read the status tags; most of the federation layer is not built yet, and that's on purpose
-(design against something concrete before building it).
+and **[NORTH-STAR]** — read the status tags. The tags in the body are as of July 2026; the status table in §10
+records what has been built since, including federation (#222).
 
 ---
 
@@ -260,14 +260,14 @@ Omitted from the public copy: it planned code moves inside the private orchestra
 | cabal Archivist/Librarian personas | **EXISTS** |
 | the distiller (`drain.py`, fire-up/close, idempotent) | **BUILT** (2026-07-04) |
 | `capture_bash`/`capture_read` for review agents | **BUILT** (2026-07-04) |
-| techne-as-federator (roles, connections, read-merge) | **NORTH-STAR** |
+| techne-as-federator (roles, connections, read-merge) | **BUILT** (#222; page merge replaced the re-scoring merge in #1089 — see [`arch/search-embeddings.md`](arch/search-embeddings.md)) |
 | knowledge-export ledger + `unpushed`/`mark_pushed` tools | **NORTH-STAR** |
 | distill → outbox/ledger wiring (today it reaches neither) | **NORTH-STAR** |
 | `standalone` flag as lane selector | **NORTH-STAR** (noop gate exists) |
 | standalone Archivist agent (topology B) | **NORTH-STAR** |
 | discovery: agent-card `url` + git-backed catalog | **NORTH-STAR** |
 | telemetry plane (fleet aggregation, problem-markers) | **PARTIAL** (substrate exists) |
-| coherence layer (contradiction-supersession, decay wiring, faithfulness) — [`proposals/coherence-layer.md`](proposals/coherence-layer.md) | **PROPOSED** (prerequisite for read-merge §4/§11.3; the store-time half stands alone) |
+| coherence layer (contradiction-supersession, decay wiring, faithfulness) — [`proposals/coherence-layer.md`](proposals/coherence-layer.md) | **BUILT in large part** — contradiction rail (`techne_conflict_*`), decayed ranking, faithfulness gate (`techne_faithfulness_*`) ship; see the proposal's status line |
 
 ---
 

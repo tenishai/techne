@@ -13,6 +13,9 @@ wrong shape for them. These are the moments to speak up **before** being asked.
 The condition is here because a trigger that lives only in a document fires only if that
 document was already open — which is the failure the documents were meant to fix, one level
 up. The *explanation* stays in the document; follow the link once a trigger fires.
+Every target below is also bundled with techne: outside a repo checkout, where these
+relative links do not resolve, read it with `techne guide <name>` (for example
+`techne guide deployment`).
 
 | when the operator… | read before answering |
 |---|---|
@@ -51,7 +54,7 @@ fails, and a row pointing at a document that no longer carries a block fails.
 Same rule as architecture cards below, for the same reason: an unindexed trigger is one
 that never fires.
 
-**Staleness is checked, not marked.** Every bullet in all six current blocks is a claim about
+**Staleness is checked, not marked.** Every bullet in every current block is a claim about
 techne and all of them are tested — including the `-wal` ones, which look like statements
 about SQLite and are not: they are true *because* techne opens its databases in WAL mode,
 one line in `core/database.py`. Flip it to `DELETE` and all four become confidently wrong
@@ -131,9 +134,12 @@ in `~/.techne/config.yaml`, run `techne init`, and tell the operator the change
 takes effect at the *next* session for `per_turn_recall` and `codex_grep_assist`
 (they decide which hooks are registered in Claude Code's `settings.json`, loaded
 at session start) but immediately, on the next tool call, for `capture_bash`,
-`codex_edit_rail` and `codex_reindex_on_edit`. Two more capabilities exist and
+`codex_edit_rail` and `codex_reindex_on_edit`. Four more capabilities exist and
 stay opt-in — offer them, do not default them on: `per_turn_seed`,
-`startup_directive`.
+`startup_directive`, `capture_read`, and `inbound_recall`. `inbound_recall` stays
+dormant until `hooks.inbound_recall_floor_vec_distance` is also set, and that floor
+has not been measured for inbound text, so do not invent a value; `techne doctor`
+reports the rail as dormant for that reason.
 
 **Offer the recommended setup; never apply it silently.** When the session-start
 line "N capabilities are off on this install… Ask me what techne can do." appears
@@ -150,9 +156,11 @@ reverses one.
 **Operator conventions, apply unprompted:**
 
 - **Recall.** Call `techne_recall` before answering from belief. Do not rely on
-  `per_turn_recall` alone — it only matches what the user *typed*; nothing is
-  injected for pasted content, replayed transcripts, handed-back agent output,
-  or tool results (techne#1018).
+  `per_turn_recall` alone. It covers typed prompts, pasted content (searched on
+  its question lines) and subagent hand-backs that arrive as a prompt (#1018,
+  #1080). Tool results — Read, Bash, fetched pages, subagent results returned
+  inside a turn — get nothing unless the opt-in `hooks.inbound_recall` is armed,
+  and it never covers Read or Bash.
 - **References.** In anything a machine parses — PR bodies, commit messages,
   issue bodies, review comments — write `issue #N` or `knowledge #N`, never a
   decorated form. GitHub's closing keywords match only a plain `#N` /
