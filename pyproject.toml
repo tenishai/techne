@@ -96,7 +96,11 @@ noop = "techne.sync.noop:NoopAdapter"
 filesystem = "techne.sync.filesystem:FilesystemAdapter"
 
 [project.urls]
+Homepage = "https://github.com/tenishai/techne"
 Repository = "https://github.com/tenishai/techne"
+Issues = "https://github.com/tenishai/techne/issues"
+Changelog = "https://github.com/tenishai/techne/blob/main/CHANGELOG.md"
+Documentation = "https://github.com/tenishai/techne/tree/main/docs"
 
 [tool.ruff]
 target-version = "py311"

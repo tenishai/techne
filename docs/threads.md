@@ -129,7 +129,7 @@ techne threads redetect <session-id>    # re-run detection on a recorded session
 signals and their sum, so you can see *which* signal did or did not fire rather than
 guessing at the outcome.
 
-Tuning lives under `threads` in `~/.techne/config.toml`:
+Tuning lives under `threads` in `~/.techne/config.yaml`:
 
 | key | default | effect |
 |---|---|---|
