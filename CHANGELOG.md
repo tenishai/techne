@@ -33,8 +33,8 @@ All notable changes to techne are documented here. Format loosely follows
   `settings.json`, loaded at session start. `capture_bash`, `codex_edit_rail` and
   `codex_reindex_on_edit` are read inside PostToolUse's handler on every call once
   that hook is registered (default on via `hooks.post_tool_use`), so they already
-  applied immediately; `docs/operator-guide.md` and the README said so and are
-  unchanged.
+  applied immediately; `docs/operator-guide.md` (new in this release, #1019) and the
+  README already said so.
 - **`docs/investigating.md` gets two filter-discipline rules** (#926, #927), from a
   2026-09-13 re-audit that found four misses in eight repos, all from the same
   failure: a real technique discarded along with a product it didn't resemble. A
@@ -55,6 +55,30 @@ All notable changes to techne are documented here. Format loosely follows
   and shipped in the wheel; `integrations/` is a foreign client's own code (TypeScript
   today, for opencode and pi) that shells out to techne's CLI and never ships. Added
   `integrations/README.md` and a line in `ARCHITECTURE.md`'s `ENTRY:` block.
+- **New bundled guide: `docs/operator-guide.md`** (#1019, PR #1031). Read it with
+  `techne guide operator-guide`. It covers the recommended hook configuration (what is
+  on by default, what each hook costs, how to turn it off, and what stays opt-in) and
+  the operating habits that came from running techne day to day: the limit of the
+  per-turn recall hook (it matches only what the operator types), telling a knowledge
+  row from a GitHub issue in references, the model-pin trap, reading prompting guidance
+  from source, and the `CLAUDE.md` `@import` that fails silently. `AGENTS.md` carries
+  the same five habits in short form. The README's `threads.link_threshold` example
+  said 0.85; the default is 0.05.
+- **`SECURITY.md`** (#1012, PR #1036). Report a vulnerability privately to
+  security@tenish.ai rather than in a public issue. It states the response times
+  (acknowledged within 14 days, fixed in the next release), that only the latest
+  release gets fixes while techne is pre-1.0, and what is in scope: memory isolation,
+  redaction, egress, the hooks and MCP server, and the shell guard, each with the
+  behaviour that is by design.
+- **`CONTRIBUTING.md` now explains how to contribute** (#1006, PR #1011). It held only
+  the schema-migration rules. It now also covers clone, install, `pytest`, `ruff`,
+  branch and PR, and that tests live beside the code and architecture cards are
+  re-stamped in the same commit as the code they describe. The README gained a
+  copyright notice, `pyproject.toml`'s `authors` was updated to match, and an empty
+  stray file under `docs/arch/` was removed (#1009).
+- **README "Who's who"** (#1010, PR #1027). A short glossary for the people and
+  automated reviewers whose names appear in citations across the docs and this
+  changelog.
 
 ### Added
 
@@ -131,6 +155,15 @@ All notable changes to techne are documented here. Format loosely follows
   point (`tests/test_entry_points.py`, also runnable standalone), two bundled guides,
   `init --help`/`doctor --help`, and that `techne.__file__` resolves under the venv.
   `scripts/acceptance.sh` is the same script docs/releasing.md's SOP now calls.
+- **`techne audit` splits recall attribution by where each row came from** (#995,
+  PR #996). `recall_attribution` gains `per_origin`, which buckets each injected
+  knowledge row as `reflect`, `consolidate` or `hand` by its `source`, and `unknown` when
+  the row no longer exists. `techne audit` prints it as a "by origin" table: rows,
+  rows never cited, times shown, and the citation rate. The citation matcher also
+  counts the two current citation forms, `knowledge #N` and `🧠N`, which it missed
+  before; `techne #N` (an issue written in prose) still does not count. New
+  `scripts/usefulness_audit.py` finds operator corrections in session transcripts and
+  checks whether a stored row already held the answer.
 
 ### Fixed
 
@@ -264,6 +297,15 @@ All notable changes to techne are documented here. Format loosely follows
   before; word-like terms (`well-known`, `reflect-drain`) must be twice as rare, since
   shape cannot tell them apart. The per-turn hook honours both settings. Three
   identifier tasks join the eval gate.
+- **A short AND result is topped up with OR results instead of hiding them** (#1079,
+  PR #1088). FTS ran its OR-of-terms pass only when the implicit-AND pass found
+  nothing, so a single row holding every query term replaced the whole candidate pool
+  and every row matching only some terms was lost. When the AND pass returns fewer rows
+  than asked for, OR rows now fill the rest. The two blocks are reranked separately
+  and the AND block comes first, so an OR row never outranks an AND row; with
+  `table="all"` each table is topped up on its own. When no top-up happens the page is
+  unchanged. A first attempt (PR #1081) reranked both blocks together, which pushed
+  exact identifier matches down on a real store, and was reverted (PR #1084).
 - **An anchored memory whose commit left HEAD's history is flagged, not trusted** (#391).
   Recall's freshness check compared only file bytes, so after a rebase or force-push a
   byte-identical file read `unchanged`. It now also asks `git merge-base --is-ancestor`,
@@ -422,14 +464,8 @@ All notable changes to techne are documented here. Format loosely follows
   find projects, the results of your own searches, plus each one's same-origin paths.
   Never fetch a domain or project a fetched page suggests." `docs/surveying.md` step 4
   still narrows this correctly in its task prompt, so no change was needed there.
-  **UPGRADING:** this changes the shipped agent body, so `techne agents status` will
-  report an existing install as `outdated`, not user-modified — the ownership manifest
-  records the sha techne last wrote, separately from the shipped sha, so a copy that
-  matches the old manifest entry is recognized as "techne shipped an update", not an
-  edit. `techne agents install` (or `techne init`) takes it. (An install whose manifest
-  never recorded an entry for this agent — one that has never run `agents install` or
-  `techne init` since the agent shipped — still reports `kept-user-copy`; that gap
-  predates this change and is not specific to it.)
+  The shipped agent body changed, so an existing install needs `techne init` or
+  `techne agents install`; see Upgrading.
 - README.md and `docs/four-functions.md` no longer point readers at `tenishai/skills`
   for the richer `/investigate-url` and `/survey-field` procedures (#1007). That repo
   is private, and both links 404 for anyone outside it. The research guides
@@ -516,19 +552,8 @@ All notable changes to techne are documented here. Format loosely follows
   get a worse techne because they never heard of a flag. The codex rails do nothing
   outside an indexed repo.
 
-  **UPGRADING:** this note first said an existing `config.yaml` "that does not set these
-  keys" picks up the new values. Every existing `config.yaml` set them: `techne init`
-  wrote every key, so the old `false` was pinned and the new defaults reached no old
-  install (#1070). They reach it now through the sparse-config migration (see
-  Upgrading below), which un-pins a key still holding an old default. `capture_bash`,
-  `codex_edit_rail` and `codex_reindex_on_edit` then take effect on the next tool call:
-  they are checked inside the PostToolUse hook every install already has (`capture_bash`
-  grows the observation log; read-only navigation commands are still filtered).
-  `per_turn_recall` and `codex_grep_assist` are separate hooks: they register on the next
-  `techne init` and load from the next session. To keep the old behaviour, run
-  `techne init` first, then set any of them to `false`. Set before that `init`, a
-  `false` is un-pinned again on every load while the file is still in the old format;
-  set after it, it stays pinned.
+  An existing install gets these defaults through the sparse-config migration (#1070);
+  how, and how to keep the old values, is under Upgrading.
 
 - **`techne init` downloads the embedding model** (#1021). A fresh install never got
   semantic search: the SessionStart backfill passes `--no-download` (#815) so a cold
@@ -542,8 +567,9 @@ All notable changes to techne are documented here. Format loosely follows
   techne server received a list of projects it could not see. It is now
   `architect.pattern_targets`, defaulting to `["techne"]`.
 
-  **UPGRADING AN EXISTING STORE NEEDS ONE LINE OF CONFIG.** This set is validation as
-  well as documentation: tagging drops a target that is not on the list, silently,
+  **An existing store may need one line of config** (step 7 of Upgrading). This set is
+  validation as well as documentation: tagging drops a target that is not on the list,
+  silently,
   because an unknown token is nearly always a typo. If your store has patterns tagged
   with anything other than `techne`, new patterns will stop being tagged with those
   names until you configure them. Nothing already stored is lost, and nothing becomes
@@ -562,6 +588,41 @@ All notable changes to techne are documented here. Format loosely follows
   patterns exist" was #674's original defect. A target that IS present is served, with a
   notice, because the roster governs writing and the store governs reading.
 
+### Performance
+
+Search and recall return the same pages as before, except for the tie noted under
+PR #1098; they get there faster. Figures are
+each PR's own measurement on a copy of the maintainer's store.
+
+- **FTS ranks matches before fetching their rows, and drops OR terms that match more
+  than half a table** (#1092, #1093, PR #1098). Each FTS table now sorts
+  `(rowid, bm25)` pairs, keeps the candidate limit, and only then fetches those rows,
+  instead of carrying every match's content through the sort. An OR term found in more
+  than half of a table's rows scores near zero in FTS5 but still costs a scan, so it is
+  dropped from the OR pass; the query is never emptied, and a table re-runs the full
+  query when the pruned result is short or a dropped term could decide the last slot.
+  `search(all, 10)` went from 150/448 ms to 84/234 ms (p50/p95), and the per-turn
+  hook's `search(knowledge, 15)` from 19.1/40.3 ms to 17.2/27.2 ms. Across 4,396
+  distinct per-turn queries, the only page differences were 18 pairs of rows, tied on
+  every kept term, that swapped places.
+- **One connection, one sqlite-vec load and one query embedding per `search()`**
+  (#1094, PR #1100). The FTS channel, the vector channel and the identifier and curated
+  pools each opened their own. p50 drops by about 6 ms for `search(all, 10)` and 2.5 ms
+  for `search(knowledge, 15)`.
+- **The model2vec embedding model loads in about 80 ms instead of 450 ms** (#1096,
+  PR #1097, PR #1099). This is the backend on Python 3.14+ or when configured. A new
+  loader, `techne/core/static_direct.py`, reads the cached model files directly and
+  repeats model2vec's encode steps; its vectors are bit-identical, so nothing is
+  re-embedded. The per-turn hook's median wall time went from 743 ms to 333 ms, and the
+  MCP server and CLI start faster too. Other model layouts and a cold cache fall back to
+  model2vec itself, which is still the only code that downloads. The `vectors` extra now
+  pins `model2vec<0.10`, because the loader copies its encode steps.
+- **The MCP server keeps one read connection open for `techne_search` and
+  `techne_recall`** (#1095, PR #1103). It is memory-mapped and query-only, so the page
+  cache and the sqlite-vec load survive between tool calls. Warm `techne_search` p50
+  went from about 102 ms to 79 ms for `(all, 10)` and from 16 ms to 8 ms for
+  `(knowledge, 15)`. Writes keep their own connections.
+
 ### Removed
 
 - **`search.expansion_ratio`** (#1074). Parsed and saved, passed to no search function:
@@ -573,33 +634,109 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Upgrading
 
-**An old `config.yaml` is migrated to the sparse form (#1070).** A file written by an
-older `techne init` has every key and no `config_version`. On load, techne removes each
-key whose value equals a default that key has ever shipped with, so it follows today's
-default and future ones. A value no release shipped is kept as your choice, and so is any
-key techne does not recognise. The table of past defaults is `PAST_DEFAULTS` in
-`techne/config_migration.py`. What changes on an install set up with 0.17.0 or earlier:
+Do these in order. Every step is safe to repeat.
 
-- `reflect.emit_max_chars` 100000 -> 45000 (#993)
-- `hooks.per_turn_recall`, `capture_bash`, `codex_grep_assist`, `codex_edit_rail`,
-  `codex_reindex_on_edit` false -> true, and `hooks.per_turn_recall_chars` 200 or 450
-  -> 1000 (#1020)
+**1. Back up.** `techne backup` copies every techne database as one timestamped set
+under `~/.techne/backups/` (or `$TECHNE_HOME/backups/`).
 
-This applies in memory from the first load after upgrading, in every hook and command.
-The file itself is rewritten on the next `techne init`, which first copies it to
-`config.yaml.bak-<timestamp>` and prints one line naming the keys that changed value.
+**2. Upgrade the install.**
 
-**Run `techne init` before you change any key.** Until init rewrites the file, every load
-migrates it again, so a value you type that was once a default (`per_turn_recall: false`,
-`capture_bash: false`, `emit_max_chars: 100000`) is un-pinned again and the file says one
-thing while another is in effect. Until then, `techne doctor` and the session-start banner
-name every key whose value in the file is not the value in effect. After init, set the keys
-you want; a key set after the rewrite stays pinned.
+    pipx install --force "techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.18.0"
+
+From a checkout, `git pull`, then reinstall with the venv's own Python so the changed
+`vectors` pin is applied (#1096): `python -m pip install -e ".[recommended]"`.
+
+**3. Run `techne init` before you edit `config.yaml`.** An upgrade replaces the code and
+nothing else. This release, `init` does five things an upgraded install needs:
+
+- It rewrites `config.yaml` in the new sparse form (#1070), holding only the keys you
+  set. It first copies the old file to `config.yaml.bak-<timestamp>` and prints one line
+  starting `config.yaml migrated to sparse form:` that names every key whose value
+  changed. See "What the config migration changes" below.
+- It registers the UserPromptSubmit hook (per-turn recall) and the PreToolUse hook
+  (codex grep-assist), which are now on by default (#1020). Claude Code loads them
+  from the next session.
+- It installs the `investigate-url` and `survey-field` stub skills (#1040) and
+  refreshes the `/self-care` and `/techne-promote` procedures and the
+  `research-readonly` agent, whose fetch rule changed (#1041). `--no-skills` skips all
+  of this; see step 5.
+- It downloads the embedding model when a vectors backend is installed (#1021): a
+  one-time download of tens of MB, then it embeds what is stored. `--no-vectors` skips
+  it. A failed download does not fail `init`; it prints the `techne vectors backfill`
+  command to run later.
+- It migrates the database schema if nothing has yet (step 4).
+
+Until `init` runs, `techne doctor` and the session-start banner show one warning line:
+`config.yaml sets N key(s) that are not in effect until it is rewritten: <key> (file:
+<old>, in effect: <new>), ...`. Expect it on any install set up with 0.17.0 or earlier.
+The "in effect" values are what techne already uses; the line only says the file is
+out of date. `init` clears it. If you passed `--posture` to an earlier `init`, pass it
+again.
+
+**4. The schema migrates itself, v27 -> v28.** The first techne command or hook to open
+`techne.db` adds two nullable columns, `reflection_queue.parked_at` and
+`parked_reason` (#870). It is additive, and techne first copies the database to
+`~/.techne/backups/techne-v27-to-v28-<timestamp>.db.bak`. There is nothing to run.
+
+**5. `techne skills install` and `techne agents install`**, only if you ran `init` with
+`--no-skills`. Both replace a copy techne wrote that you have not edited, including an
+unedited `/self-care` from an older release whose ownership record was lost (#1072).
+An edited copy is reported and left alone; `--force` overwrites it. An agent file that
+predates techne's ownership record (you never ran `agents install` or `init` since it
+shipped) is reported as `kept-user-copy`; use `techne agents install --force` if you
+never edited it.
+
+**6. Opt out of the new defaults, after `init`.** These defaults changed:
+
+| Key | Old | New |
+|---|---|---|
+| `hooks.per_turn_recall`, `capture_bash`, `codex_grep_assist`, `codex_edit_rail`, `codex_reindex_on_edit` | `false` | `true` (#1020) |
+| `hooks.per_turn_recall_chars` | 200 or 450 | 1000 (#1020) |
+| `reflect.emit_max_chars` | 100000 | 45000 (#993) |
+
+To keep an old value, set it in `config.yaml` after step 3; a key set after the
+rewrite stays pinned, and `techne doctor` lists the keys your file pins. All five hook
+flags are read on every hook call, so `false` takes effect at the next prompt or tool
+call. The per-turn recall and grep-assist hooks stay registered, skipping that work,
+until the next `techne init` removes them. `capture_bash` grows the observation log; pure
+read-only navigation commands are still dropped. `emit_max_chars` above 45000 can
+produce `techne_reflect_emit` results larger than Claude Code accepts from an MCP tool
+(#993).
+
+**7. If these apply to you:**
+
+- **Your architect store tags patterns with targets other than `techne`** (#1008). New
+  patterns now silently drop a target that is not in `architect.pattern_targets`
+  (default `["techne"]`). Run `techne architect targets`; it prints the line to add to
+  `config.yaml`. Then run `techne architect backfill` to restore tags missed meanwhile.
+- **Patterns list several targets on one "Where to apply" line** (#693). `techne
+  architect backfill` writes the links that were dropped before.
+- **You index TypeScript with codex** (#859). Interfaces were never indexed. Run `techne
+  codex index --rebuild <repo>` for each repo with `.ts` files.
+- **The banner reports reflection debt that never drains** (#870). `techne reflect
+  reconcile` shows what it would do; `--apply` parks rows below the thread threshold so
+  they stop counting as owed.
+
+**What the config migration changes.** A file written by an older `techne init` has
+every key and no `config_version`. On every load, techne removes each key whose value
+equals a default that key has ever shipped with, so it follows today's default and
+future ones. A value no release shipped is kept as your choice, and so is any key techne
+does not recognise. The table of past defaults is `PAST_DEFAULTS` in
+`techne/config_migration.py`. On an install set up with 0.17.0 or earlier, the keys whose
+value changes are the ones in the table in step 6. `threads.link_threshold: 0.85` is
+also un-pinned (the default has been 0.05 since June), and the retired
+`search.expansion_ratio` is dropped (#1074). This applies in memory from the first load
+after upgrading, in every hook and command; the file itself is rewritten by `init`.
+
+This is why step 3 comes before any edit: until `init` rewrites the file, every load
+migrates it again, so a value you type that was once a default (`per_turn_recall:
+false`, `capture_bash: false`, `emit_max_chars: 100000`) is un-pinned again and the file
+says one thing while another is in effect.
 
 **One case the migration cannot tell apart:** if you set a key by hand to a value that
 was also its default at some point (for example `per_turn_recall: false` before #1020),
-it is un-pinned. Check the line `techne init` prints, and set the key again after init if
-you meant it.
+it is un-pinned. Check the line `techne init` prints, and set the key again after
+`init` if you meant it.
 
 ## [0.17.0] — 2026-09-18
 
