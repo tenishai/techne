@@ -18,6 +18,7 @@ from techne.config import Config
 from techne.core.database import connect, init_db
 from techne.core.knowledge import (
     VALID_TYPES,
+    _declared_targets_with_ambiguity,
     declared_targets,
     find_declared_supersessions,
     retire,
@@ -48,6 +49,15 @@ def _count(db):
     conn = connect(db)
     try:
         return conn.execute("SELECT COUNT(*) FROM knowledge").fetchone()[0]
+    finally:
+        conn.close()
+
+
+def _set_created_at(db, kid, ts):
+    conn = connect(db)
+    try:
+        conn.execute("UPDATE knowledge SET created_at = ? WHERE id = ?", (ts, kid))
+        conn.commit()
     finally:
         conn.close()
 
@@ -271,6 +281,45 @@ def test_declared_targets(text, expected):
     assert declared_targets(text) == expected
 
 
+# ------------------------------------------------- ambiguous vs confident refs (techne#1065)
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        # A literal "techne#N" is the one marker that can equally name a GitHub
+        # issue, not this knowledge row — always ambiguous.
+        ("CORRECTION to techne#621: the checklist is wrong", [(621, True)]),
+        ("CORRECTS techne#896's framing of the hardware", [(896, True)]),
+        # A bare "#N", "knowledge #N", and the brain sigil carry no such doubt.
+        ("SUPERSEDES #7", [(7, False)]),
+        ("CORRECTION to knowledge #12: the value is 4", [(12, False)]),
+        ("SUPERSEDES \N{BRAIN}3394", [(3394, False)]),
+        # A list continuation after a "techne#N" opener carries no marker of its
+        # own, so it inherits the opener's ambiguity — whatever makes 882
+        # ambiguous makes 887 and 995 ambiguous too (techne#1065 review round 1).
+        (
+            "SUPERSEDES techne#882 (old runner), #887 (hardening) and #995 (third)",
+            [(882, True), (887, True), (995, True)],
+        ),
+        # A continuation with its OWN "knowledge #" marker is confident
+        # regardless of how the list opened.
+        (
+            "SUPERSEDES techne#1 and knowledge #2",
+            [(1, True), (2, False)],
+        ),
+        # Same id named twice, once ambiguously and once not: the unambiguous
+        # occurrence wins the dedup (techne#1065 review nit).
+        (
+            "SUPERSEDES techne#5 and knowledge #5",
+            [(5, False)],
+        ),
+    ],
+)
+def test_declared_targets_with_ambiguity(text, expected):
+    assert _declared_targets_with_ambiguity(text) == expected
+
+
 def test_find_declared_supersessions_reports_only_live_older_targets(cfg):
     db = cfg.db_path
     t1 = store(db, "old fact")  # 1: live, declared by 3 and 4 -> newest (4) wins
@@ -328,3 +377,135 @@ def test_doctor_says_none_when_clean(cfg):
     res = CliRunner().invoke(main, ["doctor", "--no-liveness"])
     assert "Supersessions declared in prose" in res.output
     assert "✓ none" in res.output
+
+
+# ------------------------------------------- techne#1065: techne#N is not a verdict
+
+
+# `techne#N` is the day before the 2026-08-31 convention line, so `techne#N`
+# still gets the benefit of the doubt as a knowledge ref there (just ambiguous).
+_PRE_CONVENTION = "2026-08-30 00:00:00"
+_POST_CONVENTION = "2026-09-28 10:00:00"
+
+
+@pytest.mark.parametrize(
+    "target_fact,declarer_text",
+    [
+        # techne#1065's first real false pair: knowledge 1769 read "a correction
+        # to techne#621's own rationale" (meaning issue #621) and matched live,
+        # unrelated knowledge 621 (a grep-assist restart checklist).
+        ("grep-assist restart checklist", "a correction to techne#{t}'s own rationale"),
+        # The second: knowledge 3537 read "CORRECTS techne#896's ... framing"
+        # (meaning issue #896) and matched knowledge 896 (the dev02 hardware
+        # profile, which never mentions the issue's subject at all).
+        ("dev02 hardware profile: 8 cores, 32G", "CORRECTS techne#{t}'s memory framing"),
+    ],
+    ids=["knowledge-621-vs-issue-621", "knowledge-896-vs-issue-896"],
+)
+def test_find_declared_supersessions_flags_bare_techne_ref_ambiguous(
+    cfg, target_fact, declarer_text
+):
+    """Reconstructs the two real false pairs from techne#1065. Pre-convention, the
+    match is still reported (an older declarer may genuinely mean the knowledge
+    row) but MUST come back `ambiguous`."""
+    db = cfg.db_path
+    t = store(db, target_fact)
+    _set_created_at(db, t, _PRE_CONVENTION)
+    d = store(db, declarer_text.format(t=t))
+    _set_created_at(db, d, _PRE_CONVENTION)
+    pairs = find_declared_supersessions(db)
+    assert [(p["target"], p["declarer"], p["ambiguous"]) for p in pairs] == [(t, d, True)]
+
+
+def test_find_declared_supersessions_drops_bare_techne_ref_post_convention(cfg):
+    """On or after 2026-08-31, `techne#N` names a GitHub issue, full stop — a
+    declarer written then gets no knowledge-ref benefit of the doubt from it, so
+    the pair must not be reported at all (techne#1065 option 2)."""
+    db = cfg.db_path
+    t = store(db, "dev02 hardware profile: 8 cores, 32G")
+    _set_created_at(db, t, _PRE_CONVENTION)
+    d = store(db, f"CORRECTS techne#{t}'s memory framing")
+    _set_created_at(db, d, _POST_CONVENTION)
+    assert find_declared_supersessions(db) == []
+
+
+def test_find_declared_supersessions_drops_techne_list_continuation_post_convention(cfg):
+    """Prudence review round 1, techne#1065: `techne#1 and #2` is one list, and
+    `#2` is exactly as ambiguous as `techne#1` — it must not stay confident just
+    because it has no word of its own. A post-convention declarer gets neither."""
+    db = cfg.db_path
+    t1 = store(db, "grep-assist restart checklist")
+    _set_created_at(db, t1, _PRE_CONVENTION)
+    t2 = store(db, "dev02 hardware profile: 8 cores, 32G")
+    _set_created_at(db, t2, _PRE_CONVENTION)
+    d = store(db, f"a correction to techne#{t1} and #{t2}: the issue rationale was wrong")
+    _set_created_at(db, d, _POST_CONVENTION)
+    assert find_declared_supersessions(db) == []
+
+
+def test_find_declared_supersessions_genuine_ref_still_confident_post_convention(cfg):
+    """A `knowledge #N` or brain-sigil declaration is never ambiguous, and a
+    declarer written after the convention date still gets it."""
+    db = cfg.db_path
+    t1 = store(db, "runner is host-a")
+    _set_created_at(db, t1, _PRE_CONVENTION)
+    d1 = store(db, f"CORRECTION to knowledge #{t1}: runner is host-c")
+    _set_created_at(db, d1, _POST_CONVENTION)
+
+    t2 = store(db, "runner is host-b")
+    _set_created_at(db, t2, _PRE_CONVENTION)
+    d2 = store(db, f"SUPERSEDES \N{BRAIN}{t2}: runner is host-d")
+    _set_created_at(db, d2, _POST_CONVENTION)
+
+    pairs = {p["target"]: p for p in find_declared_supersessions(db)}
+    assert pairs[t1]["declarer"] == d1 and pairs[t1]["ambiguous"] is False
+    assert pairs[t2]["declarer"] == d2 and pairs[t2]["ambiguous"] is False
+
+
+def test_doctor_renders_ambiguous_pairs_as_check_items_not_commands(cfg):
+    """techne#1065: the two real false pairs must render as CHECK items, never as
+    a paste-ready `techne knowledge supersede` line."""
+    db = cfg.db_path
+    t = store(db, "grep-assist restart checklist")
+    _set_created_at(db, t, _PRE_CONVENTION)
+    d = store(db, f"a correction to techne#{t}'s own rationale")
+    _set_created_at(db, d, _PRE_CONVENTION)
+
+    res = CliRunner().invoke(main, ["doctor", "--no-liveness"])
+    ready_line = f"    techne knowledge supersede {t} --by {d}   #"
+    assert ready_line not in res.output, res.output
+    assert f"CHECK: entry {d} says it replaces techne#{t}" in res.output
+    assert "GitHub issue" in res.output
+    assert res.exit_code == 0, "advisory: never counted as a doctor failure"
+
+
+def test_doctor_prints_no_command_for_a_techne_list_continuation_post_convention(cfg):
+    """Prudence's probe (review round 1): a declarer dated 2026-09-28 naming
+    `techne#1 and #2` must print no `techne knowledge supersede` command for
+    EITHER id — #2 inherited techne#1's ambiguity, so post-convention it is
+    dropped exactly like the opener, not rendered as a ready command."""
+    db = cfg.db_path
+    t1 = store(db, "grep-assist restart checklist")
+    _set_created_at(db, t1, _PRE_CONVENTION)
+    t2 = store(db, "dev02 hardware profile: 8 cores, 32G")
+    _set_created_at(db, t2, _PRE_CONVENTION)
+    d = store(db, f"a correction to techne#{t1} and #{t2}: the issue rationale was wrong")
+    _set_created_at(db, d, _POST_CONVENTION)
+
+    res = CliRunner().invoke(main, ["doctor", "--no-liveness"])
+    assert f"techne knowledge supersede {t1} --by {d}" not in res.output, res.output
+    assert f"techne knowledge supersede {t2} --by {d}" not in res.output, res.output
+    assert "✓ none" in res.output
+    assert res.exit_code == 0
+
+
+def test_doctor_still_renders_genuine_supersessions_as_commands(cfg):
+    """A confident match (bare `#N` here) is unaffected by the ambiguous path and
+    still prints as a ready-to-run command."""
+    db = cfg.db_path
+    a = store(db, "runner is host-a")
+    b = store(db, f"SUPERSEDES #{a}: runner is host-c")
+    res = CliRunner().invoke(main, ["doctor", "--no-liveness"])
+    assert f"techne knowledge supersede {a} --by {b}" in res.output
+    assert "CHECK:" not in res.output
+    assert res.exit_code == 0
