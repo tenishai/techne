@@ -5,7 +5,7 @@
 ```bash
 git clone https://github.com/tenishai/techne.git
 cd techne
-python3 -m venv .venv && source .venv/bin/activate
+python3 -m venv .venv && source .venv/bin/activate   # Debian/Ubuntu: sudo apt install python3-venv first
 pip install -e ".[dev]"
 pytest -q                  # the full suite; -n auto if you want it parallel
 ruff check techne tests    # ADVISORY — see below
