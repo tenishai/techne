@@ -421,8 +421,8 @@ def retire(db_path: Path, old_id: int, survivor_id: int) -> int:
 #
 # `ref_word` / `ref_brain` (techne#1065) mark which form matched: a literal
 # "techne#N" is AMBIGUOUS (can equally name a GitHub issue, not this row), and an
-# unmarked list continuation inherits its opener's ambiguity rather than getting
-# its own — see `_ref_is_ambiguous` and the PR body for the incidents this fixes.
+# unmarked list continuation inherits the ambiguity of the nearest marked reference
+# before it — see `_ref_is_ambiguous` and the PR body for the incidents this fixes.
 _REF = r"(?:(?P<ref_word>techne|knowledge)\s*#|(?P<ref_brain>\N{BRAIN})|#)\s*(?P<ref_id>\d{1,9})\b"
 _DECLARATION = re.compile(
     r"\b(?:supersedes?|corrects|correction\s+(?:to|of))\s*:?\s+" + _REF,
@@ -442,55 +442,69 @@ DECLARATION_WINDOW = 400
 REF_CONVENTION_DATE = "2026-08-31"
 
 
+def _ref_is_marked(match: re.Match) -> bool:
+    """True iff *match* carries its own marker word (`techne`/`knowledge`) or the
+    brain sigil, rather than a plain `#N`."""
+    return bool(match.group("ref_word")) or match.group("ref_brain") is not None
+
+
 def _ref_is_ambiguous(match: re.Match, *, opener_ambiguous: bool) -> bool:
     """True iff *match* (a `_DECLARATION`/`_DECLARATION_MORE` match) is a bare,
     word-less `techne#N` — the one form a GitHub issue can hide behind.
 
     A continuation that carries no marker of its own (plain `#N`) is NOT its own
     fresh, confident reference: it inherits `opener_ambiguous`, the ambiguity of
-    the list's OPENING reference. "SUPERSEDES techne#882, #887 and #995" names
-    882, 887 and 995 the same way — #887 and #995 are exactly as ambiguous as
-    882, whatever marked 882 (techne#1065, Prudence review round 1). Only a
-    continuation with its OWN `knowledge #` word or brain sigil is confident
-    regardless of how the list opened.
+    the NEAREST preceding marked reference in the list. "SUPERSEDES techne#882,
+    #887 and #995" names 882, 887 and 995 the same way (techne#1065, Prudence
+    review round 1), and in "SUPERSEDES knowledge #1, techne#2 and #3" the #3
+    follows techne#2, not the confident opener. Only a continuation with its OWN
+    `knowledge #` word or brain sigil is confident regardless of what came before.
     """
-    word = (match.group("ref_word") or "").lower()
-    marked = bool(word) or match.group("ref_brain") is not None
-    if not marked:
+    if not _ref_is_marked(match):
         return opener_ambiguous
-    return word == "techne"
+    return (match.group("ref_word") or "").lower() == "techne"
+
+
+def _declared_refs(content: str) -> list[tuple[int, int | None]]:
+    """Per declared id, the `techne#N` id that makes it ambiguous, or None.
+
+    The second element is the id itself when the reference is a literal
+    `techne#N`, the id of the nearest preceding `techne#N` in the list when it is
+    an unmarked continuation of one, and None when the reference is confident.
+    Ids are deduplicated across the whole content block: if ANY occurrence of an
+    id is unambiguous (its own `knowledge #` or brain sigil), it is reported
+    unambiguous — a later, confident restatement should not be shadowed by an
+    earlier, ambiguous one (techne#1065 review nit; e.g. "SUPERSEDES techne#5 and
+    knowledge #5").
+    """
+    head = (content or "")[:DECLARATION_WINDOW]
+    refs: list[tuple[int, int | None]] = []
+    for m in _DECLARATION.finditer(head):
+        opener_ambiguous = _ref_is_ambiguous(m, opener_ambiguous=False)
+        ref_id = int(m.group("ref_id"))
+        via = ref_id if opener_ambiguous else None
+        refs.append((ref_id, via))
+        pos = m.end()
+        while more := _DECLARATION_MORE.match(head, pos):
+            ref_id = int(more.group("ref_id"))
+            opener_ambiguous = _ref_is_ambiguous(more, opener_ambiguous=opener_ambiguous)
+            if _ref_is_marked(more):
+                via = ref_id if opener_ambiguous else None
+            refs.append((ref_id, via))
+            pos = more.end()
+    seen: dict[int, int | None] = {}
+    for target_id, via in refs:
+        if target_id not in seen:
+            seen[target_id] = via
+        elif via is None:
+            seen[target_id] = None
+    return list(seen.items())
 
 
 def _declared_targets_with_ambiguity(content: str) -> list[tuple[int, bool]]:
-    """Like `declared_targets`, but keeps, per id, whether the match is ambiguous.
-
-    A match is ambiguous when it resolves (via `_ref_is_ambiguous`) to the literal
-    word "techne" immediately before the `#` — the one form that can equally name
-    a GitHub issue (techne#1065) — including an unmarked list continuation that
-    inherits this from the reference that opened the list. Ids are deduplicated
-    across the whole content block: if ANY occurrence of an id is unambiguous
-    (its own `knowledge #` or brain sigil), the id is reported unambiguous — a
-    later, confident restatement should not be shadowed by an earlier, ambiguous
-    one (techne#1065 review nit; e.g. "SUPERSEDES techne#5 and knowledge #5").
-    """
-    head = (content or "")[:DECLARATION_WINDOW]
-    targets: list[tuple[int, bool]] = []
-    for m in _DECLARATION.finditer(head):
-        opener_ambiguous = _ref_is_ambiguous(m, opener_ambiguous=False)
-        targets.append((int(m.group("ref_id")), opener_ambiguous))
-        pos = m.end()
-        while more := _DECLARATION_MORE.match(head, pos):
-            targets.append(
-                (
-                    int(more.group("ref_id")),
-                    _ref_is_ambiguous(more, opener_ambiguous=opener_ambiguous),
-                )
-            )
-            pos = more.end()
-    seen: dict[int, bool] = {}
-    for target_id, ambiguous in targets:
-        seen[target_id] = seen[target_id] and ambiguous if target_id in seen else ambiguous
-    return list(seen.items())
+    """Like `declared_targets`, but keeps, per id, whether the match is ambiguous
+    (see `_declared_refs` for the rules)."""
+    return [(target_id, via is not None) for target_id, via in _declared_refs(content)]
 
 
 def declared_targets(content: str) -> list[int]:
@@ -516,14 +530,16 @@ def find_declared_supersessions(db_path: Path) -> list[dict]:
     matched the target resolves to a literal "techne#N" — the one marker that can
     equally name a GitHub issue rather than this knowledge row, and whose
     ambiguity is not decidable from the text alone (this includes an unmarked
-    list continuation of a `techne#N` opener, which inherits the opener's
-    ambiguity — see `_ref_is_ambiguous`). If ANY occurrence of the id is instead
+    list continuation whose nearest preceding marked reference is a `techne#N` —
+    see `_ref_is_ambiguous`). `ambiguous_via` names that `techne#N` id (the target
+    itself for a direct `techne#N`), or is None when the pair is confident, so a
+    caller can quote what the text actually says. If ANY occurrence of the id is instead
     unambiguous (its own "knowledge #N" or the brain sigil), that wins and the
     pair is reported unambiguous, so a later, confident restatement is never
     shadowed by an earlier, ambiguous one. A declarer written on or after
     `REF_CONVENTION_DATE` gets no ambiguous match at all (a bare "techne#N" there
     is not accepted as a knowledge reference, full stop — see
-    `_declared_targets_with_ambiguity`); for an older declarer it is still
+    `_declared_refs`); for an older declarer it is still
     accepted, but always comes back `ambiguous`. Callers MUST NOT render an
     ambiguous pair as a ready-to-run command — it is a check item, not a verdict
     (techne#1065; two production pairs the day this was found would have retired
@@ -542,19 +558,21 @@ def find_declared_supersessions(db_path: Path) -> list[dict]:
     best: dict[int, dict] = {}
     for declarer, row in live.items():
         declarer_is_post_convention = (row["created_at"] or "") >= REF_CONVENTION_DATE
-        for target, ambiguous in _declared_targets_with_ambiguity(row["head"]):
+        for target, via in _declared_refs(row["head"]):
+            ambiguous = via is not None
             if ambiguous and declarer_is_post_convention:
                 # Post-convention, "techne#N" never means a knowledge row.
                 continue
             if target >= declarer or target not in live:
                 continue
             if target not in best or declarer > best[target]["declarer"]:
-                best[target] = {"declarer": declarer, "ambiguous": ambiguous}
+                best[target] = {"declarer": declarer, "ambiguous": ambiguous, "via": via}
     return [
         {
             "target": t,
             "declarer": info["declarer"],
             "ambiguous": info["ambiguous"],
+            "ambiguous_via": info["via"],
             "target_preview": (live[t]["head"] or "")[:80].replace("\n", " "),
         }
         for t, info in sorted(best.items())
