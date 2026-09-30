@@ -17,6 +17,17 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Docs
 
+- **Open-source community files for the go-public release** (tenishai/agora#20).
+  `CODE_OF_CONDUCT.md` is the Contributor Covenant 2.1, verbatim, with
+  security@tenish.ai as the enforcement contact. `CONTRIBUTING.md` gains a
+  "Developer Certificate of Origin" section (sign off with `git commit -s`, the DCO 1.1
+  text, how to fix a missing sign-off) and a "Using AI tools" section (AI help welcome,
+  disclosure in the PR description required, `Co-Authored-By:` trailer optional). The
+  README gains "How this was built" and a short "Contributing" section linking both
+  files and SECURITY.md. The AI-disclosure wording is the text approved in
+  tenishai/agora discussion #42. Added `.github/ISSUE_TEMPLATE/` (bug report, feature
+  request, and a `config.yml` that sends security reports to SECURITY.md and turns off
+  blank issues) and `.github/pull_request_template.md`.
 - **README quickstart named the missing system packages and a PATH gap on stock
   Debian/Ubuntu** (#1121, #1122). A fresh `ubuntu:24.04` with only `python3` and `git`
   installed — the README's stated requirements — failed both install paths: the dev
@@ -58,6 +69,12 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Added
 
+- **CI checks DCO sign-off on every pull request** (tenishai/agora#20). A `DCO sign-off
+  check` step fails when a non-merge commit between the PR's base and head lacks a
+  `Signed-off-by:` trailer matching its author, and names each such commit. It runs in
+  `arch-cards` for in-repo PRs and in `fork-pr` for fork PRs, as inline shell that reads
+  commit metadata and executes nothing from the PR. Commits already on `main` predate
+  the rule and are not checked.
 - **`techne init --allow-worktree`** (#436). Registers even when techne runs from a git
   worktree (a bare repo's worktree may be your only checkout), with a stderr warning
   naming the worktree and what breaks when it is pruned. A flag only; there is no env

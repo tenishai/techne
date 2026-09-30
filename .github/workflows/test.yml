@@ -868,6 +868,41 @@ jobs:
         working-directory: techne
         run: bash scripts/check_comment_blocks.sh origin/main
 
+      # DCO (CONTRIBUTING.md): each non-merge commit the PR adds needs a
+      # Signed-off-by matching its author. Reads commit metadata only, runs no
+      # PR code. Kept identical in arch-cards and fork-pr; the suite pins both.
+      - name: DCO sign-off check
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        working-directory: techne
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
+            git fetch --no-tags --quiet --unshallow origin "$BASE_SHA" "$HEAD_SHA"
+          else
+            git fetch --no-tags --quiet origin "$BASE_SHA" "$HEAD_SHA"
+          fi
+          commits=$(git rev-list --no-merges "$BASE_SHA..$HEAD_SHA")
+          if [ -z "$commits" ]; then
+            echo "::error::DCO: no non-merge commits in $BASE_SHA..$HEAD_SHA, so nothing was checked"
+            exit 1
+          fi
+          bad=0
+          for c in $commits; do
+            author=$(git log -1 --format='%an <%ae>' "$c")
+            if ! git log -1 --format='%(trailers:key=Signed-off-by,valueonly,unfold)' "$c" | grep -Fxiq -- "$author"; then
+              echo "::error::DCO: commit ${c:0:12} has no 'Signed-off-by: $author' trailer"
+              bad=1
+            fi
+          done
+          if [ "$bad" -ne 0 ]; then
+            echo "Sign off with 'git commit -s'. To fix existing commits, see 'Developer Certificate of Origin' in CONTRIBUTING.md."
+            exit 1
+          fi
+          echo "DCO: $(echo "$commits" | wc -l | tr -d ' ') commit(s) signed off by their authors"
+
   # CRASH-RECOVERY GATE (#388). The `crash` suite SIGKILLs a child mid-write and
   # then proves the store: uncommitted work leaves no trace, committed work
   # survives, a hot WAL replays, an interrupted migration does not stamp its
@@ -1071,6 +1106,41 @@ jobs:
       - name: Deterministic eval gates (#68 recall, #385 retrieval-correctness)
         working-directory: techne
         run: .venv-ci/bin/python -m pytest -m "eval or eval_gate"
+
+      # DCO (CONTRIBUTING.md): each non-merge commit the PR adds needs a
+      # Signed-off-by matching its author. Reads commit metadata only, runs no
+      # PR code. Kept identical in arch-cards and fork-pr; the suite pins both.
+      - name: DCO sign-off check
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        working-directory: techne
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
+            git fetch --no-tags --quiet --unshallow origin "$BASE_SHA" "$HEAD_SHA"
+          else
+            git fetch --no-tags --quiet origin "$BASE_SHA" "$HEAD_SHA"
+          fi
+          commits=$(git rev-list --no-merges "$BASE_SHA..$HEAD_SHA")
+          if [ -z "$commits" ]; then
+            echo "::error::DCO: no non-merge commits in $BASE_SHA..$HEAD_SHA, so nothing was checked"
+            exit 1
+          fi
+          bad=0
+          for c in $commits; do
+            author=$(git log -1 --format='%an <%ae>' "$c")
+            if ! git log -1 --format='%(trailers:key=Signed-off-by,valueonly,unfold)' "$c" | grep -Fxiq -- "$author"; then
+              echo "::error::DCO: commit ${c:0:12} has no 'Signed-off-by: $author' trailer"
+              bad=1
+            fi
+          done
+          if [ "$bad" -ne 0 ]; then
+            echo "Sign off with 'git commit -s'. To fix existing commits, see 'Developer Certificate of Origin' in CONTRIBUTING.md."
+            exit 1
+          fi
+          echo "DCO: $(echo "$commits" | wc -l | tr -d ' ') commit(s) signed off by their authors"
 
       # NOT REPRODUCED HERE, deliberately, and this list is the honest cost of the
       # split rather than an oversight:

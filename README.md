@@ -906,6 +906,23 @@ an outside reader hits them before knowing what they mean:
   person's opinion. Prudence has two sibling review passes, Temperance and
   Constance; together they're "the Fates."
 
+## How this was built
+
+tenishai is a small team of engineers who build with AI coding agents. Most of
+this code was written in pairing sessions with Claude models in Claude Code: a
+person set the design, directed the work and reviewed what landed, and the
+agent wrote much of the code and docs. Many commits name the agent in a
+`Co-Authored-By:` trailer, either a Claude model or Poe (earlier Raven), the
+name of the agent one of us pairs with. A commit without a trailer may still
+have had AI help.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, the Developer Certificate of
+Origin sign-off every commit needs, and the policy on AI tools. Everyone taking
+part is expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md). Report
+security problems privately, as [SECURITY.md](SECURITY.md) describes.
+
 ## License
 
 Copyright (C) 2026 tenishai
