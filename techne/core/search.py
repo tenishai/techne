@@ -2081,8 +2081,10 @@ def search(
     #1078's, sized the same way. DEFAULT OFF: the explicit surfaces
     (``techne_search``, ``techne search``, ``techne_recall``) turn it on; the
     per-turn and inbound recall rails do not, because in the issue's measurement
-    phase none of the seats on real per-turn prompts beat the row it displaced. With it off, or when it
-    finds no rare span, the page is byte-identical to the pre-#1142 one.
+    phase none of the seats on real per-turn prompts beat the row it displaced.
+    With it off, or when it finds no rare span, the page is byte-identical to the
+    pre-#1142 one. At any limit the top result is the seat-off page's: while the
+    seat holds a row, the #946 promotion may not displace vec #1.
 
     Returned rows include:
 
@@ -2482,8 +2484,19 @@ def _search_on_conn(
                 # land at the end of the head: they are on the page by reservation,
                 # not by distance, and the order says so.
                 keep, dropped, displaced = [], 0, []
+                # VEC #1 STAYS FIRST WHILE A PHRASE ROW IS HELD (techne#1142, Prudence
+                # #1143 r1). The seat lowers `vec_budget`, so at limit 3 (or 2 with no
+                # FTS-only row) `head` is vec #1 alone and this loop displaced it:
+                # the top result moved on a page where the phrase row was already
+                # second. Guarded only when the seat holds a row, so a seat-off page
+                # runs this loop exactly as before.
+                protected = head[0] if phrase_row is not None and head else None
                 for row in reversed(head):
-                    if dropped < len(promoted) and row.get("source_table") not in _CURATED_TABLES:
+                    if (
+                        dropped < len(promoted)
+                        and row.get("source_table") not in _CURATED_TABLES
+                        and row is not protected
+                    ):
                         dropped += 1
                         # KEEP THE DISPLACED ROW AS OVERFLOW, do not drop it
                         # (Prudence, #966 r1). The promotion pool is not deduped

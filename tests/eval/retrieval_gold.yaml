@@ -461,8 +461,9 @@ tasks:
     expected_keys: [g1142_pypi]
     forbidden_keys: []
 
-  # A query of COMMON phrases must get no seat: `cache warmup` and `during deploy`
-  # sit in nine rows each (the #1078 flag rows), over the eval corpus's bar of 5.
+  # A query of COMMON phrases must get no seat: `cache warmup` sits in nine rows
+  # and `during deploy` in eight (the #1078 flag rows; the gold says "cache warmup
+  # does not block"), both over the eval corpus's bar of 5.
   # The gate asserts no negative-class page carries a `phrase_head` row, which is
   # the only thing this task can show: it has no gold of its own.
   - id: negative-phrase-common-bigram

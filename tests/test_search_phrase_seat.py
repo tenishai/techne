@@ -455,3 +455,47 @@ def test_the_inbound_rail_leaves_the_seat_off(tmp_path, spy, monkeypatch, capsys
 
     assert spy, "the inbound rail searched"
     assert all(not c.get("phrase_seat", False) for c in spy)
+
+
+# --- small limits: the seat never changes the top result (Prudence, #1143 r1) -----
+
+
+def _small_vec():
+    """12 observation vec rows, then 3 knowledge vec rows: #946 has curated rows to
+    promote at every limit."""
+    return _full_vec() + [_row("knowledge", 900 + j, 0.90 + j / 100) for j in range(3)]
+
+
+def test_prudence_repro_limit_3_phrase_row_already_second(db, monkeypatch):
+    """Her fixture: the phrase row is vec #2. At limit 3 (floor 1, head 2) the seat
+    lowered vec_budget, the #946 promotion displaced from a one-row head, and vec #1
+    left the top. Seat on must keep the seat-off page's first row."""
+    fts = [_row("observations", 500)]
+    _patch(monkeypatch, _small_vec(), fts, phrase=("observations", 1))
+
+    on = search(db, Q, table="all", limit=3, phrase_seat=True)
+    off = search(db, Q, table="all", limit=3)
+
+    assert _keys(off)[0] == ("observations", 0)
+    assert _keys(on)[0] == ("observations", 0)
+    assert len(on) == len(off) == 3
+    assert len(set(_keys(on))) == 3
+
+
+@pytest.mark.parametrize("limit", [1, 2, 3])
+@pytest.mark.parametrize("fts_only", [True, False], ids=["tail_row", "no_fts_only"])
+@pytest.mark.parametrize(
+    "phrase",
+    [("observations", 1), ("observations", 5), ("observations", 777), ("knowledge", 901)],
+    ids=["already_second", "inside_head", "lexical_only", "curated"],
+)
+def test_the_top_result_never_changes_at_small_limits(db, monkeypatch, limit, fts_only, phrase):
+    fts = [_row("observations", 500), _row("observations", 777)] if fts_only else []
+    _patch(monkeypatch, _small_vec(), fts, phrase=phrase)
+
+    on = search(db, Q, table="all", limit=limit, phrase_seat=True)
+    off = search(db, Q, table="all", limit=limit)
+
+    assert _keys(on)[:1] == _keys(off)[:1]
+    assert len(on) == len(off)
+    assert len(set(_keys(on))) == len(on)
