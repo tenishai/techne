@@ -419,19 +419,10 @@ def retire(db_path: Path, old_id: int, survivor_id: int) -> int:
 # direction and does not match (`supersedes?` needs `:` or whitespace next), and
 # other repos' refs (`cabal#12`) do not match either.
 #
-# `ref_word` / `ref_brain` (techne#1065) capture which marker matched: a literal
-# "techne#N" is AMBIGUOUS — since 2026-08-31 (REF_CONVENTION_DATE) the convention
-# is that "techne#N" names a GitHub issue and a knowledge row is written as
-# "knowledge #N" or with the brain sigil, but nothing stops an entry's prose from
-# typing "techne#N" while actually meaning the issue, not this row. `techne
-# doctor` ran on 2026-09-28 against two entries that did exactly that (knowledge
-# 1769 read "a correction to techne#621's own rationale" — issue #621 — and
-# matched live, unrelated knowledge row 621; knowledge 3537 similarly matched row
-# 896 via "CORRECTS techne#896's ... framing", issue #896). A bare "#N",
-# "knowledge #N", or the brain sigil carries no such ambiguity and is never
-# flagged — UNLESS it's an unmarked continuation of a `techne#N` list (see
-# `_declared_targets_with_ambiguity`: a Prudence review on this PR caught that
-# "techne#1 and #2" left `#2` confident, the 2026-09-28 incident with one more id).
+# `ref_word` / `ref_brain` (techne#1065) mark which form matched: a literal
+# "techne#N" is AMBIGUOUS (can equally name a GitHub issue, not this row), and an
+# unmarked list continuation inherits its opener's ambiguity rather than getting
+# its own — see `_ref_is_ambiguous` and the PR body for the incidents this fixes.
 _REF = r"(?:(?P<ref_word>techne|knowledge)\s*#|(?P<ref_brain>\N{BRAIN})|#)\s*(?P<ref_id>\d{1,9})\b"
 _DECLARATION = re.compile(
     r"\b(?:supersedes?|corrects|correction\s+(?:to|of))\s*:?\s+" + _REF,
