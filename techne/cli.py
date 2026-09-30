@@ -580,6 +580,33 @@ def _render_declared_supersessions(db_path) -> int:
     return len(pairs)
 
 
+def _render_config_pins(config) -> None:
+    """Which config keys are pinned, and whether a legacy file is being migrated (#1070).
+
+    Advisory: never changes doctor's exit code and never writes. config.yaml is
+    sparse, so the pinned list is the file's own keys; everything else follows
+    the defaults of the running version.
+    """
+    if config.loaded_from is None:
+        click.echo("Config: no config.yaml; every key follows the shipped defaults.")
+        return
+    pinned = config.pinned_keys()
+    listed = ", ".join(pinned) if pinned else "none"
+    click.echo(
+        f"Config: {config.loaded_from} pins {len(pinned)} key(s): {listed}. "
+        "Everything else follows the shipped defaults."
+    )
+    if config.config_migration is not None:
+        click.echo(
+            "  "
+            + config.config_migration.summary()
+            + ". In effect now; `techne init` rewrites the file and keeps a backup."
+        )
+        pending = config.config_migration.pending_line()
+        if pending:
+            click.echo(f"  ⚠ {pending}")
+
+
 @main.command()
 @click.option("--vacuum", is_flag=True, help="Reclaim freelist space (VACUUM) after the checks.")
 @click.option(
@@ -629,6 +656,7 @@ def doctor(ctx, vacuum, liveness):
     conn.execute("PRAGMA busy_timeout=5000")
     issues = 0
     click.echo(f"Database: {config.db_path}")
+    _render_config_pins(config)
     click.echo()
     click.echo("Duplicate-row checks (total rows vs distinct logical key):")
     for table, key_cols in _DEDUP_CHECKS:
@@ -2795,6 +2823,10 @@ def init(
     saved_path = techne_home() / "config.yaml"
     config.save(saved_path)
     click.echo(f"Config saved: {saved_path}")
+    if config.config_migration is not None:
+        # One line naming what the #1070 migration un-pinned; the debug log has
+        # the same list from load.
+        click.echo(config.config_migration.summary(config.config_backup))
 
     # After the save, so an Abort (EOF, Ctrl-C) at the prompt cannot leave a
     # registered install with no config.yaml (#1030 r1).

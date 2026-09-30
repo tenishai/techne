@@ -663,6 +663,11 @@ def _run_phases_2_to_9(
         # context FOR the model and stays where it is. (techne#452 / PR #457.)
         if operator_drift:
             banner = f"{banner}\n{operator_drift}"
+        # A legacy config.yaml whose file values are not in effect (#1070). Operator
+        # surface only, like drift: only a human running `techne init` clears it.
+        pending_config = config.config_migration.pending_line() if config.config_migration else None
+        if pending_config:
+            banner = f"{banner}\n> ⚠ {pending_config}"
         if capability_invite:
             banner = f"{banner}\n> {capability_invite}"
         # DEFER THE MODEL-FACING HALF TO THE FIRST PROMPT (techne#562).

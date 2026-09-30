@@ -87,11 +87,27 @@ def _home() -> Path:
     return Path(env).expanduser() if env else Path.home() / ".techne"
 
 
+#: The module that holds the shipped defaults. Part of the stamp (techne#1070).
+_DEFAULTS_SOURCE = Path(__file__).with_name("config.py")
+
+
 def _stamp(source: Path) -> str:
     """Source identity: mtime_ns + size. Cheaper and finer-grained than hashing,
-    and size catches the (rare) same-mtime edit."""
+    and size catches the (rare) same-mtime edit.
+
+    THE DEFAULTS ARE A SECOND SOURCE (techne#1070). config.yaml is sparse: a key it
+    does not set takes the default from `techne/config.py`, so an upgrade that
+    changes a default changes a cached value without touching config.yaml. Stamped
+    on the yaml alone, the cache would keep serving the old default until someone
+    edited the file. `config.py`'s own mtime+size is folded in, one more stat.
+    """
     st = source.stat()
-    return f"{st.st_mtime_ns}:{st.st_size}"
+    try:
+        code = _DEFAULTS_SOURCE.stat()
+        code_part = f"{code.st_mtime_ns}:{code.st_size}"
+    except OSError:
+        code_part = "-"
+    return f"{st.st_mtime_ns}:{st.st_size}:{code_part}"
 
 
 def stamp_source(source: Path) -> str:
