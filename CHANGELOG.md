@@ -7,6 +7,14 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- **`DCO sign-off check` no longer fails every Dependabot PR** (PR #1135). Dependabot
+  does sign off, but as `dependabot[bot] <support@github.com>` — an address that never
+  matches its noreply author email, and neither is configurable — so the check added
+  in #1130 failed on every dependency-update PR. `arch-cards` (the same-repo job) now
+  skips a commit authored exactly as `dependabot[bot]
+  <49699333+dependabot[bot]@users.noreply.github.com>` and logs which commits it
+  skipped as bot commits; `fork-pr` gets no such exemption, because a fork PR can
+  forge any commit author, including that one.
 - **`context_injections` now has a retention bound** (#1073). The table had none, and
   #1020 turned per-turn recall on by default, so every install gained several rows per
   turn forever. Each write now deletes up to 500 rows older than 180 days. 180 days
