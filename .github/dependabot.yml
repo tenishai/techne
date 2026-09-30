@@ -8,13 +8,17 @@
 # human contributor's PR and run on the self-hosted pool. See the PR body for
 # what that means and why no guard change ships with this file.
 #
-# NO `pip` ECOSYSTEM YET (Richard, 2026-09-30). A dependency-version bump runs
+# NO `pip` ECOSYSTEM YET. A dependency-version bump runs
 # arbitrary install-time code the day it's proposed, before review — the same
 # self-hosted-pool exposure as above, but for a much larger and more frequently
 # changing package set than the three pinned Actions. Add it once the repo is
 # public and `dependabot[bot]` PRs can be routed to the hosted `fork-pr` job
-# instead of the trusted pool (an actor check on the guard, or GitHub's
-# `dependabot-updates` deployment environment) — not before.
+# instead of the trusted pool — not before. The known mechanism is an actor
+# check on the guard (GitHub's docs gate on
+# `github.event.pull_request.user.login == 'dependabot[bot]'`); evaluate any
+# other routing option then. `dependabot-updates` is only the name of
+# Dependabot's own dynamic workflow run, not an environment a workflow here
+# can route on.
 version: 2
 updates:
   - package-ecosystem: "github-actions"

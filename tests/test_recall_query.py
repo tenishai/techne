@@ -551,7 +551,6 @@ def test_an_open_tag_quoted_in_a_nested_report_does_not_drop_the_operators_quest
     )
 
 
-
 def test_a_close_tag_quoted_in_an_earlier_report_does_not_drop_the_operators_question():
     """Prudence, PR #1127 r2: the mirror of the r1 case. The scan BEFORE the
     frame counted tags unanchored, so a `</pasted_content …>` quoted mid-line in
@@ -567,6 +566,7 @@ def test_a_close_tag_quoted_in_an_earlier_report_does_not_drop_the_operators_que
     query = build_recall_query(prompt, LIMIT)
     assert query.startswith("OPERATOR QUESTION about widget rollback?")
     assert "unclosed one" in query and "second report line" in query
+
 
 def test_a_task_notification_tag_quoted_mid_line_is_not_treated_as_one():
     """Unanchored, the opener matched `<task-notification>` wherever it occurred;
