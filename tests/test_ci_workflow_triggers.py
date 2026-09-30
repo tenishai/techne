@@ -1179,6 +1179,50 @@ def test_every_default_suite_job_fetches_origin_main():
     )
 
 
+def test_comment_block_gate_runs_in_ci_against_a_real_base():
+    """techne#1071: `scripts/check_comment_blocks.sh` existed, was correct, and
+    never ran — the repo-local `hooks.commentblockgate` git config key had no
+    reader, since the operator's global pre-commit loader never learned a
+    branch for it. Wired into `arch-cards` as a step that diffs the PR's
+    commits against `origin/main` (the script's CI mode, techne#1071).
+
+    THE STRICT PART IS THE POINT: a step invoking the script with NO base-ref
+    argument would diff `--cached`, which is empty in a checkout with nothing
+    staged — the step would run, exit 0, and print a green check for a gate
+    that checked nothing, on every single PR. That is this issue's own defect
+    shape one layer in, so this asserts the argument is actually present
+    rather than only that the script is named somewhere in a `run:` line.
+    """
+    import shlex
+
+    jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
+    steps = jobs["arch-cards"]["steps"]
+
+    def _invokes_the_gate(step) -> list[str] | None:
+        if step.get("if") is not None:
+            return None
+        for line in str(step.get("run", "")).splitlines():
+            try:
+                tok = shlex.split(line, comments=True)
+            except ValueError:
+                continue
+            if any(Path(t).name == "check_comment_blocks.sh" for t in tok):
+                return tok
+        return None
+
+    invocations = [argv for s in steps if (argv := _invokes_the_gate(s)) is not None]
+    assert invocations, "arch-cards must run scripts/check_comment_blocks.sh, unconditionally"
+    assert len(invocations) == 1, f"expected one invocation, found {invocations}"
+    (argv,) = invocations
+    script_idx = next(i for i, t in enumerate(argv) if Path(t).name == "check_comment_blocks.sh")
+    args_after = argv[script_idx + 1 :]
+    assert args_after, (
+        "check_comment_blocks.sh called with no base-ref argument — it will diff "
+        "`--cached`, which is empty in a CI checkout, and the step passes having "
+        "checked nothing (the exact silent-no-op this issue is about)"
+    )
+
+
 # Hosts, runner paths and hardware that must not ship with the public repo (#1005).
 # The runbook left the repo for naming them, and the same names were still in the
 # workflow and in two docstrings when it did, so this checks every tracked file

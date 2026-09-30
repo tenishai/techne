@@ -30,6 +30,13 @@ A few things worth knowing before you spend effort:
   pinned to its source file by a content hash. Change such a subsystem and you update
   its card in the same commit, hash included. `python scripts/check_arch_cards.py`
   tells you; so does CI.
+- **Comment-block gate.** `scripts/check_comment_blocks.sh` refuses a commit that
+  adds a comment block longer than 12 lines (techne#998) — reasoning belongs in the
+  issue and the PR, not in code that reads as current forever. It reads the staged
+  diff, so run it after `git add`: `bash scripts/check_comment_blocks.sh`. Wire it as
+  your own pre-commit hook if you want it to run automatically; CI runs it too, on
+  what your PR adds relative to `origin/main`. Deliberate exception:
+  `ALLOW_LONG_COMMENT=1 git commit ...`.
 - **Schema changes have their own rules**, below. Read that section before touching
   anything that creates or alters a table — picking the wrong mechanism either leaves
   existing databases broken or burns a version bump that was not needed.
