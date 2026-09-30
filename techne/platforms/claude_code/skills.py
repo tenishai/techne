@@ -78,6 +78,19 @@ KNOWN_SHIPPED_HASHES: dict[str, tuple[str, ...]] = {
     ),
 }
 
+#: sha256 that a procedure's CURRENT shipped content is pinned to. Nothing enforces
+#: "append the outgoing hash whenever shipped content changes" — the rule above is
+#: only written in prose (Prudence, PR #1117 r1: two mutations against a real
+#: historical hash and an unrecorded self-care.md edit both left all 118 skills-
+#: related tests passing). This pin exists to force it: `test_skills_install.py`
+#: asserts ``_sha(bundled_skill_text(name)) == CURRENT_SHIPPED_HASHES[name]`` for
+#: every name, so any content edit fails that test until the editor moves the
+#: OUTGOING hash into KNOWN_SHIPPED_HASHES and updates this pin to the new one.
+CURRENT_SHIPPED_HASHES: dict[str, str] = {
+    "self-care": "a6d6cdc4b3ed086dda1e2a462404ef159a703a292314df27a9097af372b58a3f",  # #1068
+    "techne-promote": "6042d2cb42dcf080e6d3ef226ed8072b0f793eb2439716ad93ce28a3a1cb9851",  # #1064
+}
+
 
 @dataclass
 class SkillResult:
@@ -202,9 +215,10 @@ def _install_owned(
         return SkillResult(name, "updated", path)
 
     if last_written is None and on_disk_sha in known_hashes:
-        # An unedited copy from an older release, installed before this machine's
-        # manifest ever recorded this skill (or before ownership tracking existed
-        # at all, #641). Adopt and refresh it — it is stale, not user-edited.
+        # An unedited copy from an older release, on a machine whose manifest entry
+        # for this skill was lost or never shared (a recreated DB, a different
+        # TECHNE_HOME pointed at the same ~/.claude). Adopt and refresh it — it is
+        # stale, not user-edited.
         path.write_text(shipped, encoding="utf-8")
         manifest[name] = shipped_sha
         return SkillResult(

@@ -149,6 +149,39 @@ def test_status_reports_a_known_older_copy_as_outdated_not_user_modified(env, mo
     assert by_name["self-care"] == "outdated"
 
 
+def test_current_shipped_content_is_pinned():
+    """techne#1072's fix relies on KNOWN_SHIPPED_HASHES growing by one entry every
+    time a procedure's shipped content changes — a rule written only in prose.
+    Nothing else catches a missed update (Prudence, PR #1117 r1: changing one real
+    historical hash, and editing self-care.md without recording its outgoing hash,
+    both left all 118 skills-related tests passing). This pin makes a content edit
+    fail LOUDLY until CURRENT_SHIPPED_HASHES is updated to match, with a message
+    naming the fix."""
+    for name in skills_mod.SKILL_NAMES:
+        current = skills_mod._sha(skills_mod.bundled_skill_text(name))
+        pinned = skills_mod.CURRENT_SHIPPED_HASHES.get(name)
+        assert current == pinned, (
+            f"{name}'s shipped content changed but CURRENT_SHIPPED_HASHES was not "
+            f"updated. Move the OLD hash ({pinned!r}) into "
+            f"KNOWN_SHIPPED_HASHES[{name!r}], then set CURRENT_SHIPPED_HASHES[{name!r}] "
+            f"to the new hash ({current!r})."
+        )
+
+
+def test_known_shipped_hashes_are_well_formed():
+    """Structural checks that need no git history (CI's checkout is shallow): every
+    historical entry is a real sha256 hex digest, unique within its name, and never
+    equal to the current pin — an entry equal to CURRENT would mean a hash got
+    duplicated instead of moved when the shipped content last changed."""
+    hex_digits = set("0123456789abcdef")
+    for name, hashes in skills_mod.KNOWN_SHIPPED_HASHES.items():
+        assert len(hashes) == len(set(hashes)), f"{name} has a duplicate historical hash"
+        current = skills_mod.CURRENT_SHIPPED_HASHES.get(name)
+        for h in hashes:
+            assert len(h) == 64 and set(h) <= hex_digits, f"{name} has a malformed hash: {h!r}"
+            assert h != current, f"{name}'s historical list still contains the current hash"
+
+
 def test_status_distinguishes_absent_current_and_user_modified(env):
     """#638 needs this: a config flag cannot tell you whether the hygiene pass is
     actually PRESENT on an install."""

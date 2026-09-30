@@ -138,17 +138,21 @@ All notable changes to techne are documented here. Format loosely follows
   the same query as before: 38 of 38 plain prompts in a 40-prompt sample.
 - **`techne skills install` now upgrades a stale, pre-ownership `/self-care` copy
   instead of treating it as user-edited forever** (#1072). The installed
-  `~/.claude/commands/self-care.md` on a machine that got it before this manifest
-  entry existed — or before `techne#641` shipped ownership tracking at all — matched
-  no `manifest[name]`, so it read as `kept-user-copy` no matter how many releases
-  passed, even though the operator never touched it. `_install_owned` now also checks
-  the on-disk hash against `KNOWN_SHIPPED_HASHES`, the sha256 of every past release of
-  `self-care` and `techne-promote` (current excluded): a match adopts and refreshes
-  the file, the same as an exact-current match; a hash matching nothing, current or
-  historical, is still the real signal of a tuned document and is left alone.
-  `skills status` reports the recognized-but-unadopted case as `outdated`, not
-  `user-modified`. Verified against a scratch `HOME` with a byte-for-byte 2026-08-17
-  copy (adopts) and a hand-edited one (kept).
+  `~/.claude/commands/self-care.md` on a machine whose manifest entry for this skill
+  was lost or never shared (a recreated DB, a different `TECHNE_HOME` pointed at the
+  same `~/.claude`) matched no `manifest[name]`, so it read as `kept-user-copy` no
+  matter how many releases passed, even though the operator never touched it.
+  `_install_owned` now also checks the on-disk hash against `KNOWN_SHIPPED_HASHES`,
+  the sha256 of every past release of `self-care` and `techne-promote` (current
+  excluded): a match adopts and refreshes the file, the same as an exact-current
+  match; a hash matching nothing, current or historical, is still the real signal of
+  a tuned document and is left alone. `skills status` reports the
+  recognized-but-unadopted case as `outdated`, not `user-modified`. Verified against a
+  scratch `HOME` with a byte-for-byte 2026-08-17 copy (adopts) and a hand-edited one
+  (kept). `KNOWN_SHIPPED_HASHES` is hand-maintained, so a new test pins each
+  procedure's current shipped hash and fails, with a message naming the fix, if
+  content changes without the outgoing hash moving into the list (Prudence, PR #1117
+  r1).
 - **`techne/skills/self-care.md` drops a former-employer qualifier from its
   attribution line** (#1068). Line 9's parenthetical named the employer the
   adapted-from procedure came from; the sentence reads the same without it. A
