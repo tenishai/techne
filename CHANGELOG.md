@@ -7,6 +7,17 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- **An explicit search that quotes a rare phrase now puts a row holding it second**
+  (#1142). The vector channel could crowd such rows off the page entirely: on a 63k-row
+  store, `litestream replicate techne.db exec` put neither exact row in the top 200.
+  `techne_search`, `techne search` and `techne_recall` now seat one row holding the
+  longest rare run of two or more query words (FTS tokenization and stemming apply)
+  right after the top result, tagged `reserved_slot: "phrase_head"`. Rare means fewer
+  than 0.207% of the searched rows hold it (at least 5), a bar chosen on 115 held-out
+  exact-phrase queries. Questions and queries of more than 8 words are skipped, and the
+  top result never moves. The per-turn and inbound recall rails do not use it; their
+  pages are unchanged. Federated recall keeps the seat in place. `search()` gains
+  `phrase_seat=False`.
 - **`techne doctor`'s prose-supersession check no longer prints a ready-to-run
   `techne knowledge supersede` command for a pair it matched only through a bare
   `techne#N` reference** (#1065). On 2026-09-28 doctor printed exactly that for two
