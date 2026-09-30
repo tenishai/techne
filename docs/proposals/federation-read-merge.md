@@ -1,5 +1,7 @@
 # Federation read-merge — design proposal
 
+**Status:** implemented (#222). The merge rule in step D (pool local + remote rows and run `_rerank`) was replaced in #1089 by a page merge that keeps the local page's order and reserved seats — see [`docs/arch/search-embeddings.md`](../arch/search-embeddings.md). The rest of this document is the original design.
+
 **Issue:** [#222](https://github.com/tenishai/techne/issues/222) · **Epic:** [#212](https://github.com/tenishai/techne/issues/212)
 **Companion:** [memory-system-architecture.md](../memory-system-architecture.md) §4/§11.3 — this is the concrete mechanism for that doc's read-merge (its self-declared "*this rule is the product*").
 **Depends on (all merged):** #213 (contradiction detection), #214 (decayed ranking), #220 (schema fork → **techne↔techne**).

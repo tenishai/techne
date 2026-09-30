@@ -150,7 +150,9 @@ anything.
 
 **That repair re-offers, once, every thread you answered before it.** Those answers were stored
 with no thread id, so nothing links them to the threads the repair persists, and the new ids read
-as unpaid. Answer them again or decline them; `techne consolidate` catches duplicate candidates.
+as unpaid. Answer them again or decline them; the consolidate pass (`techne_consolidate_emit` /
+`techne_consolidate_ingest` over MCP, or `techne custodian run --rail consolidate`) catches
+duplicate candidates.
 Upgrading before you backfill avoids it. (`--force` is different: it appends observations, so it
 re-detects even a session that already has threads. That is correct, and already-paid threads
 keep their payment.)
@@ -380,6 +382,6 @@ That block plus `techne reflect --help` is everything an agent needs.
 - **[`docs/welcome.md`](./welcome.md)** — the loop this is one verb of.
 - **[`docs/mcp-tools.md`](./mcp-tools.md#reflect--sleep--emitingest-pairs-answered-by-your-model-no-api-key)**
   — the emit/ingest tool pairs, including consolidate, dream and faithfulness.
-- **[`docs/arch/reflect-pipeline.md`](./arch/reflect-pipeline.md)** — the architecture card:
+- **[`docs/arch/reflect-pipeline.md`](https://github.com/tenishai/techne/blob/main/docs/arch/reflect-pipeline.md)** — the architecture card:
   invariants, fail-modes, and the reasoning behind each. Written for someone changing the
   seam, not learning it.

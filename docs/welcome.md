@@ -1,14 +1,14 @@
 # Welcome to your new memory
 
-*A first-timer's guide to techne — read this before the [README](../README.md).*
+*A first-timer's guide to techne — read this before the [README](https://github.com/tenishai/techne/blob/main/README.md).*
 
 You just installed a memory. Not a database you have to babysit, not a note-taking
 app you have to remember to open — a memory that fills itself in while your agent
 works, tidies itself while it's idle, and hands the important parts back the next
 time they're needed. This guide is the tour: what you actually got, the good bits
-you'd never find on your own, and the five things worth turning on.
+you'd never find on your own, the defaults, and what's worth turning on next.
 
-The [README](../README.md) is the reference manual — every flag, every command.
+The [README](https://github.com/tenishai/techne/blob/main/README.md) is the reference manual — every flag, every command.
 This is the brochure. Start here.
 
 ---
@@ -166,10 +166,12 @@ into context the moment you ask, without you running a recall by hand.
 
 Best-effort by design: it never blocks or delays your turn, and stays silent when
 nothing relevant turns up. **On by default** since #1020 — this is the one that makes
-memory feel present, and it has a limit worth knowing: it only matches what you typed,
-so pasted or replayed content and tool output get nothing injected (see the
-[operator guide](./operator-guide.md#the-recall-rule-and-its-limit)). Turn it off if
-you'd rather call `techne_recall` by hand:
+memory feel present, and it has a limit worth knowing. It searches what arrives as a
+prompt: what you type, what you paste (on its question lines), and a subagent's
+hand-back (on the report, with the harness wrapper stripped). Tool results and files the
+agent reads get nothing injected unless you turn on the opt-in `inbound_recall` rail (see
+the [operator guide](./operator-guide.md#the-recall-rule-and-its-limit)). Turn per-turn
+recall off if you'd rather call `techne_recall` by hand:
 
 ```yaml
 # ~/.techne/config.yaml
@@ -202,8 +204,10 @@ techne codex search "handleRequest"       # find symbols
 techne codex blast-radius <symbol-id>     # what a change ripples into
 ```
 
-**Experimental, and honest about it:** indexing is manual, so the graph goes stale as
-code changes — re-run `codex index` to refresh. Every symbol injected by grep-assist
+**Experimental, and honest about it:** the first index is manual. After that,
+`hooks.codex_reindex_on_edit` (on by default) re-indexes each file your agent edits, but
+changes made outside the agent — a `git pull`, your own editor — leave the graph behind
+until you re-run `codex index`. Every symbol injected by grep-assist
 carries a freshness marker if the graph is behind the working tree, so your agent
 knows when to double-check. Since 0.17.0 you don't have to remember to look: the
 SessionStart banner's `codex:freshness` check compares the index's recorded HEAD
@@ -211,7 +215,7 @@ against the repo's current one and says which commit it's stuck at, with the
 `techne codex index` command to fix it (#937). (Reach for Codex when a graph is *too big to hold in your
 head* or needs *deep reachability* — for a quick "where's X" on a file you're already
 reading, plain Grep still wins. The full when-to-use-it philosophy is in
-[`codex-usage.md`](./codex-usage.md).)
+[`codex-usage.md`](https://github.com/tenishai/techne/blob/main/docs/codex-usage.md).)
 
 ### ⏰ Reminders that survive a restart
 
@@ -301,9 +305,17 @@ for 0.15.
   agent answers techne's reflection prompts with its own model, so no API key is
   involved. This is the one that grows the store.
 
-**An upgrade does not re-run `techne init`**, so after upgrading run `techne skills
-install` to refresh them. `techne skills status` tells you where you stand, and it
-never overwrites a copy you have edited yourself.
+Two more ship as Claude Code skills in `~/.claude/skills/`: **`investigate-url`** (mine
+a repo you paste for patterns worth borrowing) and **`survey-field`** (map the prior art
+for something you are about to build). Each is a one-line stub that loads the bundled
+guide, `techne guide investigating` or `techne guide surveying`, so there is no second
+copy of the procedure to drift.
+
+**An upgrade does not re-run `techne init`**, so after upgrading run `techne init` (or
+at least `techne skills install`) to refresh them. `techne skills status` tells you where
+you stand, and it never overwrites a copy you have edited yourself. A copy that matches
+an earlier release exactly is recognised as unedited and refreshed, so a skill you never
+touched does not get stuck on an old version.
 
 ---
 
@@ -313,7 +325,8 @@ If you're reading this because someone handed you a machine with techne already
 running, here's the shape of a healthy setup, and why each piece is there:
 
 1. **`techne init --platform claude-code`** wires the lifecycle hooks (session start,
-   end, post-tool-use, pre/post-compact) and registers the MCP server. From then on
+   end, post-tool-use, pre/post-compact, plus UserPromptSubmit for per-turn recall and
+   PreToolUse for grep-assist) and registers the MCP server. From then on
    every session is captured and thread-summarized with zero effort.
 2. **Index your active repos with Codex.** grep-assist is on by default, but it only
    fires for repos you've indexed. This is the difference between "memory of past
@@ -345,7 +358,7 @@ was the whole point.
 
 ## Where to go next
 
-- **[README](../README.md)** — the full reference: every CLI command, config key, and
+- **[README](https://github.com/tenishai/techne/blob/main/README.md)** — the full reference: every CLI command, config key, and
   the library API for embedding techne in a non-Claude-Code runtime.
 - **[Operator guide](./operator-guide.md)** — the recommended hook configuration
   (what's on by default, what it costs, how to turn it off) plus the recall rule's
@@ -354,20 +367,18 @@ was the whole point.
 - **`techne capabilities`** — what is on, what is off, and what each would buy you,
   measured against *your* store. Start here rather than with any document, this one
   included.
-- **[`docs/modules.md`](./modules.md)** — a short sales-pitch for each module (what it
+- **[`docs/modules.md`](https://github.com/tenishai/techne/blob/main/docs/modules.md)** — a short sales-pitch for each module (what it
   does, why it's different, how to enable it).
-- **[`docs/threads.md`](./threads.md)** — sessions vs threads: why the split exists, the
+- **[`docs/threads.md`](https://github.com/tenishai/techne/blob/main/docs/threads.md)** — sessions vs threads: why the split exists, the
   signals that make it, and how a line of work survives a `/clear`.
 - **[`docs/four-functions.md`](./four-functions.md)** — the four domains, addressed by
   name: what each answers, how to read the `binding` it resolved to, and the same call
   against a different store.
 - **[`docs/mcp-tools.md`](./mcp-tools.md)** — every MCP tool your agent can call,
   grouped by purpose. The complete agent-facing surface in one place.
-- **[`docs/codex-usage.md`](./codex-usage.md)** — when to reach for the code graph and,
+- **[`docs/codex-usage.md`](https://github.com/tenishai/techne/blob/main/docs/codex-usage.md)** — when to reach for the code graph and,
   just as important, when *not* to.
 - **[`docs/reflect-guide.md`](./reflect-guide.md)** — the Reflect verb in full: the two
   switches people confuse, where candidates land, and how to drain a backlog.
-- **[`docs/memory-system-architecture.md`](./memory-system-architecture.md)** — the
-  multi-domain / federation model: how techne behaves as one store among several.
 
 Welcome aboard. Your agent has a memory now — go give it something worth remembering.

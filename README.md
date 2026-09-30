@@ -6,7 +6,7 @@
 
 Concretely: a SQLite-backed memory store whose core is a **single local file** (`techne.db`) — yours, offline, inspectable with `sqlite3`. It gives an agent three things to be useful over time: a structured record of *what it did* (sessions + auto-detected threads), a curated record of *what it learned* (knowledge), and a stable record of *who it is and who it works with* (identity). Its self-maintenance — distilling sessions into durable memory, deduping, evidence-checking claims — runs on **the agent's own model** (no API key, no extra inference bill). Larger or team-scoped domains — documents, patterns, code — each get their own SQLite file behind a `StoreAdapter` (db-per-domain).
 
-> **New here? Start with the brochure:** [**Welcome to your new memory**](docs/welcome.md) — the friendly first-timer tour (the memory loop, the good bits you'd never find on your own, and the five things worth turning on). This README is the reference manual; read the welcome guide first.
+> **New here? Start with the brochure:** [**Welcome to your new memory**](docs/welcome.md) — the friendly first-timer tour (the memory loop, the good bits you'd never find on your own, the defaults, and what's worth turning on next). This README is the reference manual; read the welcome guide first.
 >
 > **Tour the pieces:** [`docs/modules.md`](docs/modules.md) — a short sales-pitch for each module (what it does, why it's different, how to enable it).
 >
@@ -63,7 +63,14 @@ techne init
 >
 > ```bash
 > pipx install "techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.17.0"
-> pipx ensurepath   # then open a new shell — otherwise `techne` isn't on PATH yet
+> pipx ensurepath
+> ```
+>
+> Now open a new shell. `pipx` puts `techne` in `~/.local/bin`, which is not on PATH in
+> the shell you ran `ensurepath` from, so `techne init` there fails with `command not found`.
+> In the new shell:
+>
+> ```bash
 > techne init
 > ```
 >
@@ -80,17 +87,24 @@ techne init
 > Upgrade later with `pipx install --force "techne[recommended] @ git+https://github.com/tenishai/techne.git@<newer-tag>"`
 > (a plain `pipx install` on an already-installed techne refuses without `--force`).
 >
-> **An upgrade replaces the code and nothing else. Run all three afterwards:**
+> **An upgrade replaces the code and nothing else. Run these afterwards:**
 >
 > ```sh
 > techne init              # ONLY init writes the SessionStart hook chain — an upgrade
->                          #   leaves whatever chain was written last. Also refreshes
->                          #   the bundled skills, so the next line is belt-and-braces.
+>                          #   leaves whatever chain was written last. It also rewrites a
+>                          #   0.17-or-earlier config.yaml to the sparse form, downloads
+>                          #   the embedding model and embeds what is stored, and
+>                          #   refreshes the bundled skills, so the next line is
+>                          #   belt-and-braces.
 > techne skills install    # for anyone who skipped init (or passed `--no-skills`)
 > techne agents install    # SAME flag, separate command — `--no-skills` skips the research
 >                          #   sandbox too, and `skills install` does not bring it back
-> techne vectors backfill  # ONCE, from the CLI — nothing else embeds
 > ```
+>
+> Run `techne init` **before you change any config key.** A `config.yaml` written by 0.17.0
+> or earlier pinned every key; until init rewrites it, each load un-pins any value that was
+> once a default, so a `false` you type there may not take effect. `techne doctor` and the
+> session-start banner name every such key. See [Configuration](#configuration).
 >
 > The third line is not belt-and-braces the way the second is. `techne guide investigating`
 > tells an agent to do its web research inside the `research-readonly` sandbox — a
@@ -102,11 +116,14 @@ techne init
 > `widened` is called out separately from `edited` because a sandbox that gained tools is
 > the failure that matters.
 >
-> Step three worked only if it printed a JSON counts block. A `vector search unavailable`
-> line means it embedded nothing and exited 0 — run `techne vectors status` to see whether
-> a backend resolved at all, then re-run `techne vectors backfill` somewhere the model
-> cache can be fetched. The bare command downloads by default; only the SessionStart hook
-> passes `--no-download`. See the CHANGELOG's Upgrading section.
+> `techne init` reports the embedding step as `Semantic recall ready: embedded N stored
+> row(s).` Run `techne vectors backfill` yourself only if init printed a download failure
+> instead, or you passed `--no-vectors`. That run worked only if it printed a JSON counts
+> block. A `vector search unavailable` line means it embedded nothing and exited 0 — run
+> `techne vectors status` to see whether a backend resolved at all, then re-run
+> `techne vectors backfill` somewhere the model cache can be fetched. The bare command
+> downloads by default; only the SessionStart hook passes `--no-download`. See the
+> CHANGELOG's Upgrading section.
 >
 > **If you ever ran `techne init --posture observe` (or `--posture spool-primary`), pass it
 > again.** `--posture` defaults to `auto` and `init` re-resolves it every run, so a bare
@@ -121,7 +138,14 @@ techne init
 > skills marketplace because they drive its CLI and know the store layout of the version
 > they came with — a procedure written for 0.12 can be wrong for 0.15. `techne skills status`
 > shows what you have; a copy you have edited is reported, never silently overwritten.
-> Install without them via `techne init --no-skills`.
+> A copy that matches an earlier release byte for byte is recognised as unedited, so
+> `techne skills install` refreshes it rather than keeping it as yours (#1072).
+>
+> init also installs two research stubs as Claude Code skills, **`investigate-url`** and
+> **`survey-field`**, in `~/.claude/skills/<name>/SKILL.md`. Each holds one line that loads
+> the matching bundled guide (`techne guide investigating` / `techne guide surveying`), so
+> the procedure lives in one place and the stub cannot drift from it (#1040).
+> Install without any of them via `techne init --no-skills`.
 
 ---
 
@@ -144,9 +168,11 @@ The schema and triggers all live in `techne/core/database.py`. Schema migrations
 
 ## Install
 
-techne is in alpha — installed from source. Public PyPI distribution is on the roadmap.
+techne is in alpha — installed from source. The PyPI name `techne` belongs to an unrelated
+project, so a PyPI release would need a different package name; until then, install from git.
 
-**Requires:** Python 3.11+, git.
+**Requires:** Python 3.11+, git. CI runs the suite on 3.12 and 3.13, and the vector eval on
+3.14; 3.11 is supported but not in CI.
 
 Use a virtual environment — required on Debian/Ubuntu (PEP 668), recommended everywhere else.
 On Debian/Ubuntu, `venv` isn't preinstalled: `sudo apt install python3-venv`.
@@ -158,6 +184,17 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -e .          # core only
 techne init
 ```
+
+You can run `techne init` before Claude Code is installed. It registers the hooks, skills
+and MCP server anyway and prints `Claude Code not found; techne's hooks are registered and
+take effect when you install it`, so installing Claude Code later needs no second init. For
+no Claude Code integration at all, run `techne init --platform standalone`.
+
+If no embedding backend is installed, init's closing lines give the command that adds
+semantic recall, matched to how techne was installed: `pip install -e ".[recommended]"` in
+the checkout for an editable install, `uv tool install --force` for a uv tool, that venv's
+own pip for any other venv, and `pipx install --force` otherwise (#1124). `techne
+capabilities` prints the same command.
 
 ### Extras — what to install
 
@@ -216,7 +253,7 @@ Note the smaller model was chosen on merit rather than only availability: `potio
 
 ## Quick start — Claude Code integration
 
-The primary way to use techne is as a memory backend for [Claude Code](https://claude.com/claude-code). One command sets up the database, registers Claude Code hooks (session start, end, post-tool-use, pre/post-compact), and registers the MCP server so the agent can query its own memory.
+The primary way to use techne is as a memory backend for [Claude Code](https://claude.com/claude-code). One command sets up the database, registers Claude Code hooks (session start, end, post-tool-use, pre/post-compact, plus UserPromptSubmit for per-turn recall and PreToolUse for grep-assist, both on by default), and registers the MCP server so the agent can query its own memory.
 
 ```bash
 techne init --platform claude-code
@@ -225,7 +262,7 @@ techne status
 
 From there, every Claude Code session is captured, thread-summarized at session end, and queryable via the CLI or MCP tools.
 
-`techne status` also **self-checks hook registration** — if a hook is enabled in config but not actually wired into Claude Code's `settings.json`, it prints a `⚠ Hook registration drift` warning; `techne init` reconciles it. (Claude Code loads hooks at session *start*, so a newly-registered hook — e.g. opt-in [grep-assist](docs/welcome.md) — fires from the *next* session, not the current one.)
+`techne status` also **self-checks hook registration** — if a hook is enabled in config but not actually wired into Claude Code's `settings.json`, it prints a `⚠ Hook registration drift` warning; `techne init` reconciles it. (Claude Code loads hooks at session *start*, so a newly-registered hook — e.g. [grep-assist](docs/welcome.md), on by default — fires from the *next* session, not the current one.)
 
 `techne doctor` goes further and asks whether each subsystem is actually **working**, which
 includes two freshness checks added in 0.17.0 (#937). `codex:freshness` compares the repo's
@@ -242,7 +279,7 @@ the same confidence as a correct miss, so it now says so on the way in:
 `cards:freshness` does the same for architecture cards: every `anchor: <file> sha=<blob>` line
 in `ARCHITECTURE.md` and `docs/arch/*.md` is compared against the seam it vouches for, using the
 same globs as the pre-push gate so the banner and the gate cannot disagree. Both are cheap by
-construction rather than deferred — 32 checks in 0.149s against the hook's 5s budget.
+construction rather than deferred — 32 checks in 0.149s against the hook's 5s budget, measured at 0.17.0.
 
 Inspect what's been captured:
 
@@ -342,10 +379,24 @@ The complete agent-facing surface — 38 tools, grouped by purpose — is docume
 **[`docs/mcp-tools.md`](docs/mcp-tools.md)**, generated from the live registry and
 pinned by a test so a new tool cannot ship undocumented.
 
+With `connections` configured, `techne_recall` merges rows from the other stores into the
+local page. Each federated row names its source in `store` (the connection name, or
+`local`) and `role`. The underscore forms `_store` / `_role` still appear with the same
+values but are deprecated; read `store` / `role` (#1102). The merge keeps the local page's
+order and its reserved head slots, and interleaves each remote store's rows in their own
+order (#1089).
+
 ## CLI reference
 
 ```
-techne init [--platform claude-code|codex|standalone] [--identity-dir DIR]
+techne init [--platform claude-code|codex|opencode|standalone] [--identity-dir DIR]
+            [--posture auto|observe|spool-primary] [--skills/--no-skills] [--force-skills]
+            [--vectors/--no-vectors] [--allow-worktree]
+                                           # create the store, register hooks + MCP server,
+                                           # install skills, download the embedding model
+                                           # and embed what is stored (--no-vectors skips).
+                                           # Also rewrites a pre-0.18 config.yaml to the
+                                           # sparse form (backup: config.yaml.bak-<stamp>)
 techne status                              # session and storage stats
 techne --version                           # the installed version, and — on a build installed
                                            #   from a git ref — the commit it was built from,
@@ -359,6 +410,16 @@ techne capabilities ack FLAG [--reason T]  # mark FLAG as off on purpose: it sto
                                            # toward the session-start invitation (no expiry)
 techne capabilities unack FLAG             # undo that
 techne serve                               # run as a stdio MCP server (non-Claude-Code clients)
+techne guide [NAME]                        # print a bundled guide, or list them (no checkout needed)
+techne bindings [--json]                   # what each of the four domains resolved to
+
+# Bundled skills and subagents (see "Bundled procedures" above)
+techne skills install [--force]            # /self-care, /techne-promote + the research stubs
+techne skills status                       # current / outdated / user-modified / absent
+techne skills remove                       # remove only the copies techne wrote and still owns
+techne agents install [--force]            # the research-readonly subagent definition
+techne agents status                       # unchanged / edited / widened / absent
+techne agents remove                       # remove only the copies techne wrote and still owns
 
 # Threads
 techne threads [--active] [--topic QUERY] [--limit N]
@@ -378,12 +439,22 @@ techne knowledge add CONTENT [--type T] [--tags T] [--confidence high|medium|low
 techne knowledge supersede OLD_ID CONTENT  # new revision; OLD_ID stops being recalled
 techne knowledge supersede OLD_ID --by ID  # retire OLD_ID into an existing entry
                                            # (patterns go to `techne architect ingest`)
+techne knowledge archive-scan [--floor F] [--window DAYS] [--dry-run]
+                                           # soft-archive stale, uncertain, unreaffirmed
+                                           # entries (hidden from injection, never deleted)
+techne knowledge unarchive ENTRY_ID        # restore an archived entry as 'uncertain'
+techne knowledge export [-o DIR] [--include-superseded]
+                                           # live knowledge as a git-diffable markdown tree
 
 # Identity
 techne identity show [--prefix PREFIX]
 
 # Search
 techne search QUERY [--table all|threads|observations|knowledge] [--limit N]
+techne vectors status                      # embedding backend, stamp, rows not yet embedded
+techne vectors backfill [--no-download] [--tags [--all-tags]]
+                                           # embed un-embedded rows; re-embed all if the
+                                           # backend changed. init already runs this once
 
 # Outbox (sync)
 techne outbox status                       # pending / synced / dead counts
@@ -417,7 +488,7 @@ techne context [--project-path PATH] [--limit N]
                                            # client's system prompt (e.g. opencode transform)
 
 # Instruments — measuring whether the read path earns its tokens
-techne audit [--since-days N] [--json]     # utilization audit (techne#329): which injection
+techne audit [--since N] [--json]          # utilization audit (techne#329): which injection
                                            # sources fire, at what token cost, and whether the
                                            # injected item was used. Attribution is a PROXY and
                                            # biased in both directions — read the caveat it prints
@@ -442,6 +513,16 @@ techne reflect ingest RESPONSES_FILE       # feed agent-answered prompts back; w
 techne reflect promote CANDIDATE_ID [--by WHO] [--reason TEXT]
 techne reflect discard CANDIDATE_ID [--by WHO] [--reason TEXT]
 techne reflect stats                       # candidate counts as JSON
+techne reflect reconcile [--apply]         # retire queue rows left by a replaced thread
+                                           # detection; park below-threshold ones (dry run
+                                           # by default)
+techne reflect undecline --session ID [--thread ID]
+                                           # offer declined threads again
+techne custodian status                    # what each emit→ingest rail is bound to, and
+                                           # what it last did
+techne custodian run [--rail R] [--limit N] [--dry-run] [--json]
+                                           # run the rails headlessly with the bound model
+                                           # (what a scheduler calls)
 
 techne evidence SESSION_ID [--since ISO_TS]
                                            # evidence gate (#105): show what an agent actually did
@@ -491,6 +572,10 @@ techne doctor                              # subsystem liveness — is techne ac
                                            # DORMANT / STALE / UNOBSERVABLE with a remedy you
                                            # can act on. A check that cannot say what to do
                                            # about a failure is a bug, not a warning.
+                                           # Also lists the keys your config.yaml pins.
+                                           # hook:pre_compact / hook:post_compact read
+                                           # DORMANT ("idle: no compaction since …") when
+                                           # nothing has compacted, not STALE (#1075)
 techne watch                               # exits 78 (EX_CONFIG) on a startup precondition
                                            # restarting cannot fix — e.g. a missing [watch]
                                            # extra. The shipped systemd unit sets
@@ -503,6 +588,10 @@ techne probe [--runtime claude-code|opencode|pi] [--mode off-test|pull|different
                                            # whether techne carried the codeword into context
 
 # Domain stores — db-per-domain (each in its own db file beside techne.db)
+# Archivist — read-only SQL over the team (or local) knowledge store
+techne archivist schema                    # tables and columns `archivist query` can read
+techne archivist query SQL [--limit N] [--json]
+                                           # one guarded read-only SELECT
 # Librarian (librarian.db) — documents: transcripts + markdown; recall the gist, fetch full on demand
 techne librarian                           # document + card counts
 techne librarian index-transcripts [--platform claude-code] [--dir DIR]
@@ -567,8 +656,8 @@ techne codex watch REPO [--language LIST] [--debounce-ms N]
 `techne.db` holds **personal memory** (sessions, threads, observations, knowledge, identity). Larger or team-scoped domains live in their **own db file** beside it, behind a `StoreAdapter` — kept clean (each db carries only its own schema). Configure non-default locations under `stores:` in `~/.techne/config.yaml`; the default is `<data_dir>/<domain>.db`. Full design: [`docs/db-per-domain.md`](docs/db-per-domain.md).
 
 - **Librarian** (`librarian.db`) — **documents**: your session *transcripts* (the conversation prose, not just tool calls) and *markdown directories*. Recall returns a compact **gist card** that rides normal knowledge recall; the full document is fetched on demand via the card's pointer (a cross-db lookup). Long multi-topic transcripts get a deterministic **thread-index** gist; single-topic docs get an agent-written prose gist (`cards emit/ingest`, no API key). **New here, or setting up a teammate's machine? → [Using the Librarian](docs/librarian-guide.md)** (the documents↔cards model, getting your transcripts in, and an agent-instructions block).
-- **Architect** (`architect.db`) — the **architectural-patterns** corpus: `investigations` (lens-aware dedup, keyed `url × surveyed_by × lens`, so two reviewer lenses on one URL is a join) + the `patterns` lifted from them. Team-scope — queried directly, not folded into personal recall. **Bootstrap your store from the shared corpus:** `techne architect ingest patterns/architectural-patterns.md` (the corpus is a generated export — `architect export` regenerates it; see [`patterns/README.md`](patterns/README.md) for the one-writer/many-readers workflow).
-- **Codex** — **a code graph (experimental):** `symbols` + call/import/def-use `edges`. Reachability and blast-radius are recursive CTEs (graph queries without a graph DB; `graphqlite` is an optional future upgrade, techne#89). Real-repo ingest works — a Tree-sitter `SourceAdapter` (`techne codex index <repo>`, Python+TS, needs the `[codex]` extra). **One db per repo (db-per-repo, techne#209):** each indexed repo lives at `<data_dir>/codex/<slug>-<hash8>.db`, derived deterministically from the repo's absolute root — indexing a second repo can never collide with or bleed into the first. A pre-#209 single `codex.db` migrates to its per-repo home automatically the first time any consumer resolves a codex db. **Experimental:** indexing is **manual** — the graph goes stale as code changes; re-run `codex index` (or `codex index-all`) to refresh (auto-refresh is the next cycle).
+- **Architect** (`architect.db`) — the **architectural-patterns** corpus: `investigations` (lens-aware dedup, keyed `url × surveyed_by × lens`, so two reviewer lenses on one URL is a join) + the `patterns` lifted from them. Team-scope — queried directly, not folded into personal recall. A fresh store starts empty: add one pattern with `techne architect add`, or follow `techne guide investigating` to mine a repo for them. `techne architect export` writes a shareable markdown corpus and `techne architect ingest FILE.md` loads one (see [`patterns/README.md`](patterns/README.md)).
+- **Codex** — **a code graph (experimental):** `symbols` + call/import/def-use `edges`. Reachability and blast-radius are recursive CTEs (graph queries without a graph DB; `graphqlite` is an optional future upgrade, techne#89). Real-repo ingest works — a Tree-sitter `SourceAdapter` (`techne codex index <repo>`, Python+TS, needs the `[codex]` extra). **One db per repo (db-per-repo, techne#209):** each indexed repo lives at `<data_dir>/codex/<slug>-<hash8>.db`, derived deterministically from the repo's absolute root — indexing a second repo can never collide with or bleed into the first. A pre-#209 single `codex.db` migrates to its per-repo home automatically the first time any consumer resolves a codex db. **Experimental:** the first index is **manual** (`codex index`). After that, `hooks.codex_reindex_on_edit` (on by default) re-indexes each file the agent edits; changes made outside the agent still need `codex index` / `codex index-all`, or `codex watch`.
 
 Personal `techne.db` deliberately stays raw-SQLite and local-only. techne is **SQLite-only by decision** (techne#135): the domains are isolated db files behind a thin path/schema registry, not a backend-portability seam.
 
@@ -584,15 +673,28 @@ key, is migrated on upgrade: run `techne init` once to rewrite it before you cha
 key, or a value that was once a default is un-pinned again on every load. See the
 CHANGELOG's Upgrading note (#1070).
 
-Example — see the
-[operator guide](docs/operator-guide.md#recommended-configuration) for why each
-default-on hook is on, what it costs, and how to turn it off:
+A typical file is a few lines — only what you changed:
+
+```yaml
+hooks:
+  capture_bash: false         # everything else follows the defaults
+reflect:
+  enabled: true
+```
+
+The [operator guide](docs/operator-guide.md#recommended-configuration) says why each
+default-on hook is on, what it costs, and how to turn it off.
 
 > **Operators: there is a second, higher-authority layer for the keys that decide where
 > memory can GO.** See [Operator-owned config](#operator-owned-config-egress-selecting-keys)
 > below before deploying techne somewhere the agent should not be able to redirect its own
 > egress. Installs that do not deploy one are unaffected — `config.yaml` keeps full
 > authority.
+
+**Reference, not a template.** The block below lists the common keys with their defaults,
+plus example `tool_families` and `entity_patterns` entries. Don't copy it into your config:
+a copied default is pinned, so it stops following the defaults of later releases, which is
+the problem the sparse file exists to fix. Set only the keys you change.
 
 ```yaml
 # db_path / data_dir: omit to follow TECHNE_HOME (the default, ~/.techne).
@@ -676,8 +778,11 @@ hooks:
                               #   mid-session. Checked inside PostToolUse; applies on the next edit.
   per_turn_recall: true       # default on (#109/#277, #1020): a UserPromptSubmit hook injects the
                               #   durable facts most relevant to each prompt — the DYNAMIC per-turn
-                              #   complement to the STABLE SessionStart block. Only matches what you
-                              #   TYPED — see docs/operator-guide.md for the limit and the recall rule.
+                              #   complement to the STABLE SessionStart block. Searches typed
+                              #   prompts, pasted content (on its question lines) and subagent
+                              #   hand-backs (on the report, harness frame stripped). Tool results
+                              #   are covered only by inbound_recall below; see
+                              #   docs/operator-guide.md for the recall rule.
                               #   Re-run 'techne init' after changing it; loads from the next session.
   per_turn_recall_limit: 5    # max knowledge rows injected per turn
   per_turn_recall_chars: 1000 # max characters per injected row (#826, #1020). The cut lands on a
@@ -693,6 +798,25 @@ hooks:
                               #   (#1018); a paste block always counts, text with lines
                               #   starting ❯ and ⏺ once it is longer than this. Typed
                               #   prompts are searched as is.
+  per_turn_recall_floor_vec_distance: null  # relevance floor (#414): drop a hit farther than
+                              #   this. null = no floor, so every search injects up to the
+                              #   limit. Unset on purpose until a replay measurement sets it.
+  inbound_recall: false       # opt-in (#1018): PostToolUse runs the same recall on the results
+                              #   of inbound_recall_tools and on coord messages it injects —
+                              #   content that arrives mid-turn, with no prompt to trigger
+                              #   per-turn recall. At most once per user prompt. DORMANT until
+                              #   inbound_recall_floor_vec_distance is also set; `techne doctor`
+                              #   says so.
+  inbound_recall_tools: [Agent, Task, WebFetch, mcp__techne__techne_inbox, mcp__techne__techne_coord_threads]
+                              #   Bash, Read, Edit, Grep and other file tools are refused even
+                              #   if listed.
+  inbound_recall_limit: 2     # rows per inbound delivery (lands mid-turn, on top of the tool result)
+  inbound_recall_floor_vec_distance: null  # the inbound rail's own floor; unset = rail dormant.
+                              #   Not measured for inbound text yet, so there is no default.
+  per_turn_seed: false        # opt-in (#277): nudge the agent each turn to techne_store a durable
+                              #   fact the moment it emerges
+  startup_directive: false    # opt-in (#643): on the first prompt of a session, tell the agent
+                              #   how to use techne's tools, once
   timeout_s: 5.0              # wall-clock budget for a hook (grep-assist / per-turn recall degrade to no-op if slow)
 
 conflict:                     # the contradiction rail — which candidate rows reach your model
@@ -865,7 +989,7 @@ Semantic versioning. **Full release history: [`CHANGELOG.md`](CHANGELOG.md).**
   - **`cabal` platform** added to the `Platform` enum.
   - **`run_session_start` now passes `config.platform` through to `start_session`** (was always defaulting to `claude-code`; harmless but wrong for non-Claude-Code runtimes).
 - **v0.5.1** — review pass: 2 blockers (`session_end` exit code, `NoopAdapter` synced=0), 5 high-priority bugs (MCP version + ping, `db_stats` outbox query, SQL allowlist asserts, `busy_timeout` PRAGMA, `techne_store` content validation), 8 medium-priority cleanups (Filesystem leading-consecutive contract + chmod 0600, outbox failed-without-error handling, LIKE escape, Config sync round-trip, pre_compact utf-8 + stderr log, FTS sanitizer hyphen). +22 net new tests.
-- **v0.5.0** — first public release. Major additions over v0.4.x:
+- **v0.5.0** — major additions over v0.4.x:
   - **JSONL backfill** (`techne import [PATH] [--no-prompts] [--force]`). Historical Claude Code transcripts at `~/.claude/projects/<slug>/` can be replayed into the database. Captures tool calls and user prompts; idempotent by default with `--force` for partial-overlap sessions.
   - **Dual-column session summary** with provenance routing. `sessions.summary` (manual override), `sessions.summary_llm` (LLM-derived, e.g. Claude Code's `ai-title`), `sessions.summary_heuristic` (auto-detector output). `effective_summary()` returns the highest-priority non-empty slot. Schema bumped to **v4**.
   - **User-prompt-anchored thread detection**. `UserPrompt` observations contribute a `USER_PROMPT_SCORE` signal (default 0.3) that amplifies other boundary signals without crossing the threshold alone. `family_change` is suppressed when crossing into a `UserPrompt` to avoid double-counting.

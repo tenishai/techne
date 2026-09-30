@@ -270,14 +270,14 @@ topology A.**
 | cabal Archivist/Librarian personas | **EXISTS** |
 | the distiller (`drain.py`, fire-up/close, idempotent) | **BUILT** (2026-07-04) |
 | `capture_bash`/`capture_read` for review agents | **BUILT** (2026-07-04) |
-| techne-as-federator (roles, connections, read-merge) | **NORTH-STAR** |
+| techne-as-federator (roles, connections, read-merge) | **BUILT** (#222; page merge replaced the re-scoring merge in #1089 — see [`arch/search-embeddings.md`](arch/search-embeddings.md)) |
 | knowledge-export ledger + `unpushed`/`mark_pushed` tools | **NORTH-STAR** |
 | distill → outbox/ledger wiring (today it reaches neither) | **NORTH-STAR** |
 | `standalone` flag as lane selector | **NORTH-STAR** (noop gate exists) |
 | standalone Archivist agent (topology B) | **NORTH-STAR** |
 | discovery: agent-card `url` + git-backed catalog | **NORTH-STAR** |
 | telemetry plane (fleet aggregation, problem-markers) | **PARTIAL** (substrate exists) |
-| coherence layer (contradiction-supersession, decay wiring, faithfulness) — [`proposals/coherence-layer.md`](proposals/coherence-layer.md) | **PROPOSED** (prerequisite for read-merge §4/§11.3; the store-time half stands alone) |
+| coherence layer (contradiction-supersession, decay wiring, faithfulness) — [`proposals/coherence-layer.md`](proposals/coherence-layer.md) | **BUILT in large part** — contradiction rail (`techne_conflict_*`), decayed ranking, faithfulness gate (`techne_faithfulness_*`) ship; see the proposal's status line |
 
 ---
 

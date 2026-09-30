@@ -1,4 +1,7 @@
-# Deploying techne watch on Linux
+# Deploying and upgrading techne
+
+Running `techne watch` as a service, scheduled backups, and
+[upgrading an existing install](#upgrading-an-existing-install).
 
 `techne watch <dir>` is the long-running ingest daemon. It starts a techne
 session, does an initial full walk of the watched tree, then uses
@@ -226,9 +229,33 @@ nobody chose. If the machine is asleep at the scheduled time, launchd runs it on
 
 ## Upgrading an existing install
 
-An upgrade replaces the code. It does **not** touch `~/.claude/settings.json`, and it does
-not embed anything. Two consequences that neither the upgrade output nor `techne doctor`
-will tell you about:
+An upgrade replaces the code. It does **not** touch `~/.claude/settings.json` or
+`~/.techne/config.yaml`, and it does not embed anything; `techne init` does all three.
+
+**Run `techne init` before you change any config key (0.18+).** Up to 0.17.0, `techne
+init` wrote every key into `config.yaml`, so each default was pinned at the value it had
+then. From 0.18 the file holds only the keys you set. On load, an old file (no
+`config_version`) is migrated in memory: every key whose value equals a default that key
+has ever shipped with is dropped, so it follows today's default. A value no release
+shipped, and any key techne does not recognise, is kept as your choice. The next `techne
+init` rewrites the file in the sparse form, first copying it to
+`config.yaml.bak-<timestamp>`, and prints one line naming the keys that changed value.
+Until that rewrite, every load migrates the file again, so a value you type that was once
+a default (`per_turn_recall: false`, `capture_bash: false`) is un-pinned again and does
+not take effect; `techne doctor` and the session-start banner name every such key. After
+init, set the keys you want and they stay pinned. The one case the migration cannot tell
+apart is a key you set by hand to a value that was also once its default: check the line
+init prints, and set it again after init if you meant it. The CHANGELOG's Upgrading
+section lists which defaults moved.
+
+**`techne init` downloads the embedding model and embeds what is stored (0.18+, #1021).**
+The first run after an upgrade can make a network fetch (tens of MB, then cached) and
+take a while on a large store. Pass `--no-vectors` to skip it; search then stays
+keyword-only until you run `techne vectors backfill`. A failed download prints how to
+finish later and does not fail init.
+
+Three more consequences that neither the upgrade output nor `techne doctor` will tell you
+about:
 
 **A store with patterns tagged outside `techne` needs one line of config (0.18+).**
 `architect.pattern_targets` replaced a hardcoded roster in #1008, and it defaults to
@@ -244,31 +271,38 @@ install that predates a change to that template keeps the old chain indefinitely
 healthy the whole time — `doctor`'s hook-drift check compares `(event, matcher)` and never
 the command.
 
-**A store that has never been embedded stays that way.** Embedding happens only through
-`techne vectors backfill`; nothing embeds on write. The SessionStart chain runs it with
-`--no-download`, which is correct for a hook — it degrades to "swept, embedded nothing"
+**A store that has never been embedded stays that way until something fetches the
+model.** Nothing embeds on write. The SessionStart chain runs `techne vectors backfill
+--no-download`, which is correct for a hook — it degrades to "swept, embedded nothing"
 rather than blocking session start on a model fetch — but it means a cold model cache
-never warms itself. The bare CLI keeps the permissive default, so one manual run is what
-primes it.
+never warms itself. `techne init` (unless given `--no-vectors`) and a bare `techne vectors
+backfill` are the two things that download it.
 
 So, after upgrading:
 
 ```sh
 techne init             # re-writes the hook chain, including the backfill segment;
-                        #   also refreshes the bundled skills
+                        #   rewrites an old config.yaml to the sparse form; downloads the
+                        #   model and embeds the backlog; refreshes the bundled skills
 techne skills install   # for anyone who skipped init — otherwise a no-op
 techne agents install   # likewise, and it is a SEPARATE command: the research sandbox
                         #   rides the same --no-skills flag but `skills install` does not
                         #   install it. Check it with `techne agents status`.
-techne vectors backfill  # ONCE, bare — warms the model cache and catches up the backlog
+```
+
+Then, only if init printed a download or embedding failure, or you passed `--no-vectors`:
+
+```sh
+techne vectors backfill  # bare — warms the model cache and catches up the backlog
 ```
 
 `init` re-resolves `--posture` from its `auto` default every run, so an operator who chose
 `observe` or `spool-primary` should pass it again — it is machine-wide, and `init` reports
 the resolved state rather than announcing a change.
 
-The third is silent when it does nothing, so check its OUTPUT, not its exit code. It
-worked only if it printed a JSON counts block. A `vector search unavailable: no embedding
+`techne init` reports success as `Semantic recall ready: embedded N stored row(s).`
+`techne vectors backfill` is silent when it does nothing, so check its OUTPUT, not its
+exit code. It worked only if it printed a JSON counts block. A `vector search unavailable: no embedding
 backend installed` line means it embedded nothing and exited 0 — and that line appears for
 two different causes: the `vectors` extra absent, or the extra present but the embedding
 backend unable to load. `cli.py` deliberately avoids naming sqlite-vec in the second case,
@@ -286,10 +320,10 @@ and only the SessionStart hook passes `--no-download`.
 >   — the hook chain is only rewritten by `init`, so an upgrade alone leaves whatever
 >   chain was written last. Say so before they conclude the new version did nothing.
 > - They report that recall is empty, that semantic search finds nothing, or that
->   `vectors:coverage` will not go green after an upgrade — check whether
->   `techne vectors backfill` has ever been run from the CLI. The SessionStart hook runs
->   it with `--no-download`, so on a cold model cache it embeds nothing, every session,
->   silently.
+>   `vectors:coverage` will not go green after an upgrade — check whether `techne init`
+>   (without `--no-vectors`) or `techne vectors backfill` has ever run from the CLI with
+>   network access. The SessionStart hook runs backfill with `--no-download`, so on a
+>   cold model cache it embeds nothing, every session, silently.
 
 ## inotify watch-limit on Linux
 
@@ -299,9 +333,12 @@ On Linux, inotify allocates one watch descriptor per **directory** (not per
 file). The kernel default for `fs.inotify.max_user_watches` is **8 192** on
 many distributions. When `techne watch` is pointed at a large tree — a
 monorepo, a project with `node_modules`, a docs corpus — the limit can be
-exhausted silently: inotify stops issuing events for directories beyond the
-cap, and file changes in those directories are not ingested until the next
-periodic resync walk (default: every 24 hours).
+exhausted. `techne watch` does not carry on half-watching: when watchdog
+reports the limit (`ENOSPC` for `fs.inotify.max_user_watches`, `EMFILE` for
+`fs.inotify.max_user_instances`), it stops with a message naming the sysctl
+and a value to raise it to, and exits 78 (EX_CONFIG), so the shipped unit
+stops instead of respawning (#529). Raising the limit, or excluding
+directories, is the fix; restarting is not.
 
 ### How to raise the limit
 
@@ -332,18 +369,16 @@ Each watch descriptor uses roughly 1 KB of kernel memory, so 524 288 watches
 ### Reducing the watch count with exclude_globs
 
 The most effective way to stay within the default limit is to exclude
-directories that generate noise but don't need tracking. In
-`~/.techne/config.yaml`, add watch-level excludes (or pass them on the
-command line with `--exclude`):
+directories that generate noise but don't need tracking. There is no
+config.yaml key for watch excludes; pass them on the command line with
+`--exclude`:
 
-```yaml
-# No config.yaml key for watch excludes yet — pass them at invocation time:
-#
-#   techne watch /corpus \
-#       --exclude '**/.git/**' \
-#       --exclude '**/node_modules/**' \
-#       --exclude '**/__pycache__/**' \
-#       --exclude '**/.venv/**'
+```sh
+techne watch /corpus \
+    --exclude '**/.git/**' \
+    --exclude '**/node_modules/**' \
+    --exclude '**/__pycache__/**' \
+    --exclude '**/.venv/**'
 ```
 
 Or in the systemd unit:

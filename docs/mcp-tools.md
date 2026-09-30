@@ -8,7 +8,7 @@ tool cannot ship without appearing here — the gap this file was written to clo
 Call these from any MCP client. They are not Claude-Code-specific; the agent-facing
 surface is deliberately vendor-neutral (techne#499).
 
-For the CLI equivalents see the [README](../README.md); for what is switched on
+For the CLI equivalents see the [README](https://github.com/tenishai/techne/blob/main/README.md); for what is switched on
 **on your machine**, call `techne_capabilities` or run `techne capabilities`.
 
 
@@ -42,7 +42,7 @@ What techne can do on THIS install, and what is switched OFF — grounded in the
 
 ### `techne_guide`
 
-Read one of techne's bundled guides. Call with no name to list them. These are the procedures techne ships: `four-functions` (which domain answers what, and how to read the `binding` in an answer), `reflect-guide` (draining a backlog), `investigating` (mining a URL the user pasted for patterns — carries the read-only-subagent sandbox and the verdict tiers), `surveying` (mapping a whole field), `db-per-domain`, `deployment`, `welcome`, `mcp-tools`, `AGENTS`, `self-care`, `techne-promote`. Returns the raw markdown to read into your context, not a rendered page. Exists so a client with no shell can still reach them — `techne guide <name>` is the same content from the CLI.
+Read one of techne's bundled guides. Call with no name to list them. These are the procedures techne ships: `four-functions` (which domain answers what, and how to read the `binding` in an answer), `reflect-guide` (draining a backlog), `investigating` (mining a URL the user pasted for patterns — carries the read-only-subagent sandbox and the verdict tiers), `surveying` (mapping a whole field), `db-per-domain`, `deployment`, `welcome`, `operator-guide` (recommended hook config and operating habits), `releasing`, `mcp-tools`, `AGENTS`, `self-care`, `techne-promote`. Returns the raw markdown to read into your context, not a rendered page. Exists so a client with no shell can still reach them — `techne guide <name>` is the same content from the CLI.
 
 **Why it exists as a tool and not only a CLI command.** The server instructions tell every
 connected agent that these guides ship. Reading them used to require `techne guide`, a

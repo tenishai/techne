@@ -2679,7 +2679,8 @@ def _vector_lines(config, setup_vectors: bool) -> list[str]:
     show_default=True,
     help=(
         "Install techne's operational procedures (self-care, techne-promote) into the "
-        "platform's command directory. They are version-coupled to this techne, which is "
+        "platform's command directory, and the research-guide stubs (investigate-url, "
+        "survey-field) as skills. They are version-coupled to this techne, which is "
         "why they ship with it rather than from a marketplace (techne#641)."
     ),
 )

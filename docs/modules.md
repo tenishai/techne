@@ -10,7 +10,18 @@ A guiding principle worth stating up front: **techne's "thinking" features use t
 
 ## Core memory — `techne.db`  ·  *always on, zero-config, one file*
 
-The substrate. `pipx install "techne @ git+https://github.com/tenishai/techne.git@v0.17.0" && techne init` and an agent has durable memory across sessions — in **one local SQLite file**, no server, no cloud.
+The substrate. Install it and run `techne init`, and an agent has durable memory across sessions — in **one local SQLite file**, no server, no cloud:
+
+```bash
+pipx install "techne @ git+https://github.com/tenishai/techne.git@v0.17.0"
+pipx ensurepath
+```
+
+Then, in a new shell (`pipx` puts `techne` in `~/.local/bin`, which the current shell does not have on PATH yet):
+
+```bash
+techne init
+```
 
 It records three things an agent needs to be useful over time:
 - **what it did** — sessions, auto-detected topic *threads*, and an observation ledger of tool calls;
@@ -23,7 +34,7 @@ It records three things an agent needs to be useful over time:
 
 ## Recall & search  ·  *find the right memory at the right moment*
 
-Full-text search (SQLite FTS5) across every layer, out of the box. Add the `vectors` extra for **semantic recall** (embeddings via `fastembed` + `sqlite-vec`) so "how did we handle auth retries" finds the memory even when the words don't match.
+Full-text search (SQLite FTS5) across every layer, out of the box. Add the `vectors` extra for **semantic recall** (embeddings via `fastembed`, or `model2vec` on Python 3.14+, plus `sqlite-vec`) so "how did we handle auth retries" finds the memory even when the words don't match.
 
 Two retrieval shapes:
 - **`recall`** — topic-scoped context for *right now* (incl. the identity layer).
@@ -33,7 +44,7 @@ Two retrieval shapes:
 
 ```bash
 pipx install --force "techne[vectors] @ git+https://github.com/tenishai/techne.git@v0.17.0"   # semantic recall (FTS works without it)
-techne vectors backfill                  # embed what is already stored
+techne init                              # downloads the model once and embeds what is stored
 ```
 
 ---
@@ -55,7 +66,7 @@ The part most memory systems skip. techne keeps memory *honest and lean* through
 - **Reflect** — at session end, distill a finished session's observations into durable knowledge *candidates* (add-only; opt-in, off by default; enable via `reflect.enabled`). See [the reflect guide](reflect-guide.md).
 - **Consolidate** ("sleep") — dedup and merge near-duplicate live knowledge, fighting memory bloat over time.
 - **Dream** (recombine) — surface *non-obvious* connections across knowledge entries (A + B ⇒ C) as LOW-confidence, review-gated candidates. *Speculative* — for discovery, not assertion.
-- **Evidence gate** (#105) — verify an agent's *structured* claims (committed / tested / wrote-file) against the observation ledger *deterministically* (`backed` / `unbacked` / `unverifiable`). **Caveat:** commit/test/action claims come from Bash output, which is off by default (`capture_bash`), so those return `unverifiable` — not `unbacked` — until enabled.
+- **Evidence gate** (#105) — verify an agent's *structured* claims (committed / tested / wrote-file) against the observation ledger *deterministically* (`backed` / `unbacked` / `unverifiable`). Commit/test/action claims come from Bash output, which is captured by default (`hooks.capture_bash`); with it off, those claims return `unverifiable` — not `unbacked`.
 - **Claims reconciliation** (#107) — use the agent's own model to judge free-text claims in CC's curated memory against the deed-log digest. *Distinct from the evidence gate:* #105 is deterministic + structured; #107 is model-driven + free-text.
 
 **Why it's different:** memory that *curates itself using the model already running*, and proposes rather than overwrites. For headless/background runs with no agent in the loop, an optional **operator-model** path (`techne[llm]`) can drive the same passes autonomously — but it's strictly opt-in; the default is the agent's own model.
@@ -96,13 +107,13 @@ A curated corpus of **architectural patterns** lifted from other projects' code 
 
 ---
 
-## Codex — *what does the code look like?*  ·  `codex.db`  ·  **experimental**
+## Codex — *what does the code look like?*  ·  `codex/<repo>-<hash>.db`, one per repo  ·  **experimental**
 
 Point it at a repo (`techne codex index`) and it extracts a **symbol + call/import graph** with tree-sitter (Python + TypeScript today). The agent can then ask **`codex_search`** (find a function/class) and **`codex_blast_radius`** (what does this reach / what reaches this — transitive callers/callees over the graph).
 
 **Why it's different:** real graph queries — `callers`, `callees`, BFS reachability — not just grep.
 
-> **Status: experimental (opt-in).** Indexing is **manual today** — the graph goes stale as code changes; re-run `index` to refresh. Auto-refresh and deeper integration are the next cycle. Ships behind the `codex` extra; nothing else depends on it.
+> **Status: experimental (opt-in).** The first index is **manual**. After that, `hooks.codex_reindex_on_edit` (on by default) re-indexes each file the agent edits; changes made outside the agent need `techne codex index` again, or `techne codex watch`. Ships behind the `codex` extra; nothing else depends on it.
 
 > **When to reach for it (and when not):** see [`codex-usage.md`](./codex-usage.md) — Codex is a *relationship-mapping engine* (code is adapter #1), best for graphs too big to eyeball or needing transitive queries; for ad-hoc "where is X" and small graphs, grep/memory win. What decides whether such a graph lives or rots isn't persistence — it's having an automatic, high-value consumer.
 
@@ -158,7 +169,7 @@ techne is delivered as an **MCP server**, so its tools (`store`, `recall`, `sear
 | You want… | Install | Adds |
 |---|---|---|
 | Just agent memory (capture, FTS recall, threads, knowledge) | `techne` | core (lightweight) |
-| Semantic recall | `techne[vectors]` | `fastembed` + `sqlite-vec` |
+| Semantic recall | `techne[vectors]` | `fastembed` (Python <3.14) or `model2vec` (3.14+), plus `sqlite-vec` |
 | Autonomous/headless model passes | `techne[llm]` | operator-model gateway |
 | Code-graph | `techne[codex]` | tree-sitter + grammars |
 | CVE pre-install audit | `techne[security]` | `pip-audit` |
