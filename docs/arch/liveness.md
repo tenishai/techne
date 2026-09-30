@@ -1,7 +1,7 @@
 ---
 card: arch-card:techne-liveness
 updated: 2026-09-30
-anchor: techne/core/checks.py sha=13ddce55123742b5b712c964e3370e1ca80f157d
+anchor: techne/core/checks.py sha=abbd96f6bb60df57612fb87a2a2f85366bc9ce3e
 ---
 # liveness — subsystem health checks (techne#468/#469)
 

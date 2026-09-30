@@ -1,9 +1,13 @@
 # The Memory System — Architecture
 
+> **Design record, July 2026.** It describes the maintainer's own multi-agent deployment
+> as it stood then, including an orchestrator and an MCP gateway that are separate projects,
+> not part of techne. For current behaviour see the README and `docs/arch/`.
+
 **Status:** design synthesis. Captures the decisions from the 2026-07-04/05 design
-sessions (Rich + Poe). Mixes **[BUILT]**, **[EXISTS]**, and **[NORTH-STAR]** — read
-the status tags; most of the federation layer is not built yet, and that's on purpose
-(design against something concrete before building it).
+sessions (the maintainer and a paired agent session). Mixes **[BUILT]**, **[EXISTS]**,
+and **[NORTH-STAR]** — read the status tags. The tags in the body are as of July 2026; the status table in §10
+records what has been built since, including federation (#222).
 
 ---
 
@@ -53,7 +57,7 @@ Two things feed the same pipe; the only variable is *where the raw came from*:
    the Archivist. Intake is a fast durable write; the same distiller processes it
    asynchronously. The deposit doesn't block on distillation.
 
-> **[BUILT]** The distiller is `drain.py` (Prudence, 2026-07-04): fire-up + close,
+> **[BUILT]** The distiller is `drain.py` (built for a review agent, 2026-07-04): fire-up + close,
 > idempotent via a `.drained.json` fingerprint, answers reflect prompts with
 > `claude -p --setting-sources ''` (keychain OAuth, hooks off, no API key), gated so
 > a never-export/noop agent distills nothing wastefully. It's parameterized by store,
@@ -75,7 +79,7 @@ Two things feed the same pipe; the only variable is *where the raw came from*:
 A **role** is just *which domains a techne instance runs, and whether it's shared /
 git-backed.* This is the unifying idea:
 
-- **Working agent** (Prudence) = local techne; shared domains off or local-only; raw
+- **Working agent** (e.g. a review agent) = local techne; shared domains off or local-only; raw
   private.
 - **Archivist role** = a git-backed, *shared* techne with the team-level domains on:
   team `knowledge` **+** patterns **+** code-graph. It **backs it all** (raw included,
@@ -238,23 +242,9 @@ see *that* it hit a class of problem, it's telemetry.
 
 ---
 
-## 9. What this means for cabal
+## 9. What this means for the orchestrator
 
-The federator/roles model doesn't delete cabal's memory functions — it relocates the
-backends, absorbs the routing, and leaves cabal as a *host*, not an owner.
-
-- **Moves out of cabal** (so standalone works): `cabal.archivist.*` (`ArchivistStore`,
-  `gitmemory`, `promote`, `gitsync`) → the Archivist's home (techne-adjacent under the
-  techne↔techne answer). cabal imports & hosts it; doesn't own it.
-- **Absorbed by techne-federator:** the sink map / `register_sink("archivist")` wiring —
-  "team means the Archivist" is routing knowledge.
-- **Survives, fronted:** the Archivist & Librarian personas as topology-A hosts +
-  (for the Archivist) the raw-deposit intake.
-- **Retired:** the techne→git direct push (`sync.sh` / scraping `knowledge`).
-- **Unchanged:** A2A dispatch, orchestration, limenal's connection/policy plane.
-
-Net: **cabal stops being where memory *code* lives and becomes an orchestration host for
-topology A.**
+Omitted from the public copy: it planned code moves inside the private orchestrator.
 
 ---
 

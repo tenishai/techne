@@ -116,9 +116,9 @@ shelling out — 0.006s for 19 anchors against 0.50s for 21 subprocesses — so 
 enough to run every session. A seam a card points at that can no longer be READ (renamed,
 deleted) is reported as drift too, matching the gate's hard failure, rather than skipped.
 
-Cards are the **source of truth**. On merge they are mirrored into techne
-(`document_card`, org-wide recall) — so keeping them current *here* keeps the
-org-at-a-glance view current *everywhere*.
+Cards are the **source of truth**. If your deployment mirrors cards into a shared
+techne store (`document_card`, org-wide recall), keeping them current *here* keeps
+that view current too.
 
 ## Recommended configuration and operator conventions
 

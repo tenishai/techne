@@ -1213,7 +1213,7 @@ TOOLS = [
                         "Max nodes returned, closest-by-depth first; clamped to 500. "
                         "Measured uncapped worst case on one repo: 500 nodes / ~44k "
                         "tokens, which returns a token-ceiling ERROR instead of an "
-                        "impact set (tenishai/agents#10)."
+                        "impact set."
                     ),
                 },
             },
@@ -2280,7 +2280,7 @@ def _codex_blast_radius(args: dict, config: Config) -> dict:
     stale_count = sum(1 for r in rows if r.get("freshness") in ("stale", "missing"))
     inferred_count = sum(1 for r in rows if not r["proven"])
 
-    # CAP THE RESPONSE (tenishai/agents#10). A hot symbol's radius blew the MCP tool's
+    # CAP THE RESPONSE. A hot symbol's radius blew the MCP tool's
     # token ceiling outright: measured on this repo, `execute` returns 500 nodes /
     # 175,020 characters — about 44k tokens in one response — and the reviewer who hit it
     # got `Error: result exceeds maximum allowed tokens` instead of an impact set. An
@@ -2352,9 +2352,9 @@ def _domain_search(domain: str):
     """Address one knowledge domain BY NAME (techne#552, the connection seam).
 
     The four names — archivist, librarian, architect, codex — are the vocabulary an
-    operator learns in techne and keeps when the infrastructure grows into liminal and
-    cabal. A local librarian may become a cabal persona and later a deployed service;
-    the CALL does not change, only the `binding` in the answer.
+    operator learns in techne and keeps when a store moves from a local file to a team
+    service. A local librarian may become a shared one; the CALL does not change, only
+    the `binding` in the answer.
 
     RECALL IS STILL THE DEFAULT. `techne_recall` escalates across all four rungs and is
     the right answer to "what do we know about X". These are for when you already know

@@ -1,8 +1,8 @@
 # Proposal: make reflect ingest exactly-once (drained marker + candidate dedup)
 
-- **Filed:** 2026-07-04 · by Poe, from the Prudence drain build
+- **Filed:** 2026-07-04 · from a review agent's drain build
 - **Status:** proposed (follow-up "B"; the drain script ships the "A" workaround today)
-- **Motivation:** the out-of-band drain (`~/agents/<name>/drain.py`) distills a
+- **Motivation:** the out-of-band drain (a per-agent `drain.py` script) distills a
   capture-only agent's observations after the fact, and runs at BOTH fire-up and
   close, so it must be safe to double-run. Two gaps in techne make it not
   idempotent at the source; the drain works around both, but they're latent bugs

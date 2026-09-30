@@ -3,9 +3,8 @@
 > Companion to the Codex pitch in [`modules.md`](./modules.md). The pitch says *what it
 > is*; this says *when to reach for it and when not to*. Settled 2026-06-29, then corrected
 > against a field survey of code-graph / knowledge-graph tools (CodeQL, Joern, Sourcegraph,
-> Glean, stack-graphs, Potpie, RepoGraph, GraphRAG, Graphiti, Cognee, Kuzu). See
-> knowledge#488. The mechanics (`index`, `codex_search`, `codex_blast_radius`) live in the
-> pitch and the CLI `--help`.
+> Glean, stack-graphs, Potpie, RepoGraph, GraphRAG, Graphiti, Cognee, Kuzu). The mechanics
+> (`index`, `codex_search`, `codex_blast_radius`) live in the pitch and the CLI `--help`.
 
 ## What Codex actually is
 

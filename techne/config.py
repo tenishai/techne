@@ -887,7 +887,7 @@ class Config:
     #: the very table whose job is to say who said what. Not derived from hostname
     #: for that reason: a machine name is not an author.
     #:
-    #: QUALIFY IT: `<agent>@<cabal>`, e.g. `archivist@dimartin`. A bare persona name
+    #: QUALIFY IT: `<agent>@<cabal>`, e.g. `archivist@alice`. A bare persona name
     #: is GUARANTEED to collide, not merely likely to — cabal's
     #: `identity.toml.example`, which every new cabal starts from, ships `archivist`,
     #: `architect`, `librarian`, `mason` and `wright`. Three operators sharing one

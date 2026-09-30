@@ -365,6 +365,31 @@ def test_auto_memory_probe_respects_spool_primary(config, monkeypatch):
     assert capmod._probe_single_memory_layer(config) is True
 
 
+def test_auto_memory_probe_is_silent_without_claude_code(config, monkeypatch, tmp_path):
+    """No Claude Code here: "auto-memory is on beside techne" would be false, so the
+    entry drops out. `techne init` has already created the config dir (settings.json
+    lives there), so the dir cannot be the signal; a transcript dir can."""
+    from techne.platforms.claude_code import hooks, paths
+
+    cc = tmp_path / "cc"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cc))
+    cc.mkdir()
+    (cc / "settings.json").write_text("{}")  # what init leaves behind
+    monkeypatch.setattr(hooks, "auto_memory_enabled", lambda: True)
+    monkeypatch.setattr(paths, "_claude_on_path", lambda: False)
+    config.platform = "claude-code"
+    config.posture.mode = "observe"
+    assert capmod._probe_single_memory_layer(config) is None
+    monkeypatch.setitem(capmod._PROBES, "single_memory_layer", capmod._probe_single_memory_layer)
+    assert _row(capability_report(config), "single_memory_layer") is None
+
+    (cc / "projects").mkdir()  # Claude Code has run a session here
+    assert capmod._probe_single_memory_layer(config) is False
+    (cc / "projects").rmdir()
+    monkeypatch.setattr(paths, "_claude_on_path", lambda: True)
+    assert capmod._probe_single_memory_layer(config) is False
+
+
 def test_auto_memory_enable_names_the_real_settings_file(config, monkeypatch, tmp_path):
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cc"))
     _set_probes(monkeypatch, single_memory_layer=False)
