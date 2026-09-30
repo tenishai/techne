@@ -64,11 +64,47 @@ def test_present_on_path_is_unchanged(isolated, monkeypatch):
     assert json.loads(hooks.SETTINGS_PATH.read_text())["autoMemoryEnabled"] is False
 
 
-def test_an_existing_config_dir_counts_as_present(isolated, monkeypatch):
-    """`claude` can be off PATH (desktop app, unexported npm prefix); a config dir
-    that existed before init says it has run here."""
+def test_an_existing_projects_dir_counts_as_present(isolated, monkeypatch):
+    """`claude` can be off PATH (desktop app, unexported npm prefix); its projects
+    dir, where every session writes a transcript, says it has run here."""
+    monkeypatch.setattr(paths, "_claude_on_path", lambda: False)
+    paths.claude_projects_dir().mkdir(parents=True)
+    out = _init(answer="n\n")
+    assert NOT_FOUND not in out
+    assert "auto-memory is on" in out
+
+
+def test_a_bare_config_dir_does_not_count(isolated, monkeypatch):
+    """A config dir with no projects/ is what a previous `techne init` leaves
+    behind, so on its own it cannot mean Claude Code is installed (#1137)."""
     monkeypatch.setattr(paths, "_claude_on_path", lambda: False)
     paths.claude_config_dir().mkdir(parents=True)
+    (paths.claude_config_dir() / "settings.json").write_text("{}")
+    out = _init()
+    assert NOT_FOUND in out
+    assert "auto-memory" not in out, out
+
+
+def test_second_init_without_claude_code_still_says_not_found(isolated, monkeypatch):
+    """#1137: the first init creates the config dir; the rerun the upgrade steps
+    ask for must not then claim auto-memory is on, or prompt about it."""
+    monkeypatch.setattr(paths, "_claude_on_path", lambda: False)
+    first = _init()
+    assert paths.claude_config_dir().is_dir()
+    assert not paths.claude_projects_dir().exists()
+    # _interactive is pinned True, so an offer would show its prompt here.
+    second = _init(answer="")
+    for out in (first, second):
+        assert NOT_FOUND in out, out
+        assert "auto-memory" not in out, out
+        assert "[y/N]" not in out and "[Y/n]" not in out, out
+    assert "autoMemoryEnabled" not in json.loads(hooks.SETTINGS_PATH.read_text())
+
+
+def test_second_init_with_claude_code_offers_again(isolated, monkeypatch):
+    """The rerun on a machine that has Claude Code is unchanged: it still offers."""
+    monkeypatch.setattr(paths, "_claude_on_path", lambda: True)
+    _init(answer="n\n")
     out = _init(answer="n\n")
     assert NOT_FOUND not in out
     assert "auto-memory is on" in out

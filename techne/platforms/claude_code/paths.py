@@ -80,23 +80,14 @@ def _claude_on_path() -> bool:
     return shutil.which("claude") is not None
 
 
-def claude_code_present() -> bool:
-    """Is Claude Code installed here? `claude` on PATH, or its config dir exists (#1123).
-
-    Call it BEFORE `techne init` registers anything: registration creates the
-    config dir, after which this is always True. Either signal is enough, because
-    `claude` may be installed somewhere off PATH (a desktop app, an npm prefix the
-    shell does not export) and the dir alone then says it has run here.
-    """
-    return _claude_on_path() or claude_config_dir().is_dir()
-
-
 def claude_code_has_run() -> bool:
-    """Has Claude Code run here? The post-init form of ``claude_code_present``.
+    """Has Claude Code run here? `claude` on PATH, or its projects dir exists.
 
-    After `techne init` the config dir always exists (init writes settings.json
-    into it), so the dir no longer says anything. The projects dir does: Claude
-    Code writes a transcript there every session, and techne never creates it.
+    Not the config dir: `techne init` writes settings.json into it, so after the
+    first init it exists on every machine and says nothing (#1137). Claude Code
+    writes a transcript under projects/ every session, and techne never creates
+    it. PATH alone would miss a `claude` installed off PATH (a desktop app, an npm
+    prefix the shell does not export); projects/ covers that once it has run.
     """
     return _claude_on_path() or claude_projects_dir().is_dir()
 
