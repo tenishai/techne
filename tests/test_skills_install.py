@@ -98,6 +98,57 @@ def test_a_preexisting_identical_copy_adopts_cleanly(env):
     assert skills_mod._load_manifest(config)["self-care"], "identical pre-existing copy not adopted"
 
 
+def test_a_known_older_shipped_copy_adopts_without_a_manifest_entry(env, monkeypatch):
+    """techne#1072: a copy installed before this machine's manifest ever recorded
+    self-care — or before ownership tracking existed at all (#641) — is a stale
+    shipped release, not a user edit. It must adopt and refresh, the same as an
+    exact-current match, as long as its hash is a KNOWN past release."""
+    config, target = env
+    target.mkdir(parents=True, exist_ok=True)
+    old_text = "OLD self-care, once genuinely shipped\n"
+    (target / "self-care.md").write_text(old_text, encoding="utf-8")
+    monkeypatch.setitem(
+        skills_mod.KNOWN_SHIPPED_HASHES, "self-care", (skills_mod._sha(old_text),)
+    )
+
+    results = {r.name: r.action for r in skills_mod.register_skills(config)}
+    assert results["self-care"] == "updated"
+    assert (target / "self-care.md").read_text() == skills_mod.bundled_skill_text("self-care")
+    assert skills_mod._load_manifest(config)["self-care"] == skills_mod._sha(
+        skills_mod.bundled_skill_text("self-care")
+    )
+
+
+def test_an_unknown_stale_copy_is_still_kept_as_a_user_edit(env, monkeypatch):
+    """The converse of the above: a copy that differs from current AND matches no
+    known past release is the real signal of a tuned document, and must still be
+    left alone — KNOWN_SHIPPED_HASHES must not swallow genuine edits."""
+    config, target = env
+    target.mkdir(parents=True, exist_ok=True)
+    (target / "self-care.md").write_text("my own local version\n", encoding="utf-8")
+    monkeypatch.setitem(skills_mod.KNOWN_SHIPPED_HASHES, "self-care", ("not-this-hash",))
+
+    results = {r.name: r.action for r in skills_mod.register_skills(config)}
+    assert results["self-care"] == "kept-user-copy"
+    assert (target / "self-care.md").read_text() == "my own local version\n"
+
+
+def test_status_reports_a_known_older_copy_as_outdated_not_user_modified(env, monkeypatch):
+    """`skills status` must not scare an operator into thinking they tuned a file
+    they never touched — a recognized past release reports `outdated`, same as a
+    manifest-tracked stale copy, and `techne skills install` will fix it."""
+    config, target = env
+    target.mkdir(parents=True, exist_ok=True)
+    old_text = "OLD self-care, once genuinely shipped\n"
+    (target / "self-care.md").write_text(old_text, encoding="utf-8")
+    monkeypatch.setitem(
+        skills_mod.KNOWN_SHIPPED_HASHES, "self-care", (skills_mod._sha(old_text),)
+    )
+
+    by_name = {r.name: r.action for r in skills_mod.skills_status(config)}
+    assert by_name["self-care"] == "outdated"
+
+
 def test_status_distinguishes_absent_current_and_user_modified(env):
     """#638 needs this: a config flag cannot tell you whether the hygiene pass is
     actually PRESENT on an install."""

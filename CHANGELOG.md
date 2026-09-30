@@ -136,7 +136,24 @@ All notable changes to techne are documented here. Format loosely follows
   peer's text the same way, and a `<task-notification>` sent with typed text is
   dropped while the typed text is searched. Prompts with none of these frames build
   the same query as before: 38 of 38 plain prompts in a 40-prompt sample.
-
+- **`techne skills install` now upgrades a stale, pre-ownership `/self-care` copy
+  instead of treating it as user-edited forever** (#1072). The installed
+  `~/.claude/commands/self-care.md` on a machine that got it before this manifest
+  entry existed — or before `techne#641` shipped ownership tracking at all — matched
+  no `manifest[name]`, so it read as `kept-user-copy` no matter how many releases
+  passed, even though the operator never touched it. `_install_owned` now also checks
+  the on-disk hash against `KNOWN_SHIPPED_HASHES`, the sha256 of every past release of
+  `self-care` and `techne-promote` (current excluded): a match adopts and refreshes
+  the file, the same as an exact-current match; a hash matching nothing, current or
+  historical, is still the real signal of a tuned document and is left alone.
+  `skills status` reports the recognized-but-unadopted case as `outdated`, not
+  `user-modified`. Verified against a scratch `HOME` with a byte-for-byte 2026-08-17
+  copy (adopts) and a hand-edited one (kept).
+- **`techne/skills/self-care.md` drops a former-employer qualifier from its
+  attribution line** (#1068). Line 9's parenthetical named the employer the
+  adapted-from procedure came from; the sentence reads the same without it. A
+  case-insensitive grep of the tracked tree found no other occurrence of the name in
+  this repo.
 - **`paraphrase-dbpool` scores 1.0 again in the vector eval, and losing any one
   paraphrase task now fails the gate** (#1083). Since #977 the lexical-tail task's
   padded gold row used infrastructure prose ("connection pooling ... sixty four

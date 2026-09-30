@@ -6,7 +6,7 @@ disable-model-invocation: false
 
 You are running techne's periodic hygiene pass. The goal is a store that is **smaller, current, and honest** — not a green checkmark. An honest "step 4 skipped, here's why" is a successful run.
 
-Adapted from the Rook `lean-and-mean` procedure (fubo-era, `~/.claude/memory` + `sessions.db`). Roughly half of that procedure transferred; the steps below are the parts that actually apply to *this* stack, plus three leaks Rook's version never looked for.
+Adapted from the Rook `lean-and-mean` procedure (`~/.claude/memory` + `sessions.db`). Roughly half of that procedure transferred; the steps below are the parts that actually apply to *this* stack, plus three leaks Rook's version never looked for.
 
 ## Argument
 

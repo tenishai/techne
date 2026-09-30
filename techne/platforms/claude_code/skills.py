@@ -29,6 +29,17 @@ content hash of what techne last wrote is recorded, and a file that no longer
 matches it is left alone and reported. A hook block is techne's plumbing; a
 procedure is a document someone may have tuned, and silently reverting that is
 the kind of quiet destruction techne exists to make visible.
+
+A STALE COPY FROM BEFORE THE MANIFEST ENTRY EXISTED IS NOT A USER EDIT (techne#1072).
+A file installed before this machine's manifest ever recorded this skill — or from a
+release whose content has since moved on — has no ``manifest[name]`` to compare
+against, and the naive rule would call it ``kept-user-copy`` forever even though the
+operator never touched it. KNOWN_SHIPPED_HASHES holds the sha256 of every past release
+of each procedure (current excluded — ``bundled_skill_text`` already covers that): an
+on-disk file matching one of those hashes is adopted and refreshed the same as an
+exact-current match, never treated as edited. A file matching none of them, current or
+historical, is the real signal of a tuned document and is left alone. Append the
+outgoing hash to KNOWN_SHIPPED_HASHES whenever a procedure's shipped content changes.
 """
 
 import hashlib
@@ -45,6 +56,27 @@ SKILL_NAMES = ("self-care", "techne-promote")
 
 #: extension_state key holding {name: sha256} of what techne last wrote.
 STATE_KEY = "skills:claude-code:installed"
+
+#: sha256 of every PAST release of a procedure's shipped content, oldest first,
+#: current excluded (bundled_skill_text() / _sha(shipped) already covers that one).
+#: Lets an on-disk copy from an older release adopt cleanly instead of reading as
+#: user-modified forever, whether or not this machine's manifest ever recorded it
+#: (techne#1072). Nothing here is restored, only compared — nothing is lost if a
+#: hash is missing, the file just falls back to the ordinary kept-user-copy rule.
+#: Append the sha of the version being replaced here whenever shipped content changes.
+KNOWN_SHIPPED_HASHES: dict[str, tuple[str, ...]] = {
+    "self-care": (
+        "d02a4412ef0c0f42738e29223f8754b4b3c5afcd865887a474f0e998f0353e96",  # 2026-08-17 #650
+        "5c4953601278c509e7358e871852b612041557cf8533aa1320b67cf9fe4cf918",  # 2026-08-19 #685
+        "1c83ce7cdb5bbaf3b5ddb736931edc47a092ecd5efaa3f22096f09d99d27fd66",  # 2026-08-24 #752
+        "92b256bc9a871d4e83d1b5349955dc35f2f0ef5565b06a52fc4e4e3e3d4cc434",  # 2026-08-25 #755
+        "39f47760159288cfbabd014494c81e61ba7e6afcb6772a790cd2d11fb6cdc0c1",  # 2026-08-25 #771
+    ),
+    "techne-promote": (
+        "85c3a86dd8240b6f78a9a43a6325c0f7c414d1c8bfbd9fa605e740b3105db00b",  # 2026-08-17 #650
+        "eb1f090f46809ab183c947119c13e53b9f63f9f21e3f603a04af5db6bac29b41",  # 2026-09-17 #958
+    ),
+}
 
 
 @dataclass
@@ -117,19 +149,35 @@ def register_skills(config: Config, *, force: bool = False) -> list[SkillResult]
 
     for name in SKILL_NAMES:
         path = target_dir / f"{name}.md"
-        results.append(_install_owned(name, path, bundled_skill_text(name), manifest, force))
+        known = KNOWN_SHIPPED_HASHES.get(name, ())
+        results.append(
+            _install_owned(
+                name, path, bundled_skill_text(name), manifest, force, known_hashes=known
+            )
+        )
 
     _save_manifest(config, manifest)
     return results
 
 
 def _install_owned(
-    name: str, path: Path, shipped: str, manifest: dict, force: bool
+    name: str,
+    path: Path,
+    shipped: str,
+    manifest: dict,
+    force: bool,
+    *,
+    known_hashes: tuple[str, ...] = (),
 ) -> SkillResult:
     """Write *shipped* to *path* unless the user has edited what techne last wrote.
 
     One copy of the ownership rule, shared by the procedures and the guide stubs, so
-    the day it is wrong there is one place to fix. Updates *manifest* in place."""
+    the day it is wrong there is one place to fix. Updates *manifest* in place.
+
+    *known_hashes* are past releases' shipped content (current excluded): an on-disk
+    file matching one is adopted the same as an exact-current match — a stale but
+    unedited copy, not a tuned document — whether or not this machine's manifest ever
+    recorded it (techne#1072)."""
     shipped_sha = _sha(shipped)
 
     if not path.exists():
@@ -139,7 +187,8 @@ def _install_owned(
         return SkillResult(name, "installed", path)
 
     on_disk = path.read_text(encoding="utf-8")
-    if _sha(on_disk) == shipped_sha:
+    on_disk_sha = _sha(on_disk)
+    if on_disk_sha == shipped_sha:
         # Already current. Record the hash anyway: a pre-#641 machine has the
         # file with no manifest entry, and without this it would look
         # user-modified forever and never take an upgrade.
@@ -147,10 +196,24 @@ def _install_owned(
         return SkillResult(name, "unchanged", path)
 
     last_written = manifest.get(name)
-    if force or (last_written is not None and _sha(on_disk) == last_written):
+    if force or (last_written is not None and on_disk_sha == last_written):
         path.write_text(shipped, encoding="utf-8")
         manifest[name] = shipped_sha
         return SkillResult(name, "updated", path)
+
+    if last_written is None and on_disk_sha in known_hashes:
+        # An unedited copy from an older release, installed before this machine's
+        # manifest ever recorded this skill (or before ownership tracking existed
+        # at all, #641). Adopt and refresh it — it is stale, not user-edited.
+        path.write_text(shipped, encoding="utf-8")
+        manifest[name] = shipped_sha
+        return SkillResult(
+            name,
+            "updated",
+            path,
+            detail="adopted an unedited copy from an older techne release",
+        )
+
     return SkillResult(
         name,
         "kept-user-copy",
@@ -199,6 +262,18 @@ def skills_status(config: Config) -> list[SkillResult]:
             out.append(SkillResult(name, "current", path))
         elif on_disk_sha == manifest.get(name):
             out.append(SkillResult(name, "outdated", path, detail="techne's copy, older version"))
+        elif manifest.get(name) is None and on_disk_sha in KNOWN_SHIPPED_HASHES.get(name, ()):
+            out.append(
+                SkillResult(
+                    name,
+                    "outdated",
+                    path,
+                    detail=(
+                        "an older techne release, not yet adopted — "
+                        "`techne skills install` will"
+                    ),
+                )
+            )
         else:
             out.append(SkillResult(name, "user-modified", path))
     return out
