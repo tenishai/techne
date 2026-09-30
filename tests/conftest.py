@@ -241,7 +241,8 @@ def _pin_claude_on_path(monkeypatch):
     """
     from techne.platforms.claude_code import paths as paths_mod
 
-    monkeypatch.setattr(paths_mod, "_claude_on_path", lambda: True)
+    # raising=False: eval-vec's base leg runs these tests against main's library.
+    monkeypatch.setattr(paths_mod, "_claude_on_path", lambda: True, raising=False)
 
 
 @pytest.fixture(autouse=True)
@@ -264,6 +265,7 @@ def _pin_install_context(monkeypatch):
             "base_prefix": "/usr",
             "executable": "/home/u/.local/share/pipx/venvs/techne/bin/python",
         },
+        raising=False,  # eval-vec's base leg runs these tests against main's library
     )
 
 
