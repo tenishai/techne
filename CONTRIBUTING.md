@@ -130,7 +130,9 @@ git push --force-with-lease
 ```
 
 Commits already on `main` from before this rule are not re-checked; the check
-covers the commits a pull request adds.
+covers the commits a pull request adds. Commits authored by Dependabot are
+exempt from the sign-off requirement (it cannot add one), but only for
+same-repo dependency-update PRs — the check stays strict on PRs from forks.
 
 ## Using AI tools
 
