@@ -88,7 +88,7 @@ KNOWN_SHIPPED_HASHES: dict[str, tuple[str, ...]] = {
 #: every name, so any content edit fails that test until the editor moves the
 #: OUTGOING hash into KNOWN_SHIPPED_HASHES and updates this pin to the new one.
 CURRENT_SHIPPED_HASHES: dict[str, str] = {
-    "self-care": "e89dc076d46ef5b78d051465557ce55d113dd7926b87385764b6f87a58b05a54",  # hygiene
+    "self-care": "e89dc076d46ef5b78d051465557ce55d113dd7926b87385764b6f87a58b05a54",  # #1132
     "techne-promote": "6042d2cb42dcf080e6d3ef226ed8072b0f793eb2439716ad93ce28a3a1cb9851",  # #1064
 }
 
