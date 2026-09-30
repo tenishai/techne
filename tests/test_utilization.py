@@ -20,6 +20,18 @@ from techne.core.utilization import (
 from techne.hooks._injection_log import log_context_injection
 
 
+@pytest.fixture(autouse=True)
+def _no_injection_retention(monkeypatch):
+    """These tests stamp fixed calendar dates (2026-01-01 …) onto injections to
+    control relative timing, and every log_context_injection prunes rows past the
+    retention window (#1073). Once those dates are older than the window, a test's
+    second write deletes its first. Retention has its own tests in
+    test_retention_1073.py; here it is held open so the fixtures never age out."""
+    import techne.hooks._injection_log as injection_log
+
+    monkeypatch.setattr(injection_log, "RETENTION_DAYS", 100_000)
+
+
 @pytest.fixture()
 def db(tmp_path):
     p = tmp_path / "techne.db"

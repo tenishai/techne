@@ -695,12 +695,19 @@ def _run_phases_2_to_9(
         if config.hooks.defer_session_start_context and session_id and not reactivation:
             try:
                 from techne.core.database import connect
-                from techne.core.extension_state import set_state
+                from techne.core.extension_state import prune_stale, set_state
 
                 conn = connect(config.db_path)
                 try:
                     set_state(conn, f"{DEFERRED_CONTEXT_KEY}:{session_id}", {"summary": summary})
                     deferred = True
+                    # One stash per session, claimed (emptied, not deleted) by the
+                    # first prompt or never claimed at all. Both kinds are dead once
+                    # the session is gone (techne#1073).
+                    try:
+                        prune_stale(conn, f"{DEFERRED_CONTEXT_KEY}:")
+                    except Exception as e:  # noqa: BLE001 — the stash above is committed
+                        print(f"techne: deferred-context prune skipped: {e}", file=sys.stderr)
                 finally:
                     conn.close()
             except Exception as e:  # noqa: BLE001 — never cost the session its context
