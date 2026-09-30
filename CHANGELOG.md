@@ -15,30 +15,6 @@ All notable changes to techne are documented here. Format loosely follows
   removed in a future release. Internal readers (`tiers.tier_of`, the freshness filter)
   are unchanged.
 
-### Fixed
-
-- **`techne doctor` no longer reports `hook:pre_compact`/`hook:post_compact` STALE
-  when nothing has compacted in the window** (#1075). Both fire only on a
-  compaction, and this store has no independent way to confirm one happened —
-  Claude Code's SessionStart payload carries `source="compact"` (#906), but
-  `session_start.py` reads it only to pick the banner shape and never persists it,
-  and nothing parses the transcript's own compaction markers either. An aged-out
-  or never-set marker on these two hooks now reads DORMANT (`idle: no compaction
-  since <date>`, or `idle — no compaction recorded yet`) instead of STALE — the
-  outcome under 1M-context sessions, where a compaction can legitimately not
-  happen for a long stretch. A hook that DID run and failed is unaffected: its
-  `last_error` marker still reads BROKEN before the new branch is reached.
-- **`scripts/check_comment_blocks.sh` now actually runs** (#1071). The repo-local
-  `hooks.commentblockgate` git config key had no reader — the operator's global
-  pre-commit loader never grew a branch for it — so the gate had never executed
-  anywhere, on any commit, since it was added for #998. The script itself is
-  correct (verified against the real regression it would have caught: PR #1116's
-  `scripts/acceptance.sh` landed with a 30-line header, over the default 12-line
-  max). Wired into the `arch-cards` CI job as a step that diffs the PR's own
-  commits against `origin/main`, so pre-existing content already on `main` is
-  never re-flagged — only what a PR newly adds. Documented in CONTRIBUTING.md so
-  contributors can also run it locally, staged, as a pre-commit check.
-
 ### Docs
 
 - **Two lines stopped saying every hook config change needs a new session** (#1032).
@@ -149,6 +125,27 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- **`techne doctor` no longer reports `hook:pre_compact`/`hook:post_compact` STALE
+  when nothing has compacted in the window** (#1075). Both fire only on a
+  compaction, and this store has no independent way to confirm one happened —
+  Claude Code's SessionStart payload carries `source="compact"` (#906), but
+  `session_start.py` reads it only to pick the banner shape and never persists it,
+  and nothing parses the transcript's own compaction markers either. An aged-out
+  or never-set marker on these two hooks now reads DORMANT (`idle: no compaction
+  since <date>`, or `idle — no compaction recorded yet`) instead of STALE — the
+  outcome under 1M-context sessions, where a compaction can legitimately not
+  happen for a long stretch. A hook that DID run and failed is unaffected: its
+  `last_error` marker still reads BROKEN before the new branch is reached.
+- **`scripts/check_comment_blocks.sh` now actually runs** (#1071). The repo-local
+  `hooks.commentblockgate` git config key had no reader — the operator's global
+  pre-commit loader never grew a branch for it — so the gate had never executed
+  anywhere, on any commit, since it was added for #998. The script itself is
+  correct (verified against the real regression it would have caught: PR #1116's
+  `scripts/acceptance.sh` landed with a 30-line header, over the default 12-line
+  max). Wired into the `arch-cards` CI job as a step that diffs the PR's own
+  commits against `origin/main`, so pre-existing content already on `main` is
+  never re-flagged — only what a PR newly adds. Documented in CONTRIBUTING.md so
+  contributors can also run it locally, staged, as a pre-commit check.
 - **`paraphrase-dbpool` scores 1.0 again in the vector eval, and losing any one
   paraphrase task now fails the gate** (#1083). Since #977 the lexical-tail task's
   padded gold row used infrastructure prose ("connection pooling ... sixty four
