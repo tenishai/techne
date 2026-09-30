@@ -431,24 +431,12 @@ _HOOK_EXPECTATIONS = {
 #: operator worked, not whether the hook works.
 _SESSION_SCOPED = {"session_start", "session_end", "post_tool_use", "user_prompt_submit"}
 
-#: Hooks whose trigger is an EXTERNAL EVENT this store has no independent way to
-#: confirm happened (techne#1075). Both fire only on a compaction: `pre_compact`
-#: IS the compaction event as far as techne can observe it, and `post_compact`
-#: fires immediately after. Claude Code's SessionStart payload carries
-#: `source="compact"` (techne#906) that WOULD be that independent signal, but
-#: `session_start.py` reads it only to pick the banner shape and never persists
-#: it — no `sessions` column, no other table records it — and nothing here
-#: parses the transcript's own compaction markers either. So a marker aged past
-#: `interval` is not evidence the hook is broken; it is equally consistent with
-#: "no compaction since <date>", which is the expected steady state under
-#: 1M-context sessions. `check_hooks` gives these two an interval for the LIVE
-#: case only (a recent marker is still meaningfully "just ran") and reports the
-#: aged-out case as idle rather than STALE. A hook that DID get a chance to run
-#: and failed is still caught: a raised exception lands in `hook:<name>:last_error`
-#: and is read as `err` above this branch, landing on BROKEN before this is ever
-#: reached; a hook Claude Code never dispatches to at all (mis-registered) is
-#: `check_hook_drift`'s job, not this one's — this module only reads what a run
-#: recorded, never whether one was invoked.
+#: Hooks whose trigger is an EXTERNAL EVENT (a compaction) this store cannot
+#: independently confirm happened — SessionStart's `source="compact"` (#906) is
+#: read but never persisted, and nothing here parses transcript compaction
+#: markers either. So an aged or never-set marker is idle, not stale
+#: (techne#1075); see docs/arch/liveness.md for the full reasoning, and
+#: `check_hook_drift` for the mis-registered case this set does not cover.
 _EVENT_DRIVEN_NO_SIGNAL = {"pre_compact", "post_compact"}
 
 #: How long a store may exist without any session before "nothing has run yet"
