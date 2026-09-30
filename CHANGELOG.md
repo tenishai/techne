@@ -28,6 +28,24 @@ All notable changes to techne are documented here. Format loosely follows
   now inherits the opener's ambiguity, and the reverse case (a later, unambiguous
   restatement of the same id, e.g. `"techne#5 and knowledge #5"`) is no longer
   shadowed by the earlier ambiguous one.
+- **`DCO sign-off check` no longer fails every Dependabot PR** (PR #1135). Dependabot
+  does sign off, but as `dependabot[bot] <support@github.com>` — an address that never
+  matches its noreply author email, and neither is configurable — so the check added
+  in #1130 failed on every dependency-update PR. `arch-cards` (the same-repo job) now
+  skips a commit authored exactly as `dependabot[bot]
+  <49699333+dependabot[bot]@users.noreply.github.com>` and logs which commits it
+  skipped as bot commits; `fork-pr` gets no such exemption, because a fork PR can
+  forge any commit author, including that one.
+- **`context_injections` now has a retention bound** (#1073). The table had none, and
+  #1020 turned per-turn recall on by default, so every install gained several rows per
+  turn forever. Each write now deletes up to 500 rows older than 180 days. 180 days
+  covers every reader: re-send suppression reads only the current session, and `techne
+  audit` with no `--since` now means "every retained row" rather than all-time. Two
+  per-session `extension_state` families had no prune either and now get the 7-day one
+  the others use: `session_start:deferred:<session>` and `heuristic_threads.<session>`.
+  A third, `reflect:emitted:<session>`, stays unbounded on purpose: it is the reflect
+  emit cursor, and a missing marker reads as "never emitted", so pruning it would put
+  old sessions back up for reflection.
 
 ## [0.18.0] — 2026-09-30
 
