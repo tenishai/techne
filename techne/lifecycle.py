@@ -405,7 +405,7 @@ def run_session_end(
     import os
 
     from techne.core.database import connect
-    from techne.core.extension_state import get_state, set_state
+    from techne.core.extension_state import get_state, prune_stale, set_state
     from techne.core.state import end_session, get_observations
     from techne.core.threads import (
         age_threads,
@@ -505,6 +505,12 @@ def run_session_end(
                 f"heuristic_threads.{session_id}",
                 {"last_obs_count": len(observations)},
             )
+            # One cursor per session, never removed (techne#1073). Losing an old
+            # session's cursor costs one redundant detection if it ever ends again.
+            try:
+                prune_stale(conn, "heuristic_threads.")
+            except Exception as e:  # noqa: BLE001 — never fail teardown over a prune
+                print(f"techne: heuristic_threads cursor prune skipped: {e}", file=sys.stderr)
         finally:
             conn.close()
 

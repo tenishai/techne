@@ -34,13 +34,43 @@ Design:
   ``"vec_distance"``; where it is ``"bm25"`` the score is an input to placement,
   not placement itself — see ``_retrieval_signal``, and do not build a floor
   without reading it.
+- **Bounded** (techne#1073) — every write also deletes a bounded batch of rows
+  older than ``RETENTION_DAYS``. See that constant for why the window is 180 days.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
+import sys
 from typing import Any
+
+log = logging.getLogger(__name__)
+
+#: Rows older than this are deleted (techne#1073). Before this the table had no
+#: retention at all, and #1020 turned per_turn_recall on by default, so every
+#: install grew it by several rows per turn, forever.
+#:
+#: WHY 180 DAYS, reader by reader:
+#:   - `_already_sent_this_session` (user_prompt_submit) reads one session's rows
+#:     since its last compaction. Sessions last hours to days; 180 covers any resume.
+#:   - `techne audit` (utilization.py) takes `--since N`, default all-time. All-time
+#:     now means the last 180 days, which is the window its attribution panels are
+#:     read over in practice.
+#:   - scripts/usefulness_audit.py joins rows to transcripts and reads every row.
+#:   - Per-row utilization from `hit_ids` (techne#1024, not built yet) asks which
+#:     rows were never injected. Over a bounded window that becomes "not injected in
+#:     180 days", which is the question a staleness signal needs anyway.
+#: 180 also matches `reaffirmation_window_days`, the other usage-shaped window.
+#: A module constant, not a config key: no other retention window is one (the
+#: outbox sweep's `--retain-days` flag, the hooks' 7-day extension_state TTL).
+RETENTION_DAYS = 180
+
+#: Most rows one prune looks at. The prune runs on every write, so it must cost
+#: the same on a store with a million rows as on an empty one. A store upgrading
+#: with a long backlog drains it BATCH rows per injection.
+PRUNE_BATCH = 500
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS context_injections (
@@ -298,7 +328,43 @@ def log_context_injection(
                 ),
             )
             conn.commit()
+            # After the commit and in its own guard, so a failed prune never costs
+            # the row just written.
+            try:
+                prune_context_injections(conn)
+            except Exception as e:  # noqa: BLE001 — retention must never break the hook
+                print(f"techne: context_injections prune skipped: {e}", file=sys.stderr)
         finally:
             conn.close()
     except Exception:  # noqa: BLE001 — instrumentation must never break the hook
         pass
+
+
+def prune_context_injections(
+    conn: sqlite3.Connection,
+    *,
+    retention_days: int | None = None,
+    batch: int | None = None,
+) -> int:
+    """Delete up to *batch* rows older than *retention_days*. Returns the count.
+
+    Idempotent, and bounded: it examines only the *batch* lowest ids, so a store
+    with nothing to prune pays a short rowid walk rather than a scan of the whole
+    table. That relies on ids and timestamps rising together, which holds because
+    ``timestamp`` is ``CURRENT_TIMESTAMP`` at insert and no writer supplies it.
+    Commits its own work.
+    """
+    # Defaults resolve at call time so a test can move the module constants.
+    retention_days = RETENTION_DAYS if retention_days is None else retention_days
+    batch = PRUNE_BATCH if batch is None else batch
+    cur = conn.execute(
+        "DELETE FROM context_injections"
+        " WHERE id IN (SELECT id FROM context_injections ORDER BY id LIMIT ?)"
+        "   AND timestamp < datetime('now', ?)",
+        (int(batch), f"-{int(retention_days)} days"),
+    )
+    conn.commit()
+    n = cur.rowcount
+    if n:
+        log.debug("context_injections: pruned %d row(s) older than %d days", n, retention_days)
+    return n
