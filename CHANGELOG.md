@@ -5,59 +5,6 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
-### Fixed
-
-- **An explicit search that quotes a rare phrase now puts a row holding it second**
-  (#1142). The vector channel could crowd such rows off the page entirely: on a 63k-row
-  store, `litestream replicate techne.db exec` put neither exact row in the top 200.
-  `techne_search`, `techne search` and `techne_recall` now seat one row holding the
-  longest rare run of two or more query words (FTS tokenization and stemming apply)
-  right after the top result, tagged `reserved_slot: "phrase_head"`. Rare means fewer
-  than 0.207% of the searched rows hold it (at least 5), a bar chosen on 115 held-out
-  exact-phrase queries. Questions and queries of more than 8 words are skipped, and the
-  top result never moves. The per-turn and inbound recall rails do not use it; their
-  pages are unchanged. Federated recall keeps the seat in place. `search()` gains
-  `phrase_seat=False`.
-- **`techne doctor`'s prose-supersession check no longer prints a ready-to-run
-  `techne knowledge supersede` command for a pair it matched only through a bare
-  `techne#N` reference** (#1065). On 2026-09-28 doctor printed exactly that for two
-  live, unrelated knowledge rows: knowledge 1769 read "a correction to techne#621's
-  own rationale" (meaning issue #621, not knowledge row 621, a grep-assist restart
-  checklist), and knowledge 3537 read "CORRECTS techne#896's ... framing" (issue
-  #896, not knowledge row 896, the dev02 hardware profile). `find_declared_supersessions`
-  now marks a pair `ambiguous` when the only match is a literal `techne#N`, and
-  doctor prints those as CHECK items — a sentence naming what to verify, never a
-  copy-pasteable command — while a genuine `knowledge #N` or brain-sigil match still
-  prints as before. Separately, since the 2026-08-31 knowledge-ref convention
-  (`knowledge #N` / the brain sigil for a knowledge row, `techne#N` for an issue), a
-  declarer written on or after that date gets no benefit of the doubt at all: a bare
-  `techne#N` there is not accepted as a knowledge reference, so no pair is reported
-  for it. An older declarer (e.g. knowledge 1155's "SUPERSEDES techne#882") still
-  needs it and still gets it, just always flagged `ambiguous`. A review round caught
-  that an unmarked list continuation of a `techne#N` opener (`"techne#1 and #2"`)
-  still counted as confident, reproducing the same incident with one more id; it
-  now inherits the opener's ambiguity, and the reverse case (a later, unambiguous
-  restatement of the same id, e.g. `"techne#5 and knowledge #5"`) is no longer
-  shadowed by the earlier ambiguous one.
-- **`DCO sign-off check` no longer fails every Dependabot PR** (PR #1135). Dependabot
-  does sign off, but as `dependabot[bot] <support@github.com>` — an address that never
-  matches its noreply author email, and neither is configurable — so the check added
-  in #1130 failed on every dependency-update PR. `arch-cards` (the same-repo job) now
-  skips a commit authored exactly as `dependabot[bot]
-  <49699333+dependabot[bot]@users.noreply.github.com>` and logs which commits it
-  skipped as bot commits; `fork-pr` gets no such exemption, because a fork PR can
-  forge any commit author, including that one.
-- **`context_injections` now has a retention bound** (#1073). The table had none, and
-  #1020 turned per-turn recall on by default, so every install gained several rows per
-  turn forever. Each write now deletes up to 500 rows older than 180 days. 180 days
-  covers every reader: re-send suppression reads only the current session, and `techne
-  audit` with no `--since` now means "every retained row" rather than all-time. Two
-  per-session `extension_state` families had no prune either and now get the 7-day one
-  the others use: `session_start:deferred:<session>` and `heuristic_threads.<session>`.
-  A third, `reflect:emitted:<session>`, stays unbounded on purpose: it is the reflect
-  emit cursor, and a missing marker reads as "never emitted", so pruning it would put
-  old sessions back up for reflection.
-
 ## [0.18.0] — 2026-09-30
 
 ### Deprecated
@@ -246,6 +193,58 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- **An explicit search that quotes a rare phrase now puts a row holding it second**
+  (#1142). The vector channel could crowd such rows off the page entirely: on a 63k-row
+  store, `litestream replicate techne.db exec` put neither exact row in the top 200.
+  `techne_search`, `techne search` and `techne_recall` now seat one row holding the
+  longest rare run of two or more query words (FTS tokenization and stemming apply)
+  right after the top result, tagged `reserved_slot: "phrase_head"`. Rare means fewer
+  than 0.207% of the searched rows hold it (at least 5), a bar chosen on 115 held-out
+  exact-phrase queries. Questions and queries of more than 8 words are skipped, and the
+  top result never moves. The per-turn and inbound recall rails do not use it; their
+  pages are unchanged. Federated recall keeps the seat in place. `search()` gains
+  `phrase_seat=False`.
+- **`techne doctor`'s prose-supersession check no longer prints a ready-to-run
+  `techne knowledge supersede` command for a pair it matched only through a bare
+  `techne#N` reference** (#1065). On 2026-09-28 doctor printed exactly that for two
+  live, unrelated knowledge rows: knowledge 1769 read "a correction to techne#621's
+  own rationale" (meaning issue #621, not knowledge row 621, a grep-assist restart
+  checklist), and knowledge 3537 read "CORRECTS techne#896's ... framing" (issue
+  #896, not knowledge row 896, the dev02 hardware profile). `find_declared_supersessions`
+  now marks a pair `ambiguous` when the only match is a literal `techne#N`, and
+  doctor prints those as CHECK items — a sentence naming what to verify, never a
+  copy-pasteable command — while a genuine `knowledge #N` or brain-sigil match still
+  prints as before. Separately, since the 2026-08-31 knowledge-ref convention
+  (`knowledge #N` / the brain sigil for a knowledge row, `techne#N` for an issue), a
+  declarer written on or after that date gets no benefit of the doubt at all: a bare
+  `techne#N` there is not accepted as a knowledge reference, so no pair is reported
+  for it. An older declarer (e.g. knowledge 1155's "SUPERSEDES techne#882") still
+  needs it and still gets it, just always flagged `ambiguous`. A review round caught
+  that an unmarked list continuation of a `techne#N` opener (`"techne#1 and #2"`)
+  still counted as confident, reproducing the same incident with one more id. A
+  continuation now inherits the ambiguity of the nearest marked reference before it
+  (in `"knowledge #1, techne#2 and #3"`, #3 is ambiguous), and doctor's CHECK line
+  quotes it as written: `#3 (listed after techne#2)`, not `techne#3`. The reverse
+  case (a later, unambiguous restatement of the same id, e.g. `"techne#5 and
+  knowledge #5"`) is no longer shadowed by the earlier ambiguous one.
+- **`DCO sign-off check` no longer fails every Dependabot PR** (PR #1140; seen on PR #1135). Dependabot
+  does sign off, but as `dependabot[bot] <support@github.com>` — an address that never
+  matches its noreply author email, and neither is configurable — so the check added
+  in #1130 failed on every dependency-update PR. `arch-cards` (the same-repo job) now
+  skips a commit authored exactly as `dependabot[bot]
+  <49699333+dependabot[bot]@users.noreply.github.com>` and logs which commits it
+  skipped as bot commits; `fork-pr` gets no such exemption, because a fork PR can
+  forge any commit author, including that one.
+- **`context_injections` now has a retention bound** (#1073). The table had none, and
+  #1020 turned per-turn recall on by default, so every install gained several rows per
+  turn forever. Each write now deletes up to 500 rows older than 180 days. 180 days
+  covers every reader: re-send suppression reads only the current session, and `techne
+  audit` with no `--since` now means "every retained row" rather than all-time. Two
+  per-session `extension_state` families had no prune either and now get the 7-day one
+  the others use: `session_start:deferred:<session>` and `heuristic_threads.<session>`.
+  A third, `reflect:emitted:<session>`, stays unbounded on purpose: it is the reflect
+  emit cursor, and a missing marker reads as "never emitted", so pruning it would put
+  old sessions back up for reflection.
 - **The install-the-extra hint now tests the REAL `_install_context()`/`_direct_url()`
   path, not only the pinned one** (#1128). Every hint test ran against
   `tests/conftest.py`'s autouse `_pin_install_context`, which replaces
@@ -839,6 +838,10 @@ produce `techne_reflect_emit` results larger than Claude Code accepts from an MC
 
 **7. If these apply to you:**
 
+- **You rely on `context_injections` rows older than 180 days** (#1073). From the
+  first injection after upgrading, each write deletes up to 500 rows older than 180
+  days, and `techne audit` with no `--since` covers only the rows kept. The step 1
+  backup, taken before the upgrade, keeps the older rows.
 - **Your architect store tags patterns with targets other than `techne`** (#1008). New
   patterns now silently drop a target that is not in `architect.pattern_targets`
   (default `["techne"]`). Run `techne architect targets`; it prints the line to add to

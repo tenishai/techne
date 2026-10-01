@@ -308,6 +308,19 @@ def test_declared_targets(text, expected):
             "SUPERSEDES techne#1 and knowledge #2",
             [(1, True), (2, False)],
         ),
+        # A continuation inherits from the NEAREST preceding marked reference,
+        # not the list opener: #3 follows techne#2, so it is as ambiguous as 2.
+        (
+            "SUPERSEDES knowledge #1, techne#2 and #3",
+            [(1, False), (2, True), (3, True)],
+        ),
+        # The other direction: #3 follows "knowledge #2", so it is confident
+        # even though the list opened with techne#1 (the writer switched
+        # markers on purpose).
+        (
+            "SUPERSEDES techne#1, knowledge #2 and #3",
+            [(1, True), (2, False), (3, False)],
+        ),
         # Same id named twice, once ambiguously and once not: the unambiguous
         # occurrence wins the dedup (techne#1065 review nit).
         (
@@ -509,3 +522,40 @@ def test_doctor_still_renders_genuine_supersessions_as_commands(cfg):
     assert f"techne knowledge supersede {a} --by {b}" in res.output
     assert "CHECK:" not in res.output
     assert res.exit_code == 0
+
+
+def test_doctor_prints_no_command_for_a_continuation_after_a_mid_list_techne_ref(cfg):
+    """`knowledge #A, techne#B and #C`: #C follows techne#B, so it inherits
+    techne#B's ambiguity, not the confident opener's. A post-convention declarer
+    gets a command for A only."""
+    db = cfg.db_path
+    ta = store(db, "runner is host-a")
+    tb = store(db, "grep-assist restart checklist")
+    tc = store(db, "dev02 hardware profile: 8 cores, 32G")
+    for t in (ta, tb, tc):
+        _set_created_at(db, t, _PRE_CONVENTION)
+    d = store(db, f"SUPERSEDES knowledge #{ta}, techne#{tb} and #{tc}: see the issues")
+    _set_created_at(db, d, _POST_CONVENTION)
+
+    res = CliRunner().invoke(main, ["doctor", "--no-liveness"])
+    assert f"techne knowledge supersede {ta} --by {d}" in res.output, res.output
+    assert f"techne knowledge supersede {tb} --by {d}" not in res.output, res.output
+    assert f"techne knowledge supersede {tc} --by {d}" not in res.output, res.output
+    assert res.exit_code == 0
+
+
+def test_doctor_check_line_quotes_an_inherited_continuation_as_written(cfg):
+    """The CHECK line for an inherited-ambiguous pair must quote `#C` as the text
+    has it, naming the `techne#B` it follows, not claim the text says `techne#C`."""
+    db = cfg.db_path
+    tb = store(db, "grep-assist restart checklist")
+    tc = store(db, "dev02 hardware profile: 8 cores, 32G")
+    for t in (tb, tc):
+        _set_created_at(db, t, _PRE_CONVENTION)
+    d = store(db, f"a correction to techne#{tb} and #{tc}: the issue rationale was wrong")
+    _set_created_at(db, d, _PRE_CONVENTION)
+
+    res = CliRunner().invoke(main, ["doctor", "--no-liveness"])
+    assert f"CHECK: entry {d} says it replaces techne#{tb} —" in res.output, res.output
+    assert f"CHECK: entry {d} says it replaces #{tc} (listed after techne#{tb}) —" in res.output
+    assert f"replaces techne#{tc}" not in res.output
