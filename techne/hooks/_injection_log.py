@@ -49,8 +49,8 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 #: Rows older than this are deleted (techne#1073); every write prunes. 180 days
-#: outlasts every reader (re-send suppression, `techne audit`, usefulness_audit,
-#: #1024); the per-reader reasoning is in PR #1139. A constant, like the other
+#: outlasts every reader (re-send suppression, `techne audit`, usefulness_audit
+#: (#995); #1024 when built); the per-reader reasoning is in PR #1139. A constant, like the other
 #: retention windows, not a config key.
 RETENTION_DAYS = 180
 

@@ -195,7 +195,7 @@ def test_retrieval_gate_vec(pinned_model2vec, tmp_path, capsys, phrase_seat_all)
             "mrr": round(mrr(expected, ranked), 3),
             "fpr": round(false_positive_rate(forbidden, ranked, fpr_k), 3),
             "n_results": len(ranked),
-            "gold_match_sources": [match_sources.get(e) for e in expected],
+            "gold_match_sources": [match_sources.get(e) for e in sorted(expected)],
             "gold_reserved_slots": [reserved.get(e) for e in sorted(expected)],
         }
         rows.append(row)

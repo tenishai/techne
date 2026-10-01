@@ -505,8 +505,9 @@ def run_session_end(
                 f"heuristic_threads.{session_id}",
                 {"last_obs_count": len(observations)},
             )
-            # One cursor per session, never removed (techne#1073). Losing an old
-            # session's cursor costs one redundant detection if it ever ends again.
+            # One cursor per session; nothing else removes them, so prune here
+            # (techne#1073). Losing an old session's cursor costs one redundant
+            # detection if it ever ends again.
             try:
                 prune_stale(conn, "heuristic_threads.")
             except Exception as e:  # noqa: BLE001 — never fail teardown over a prune

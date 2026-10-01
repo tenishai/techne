@@ -593,8 +593,16 @@ def _render_declared_supersessions(db_path) -> int:
             "(`techne#N` may name a GitHub issue, not knowledge #N):"
         )
         for p in ambiguous[:_DECLARED_SUPERSESSIONS_SHOWN]:
+            # Quote the text as written: an unmarked list continuation says `#N`,
+            # and its ambiguity comes from the `techne#M` before it.
+            via = p.get("ambiguous_via")
+            said = (
+                f"techne#{p['target']}"
+                if via in (None, p["target"])
+                else f"#{p['target']} (listed after techne#{via})"
+            )
             click.echo(
-                f"    CHECK: entry {p['declarer']} says it replaces techne#{p['target']} — "
+                f"    CHECK: entry {p['declarer']} says it replaces {said} — "
                 f"confirm that means knowledge #{p['target']} (not GitHub issue #{p['target']}) "
                 f"before running `techne knowledge supersede {p['target']} --by {p['declarer']}`"
                 f"   # {p['target_preview']}"
