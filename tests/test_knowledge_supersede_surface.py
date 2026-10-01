@@ -314,6 +314,13 @@ def test_declared_targets(text, expected):
             "SUPERSEDES knowledge #1, techne#2 and #3",
             [(1, False), (2, True), (3, True)],
         ),
+        # The other direction: #3 follows "knowledge #2", so it is confident
+        # even though the list opened with techne#1 (the writer switched
+        # markers on purpose).
+        (
+            "SUPERSEDES techne#1, knowledge #2 and #3",
+            [(1, True), (2, False), (3, False)],
+        ),
         # Same id named twice, once ambiguously and once not: the unambiguous
         # occurrence wins the dedup (techne#1065 review nit).
         (

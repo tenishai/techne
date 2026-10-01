@@ -227,7 +227,7 @@ All notable changes to techne are documented here. Format loosely follows
   quotes it as written: `#3 (listed after techne#2)`, not `techne#3`. The reverse
   case (a later, unambiguous restatement of the same id, e.g. `"techne#5 and
   knowledge #5"`) is no longer shadowed by the earlier ambiguous one.
-- **`DCO sign-off check` no longer fails every Dependabot PR** (PR #1135). Dependabot
+- **`DCO sign-off check` no longer fails every Dependabot PR** (PR #1140; seen on PR #1135). Dependabot
   does sign off, but as `dependabot[bot] <support@github.com>` — an address that never
   matches its noreply author email, and neither is configurable — so the check added
   in #1130 failed on every dependency-update PR. `arch-cards` (the same-repo job) now
