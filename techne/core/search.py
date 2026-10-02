@@ -1,6 +1,7 @@
 """Search across all techne data layers — FTS5 and optional vector search."""
 
 import json
+import logging
 import math
 import sqlite3
 import sys
@@ -13,6 +14,8 @@ from techne.core import embeddings as embeddings_mod
 from techne.core.database import connect
 from techne.core.embeddings import _get_embedding_model
 from techne.core.knowledge import decay_score
+
+logger = logging.getLogger(__name__)
 
 
 #: THE RESULT-ROW CONTRACT (techne#579), and why `type` is deliberately ABSENT.
@@ -1988,10 +1991,74 @@ def _phrase_seat_row(
                 row_chars=row_chars,
             )
             if rows:
-                return min(rows, key=lambda r: r["rank"])
+                best = dict(min(rows, key=lambda r: r["rank"]))
+                # The MATCH that seated it, for `_window_seated_row`.
+                best["_phrase_match"] = " OR ".join(rare[n])
+                return best
     except sqlite3.Error:
         return None
     return None
+
+
+def _window_seated_row(conn: sqlite3.Connection, row: dict, match: str) -> None:
+    """Show the seated observation row's matched span, in place (techne#1142).
+
+    Search cuts each observation row to its first `_ROW_CHAR_CAP` chars. The phrase
+    seat picks a row for a span that can sit past that cut: on the 2026-09-28 eval
+    store it seated a 1,733-char Dockerfile echo whose `litestream replicates #
+    techne.db` starts near char 890, so the page showed 500 chars of shell and
+    nothing the query asked for.
+
+    When the span ends past what the row shows, the content becomes a window of
+    the same width (or the whole tail, when the row is shorter than span + width)
+    starting a quarter-width before the span, prefixed with `…` when it does not
+    start at char 0. FTS5 `highlight()` finds the span, so porter stemming applies
+    exactly as it did in the seat's MATCH. The original offsets go in
+    `content_window` and the full length in `content_chars_total`. Any SQLite
+    error, or a span only in `tags`/`kind`, leaves the row as it was.
+
+    OBSERVATIONS ONLY. A knowledge row is left alone: federation's
+    `_cross_store_dedup` fingerprints `content`, and a remote replica arrives
+    head-cut, so a windowed local copy stops matching it and the entry is flagged
+    as contradicting its own replica (Prudence, PR #1146 r1). Observations never
+    federate. Threads are left alone too: a thread's span usually sits in `label`
+    or `resume_points`, which the page shows whole. Wider windowing is techne#1147.
+    """
+    shown = row.get("content")
+    if row.get("source_table") != "observation" or not isinstance(shown, str) or not shown:
+        return
+    try:
+        hit = conn.execute(
+            "SELECT highlight(observations_fts, 0, char(1), char(2)) FROM observations_fts "
+            "WHERE observations_fts MATCH ? AND rowid = ?",
+            (match, row["id"]),
+        ).fetchone()
+    except sqlite3.Error:
+        return
+    if hit is None or hit[0] is None or "\x01" not in hit[0]:
+        return
+    marked = hit[0]
+    start = marked.index("\x01")
+    # Exclusive end of the first span in the unmarked text: its two markers are
+    # the only ones before its closing marker.
+    end = marked.index("\x02", start) - 1
+    full = marked.replace("\x01", "").replace("\x02", "")
+    width = len(shown)
+    if end <= width:
+        return
+    # Fill the width when the span is near the end of the row.
+    lo = max(0, min(start - width // 4, len(full) - width))
+    window = full[lo : lo + width]
+    row["content"] = ("…" if lo else "") + window
+    row["content_window"] = [lo, lo + len(window)]
+    row["content_chars_total"] = len(full)
+    logger.debug(
+        "phrase seat: windowed observation %s to chars %d-%d of %d",
+        row["id"],
+        lo,
+        lo + len(window),
+        len(full),
+    )
 
 
 def search(
@@ -2378,8 +2445,11 @@ def _search_on_conn(
                 # The FTS channel's own copy when it has one: that carries the
                 # reranked `rank` and `_match_pass` federation's tier rule reads.
                 phrase_row = dict(fts_by_key.get(key, cand))
+                phrase_row.pop("_phrase_match", None)
                 phrase_row["match_source"] = "fts"
                 phrase_row["fusion"] = "vec_first"
+            if cand.get("_phrase_match"):
+                _window_seated_row(conn, phrase_row, cand["_phrase_match"])
             # Tagged when the seat changed its place: a row vec-first already put
             # second is there on rank, the #1078 rule.
             if rest[1:2] != [key]:
