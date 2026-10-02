@@ -152,7 +152,7 @@ def _detect_summarize_heuristic(
     # per-pass repo_cache collapses the many repeated path probes within a
     # session; passing features into detect_threads avoids a second full pass
     # (previously features were extracted twice per observation per run).
-    repo_cache: dict[str, str | None] = {}
+    repo_cache: dict[str, str | bool | None] = {}
     features = [
         ht.extract_features(
             i,
