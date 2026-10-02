@@ -499,3 +499,74 @@ def test_the_top_result_never_changes_at_small_limits(db, monkeypatch, limit, ft
     assert _keys(on)[:1] == _keys(off)[:1]
     assert len(on) == len(off)
     assert len(set(_keys(on))) == len(on)
+
+
+# --- the seated row shows its span (techne#1142 follow-up) --------------------------
+
+#: The eval shape: a long shell echo whose matched span sits far past the 500-char
+#: head the page shows for an observation.
+_LONG = ("echo build step; " * 95) + "litestream replicates # techne.db to object storage"
+
+
+def _window(db, rid, match, shown):
+    conn = connect(db)
+    try:
+        row = {"source_table": "observation", "id": rid, "content": shown}
+        search_mod._window_seated_row(conn, row, match)
+    finally:
+        conn.close()
+    return row
+
+
+def test_a_span_past_the_cut_is_windowed_into_view(db):
+    (rid,) = _obs(db, [_LONG])
+    span_at = _LONG.index("litestream replicates")
+    assert span_at > search_mod._ROW_CHAR_CAP
+
+    row = _window(db, rid, '"litestream replicate techne.db"', _LONG[: search_mod._ROW_CHAR_CAP])
+
+    assert "litestream replicates # techne.db" in row["content"], "stemmed span is shown"
+    assert row["content"].startswith("…")
+    lo, hi = row["content_window"]
+    assert lo <= span_at and hi - lo <= search_mod._ROW_CHAR_CAP
+    assert row["content"][1:] == _LONG[lo:hi]
+    assert row["content_chars_total"] == len(_LONG)
+
+
+def test_a_span_inside_the_head_leaves_the_row_alone(db):
+    text = "litestream replicates techne.db first. " + "padding words here. " * 60
+    (rid,) = _obs(db, [text])
+    shown = text[: search_mod._ROW_CHAR_CAP]
+
+    row = _window(db, rid, '"litestream replicate"', shown)
+
+    assert row == {"source_table": "observation", "id": rid, "content": shown}
+
+
+def test_a_thread_row_or_a_bad_match_leaves_the_row_alone(db):
+    (rid,) = _obs(db, [_LONG])
+    thread = {"source_table": "thread", "id": "t-1", "content": "x"}
+    search_mod._window_seated_row(connect(db), thread, '"litestream replicate"')
+    assert thread == {"source_table": "thread", "id": "t-1", "content": "x"}
+
+    shown = _LONG[: search_mod._ROW_CHAR_CAP]
+    assert _window(db, rid, 'a "" -- ** NOT', shown)["content"] == shown
+
+
+def test_the_seated_page_row_shows_its_span(db, monkeypatch):
+    """End to end on a real FTS index. The vector channel is pinned, and the
+    identifier head is emptied: `techne.db` is a rare identifier here, so it would
+    seat the row first and the phrase seat would never run."""
+    _filler(db, 50)
+    (rid,) = _obs(db, [_LONG])
+    monkeypatch.setattr(search_mod, "search_vec", _scoped(_full_vec()))
+    monkeypatch.setattr(search_mod, "_identifier_pool", lambda *_a, **_k: [])
+
+    page = search(db, Q, table="all", limit=10, phrase_seat=True)
+
+    seated = [r for r in page if r.get("reserved_slot") == "phrase_head"]
+    assert [(r["source_table"], r["id"]) for r in seated] == [("observation", rid)]
+    assert "litestream replicates # techne.db" in seated[0]["content"]
+    assert "_phrase_match" not in seated[0]
+    others = [r for r in page if r is not seated[0]]
+    assert all("content_window" not in r for r in others), "only the seated row"
