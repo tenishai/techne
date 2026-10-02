@@ -204,6 +204,20 @@ All notable changes to techne are documented here. Format loosely follows
   top result never moves. The per-turn and inbound recall rails do not use it; their
   pages are unchanged. Federated recall keeps the seat in place. `search()` gains
   `phrase_seat=False`.
+- **The phrase-seated row now shows the phrase it was seated for** (#1146, follow-up
+  to #1142). Observation rows reach the page cut to their first 500 characters, and
+  the seat could pick a row whose phrase sits past that cut. On the 2026-09-28 eval
+  store, `litestream replicate techne.db exec` seated a 1,733-character Dockerfile
+  echo whose `litestream replicates # techne.db` starts near character 890, so the
+  page showed only shell output. When the phrase ends past the cut, the seated
+  observation row's content is now a 500-character window around it, starting with
+  `…`, and the row gains `content_window` (offsets into the full text) and
+  `content_chars_total`. This changes what the page shows, not what it retrieves:
+  ranks, order and every other row are unchanged, and the eval gain on that query
+  (marker rank 0 to 2 on three arms) comes from a row that was already second.
+  Knowledge rows are not windowed, because federation's cross-store dedup compares
+  head-cut content and a windowed local copy would be flagged against its own
+  replica. Windowing other lexical rows is #1147.
 - **`techne doctor`'s prose-supersession check no longer prints a ready-to-run
   `techne knowledge supersede` command for a pair it matched only through a bare
   `techne#N` reference** (#1065). On 2026-09-28 doctor printed exactly that for two
