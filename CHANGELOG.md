@@ -217,7 +217,10 @@ All notable changes to techne are documented here. Format loosely follows
   (marker rank 0 to 2 on three arms) comes from a row that was already second.
   Knowledge rows are not windowed, because federation's cross-store dedup compares
   head-cut content and a windowed local copy would be flagged against its own
-  replica. Windowing other lexical rows is #1147.
+  replica. The window follows the seat's row wherever it lands, not only when the
+  seat moves it (#1150): on an FTS-only page (a fresh or not-yet-embedded store,
+  found by the 0.18.0 quickstart re-run), as the top vector hit, or in the
+  identifier head. Windowing other lexical rows is #1147.
 - **`techne doctor`'s prose-supersession check no longer prints a ready-to-run
   `techne knowledge supersede` command for a pair it matched only through a bare
   `techne#N` reference** (#1065). On 2026-09-28 doctor printed exactly that for two
