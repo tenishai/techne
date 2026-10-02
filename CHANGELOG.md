@@ -19,6 +19,11 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Docs
 
+- **The README's apt lines run on a fresh machine** (#1154). Each `sudo apt install`
+  (`python3-venv`, `pipx`) is now preceded by `sudo apt update`, and so is the
+  CONTRIBUTING hint. A fresh Ubuntu container or VM has empty package lists, and the
+  install failed with "no installation candidate". Found by the 2026-10-02 clean-machine
+  quickstart round.
 - **Open-source community files for the go-public release** (#1130).
   `CODE_OF_CONDUCT.md` is the Contributor Covenant 3.0, verbatim except for the
   reporting line (security@tenish.ai) and one adopter's note removed. `SUPPORT.md` says
