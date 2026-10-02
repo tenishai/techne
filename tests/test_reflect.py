@@ -2761,3 +2761,50 @@ def test_render_leaves_short_and_failure_free_rows_as_before():
     assert _render_observations([{"tool_name": "Bash", "content": clean}]) == (
         f"- [Bash] {'x' * MAX_OBS_CONTENT_CHARS}…"
     )
+
+
+def test_bare_emit_reaches_sessions_older_than_the_pending_window(tmp_path):
+    """techne#1158, found by Grip. Bare emit picked its target from pending_reflection's
+    default window of 5, so once the 5 newest were emitted it answered "no session with
+    unreflected work" while older sessions were still owed, and a bulk caller guarding on
+    a wider window spun forever."""
+    import inspect
+
+    from techne.core.reflect import (
+        emit_reflection_pass,
+        ingest_reflection_batch,
+        pending_reflection,
+    )
+
+    window = inspect.signature(pending_reflection).parameters["limit"].default
+    config = _mk_config(tmp_path, enabled=True)
+    sessions = {_mk_db_backed_session(config) for _ in range(window + 3)}
+
+    reflected = []
+    for _ in range(len(sessions) + 2):
+        result = emit_reflection_pass(config)
+        if not result["count"]:
+            break
+        reflected.append(result["session_id"])
+        ingest_reflection_batch(config, _fill_raw_responses(result["batch"]))
+    else:
+        raise AssertionError(f"bare emit did not terminate after {len(reflected)} passes")
+
+    assert set(reflected) == sessions, (
+        f"bare emit reflected {len(set(reflected))} of {len(sessions)} sessions; the rest "
+        "sat outside the pending window"
+    )
+    assert result["note"] == "no session with unreflected work"
+    assert pending_reflection(config, limit=None) == []
+
+
+def test_the_hook_window_is_unchanged(tmp_path):
+    """The SessionStart nudge and per-turn recall stay newest-first and windowed
+    (techne#1158 widened only the explicit emit's lookup)."""
+    from techne.core.reflect import pending_reflection
+
+    config = _mk_config(tmp_path, enabled=True)
+    for _ in range(7):
+        _mk_db_backed_session(config)
+    assert len(pending_reflection(config)) == 5
+    assert len(pending_reflection(config, limit=None)) == 7
