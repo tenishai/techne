@@ -111,8 +111,15 @@ def _git_project_root(cwd: Path) -> Path:
     except OSError:
         cur = cwd.absolute()
     for parent in (cur, *cur.parents):
-        if (parent / ".git").exists():
-            return parent
+        # An unreadable level is "no .git here", not a crash: Path.exists() raises
+        # PermissionError where os.path.exists returns False, and one unreadable
+        # ancestor (a shared server, `sudo -u` with an inherited cwd) must not stop
+        # `techne init`. (techne#1149)
+        try:
+            if (parent / ".git").exists():
+                return parent
+        except OSError:
+            continue
     return cur
 
 
