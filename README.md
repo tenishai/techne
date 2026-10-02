@@ -45,7 +45,7 @@ want.
 
 ---
 
-On Debian/Ubuntu, `venv` isn't preinstalled: `sudo apt install python3-venv`.
+On Debian/Ubuntu, `venv` isn't preinstalled: `sudo apt update && sudo apt install python3-venv`.
 
 ```bash
 git clone https://github.com/tenishai/techne.git
@@ -59,7 +59,7 @@ techne init
 > from git — no clone, non-editable, and the Claude Code hook launcher self-heals
 > across interpreter changes:
 >
-> On Debian/Ubuntu, `pipx` isn't preinstalled: `sudo apt install pipx` (macOS: `brew install pipx`).
+> On Debian/Ubuntu, `pipx` isn't preinstalled: `sudo apt update && sudo apt install pipx` (macOS: `brew install pipx`).
 >
 > ```bash
 > pipx install "techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.18.0"
@@ -175,7 +175,7 @@ project, so a PyPI release would need a different package name; until then, inst
 3.14; 3.11 is supported but not in CI.
 
 Use a virtual environment — required on Debian/Ubuntu (PEP 668), recommended everywhere else.
-On Debian/Ubuntu, `venv` isn't preinstalled: `sudo apt install python3-venv`.
+On Debian/Ubuntu, `venv` isn't preinstalled: `sudo apt update && sudo apt install python3-venv`.
 
 ```bash
 git clone https://github.com/tenishai/techne.git
