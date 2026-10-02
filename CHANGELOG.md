@@ -193,6 +193,11 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- **`techne init` no longer crashes when the cwd sits under a directory the user can't
+  read** (#1149). The walk up to the git root called `Path.exists()`, which raises
+  `PermissionError` on an unreadable level, so `sudo -u <user>` with an inherited cwd or a
+  shared server stopped init outright. An unreadable level now counts as "no `.git`
+  here" and the walk continues. Found by the 0.18.0 clean-machine quickstart run.
 - **An explicit search that quotes a rare phrase now puts a row holding it second**
   (#1142). The vector channel could crowd such rows off the page entirely: on a 63k-row
   store, `litestream replicate techne.db exec` put neither exact row in the top 200.
