@@ -114,7 +114,7 @@ def extract_file_paths(content: str) -> tuple[set[str], list[str]]:
 def find_repo(
     path: str,
     fs_check: Callable[[Path, str], bool] | None = None,
-    cache: dict[str, str | None] | None = None,
+    cache: dict[str, str | bool | None] | None = None,
 ) -> str | None:
     """Walk up from ``path`` until a repo-root marker is found.
 
@@ -128,9 +128,19 @@ def find_repo(
     ``_detect_summarize_heuristic``). It is scoped to a single pass (a fresh
     dict per call site), never process-global, so a repo created mid-process is
     still picked up on the next pass — no stale-negative risk.
+
+    THE SAME MEMO ALSO HOLDS ONE ANSWER PER DIRECTORY (techne#1155), under
+    `_DIR_KEY` + the directory, so DISTINCT paths sharing ancestors probe each
+    ancestor once per pass rather than once per path. Without it, a 789-row
+    session of Linux container paths re-probed `/home` 175 times; on macOS `/home`
+    is an autofs automount at ~20 ms a stat, so thread detection took 12 s and
+    the 5 s `session_end` hook timed out on every turn. With the real filesystem
+    probe, a directory that is not there is tested once (`is_dir`) and its five
+    marker probes skipped: it cannot hold one. An injected ``fs_check`` models
+    its own filesystem, so it gets no such test.
     """
     if cache is not None and path in cache:
-        return cache[path]
+        return cache[path]  # type: ignore[return-value]  # full-path keys hold str | None
 
     if fs_check is None:
 
@@ -145,50 +155,50 @@ def find_repo(
     p = Path(path)
     if p.is_absolute():
         for parent in p.parents:
-            for marker in REPO_MARKERS:
-                # A PROBE THAT CANNOT READ A PATH MEANS "NO MARKER HERE", NEVER AN
-                # ABORT (techne#963). The walk starts at a cwd recorded in a
-                # transcript, which on a historical corpus may be gone, may belong to
-                # another machine, or may be readable only by root -- macOS security
-                # software was the reported case. Thread detection does not depend on
-                # the repo marker resolving; it is one feature among several, and one
-                # unreadable ancestor used to cost a whole session its threads.
-                #
-                # THE TRADE, STATED: this collapses "could not look" into "no
-                # marker here", so the answer is the nearest READABLE marker. If
-                # the unreadable directory itself held the true repo, an OUTER one
-                # is attributed with no signal that anything was skipped. Accepted
-                # because repo is one feature among several and losing a session's
-                # threads is the worse failure -- but it is a trade, not free.
-                # The guard is MARKER-granular, not directory-granular, which is
-                # the useful direction: a `.git` that raises while `pyproject.toml`
-                # reads fine still resolves the same directory.
-                #
-                # NOT redundant with pathlib swallowing the error. `Path.exists()`
-                # re-raises EACCES on 3.11, 3.12 and 3.13, and only swallows it on
-                # 3.14 -- measured, not assumed:
-                #
-                #   3.11/3.12/3.13: exists() RAISED PermissionError [Errno 13]
-                #   3.14:           exists() -> False
-                #
-                # So the guarantee this code leaned on held only on the interpreter we
-                # develop on, while `requires-python` is >=3.11 and CI runs 3.12/3.13.
-                # Guarding at the CALL SITE rather than inside the default probe also
-                # covers an injected `fs_check`, and a future probe that opens a
-                # `.git` file instead of stat-ing it.
-                try:
-                    hit = probe(parent, marker)
-                except OSError:
-                    continue
-                if hit:
+            dir_key = _DIR_KEY + str(parent)
+            if cache is not None and dir_key in cache:
+                if cache[dir_key]:
                     result = parent.name
                     break
-            if result is not None:
+                continue
+            hit = _dir_has_marker(parent, probe, real_fs=fs_check is None)
+            if cache is not None:
+                cache[dir_key] = hit
+            if hit:
+                result = parent.name
                 break
 
     if cache is not None:
         cache[path] = result
     return result
+
+
+#: Prefix for `find_repo`'s per-directory entries in its memo (techne#1155). NUL
+#: cannot occur in a path, so these never collide with a full-path key.
+_DIR_KEY = "\x00dir:"
+
+
+def _dir_has_marker(parent: Path, probe: Callable[[Path, str], bool], *, real_fs: bool) -> bool:
+    """Whether ``parent`` holds any of `REPO_MARKERS`, for `find_repo`."""
+    if real_fs:
+        # One stat instead of five for a directory that is not there (techne#1155).
+        # A stat that raises falls through to the per-marker probes, so "could not
+        # look" keeps meaning exactly what it meant before (techne#963, below).
+        try:
+            if not parent.is_dir():
+                return False
+        except OSError:
+            pass
+    for marker in REPO_MARKERS:
+        # A probe that raises means "no marker here", per marker, never an abort
+        # (techne#963): pathlib re-raises EACCES on 3.11-3.13. The trade (an outer
+        # repo can be attributed) is stated in tests/test_find_repo_unreadable.py.
+        try:
+            if probe(parent, marker):
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def extract_entities(
@@ -245,7 +255,7 @@ def extract_features(
     user_families: dict[str, str] | None = None,
     extra_entity_patterns: list[re.Pattern[str]] | None = None,
     fs_check: Callable[[Path, str], bool] | None = None,
-    repo_cache: dict[str, str | None] | None = None,
+    repo_cache: dict[str, str | bool | None] | None = None,
 ) -> ObsFeatures:
     """Build the feature vector for one observation.
 

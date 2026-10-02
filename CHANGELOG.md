@@ -198,6 +198,17 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- **`session_end` no longer times out on sessions full of paths that share
+  ancestors** (#1155). Thread detection's repo lookup walked up from every absolute
+  path in a session and checked five repo markers in each ancestor directory,
+  remembering answers per full path only, so paths sharing parents checked the same
+  directories again. On macOS, `/home` is an automount where each check costs about
+  20 ms. A 789-observation session of Linux container paths checked `/home` 175
+  times, detection took 10–13 s, and the 5 s `Stop` hook timed out on every turn,
+  so that session's threads were never saved while it ran. The lookup now answers
+  each directory once per pass and skips the marker checks for a directory that
+  isn't there. That session's `session_end` work went from 10.1 s to 1.7 s, with
+  the same 34 threads.
 - **`techne init` no longer crashes when the cwd sits under a directory the user can't
   read** (#1149). The walk up to the git root called `Path.exists()`, which raises
   `PermissionError` on an unreadable level, so `sudo -u <user>` with an inherited cwd or a
