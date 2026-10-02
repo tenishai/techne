@@ -2061,6 +2061,26 @@ def _window_seated_row(conn: sqlite3.Connection, row: dict, match: str) -> None:
     )
 
 
+def _window_phrase_row(conn: sqlite3.Connection, page: list[dict], cand: dict | None) -> list[dict]:
+    """Window the phrase seat's row wherever it sits on ``page`` (techne#1150).
+
+    The seat's row reaches the page three ways besides being moved there: on an
+    FTS-only page (empty vector channel, as on a fresh or not-yet-embedded store),
+    as the top vec row, or through the identifier head. Each kept the plain head
+    cut, so a phrase past char 500 was not shown though the row ranked first.
+    Windowing it by key on the finished page covers every path, and windows at
+    most one row, once. Order and every other row are untouched.
+    """
+    if cand is None or not cand.get("_phrase_match"):
+        return page
+    key = (cand["source_table"], cand["id"])
+    for r in page:
+        if (r.get("source_table"), r.get("id")) == key:
+            _window_seated_row(conn, r, cand["_phrase_match"])
+            break
+    return page
+
+
 def search(
     db_path: Path,
     query: str,
@@ -2249,8 +2269,24 @@ def _search_on_conn(
         conn=conn,
     )
 
+    # The phrase seat's row (techne#1142), looked up once. Every return below
+    # windows it on the page (#1150); the vec-first page also seats it.
+    cand = (
+        _phrase_seat_row(
+            conn,
+            query,
+            table,
+            PHRASE_RARE_FRACTION_DEFAULT,
+            include_archived=include_archived,
+            include_uncertain=include_uncertain,
+            row_chars=row_chars,
+        )
+        if phrase_seat
+        else None
+    )
+
     if not use_vectors:
-        return fts_results
+        return _window_phrase_row(conn, fts_results, cand)
 
     # Embedded once, for this call and the #946 curated pool below. None means the
     # channel is off here (no sqlite-vec, no backend, model not cached); search_vec
@@ -2269,7 +2305,7 @@ def _search_on_conn(
         query_vec=query_vec,
     )
     if not vec_results:
-        return fts_results
+        return _window_phrase_row(conn, fts_results, cand)
 
     # Vec-first union with a reserved lexical floor (techne#401, floor #827).
     # The vector channel leads — it comes back already sorted best-first
@@ -2417,15 +2453,6 @@ def _search_on_conn(
     # for the vector channel, as the identifier head does.
     phrase_row: dict | None = None
     if phrase_seat and vec_budget > 1:
-        cand = _phrase_seat_row(
-            conn,
-            query,
-            table,
-            PHRASE_RARE_FRACTION_DEFAULT,
-            include_archived=include_archived,
-            include_uncertain=include_uncertain,
-            row_chars=row_chars,
-        )
         # The head as vec-first would fill it from here, without the seat.
         rest = []
         for r in vec_results:
@@ -2448,8 +2475,6 @@ def _search_on_conn(
                 phrase_row.pop("_phrase_match", None)
                 phrase_row["match_source"] = "fts"
                 phrase_row["fusion"] = "vec_first"
-            if cand.get("_phrase_match"):
-                _window_seated_row(conn, phrase_row, cand["_phrase_match"])
             # Tagged when the seat changed its place: a row vec-first already put
             # second is there on rank, the #1078 rule.
             if rest[1:2] != [key]:
@@ -2633,7 +2658,7 @@ def _search_on_conn(
     # vec rows alone.
     if phrase_row is not None:
         head.insert(min(1, len(head)), phrase_row)
-    return (ident_head + head + tail + overflow + bumped)[:limit]
+    return _window_phrase_row(conn, (ident_head + head + tail + overflow + bumped)[:limit], cand)
 
 
 def backfill_vectors(

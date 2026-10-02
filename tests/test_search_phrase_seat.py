@@ -655,3 +655,65 @@ def test_a_seated_row_the_vector_channel_also_found_is_windowed(db, monkeypatch)
     assert [(r["source_table"], r["id"]) for r in seated] == [("observation", rid)]
     assert seated[0]["match_source"] in ("vec", "fts+vec"), "came through the vec copy"
     assert "litestream replicates # techne.db" in seated[0]["content"]
+
+
+# --- the window follows the seat's row to wherever it lands (techne#1150) ------------
+
+
+def _long_row():
+    return {"source_table": "observation", "content": _LONG[:500], "distance": 0.05}
+
+
+@pytest.mark.parametrize("use_vectors", [True, False])
+def test_an_fts_only_page_windows_the_seat_row(db, monkeypatch, use_vectors):
+    """poe1's quickstart case: a fresh store has no embeddings, the vector channel
+    comes back empty and search() returns the FTS page early. The row ranks first
+    there, and before #1150 its phrase stayed hidden past the head cut."""
+    (rid,) = _obs(db, [_LONG])
+    monkeypatch.setattr(search_mod, "search_vec", _scoped([]))
+
+    page = search(db, Q, table="all", limit=10, use_vectors=use_vectors, phrase_seat=True)
+
+    assert [(r["source_table"], r["id"]) for r in page][:1] == [("observation", rid)]
+    assert "litestream replicates # techne.db" in page[0]["content"]
+    assert "reserved_slot" not in page[0], "windowed, not moved"
+
+
+def test_the_seat_row_already_top_of_the_vec_head_is_windowed(db, monkeypatch):
+    _filler(db, 50)
+    (rid,) = _obs(db, [_LONG])
+    vec = [dict(_long_row(), id=rid)] + _full_vec()
+    monkeypatch.setattr(search_mod, "search_vec", _scoped(vec))
+    monkeypatch.setattr(search_mod, "_identifier_pool", lambda *_a, **_k: [])
+
+    page = search(db, Q, table="all", limit=10, phrase_seat=True)
+
+    assert (page[0]["source_table"], page[0]["id"]) == ("observation", rid)
+    assert "litestream replicates # techne.db" in page[0]["content"]
+    assert all(r.get("reserved_slot") != "phrase_head" for r in page)
+
+
+def test_the_seat_row_placed_by_the_identifier_head_is_windowed(db, monkeypatch):
+    _filler(db, 50)
+    (rid,) = _obs(db, [_LONG])
+    monkeypatch.setattr(search_mod, "search_vec", _scoped(_full_vec()))
+    monkeypatch.setattr(
+        search_mod, "_identifier_pool", lambda *_a, **_k: [dict(_long_row(), id=rid)]
+    )
+
+    page = search(db, Q, table="all", limit=10, phrase_seat=True)
+
+    assert page[0]["reserved_slot"] == "identifier_head"
+    assert (page[0]["source_table"], page[0]["id"]) == ("observation", rid)
+    assert "litestream replicates # techne.db" in page[0]["content"]
+    assert sum("content_window" in r for r in page) == 1, "one row, windowed once"
+
+
+def test_without_the_seat_an_fts_only_page_keeps_its_head_cut(db, monkeypatch):
+    (rid,) = _obs(db, [_LONG])
+    monkeypatch.setattr(search_mod, "search_vec", _scoped([]))
+
+    page = search(db, Q, table="all", limit=10)
+
+    assert page[0]["content"] == _LONG[:500]
+    assert all("content_window" not in r for r in page)
