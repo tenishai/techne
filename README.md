@@ -1043,7 +1043,7 @@ problems privately, as [SECURITY.md](SECURITY.md) describes.
 
 ## License
 
-Copyright (C) 2026 Richard DiMartino and the techne contributors
+Copyright (C) 2026 tenishai
 
 This program is free software: you can redistribute it and/or modify it under
 the terms of the GNU Affero General Public License as published by the Free
