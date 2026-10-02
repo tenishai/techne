@@ -543,6 +543,54 @@ def test_a_span_inside_the_head_leaves_the_row_alone(db):
     assert row == {"source_table": "observation", "id": rid, "content": shown}
 
 
+@pytest.mark.parametrize("past", [0, 1])
+def test_the_cut_boundary_is_the_span_end(db, past):
+    """A span ending exactly at the cut is in view; one char past it is not."""
+    cap = search_mod._ROW_CHAR_CAP
+    span = "litestream replicates"
+    pad = "x" * (cap - len(span) - 1 + past)
+    text = pad + " " + span + " and then more words follow here" * 20
+    (rid,) = _obs(db, [text])
+    assert text.index(span) + len(span) == cap + past
+
+    row = _window(db, rid, '"litestream replicate"', text[:cap])
+
+    assert ("content_window" in row) is bool(past)
+
+
+def test_a_span_near_the_end_still_fills_the_width(db):
+    cap = search_mod._ROW_CHAR_CAP
+    text = "echo build step; " * 95 + "litestream replicates done"
+    (rid,) = _obs(db, [text])
+
+    row = _window(db, rid, '"litestream replicate"', text[:cap])
+
+    assert row["content_window"] == [len(text) - cap, len(text)]
+    assert row["content"] == "…" + text[-cap:]
+
+
+def test_a_knowledge_row_is_not_windowed_so_federation_dedup_still_holds(db, monkeypatch):
+    """Prudence, PR #1146 r1: `_cross_store_dedup` fingerprints `content`, and a
+    remote replica arrives head-cut. A windowed local copy stopped matching it and
+    recall flagged the entry against its own replica."""
+    from techne.core.federation import _cross_store_dedup
+    from techne.core.knowledge import store
+
+    _filler(db, 50)
+    text = "Deploy notes. " * 80 + "litestream replicates techne.db to object storage."
+    kid = store(db, text, type="fact", source="test")
+    monkeypatch.setattr(search_mod, "search_vec", _scoped(_full_vec()))
+    monkeypatch.setattr(search_mod, "_identifier_pool", lambda *_a, **_k: [])
+
+    page = search(db, Q, table="all", limit=10, phrase_seat=True)
+
+    seated = [r for r in page if r.get("reserved_slot") == "phrase_head"]
+    assert [(r["source_table"], r["id"]) for r in seated] == [("knowledge", kid)]
+    assert "content_window" not in seated[0]
+    replica = {"source_table": "knowledge", "id": 1, "content": text[: search_mod._ROW_CHAR_CAP]}
+    assert _cross_store_dedup(page, [replica]) == [], "the replica is still a duplicate"
+
+
 def test_a_thread_row_or_a_bad_match_leaves_the_row_alone(db):
     (rid,) = _obs(db, [_LONG])
     thread = {"source_table": "thread", "id": "t-1", "content": "x"}
@@ -570,3 +618,40 @@ def test_the_seated_page_row_shows_its_span(db, monkeypatch):
     assert "_phrase_match" not in seated[0]
     others = [r for r in page if r is not seated[0]]
     assert all("content_window" not in r for r in others), "only the seated row"
+
+
+def test_the_seated_row_from_the_phrase_lookup_alone_is_windowed_and_clean(db, monkeypatch):
+    """Neither channel returned the row, so the page copy is the lookup's own row:
+    the MATCH it carries must not reach the page."""
+    _filler(db, 50)
+    (rid,) = _obs(db, [_LONG])
+    monkeypatch.setattr(search_mod, "search_vec", _scoped(_full_vec()))
+    monkeypatch.setattr(search_mod, "search_fts", _scoped([]))
+    monkeypatch.setattr(search_mod, "_identifier_pool", lambda *_a, **_k: [])
+
+    page = search(db, Q, table="all", limit=10, phrase_seat=True)
+
+    seated = [r for r in page if r.get("reserved_slot") == "phrase_head"]
+    assert [(r["source_table"], r["id"]) for r in seated] == [("observation", rid)]
+    assert "_phrase_match" not in seated[0]
+    assert "litestream replicates # techne.db" in seated[0]["content"]
+
+
+def test_a_seated_row_the_vector_channel_also_found_is_windowed(db, monkeypatch):
+    """The vec-copy branch: the vector channel ranked the row 6th, so the seat
+    moves the vector channel's own copy up to index 1."""
+    _filler(db, 50)
+    (rid,) = _obs(db, [_LONG])
+    vec = _full_vec()
+    vec.insert(
+        5, {"source_table": "observation", "id": rid, "content": _LONG[:500], "distance": 0.15}
+    )
+    monkeypatch.setattr(search_mod, "search_vec", _scoped(vec))
+    monkeypatch.setattr(search_mod, "_identifier_pool", lambda *_a, **_k: [])
+
+    page = search(db, Q, table="all", limit=10, phrase_seat=True)
+
+    seated = [r for r in page if r.get("reserved_slot") == "phrase_head"]
+    assert [(r["source_table"], r["id"]) for r in seated] == [("observation", rid)]
+    assert seated[0]["match_source"] in ("vec", "fts+vec"), "came through the vec copy"
+    assert "litestream replicates # techne.db" in seated[0]["content"]

@@ -2000,42 +2000,37 @@ def _phrase_seat_row(
     return None
 
 
-#: Source table -> (FTS table, FTS column index, page field) for
-#: `_window_seated_row`. Threads are left out: their page field is `summary`, and
-#: a thread's span usually sits in `label` or `resume_points`, which the page
-#: shows whole.
-_SEAT_WINDOW_COLS = {
-    "observation": ("observations_fts", 0, "content"),
-    "knowledge": ("knowledge_fts", 0, "content"),
-}
-
-
 def _window_seated_row(conn: sqlite3.Connection, row: dict, match: str) -> None:
-    """Show the seated row's matched span, in place (techne#1142).
+    """Show the seated observation row's matched span, in place (techne#1142).
 
-    Search cuts each row to its head (`_ROW_CHAR_CAP` for observations, the
-    caller's cap for knowledge). The phrase seat picks a row for a span that can
-    sit past that cut: on the 2026-09-28 eval store it seated a 1,733-char
-    Dockerfile echo whose `litestream replicates techne.db` starts near char 890,
-    so the page showed 500 chars of shell and nothing the query asked for.
+    Search cuts each observation row to its first `_ROW_CHAR_CAP` chars. The phrase
+    seat picks a row for a span that can sit past that cut: on the 2026-09-28 eval
+    store it seated a 1,733-char Dockerfile echo whose `litestream replicates #
+    techne.db` starts near char 890, so the page showed 500 chars of shell and
+    nothing the query asked for.
 
-    When the span's end lies past what the row shows, the content becomes a
-    window of the same width starting a quarter-width before the span, prefixed
-    with `…` when it does not start at char 0. FTS5 `highlight()` finds the span,
-    so porter stemming applies exactly as it did in the seat's MATCH. The
-    original offsets go in `content_window` and the full length in
-    `content_chars_total`. Any SQLite error, or a span in another column (tags),
-    leaves the row as it was.
+    When the span ends past what the row shows, the content becomes a window of
+    the same width (or the whole tail, when the row is shorter than span + width)
+    starting a quarter-width before the span, prefixed with `…` when it does not
+    start at char 0. FTS5 `highlight()` finds the span, so porter stemming applies
+    exactly as it did in the seat's MATCH. The original offsets go in
+    `content_window` and the full length in `content_chars_total`. Any SQLite
+    error, or a span only in `tags`/`kind`, leaves the row as it was.
+
+    OBSERVATIONS ONLY. A knowledge row is left alone: federation's
+    `_cross_store_dedup` fingerprints `content`, and a remote replica arrives
+    head-cut, so a windowed local copy stops matching it and the entry is flagged
+    as contradicting its own replica (Prudence, PR #1146 r1). Observations never
+    federate. Threads are left alone too: a thread's span usually sits in `label`
+    or `resume_points`, which the page shows whole. Wider windowing is techne#1147.
     """
-    spec = _SEAT_WINDOW_COLS.get(row.get("source_table"))
     shown = row.get("content")
-    if spec is None or not isinstance(shown, str) or not shown:
+    if row.get("source_table") != "observation" or not isinstance(shown, str) or not shown:
         return
-    fts, col, field = spec
     try:
         hit = conn.execute(
-            f"SELECT highlight({fts}, {col}, char(1), char(2)) FROM {fts} "
-            f"WHERE {fts} MATCH ? AND rowid = ?",
+            "SELECT highlight(observations_fts, 0, char(1), char(2)) FROM observations_fts "
+            "WHERE observations_fts MATCH ? AND rowid = ?",
             (match, row["id"]),
         ).fetchone()
     except sqlite3.Error:
@@ -2044,21 +2039,21 @@ def _window_seated_row(conn: sqlite3.Connection, row: dict, match: str) -> None:
         return
     marked = hit[0]
     start = marked.index("\x01")
-    # Offsets into the unmarked text: the first span's markers are the only ones
-    # before its closing marker.
+    # Exclusive end of the first span in the unmarked text: its two markers are
+    # the only ones before its closing marker.
     end = marked.index("\x02", start) - 1
     full = marked.replace("\x01", "").replace("\x02", "")
     width = len(shown)
     if end <= width:
         return
-    lo = max(0, start - width // 4)
+    # Fill the width when the span is near the end of the row.
+    lo = max(0, min(start - width // 4, len(full) - width))
     window = full[lo : lo + width]
-    row[field] = ("…" if lo else "") + window
+    row["content"] = ("…" if lo else "") + window
     row["content_window"] = [lo, lo + len(window)]
     row["content_chars_total"] = len(full)
     logger.debug(
-        "phrase seat: windowed %s %s to chars %d-%d of %d",
-        row["source_table"],
+        "phrase seat: windowed observation %s to chars %d-%d of %d",
         row["id"],
         lo,
         lo + len(window),
