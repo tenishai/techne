@@ -111,8 +111,9 @@ def _git_project_root(cwd: Path) -> Path:
     except OSError:
         cur = cwd.absolute()
     for parent in (cur, *cur.parents):
-        # An unreadable level is "no .git here", not a crash: Path.exists() raises
-        # PermissionError where os.path.exists returns False, and one unreadable
+        # An unreadable level is "no .git here", not a crash: before Python 3.14,
+        # Path.exists() raises PermissionError where os.path.exists returns False
+        # (3.14 made it return False too; CI's 3.12/3.13 legs pin this), and one unreadable
         # ancestor (a shared server, `sudo -u` with an inherited cwd) must not stop
         # `techne init`. (techne#1149)
         try:
