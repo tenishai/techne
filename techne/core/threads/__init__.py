@@ -186,7 +186,7 @@ def detect_threads(
         return [], []
 
     if features is None:
-        repo_cache: dict[str, str | None] = {}
+        repo_cache: dict[str, str | bool | None] = {}
         features = [
             extract_features(
                 i, obs, user_families, extra_entity_patterns, fs_check, repo_cache=repo_cache
