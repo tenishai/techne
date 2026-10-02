@@ -190,36 +190,9 @@ def _dir_has_marker(parent: Path, probe: Callable[[Path, str], bool], *, real_fs
         except OSError:
             pass
     for marker in REPO_MARKERS:
-        # A PROBE THAT CANNOT READ A PATH MEANS "NO MARKER HERE", NEVER AN
-        # ABORT (techne#963). The walk starts at a cwd recorded in a
-        # transcript, which on a historical corpus may be gone, may belong to
-        # another machine, or may be readable only by root -- macOS security
-        # software was the reported case. Thread detection does not depend on
-        # the repo marker resolving; it is one feature among several, and one
-        # unreadable ancestor used to cost a whole session its threads.
-        #
-        # THE TRADE, STATED: this collapses "could not look" into "no
-        # marker here", so the answer is the nearest READABLE marker. If
-        # the unreadable directory itself held the true repo, an OUTER one
-        # is attributed with no signal that anything was skipped. Accepted
-        # because repo is one feature among several and losing a session's
-        # threads is the worse failure -- but it is a trade, not free.
-        # The guard is MARKER-granular, not directory-granular, which is
-        # the useful direction: a `.git` that raises while `pyproject.toml`
-        # reads fine still resolves the same directory.
-        #
-        # NOT redundant with pathlib swallowing the error. `Path.exists()`
-        # re-raises EACCES on 3.11, 3.12 and 3.13, and only swallows it on
-        # 3.14 -- measured, not assumed:
-        #
-        #   3.11/3.12/3.13: exists() RAISED PermissionError [Errno 13]
-        #   3.14:           exists() -> False
-        #
-        # So the guarantee this code leaned on held only on the interpreter we
-        # develop on, while `requires-python` is >=3.11 and CI runs 3.12/3.13.
-        # Guarding at the CALL SITE rather than inside the default probe also
-        # covers an injected `fs_check`, and a future probe that opens a
-        # `.git` file instead of stat-ing it.
+        # A probe that raises means "no marker here", per marker, never an abort
+        # (techne#963): pathlib re-raises EACCES on 3.11-3.13. The trade (an outer
+        # repo can be attributed) is stated in tests/test_find_repo_unreadable.py.
         try:
             if probe(parent, marker):
                 return True

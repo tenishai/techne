@@ -131,3 +131,19 @@ def test_a_denied_marker_does_not_hide_the_next_one_in_the_same_directory():
 
     assert find_repo("/srv/app/src/f.py", fs_check=probe) == "app"
     assert find_repo("/srv/app/src/f.py", fs_check=probe, cache={}) == "app"
+
+
+def test_a_directory_whose_stat_raises_still_has_its_markers_probed(tmp_path, monkeypatch):
+    """The `is_dir()` short-cut falls through on OSError instead of answering, so
+    "could not look" is never a new early exit (Prudence, PR #1156 r1)."""
+    (tmp_path / ".git").mkdir()
+    real_is_dir = Path.is_dir
+
+    def is_dir(self, *a, **k):
+        if self == tmp_path:
+            raise PermissionError(13, "Permission denied")
+        return real_is_dir(self, *a, **k)
+
+    monkeypatch.setattr(Path, "is_dir", is_dir)
+
+    assert find_repo(str(tmp_path / "src" / "f.py"), cache={}) == tmp_path.name
