@@ -1,7 +1,7 @@
 """`techne init` and the memory commands under an unreadable cwd (techne#1153).
 
 On macOS, getcwd() fails with EACCES when an ancestor of the cwd has no read
-permission, so Path.cwd() raises before anything else runs. Linux returns the path
+permission, so the first Path.cwd() call raises. Linux returns the path
 regardless, so the CI runners only reach these branches through the monkeypatched
 tests; the real reproduction runs on macOS alone.
 """
@@ -54,6 +54,8 @@ def test_init_treats_unreadable_cwd_as_no_project(monkeypatch):
     result = _invoke(["init", "--platform", "standalone", "--no-vectors"])
     assert result.exit_code == 0, result.output
     assert "working directory can't be read" in result.output
+    assert "detection skipped" in result.output
+    assert "no CC curated memory detected" not in result.output
     cfg = Config.load()
     assert cfg.posture.mode == "observe"
     assert cfg.posture.cc_memory_detected is False

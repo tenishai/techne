@@ -2600,8 +2600,8 @@ _UNREADABLE_CWD = (
 def _readable_cwd() -> Path | None:
     """The cwd, or None when getcwd() itself fails (#1153). macOS's getcwd() raises
     EACCES under an unreadable ancestor, where Linux's returns the path regardless.
-    None means "no project", not the home directory: home's Claude Code slug belongs
-    to a different project."""
+    None means "no project", not the home directory: finding the project needs the
+    cwd, and home is a guess that would read another project's memory."""
     try:
         return Path.cwd()
     except OSError:
@@ -2885,11 +2885,12 @@ def init(
         )
     else:
         # Be honest about why we landed on observe (detected-none vs forced-despite-CC).
-        cc_note = (
-            "CC curated memory WAS detected, but observe was requested"
-            if cc
-            else "no CC curated memory detected"
-        )
+        if cc:
+            cc_note = "CC curated memory WAS detected, but observe was requested"
+        elif not cwd_readable:
+            cc_note = "CC curated memory detection skipped"
+        else:
+            cc_note = "no CC curated memory detected"
         click.echo(
             "Posture: observe — techne captures + (if you enable reflect) may author its own"
             f" knowledge ({cc_note})."
