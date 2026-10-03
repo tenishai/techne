@@ -2590,6 +2590,24 @@ def _interactive() -> bool:
     return sys.stdin.isatty() and sys.stdout.isatty()
 
 
+# What an unreadable cwd costs, said once for init and the memory commands (#1153).
+_UNREADABLE_CWD = (
+    "The working directory can't be read (getcwd failed; on macOS a parent directory "
+    "without read permission does this)."
+)
+
+
+def _readable_cwd() -> Path | None:
+    """The cwd, or None when getcwd() itself fails (#1153). macOS's getcwd() raises
+    EACCES under an unreadable ancestor, where Linux's returns the path regardless.
+    None means "no project", not the home directory: home's Claude Code slug belongs
+    to a different project."""
+    try:
+        return Path.cwd()
+    except OSError:
+        return None
+
+
 def _offer_auto_memory_off(spool_primary: bool) -> None:
     """Claude Code's auto-memory is a second memory layer beside techne (techne#1023).
 
@@ -2846,7 +2864,13 @@ def init(
                 click.echo(line)
 
     # Resolve coexistence posture (techne#107 PR4).
-    cc = bool(find_curated_memory_files())
+    cwd_readable = _readable_cwd() is not None
+    if not cwd_readable:
+        click.echo(
+            f"{_UNREADABLE_CWD} Skipped curated-memory detection; run `techne init` "
+            "from your project directory to detect it."
+        )
+    cc = cwd_readable and bool(find_curated_memory_files())
     if posture == "auto":
         resolved_mode = "spool-primary" if cc else "observe"
     else:
@@ -3335,6 +3359,8 @@ def memory_doctor_cmd(ctx, since_days, as_json, do_claims):
     if not config.db_path.exists():
         click.echo("techne not initialized. Run: techne init", err=True)
         ctx.exit(1)
+    if _readable_cwd() is None:
+        raise click.ClickException(f"{_UNREADABLE_CWD} Run this from your project directory.")
 
     if do_claims:
         _memory_doctor_claims(ctx, config, since_days=since_days, as_json=as_json)
@@ -3403,6 +3429,8 @@ def memory_sync_cmd(ctx):
         click.echo("techne not initialized. Run: techne init", err=True)
         ctx.exit(1)
         return
+    if _readable_cwd() is None:
+        raise click.ClickException(f"{_UNREADABLE_CWD} Run this from your project directory.")
 
     from techne.core.memory_doctor import find_curated_memory_files
     from techne.sync.cc_memory import CCMemorySource
