@@ -517,7 +517,7 @@ def _marker_has_unemitted_threads(marker: dict | None, *, observations: int | No
     return len(emitted) < total
 
 
-def pending_reflection(config: Config, *, limit: int = 5) -> list[dict]:
+def pending_reflection(config: Config, *, limit: int | None = 5) -> list[dict]:
     """Recent sessions that look reflectable but aren't fully emitted yet (techne#19).
 
     A cheap SessionStart heuristic for the auto-trigger: a session with at least
@@ -535,6 +535,10 @@ def pending_reflection(config: Config, *, limit: int = 5) -> list[dict]:
     LIMIT, so a genuinely-old pending session past that window is intentionally not
     surfaced (newest-unreflected is what the nudge cares about; explicit emit always
     works). Empty when nothing is pending.
+
+    ``limit=None`` drops the window and checks every session, newest first. That is
+    for an explicit emit choosing its default target (techne#1158), which may report
+    "nothing pending" only after looking everywhere. The hooks keep the window.
     """
     from techne.core.extension_state import get_state
 
@@ -549,7 +553,7 @@ def pending_reflection(config: Config, *, limit: int = 5) -> list[dict]:
                HAVING n >= ?
              ORDER BY s.started_at DESC
                 LIMIT ?""",
-            (min_obs, limit),
+            (min_obs, -1 if limit is None else limit),
         ).fetchall()
         return [
             {"session_id": r["session_id"], "observations": r["n"]}
@@ -1579,8 +1583,10 @@ def emit_reflection_pass(
         # NOT simply the newest session by started_at: the canonical reflect-before-
         # restart call fires while a fresh (empty) session is the newest, so the raw
         # "ORDER BY started_at DESC" default landed on a count:0 session and forced a
-        # manual hunt for the real id (tenishai/techne#267).
-        pend = pending_reflection(config)
+        # manual hunt for the real id (tenishai/techne#267). UNWINDOWED (techne#1158):
+        # the default window of 5 hid every older pending session, so a bulk drain
+        # was told "no session with unreflected work" while sessions were still owed.
+        pend = pending_reflection(config, limit=None)
         session_id = pend[0]["session_id"] if pend else None
     if not session_id:
         return {"batch": [], "count": 0, "note": "no session with unreflected work"}
