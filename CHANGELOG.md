@@ -5,6 +5,17 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **`techne reflect emit` with no session id reaches every pending session, not just
+  the newest five** (#1158, found by Grip). It took its target from
+  `pending_reflection`'s window of 5. Once those five were emitted it said "no
+  session with unreflected work" while older sessions were still owed, and a bulk
+  drain that guarded on a wider window looped forever. On the operator's store the
+  bare emit could see 4 of 70 pending sessions. The same fix applies to the API and
+  to `techne_reflect_emit` without a `session_id`. The SessionStart nudge and
+  per-turn recall keep their newest-five window.
+
 ## [0.18.0] — 2026-09-30
 
 ### Deprecated
