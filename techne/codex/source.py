@@ -264,12 +264,12 @@ def _extract_import_names(node, language: str, *, with_orig: bool = False) -> li
     wins: after ``import json as j`` the callable in scope is ``j``, and
     recording ``json`` would not match any call site.
 
-    BUT AN ALIASED from-IMPORT RECORDS NO MODULE. The name and the module are
+    BUT IN THE PAIR FORM AN ALIASED from-IMPORT RECORDS NO MODULE. The name and the module are
     correct individually and wrong together: `resolve_edges_by_import` looks the
     BOUND name up inside the SOURCE module, and after
     ``from a.b import real as helper`` module ``a.b`` has no ``helper``. The
-    original name is stored nowhere, so the pair cannot be resolved truthfully
-    and the honest binding is none at all.
+    original name is stored nowhere in a pair, so the pair cannot be resolved
+    truthfully and the honest binding is none at all.
 
     ``with_orig=True`` STORES IT (techne#1164). Each item becomes ``(name,
     module, orig)``: a renaming alias keeps its module and carries the name it
