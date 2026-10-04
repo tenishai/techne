@@ -241,7 +241,7 @@ def _find_enclosing_symbol(byte_pos: int, spans: list[tuple[int, int, str]]) -> 
 _TS_ALIAS_SIGILS = (".", "@", "$")
 
 
-def _extract_import_names(node, language: str) -> list[tuple[str, str | None]]:
+def _extract_import_names(node, language: str, *, with_orig: bool = False) -> list[tuple]:
     """Pull the imported names out of an import node, each with its SOURCE MODULE.
 
     Returns ``(name, module)`` pairs (techne#679). ``module`` is the dotted path a
@@ -251,7 +251,8 @@ def _extract_import_names(node, language: str) -> list[tuple[str, str | None]]:
         import a.b.c               -> ("c",    None)
         import json as j           -> ("j",    None)
         from pathlib import Path   -> ("Path", "pathlib")
-        from a.b import c as d     -> ("d",    "a.b")
+        from a.b import c as d     -> ("d",    None)   (see below; with_orig gives
+                                      ("d", "a.b", "c"))
 
     The ``None`` is load-bearing, not a placeholder: it is what distinguishes a
     module brought into scope from a name brought out of one. Before this pair
@@ -264,14 +265,23 @@ def _extract_import_names(node, language: str) -> list[tuple[str, str | None]]:
     wins: after ``import json as j`` the callable in scope is ``j``, and
     recording ``json`` would not match any call site.
 
-    BUT AN ALIASED from-IMPORT RECORDS NO MODULE. The name and the module are
+    BUT IN THE PAIR FORM AN ALIASED from-IMPORT RECORDS NO MODULE. The name and the module are
     correct individually and wrong together: `resolve_edges_by_import` looks the
     BOUND name up inside the SOURCE module, and after
     ``from a.b import real as helper`` module ``a.b`` has no ``helper``. The
-    original name is stored nowhere, so the pair cannot be resolved truthfully
-    and the honest binding is none at all.
+    original name is stored nowhere in a pair, so the pair cannot be resolved
+    truthfully and the honest binding is none at all.
+
+    ``with_orig=True`` STORES IT (techne#1164). Each item becomes ``(name,
+    module, orig)``: a renaming alias keeps its module and carries the name it
+    imported (``from a.b import real as helper`` -> ``("helper", "a.b",
+    "real")``), so the resolver can ask ``a.b`` for ``real``. ``orig`` is None
+    for every other form. The indexer passes it; the pair form is unchanged for
+    every other caller.
     """
     names: list[tuple[str, str | None]] = []
+    # bound name -> (module, original name), for renaming aliases only.
+    renamed: dict[str, tuple[str | None, str]] = {}
     if language == "python":
         node_type = node.type
         if node_type == "import_statement":
@@ -358,6 +368,11 @@ def _extract_import_names(node, language: str) -> list[tuple[str, str | None]]:
                                 else orig_node.text.decode("utf-8", errors="replace")
                             )
                         names.append((alias, module if alias == orig else None))
+                        # No module, no rename record: a relative `from . import
+                        # x as y` stays unbound, and `to_orig` never appears
+                        # without the module it is looked up in (Prudence, #1165).
+                        if module is not None and orig is not None and alias != orig:
+                            renamed[alias] = (module, orig)
                     else:
                         dotted = child.child_by_field_name("name")
                         if dotted:
@@ -412,11 +427,15 @@ def _extract_import_names(node, language: str) -> list[tuple[str, str | None]]:
                                         else bound
                                     )
                                     names.append((bound, module if bound == orig else None))
+                                    if module is not None and bound != orig:
+                                        renamed[bound] = (module, orig)
                     elif sub.type == "namespace_import":
                         ident = next((c for c in sub.children if c.type == "identifier"), None)
                         if ident:
                             names.append((ident.text.decode("utf-8", errors="replace"), module))
-    return names
+    if not with_orig:
+        return names
+    return [(n, *renamed[n]) if m is None and n in renamed else (n, m, None) for n, m in names]
 
 
 def _parse_file(
@@ -571,7 +590,9 @@ def _parse_file(
     for caps in import_matches:
         imp_nodes = caps.get("import.range", [])
         for imp_node in imp_nodes:
-            for name, to_module in _extract_import_names(imp_node, language):
+            for name, to_module, to_orig in _extract_import_names(
+                imp_node, language, with_orig=True
+            ):
                 # KEY EXCLUDES to_module ON PURPOSE — it mirrors the table's
                 # PRIMARY KEY (from_symbol, to_name, kind). Two imports binding
                 # the same name in one module is a shadow, not two edges: after
@@ -588,6 +609,7 @@ def _parse_file(
                             and e["to_name"] == name
                         ):
                             e["to_module"] = to_module
+                            e["to_orig"] = to_orig
                             break
                     continue
                 seen_edges.add(key)
@@ -598,6 +620,7 @@ def _parse_file(
                         "kind": "import",
                         "src_file_hash": file_hash,
                         "to_module": to_module,
+                        "to_orig": to_orig,
                     }
                 )
 
@@ -714,12 +737,13 @@ def _index_file(db_path: Path, file_path: Path, repo_root: Path, *, force: bool 
             for e in edges:
                 e.setdefault("to_module", None)
                 e.setdefault("bare_call", None)
+                e.setdefault("to_orig", None)
             conn.executemany(
                 """INSERT OR IGNORE INTO edges
                    (from_symbol, to_name, kind, src_file_hash, resolution_status, to_module,
-                    bare_call)
+                    bare_call, to_orig)
                    VALUES (:from_symbol, :to_name, :kind, :src_file_hash, 'unresolved',
-                           :to_module, :bare_call)""",
+                           :to_module, :bare_call, :to_orig)""",
                 edges,
             )
         conn.commit()

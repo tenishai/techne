@@ -275,7 +275,9 @@ def test_migration_adds_the_column_and_records_reparse_debt(tmp_path):
     owed = conn.execute("SELECT value FROM codex_meta WHERE key = 'reparse_owed_since'").fetchone()
     conn.close()
     assert "bare_call" in cols
-    assert owed == ("5",), "a store with rows must re-parse to fill bare_call"
+    # A later step overwrites the key rather than adding one (v6, techne#1164);
+    # any value forces the full re-parse that fills bare_call.
+    assert owed is not None and int(owed[0]) >= 5, "a store with rows must re-parse"
 
 
 def test_cli_only_proven_never_prints_a_bare_empty_result(tmp_path, monkeypatch):
