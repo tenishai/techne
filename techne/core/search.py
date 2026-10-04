@@ -2056,15 +2056,15 @@ def _window_matched_row(conn: sqlite3.Connection, row: dict, match: str) -> None
         return
     newline = full.find("\n")
     head = min(width // 4, newline) if newline >= 0 else width // 4
-    span = width - head - len(_WINDOW_SEP)
-    # Fill the width when the span is near the end of the row.
-    lo = min(start - span // 4, len(full) - span)
-    if lo <= head:
-        # Nothing would be elided between head and window, so `_WINDOW_SEP` would
-        # claim a gap that is not there. Only a single token longer than the window
-        # gets here (it starts near the head and ends past the cut); the head cut
-        # shows as much of it as a window could.
+    if start <= head:
+        # The span starts inside the head, which the head cut already shows.
         return
+    span = width - head - len(_WINDOW_SEP)
+    # Start past the head, so `_WINDOW_SEP` stands for chars really left out, and
+    # no later than the span, keeping its end in view when it fits; fill the
+    # width when the span is near the row's end.
+    lo = max(start - span // 4, head + 1, min(end - span, start))
+    lo = min(lo, start, len(full) - span)
     window = full[lo : lo + span]
     row["content"] = full[:head] + _WINDOW_SEP + window
     row["content_head"] = head
@@ -2098,9 +2098,10 @@ def _window_page(
     the identifier head and the lexical tail) is windowed on an OR of the query's
     terms outside `_PHRASE_STOP`, so a stopword near the top does not count as
     the span. A row FTS matched only through a stopword (the OR fallback keeps
-    them) has no such term and keeps its head cut. ``fts_page`` says the whole page came from `search_fts` (an empty
-    vector channel or ``use_vectors=False``), whose rows carry no `match_source`
-    but are all lexical. Vec-only rows keep their head cut: nothing says their
+    them) has no such term and keeps its head cut. ``fts_page`` says the whole
+    page came from `search_fts` (an empty vector channel or
+    ``use_vectors=False``), whose rows carry no `match_source` but are all
+    lexical. Vec-only rows keep their head cut: nothing says their
     text holds a query term.
 
     ``enabled`` is the caller's ``phrase_seat``: explicit search only. Measured on

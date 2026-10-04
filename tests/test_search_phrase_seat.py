@@ -797,16 +797,76 @@ def test_a_row_opening_with_a_newline_has_an_empty_head(db):
     assert len(row["content"]) == search_mod._ROW_CHAR_CAP
 
 
-def test_a_token_too_long_to_window_keeps_the_head_cut(db):
-    """Temperance, PR #1161: a window starting where the head ends would put the
-    separator inside contiguous text. Only a token longer than the window does it."""
-    text = "Ran: dump\n" + "x" * 60 + " " + "k" * 600 + " tail"
+def test_a_span_starting_inside_the_head_keeps_the_head_cut(db):
+    """The head cut already shows where the span starts."""
+    text = "k" * 600 + " tail" * 40
     (rid,) = _obs(db, [text])
     shown = text[: search_mod._ROW_CHAR_CAP]
 
     row = _window(db, rid, '"' + "k" * 600 + '"', shown)
 
     assert row == {"source_table": "observation", "id": rid, "content": shown}
+
+
+@pytest.mark.parametrize(
+    "middle, match",
+    [
+        ("kubeconfig " + "=" * 340 + " rotated", '"kubeconfig rotated"'),
+        ("k" * 360, '"' + "k" * 360 + '"'),
+    ],
+    ids=["phrase", "long_token"],
+)
+def test_a_span_just_past_the_head_is_shown_whole_after_a_real_gap(db, middle, match):
+    """Temperance, PR #1161 r1 (P2, P3): a span starting a little past the head
+    and ending past the cut fits the window, so it is shown whole, and the window
+    starts past the head, so the separator stands for chars really left out."""
+    text = "p " * 75 + middle + " tail" * 40
+    (rid,) = _obs(db, [text])
+    start = text.index(middle)
+    end = start + len(middle)
+
+    row = _window(db, rid, match, text[: search_mod._ROW_CHAR_CAP])
+
+    head = row["content_head"]
+    lo, hi = row["content_window"]
+    assert head < lo <= start and end <= hi, "a real gap, and the whole span in view"
+    assert row["content"] == text[:head] + search_mod._WINDOW_SEP + text[lo:hi]
+    assert len(row["content"]) == search_mod._ROW_CHAR_CAP
+
+
+def test_window_invariants_hold_on_random_rows(db):
+    """Seeded fuzz (Temperance, PR #1161): every windowed row keeps the width,
+    shows where its span starts, has a real gap behind the separator, and shows
+    the whole span whenever it fits the window."""
+    import random
+
+    rng = random.Random(1147)
+    words = "alpha beta gamma delta step build run echo".split()
+    cap = search_mod._ROW_CHAR_CAP
+    windowed = 0
+    for _ in range(400):
+        body = " ".join(rng.choice(words) for _ in range(rng.randint(100, 500)))
+        if rng.random() < 0.5:
+            k = rng.randint(0, 40)
+            body = body[:k] + "\n" + body[k:]
+        tok = "kubeconfig" if rng.random() < 0.6 else "k" * rng.randint(20, 700)
+        pos = rng.choice([rng.randint(0, 20), rng.randint(120, 230), rng.randint(0, len(body))])
+        body = body[:pos] + " " + tok + " " + body[pos:]
+        (rid,) = _obs(db, [body])
+        start = body.index(" " + tok + " ") + 1
+
+        row = _window(db, rid, '"' + tok + '"', body[:cap])
+
+        if "content_window" not in row:
+            continue
+        windowed += 1
+        head = row["content_head"]
+        lo, hi = row["content_window"]
+        assert len(row["content"]) == cap
+        assert head < lo <= start < hi
+        if len(tok) <= cap - head - len(search_mod._WINDOW_SEP):
+            assert start + len(tok) <= hi
+    assert windowed > 100, "the fuzz must actually window rows"
 
 
 def test_window_page_is_a_no_op_when_disabled(db):
