@@ -799,10 +799,13 @@ class TestTheLookupCannotInventASymbol:
 
         resolve_edges_by_import(sqlite3.connect(db))
         status, to_symbol = self._calls(db)["helper"]
-        assert to_symbol is None, (
+        # Since techne#1164 the original name is stored, so the lookup asks
+        # `pkg.util` for `real` and the call resolves to it. The invariant this
+        # test guards is unchanged: never the same-named decoy.
+        assert to_symbol != decoy[0], (
             f"bound an aliased import to an unrelated same-named symbol: {to_symbol}"
         )
-        assert status != "import_resolved"
+        assert (status, to_symbol) == ("import_resolved", "pkg/util.py::real::function::1")
 
     def test_a_module_level_import_never_binds_to_a_method(self, tmp_path):
         """MECHANISM TWO: no alias needed — a re-export plus a same-named method.
@@ -1077,8 +1080,12 @@ class TestTheReExportIdiomSurvives:
         assert status == "import_resolved", "the re-export idiom stopped resolving"
         assert to_symbol == "pkg/util.py::helper::function::1"
 
-    def test_x_as_y_still_refuses(self, tmp_path):
-        """The r3 defect must stay closed — this is the case that caused it."""
+    def test_x_as_y_resolves_to_the_original_not_the_decoy(self, tmp_path):
+        """The r3 defect must stay closed — this is the case that caused it.
+
+        Until techne#1164 the only safe answer was to refuse, because the
+        original name was stored nowhere. v6 stores it (`edges.to_orig`), so
+        the call resolves to `real` — and still never to the decoy `helper`."""
         pytest.importorskip("tree_sitter_python")
         db = self._db(
             tmp_path,
@@ -1098,7 +1105,8 @@ class TestTheReExportIdiomSurvives:
         assert decoy, "the same-named decoy was not indexed; this fixture tests nothing"
 
         resolve_edges_by_import(sqlite3.connect(db))
-        assert self._calls(db)["helper"][1] is None
+        assert self._calls(db)["helper"] == ("import_resolved", "pkg/util.py::real::function::1")
+        assert self._calls(db)["helper"][1] != decoy[0]
 
     def test_ts_x_as_x_keeps_its_module_and_a_rename_does_not(self):
         pytest.importorskip("tree_sitter_typescript")
@@ -1513,3 +1521,78 @@ def test_a_vite_alias_is_not_asserted_external(tmp_path):
     assert status != "external", (
         "a Vite $-alias naming an in-repo file was asserted out-of-repo"
     )
+
+
+# --- a renaming import keeps its module and its original name (techne#1164) ---------
+
+
+@pytest.mark.parametrize(
+    "src, expected",
+    [
+        ("from a.b import real as helper", [("helper", "a.b", "real")]),
+        ("from a.b import real, other as o", [("real", "a.b", None), ("o", "a.b", "other")]),
+        ("from a.b import same as same", [("same", "a.b", None)]),
+    ],
+)
+def test_with_orig_keeps_the_module_and_the_original_name(src, expected):
+    pytest.importorskip("tree_sitter_python")
+    node = _py_node(src, "import_from_statement")
+    assert _extract_import_names(node, "python", with_orig=True) == expected
+    # The pair form every other caller reads is unchanged.
+    assert _extract_import_names(node, "python") == [
+        (n, m if o is None else None) for n, m, o in expected
+    ]
+
+
+def test_a_ts_rename_keeps_its_module_and_original_name_with_orig():
+    pytest.importorskip("tree_sitter_typescript")
+    node = _ts_node("import { real as helper, same } from 'pkg';")
+    assert _extract_import_names(node, "typescript", with_orig=True) == [
+        ("helper", "pkg", "real"),
+        ("same", "pkg", None),
+    ]
+
+
+def test_a_function_local_renaming_import_resolves(tmp_path):
+    """The shape that hid `techne search` from `codex callers search`: cli.py
+    imports inside the command body under another name."""
+    pytest.importorskip("tree_sitter_python")
+    db = TestExternalNeedsPositiveEvidence()._db(
+        tmp_path,
+        {
+            "pkg/__init__.py": "",
+            "pkg/core.py": "def search(q):\n    return [q]\n",
+            "cli.py": (
+                "def cmd(q):\n"
+                "    from pkg.core import search as do_search\n\n"
+                "    return do_search(q)\n"
+            ),
+        },
+    )
+    resolve_edges_by_import(sqlite3.connect(db))
+    calls = TestExternalNeedsPositiveEvidence()._calls(db)
+    assert calls["do_search"] == ("import_resolved", "pkg/core.py::search::function::1")
+
+
+def test_a_v5_database_gains_to_orig_and_owes_a_reparse(tmp_path):
+    """Nullable ADD COLUMN plus the #864 reparse debt, as v4 and v5 do: an
+    existing renamed-import row has no module either, so only a re-parse can
+    bind it."""
+    from techne.core.codex import CODEX_VERSION, _run_codex_steps
+
+    db = tmp_path / "v5.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(CODEX_SCHEMA)
+    conn.execute("ALTER TABLE edges DROP COLUMN to_orig")
+    conn.execute(
+        "INSERT INTO symbols (id, file, name, kind) "
+        "VALUES ('a.py::f::function::1', 'a.py', 'f', 'function')"
+    )
+    conn.commit()
+    _run_codex_steps(conn, 5, CODEX_VERSION)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(edges)")}
+    owed = conn.execute("SELECT value FROM codex_meta WHERE key = 'reparse_owed_since'").fetchone()
+    _run_codex_steps(conn, 5, CODEX_VERSION)  # re-entrant
+    conn.close()
+    assert "to_orig" in cols
+    assert owed == ("6",)
