@@ -21,6 +21,19 @@ All notable changes to techne are documented here. Format loosely follows
   curated-memory detection, so `auto` posture resolves to observe, and says why.
   `memory doctor` and `memory sync` exit 1 with the same explanation. Run them from
   your project directory.
+- **Explicit search shows why a lexically matched observation row is on the page**
+  (#1147). Observation rows are cut to their first 500 chars, so a row FTS matched on
+  a term past that cut showed nothing the query asked for: 4 of 16 such rows on the
+  gold-v2 queries. 0.18.0 fixed this for the phrase-seated row only. Now every
+  observation row FTS matched keeps its first line (the tool and command), then ` … `,
+  then a window over the first matched term, at the same width, with
+  `content_head`, `content_window` and `content_chars_total` saying what is shown. The
+  phrase-seated row takes the same shape, replacing the 0.18.0 `…`-prefixed window.
+  On the 2026-09-28 snapshot every lexical row now shows a query term (16/16, 25/25
+  on 40 real prompts, 48/48 on the held-out phrase queries), and no page's order
+  changed. Explicit search only (`techne_search`, `techne search`, `techne_recall`);
+  the per-turn and inbound recall rails search knowledge rows, which are never
+  windowed, so injected text is unchanged.
 
 ## [0.18.0] — 2026-09-30
 

@@ -1992,7 +1992,7 @@ def _phrase_seat_row(
             )
             if rows:
                 best = dict(min(rows, key=lambda r: r["rank"]))
-                # The MATCH that seated it, for `_window_seated_row`.
+                # The MATCH that seated it, for `_window_matched_row`.
                 best["_phrase_match"] = " OR ".join(rare[n])
                 return best
     except sqlite3.Error:
@@ -2000,29 +2000,35 @@ def _phrase_seat_row(
     return None
 
 
-def _window_seated_row(conn: sqlite3.Connection, row: dict, match: str) -> None:
-    """Show the seated observation row's matched span, in place (techne#1142).
+#: Between a windowed row's head and its window (techne#1147).
+_WINDOW_SEP = " … "
 
-    Search cuts each observation row to its first `_ROW_CHAR_CAP` chars. The phrase
-    seat picks a row for a span that can sit past that cut: on the 2026-09-28 eval
-    store it seated a 1,733-char Dockerfile echo whose `litestream replicates #
-    techne.db` starts near char 890, so the page showed 500 chars of shell and
-    nothing the query asked for.
 
-    When the span ends past what the row shows, the content becomes a window of
-    the same width (or the whole tail, when the row is shorter than span + width)
-    starting a quarter-width before the span, prefixed with `…` when it does not
-    start at char 0. FTS5 `highlight()` finds the span, so porter stemming applies
-    exactly as it did in the seat's MATCH. The original offsets go in
-    `content_window` and the full length in `content_chars_total`. Any SQLite
-    error, or a span only in `tags`/`kind`, leaves the row as it was.
+def _window_matched_row(conn: sqlite3.Connection, row: dict, match: str) -> None:
+    """Show an observation row's first span for ``match``, in place (techne#1142, #1147).
+
+    Search cuts each observation row to its first `_ROW_CHAR_CAP` chars, and a row
+    can be on the page for a span past that cut: on the 2026-09-28 eval store the
+    phrase seat put a 1,733-char Dockerfile echo there for `litestream replicates #
+    techne.db` near char 890, and 4 of the 16 lexically matched rows on the gold-v2
+    queries showed no query term at all (#1147).
+
+    When the span ends past what the row shows, the content keeps the row's first
+    line (at most a quarter of the width: the tool and command, which say what the
+    row is), then `_WINDOW_SEP`, then a window over the span, starting a quarter of
+    its width before it, or earlier when the span is near the row's end. The total
+    width is unchanged. FTS5 `highlight()` finds the span, so porter stemming
+    applies exactly as it did in the MATCH that put the row there. The head's
+    length goes in `content_head`, the window's offsets in `content_window` and the
+    full length in `content_chars_total`. Any SQLite error, or a span only in
+    `tags`/`kind`, leaves the row as it was.
 
     OBSERVATIONS ONLY. A knowledge row is left alone: federation's
     `_cross_store_dedup` fingerprints `content`, and a remote replica arrives
     head-cut, so a windowed local copy stops matching it and the entry is flagged
     as contradicting its own replica (Prudence, PR #1146 r1). Observations never
     federate. Threads are left alone too: a thread's span usually sits in `label`
-    or `resume_points`, which the page shows whole. Wider windowing is techne#1147.
+    or `resume_points`, which the page shows whole.
     """
     shown = row.get("content")
     if row.get("source_table") != "observation" or not isinstance(shown, str) or not shown:
@@ -2046,38 +2052,68 @@ def _window_seated_row(conn: sqlite3.Connection, row: dict, match: str) -> None:
     width = len(shown)
     if end <= width:
         return
+    newline = full.find("\n")
+    head = min(width // 4, newline) if newline > 0 else width // 4
+    span = width - head - len(_WINDOW_SEP)
     # Fill the width when the span is near the end of the row.
-    lo = max(0, min(start - width // 4, len(full) - width))
-    window = full[lo : lo + width]
-    row["content"] = ("…" if lo else "") + window
+    lo = max(head, min(start - span // 4, len(full) - span))
+    window = full[lo : lo + span]
+    row["content"] = full[:head] + _WINDOW_SEP + window
+    row["content_head"] = head
     row["content_window"] = [lo, lo + len(window)]
     row["content_chars_total"] = len(full)
     logger.debug(
-        "phrase seat: windowed observation %s to chars %d-%d of %d",
+        "search: windowed observation %s to head %d + chars %d-%d of %d",
         row["id"],
+        head,
         lo,
         lo + len(window),
         len(full),
     )
 
 
-def _window_phrase_row(conn: sqlite3.Connection, page: list[dict], cand: dict | None) -> list[dict]:
-    """Window the phrase seat's row wherever it sits on ``page`` (techne#1150).
+def _window_page(
+    conn: sqlite3.Connection,
+    page: list[dict],
+    query: str,
+    cand: dict | None,
+    enabled: bool,
+    *,
+    fts_page: bool = False,
+) -> list[dict]:
+    """Show each lexically matched observation row's span on ``page`` (techne#1150, #1147).
 
-    The seat's row reaches the page three ways besides being moved there: on an
-    FTS-only page (empty vector channel, as on a fresh or not-yet-embedded store),
-    as the top vec row, or through the identifier head. Each kept the plain head
-    cut, so a phrase past char 500 was not shown though the row ranked first.
-    Windowing it by key on the finished page covers every path, and windows at
-    most one row, once. Order and every other row are untouched.
+    The phrase seat's row is windowed on its own MATCH, wherever it sits: it
+    reaches the page moved there, on an FTS-only page (empty vector channel), as
+    the top vec row, or through the identifier head (#1150). Then every other
+    observation row FTS matched (`match_source` "fts" or "fts+vec", which takes in
+    the identifier head and the lexical tail) is windowed on an OR of the query's
+    terms outside `_PHRASE_STOP`, so a stopword near the top does not count as
+    the span. ``fts_page`` says the whole page came from `search_fts` (an empty
+    vector channel or ``use_vectors=False``), whose rows carry no `match_source`
+    but are all lexical. Vec-only rows keep their head cut: nothing says their
+    text holds a query term.
+
+    ``enabled`` is the caller's ``phrase_seat``: explicit search only. Measured on
+    the 2026-09-28 snapshot at `table="all"` limit 10, lexical observation rows
+    showing a query term went 12/16 to 16/16 on the gold-v2 queries, 22/25 to
+    25/25 on 40 real per-turn prompts and 46/48 to 48/48 on the held-out phrase
+    queries, with the order of all 154 pages unchanged. The recall rails search
+    `table="knowledge"`, where nothing is windowed: their pages stayed
+    byte-identical.
     """
-    if cand is None or not cand.get("_phrase_match"):
+    if not enabled:
         return page
-    key = (cand["source_table"], cand["id"])
+    phrase_key = None
+    if cand is not None and cand.get("_phrase_match"):
+        phrase_key = (cand["source_table"], cand["id"])
+    terms = [t for t in _fts_terms(query) if t.lower() not in _PHRASE_STOP]
+    lexical = " OR ".join(f'"{t}"' for t in terms)
     for r in page:
-        if (r.get("source_table"), r.get("id")) == key:
-            _window_seated_row(conn, r, cand["_phrase_match"])
-            break
+        if (r.get("source_table"), r.get("id")) == phrase_key:
+            _window_matched_row(conn, r, cand["_phrase_match"])
+        elif lexical and (fts_page or r.get("match_source") in ("fts", "fts+vec")):
+            _window_matched_row(conn, r, lexical)
     return page
 
 
@@ -2169,9 +2205,11 @@ def search(
     (``techne_search``, ``techne search``, ``techne_recall``) turn it on; the
     per-turn and inbound recall rails do not, because in the issue's measurement
     phase none of the seats on real per-turn prompts beat the row it displaced.
-    With it off, or when it finds no rare span, the page is byte-identical to the
-    pre-#1142 one. At any limit the top result is the seat-off page's: while the
-    seat holds a row, the #946 promotion may not displace vec #1.
+    With it off, the page is byte-identical to the pre-#1142 one. With it on and
+    no rare span, the order is the seat-off page's, and lexically matched
+    observation rows show their span (`_window_page`, #1147). At any limit the
+    top result is the seat-off page's: while the seat holds a row, the #946
+    promotion may not displace vec #1.
 
     Returned rows include:
 
@@ -2270,7 +2308,8 @@ def _search_on_conn(
     )
 
     # The phrase seat's row (techne#1142), looked up once. Every return below
-    # windows it on the page (#1150); the vec-first page also seats it.
+    # windows it and the page's other lexical rows (#1150, #1147); the vec-first
+    # page also seats it.
     cand = (
         _phrase_seat_row(
             conn,
@@ -2286,7 +2325,7 @@ def _search_on_conn(
     )
 
     if not use_vectors:
-        return _window_phrase_row(conn, fts_results, cand)
+        return _window_page(conn, fts_results, query, cand, phrase_seat, fts_page=True)
 
     # Embedded once, for this call and the #946 curated pool below. None means the
     # channel is off here (no sqlite-vec, no backend, model not cached); search_vec
@@ -2305,7 +2344,7 @@ def _search_on_conn(
         query_vec=query_vec,
     )
     if not vec_results:
-        return _window_phrase_row(conn, fts_results, cand)
+        return _window_page(conn, fts_results, query, cand, phrase_seat, fts_page=True)
 
     # Vec-first union with a reserved lexical floor (techne#401, floor #827).
     # The vector channel leads — it comes back already sorted best-first
@@ -2658,7 +2697,9 @@ def _search_on_conn(
     # vec rows alone.
     if phrase_row is not None:
         head.insert(min(1, len(head)), phrase_row)
-    return _window_phrase_row(conn, (ident_head + head + tail + overflow + bumped)[:limit], cand)
+    return _window_page(
+        conn, (ident_head + head + tail + overflow + bumped)[:limit], query, cand, phrase_seat
+    )
 
 
 def backfill_vectors(
