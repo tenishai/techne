@@ -752,7 +752,7 @@ def test_an_fts_matched_row_shows_its_span_on_explicit_search(db, monkeypatch):
 
     assert [r["id"] for r in on] == [r["id"] for r in off] == [rid], "order untouched"
     assert on[0]["content"].startswith("Ran: make deploy" + search_mod._WINDOW_SEP)
-    assert "kubeconfig rotated" in on[0]["content"], "a stopword in the head is not the span"
+    assert "kubeconfig rotated" in on[0]["content"], "a stopword before the term is not the span"
     assert off[0]["content"] == _DEEP[: search_mod._ROW_CHAR_CAP], "off: the head cut, as before"
 
 

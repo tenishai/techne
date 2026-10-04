@@ -2015,9 +2015,10 @@ def _window_matched_row(conn: sqlite3.Connection, row: dict, match: str) -> None
 
     When the span ends past what the row shows, the content keeps the row's first
     line (at most a quarter of the width: the tool and command, which say what the
-    row is), then `_WINDOW_SEP`, then a window over the span, starting a quarter of
-    its width before it, or earlier when the span is near the row's end. The total
-    width is unchanged. FTS5 `highlight()` finds the span, so porter stemming
+    row is), then `_WINDOW_SEP`, then a window over the span. The window starts up
+    to a quarter of its width before the span: less when that keeps the span's end
+    in view, at the span itself when the span is wider than the window, and earlier
+    when the span is near the row's end. The total width is unchanged. FTS5 `highlight()` finds the span, so porter stemming
     applies exactly as it did in the MATCH that put the row there. A phrase MATCH
     marks the phrase as one span; an OR of terms marks each term, so there the
     window anchors on the first matched term. The head's
