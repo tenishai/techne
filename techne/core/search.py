@@ -2023,7 +2023,8 @@ def _window_matched_row(conn: sqlite3.Connection, row: dict, match: str) -> None
     the MATCH that put the row there. A phrase MATCH marks the phrase as one span;
     an OR of terms marks each term, so there the window anchors on the first
     matched term. The head's
-    length goes in `content_head`, the window's offsets in `content_window` and the
+    length goes in `content_head`, the window's offsets in `content_window`, the
+    span's own offsets in `content_span` (so a shorter preview can find it, #1162) and the
     full length in `content_chars_total`. Any SQLite error, or a span only in
     `tags`/`kind`, leaves the row as it was.
 
@@ -2071,6 +2072,7 @@ def _window_matched_row(conn: sqlite3.Connection, row: dict, match: str) -> None
     row["content"] = full[:head] + _WINDOW_SEP + window
     row["content_head"] = head
     row["content_window"] = [lo, lo + len(window)]
+    row["content_span"] = [start, end]
     row["content_chars_total"] = len(full)
     logger.debug(
         "search: windowed observation %s to head %d + chars %d-%d of %d",

@@ -326,6 +326,40 @@ _DEDUP_CHECKS = [
 ]
 
 
+#: `techne search` prints this much of a row, and keeps at most this much of a
+#: windowed row's first line, so a long head cannot crowd out the match (#1162).
+_PREVIEW_CHARS = 200
+_PREVIEW_HEAD = 60
+#: How much of a windowed row to show before its matched span.
+_PREVIEW_LEAD = 40
+
+
+def _preview(row: dict) -> str:
+    """A row's content cut to `_PREVIEW_CHARS`, showing the match when search
+    windowed it (techne#1162).
+
+    A windowed observation (`content_head`, `content_window`, `content_span` from
+    `search._window_matched_row`) reads `<first line> … <window>` at 500 chars,
+    and the span can sit anywhere in the window: near a row's end the window is
+    pulled back to fill the width. A plain 200-char cut then shows the head and
+    not the match. So the preview keeps up to `_PREVIEW_HEAD` chars of the first
+    line, then the separator, then the window from `_PREVIEW_LEAD` chars before
+    the span. Any other row is a plain cut, as before.
+    """
+    content = row.get("content", "") or ""
+    head = row.get("content_head")
+    if head is None or "content_window" not in row or "content_span" not in row:
+        return content[:_PREVIEW_CHARS]
+    from techne.core.search import _WINDOW_SEP
+
+    lo = row["content_window"][0]
+    window = content[head + len(_WINDOW_SEP) :]
+    shown = content[: min(head, _PREVIEW_HEAD)]
+    budget = _PREVIEW_CHARS - len(shown) - len(_WINDOW_SEP)
+    at = max(0, row["content_span"][0] - lo - _PREVIEW_LEAD)
+    return shown + _WINDOW_SEP + window[at : at + budget]
+
+
 def _render_liveness(config) -> tuple[int, int]:
     """Print the subsystem-liveness table. Returns (failing checks, drift failures).
 
@@ -1101,7 +1135,7 @@ def search(ctx, query, table, limit):
         if type_tag == "thread":
             click.echo(f"    {r.get('label', '')} — {r.get('summary', '')[:200]}")
         elif type_tag == "observation":
-            click.echo(f"    [{r.get('tool_name', '')}] {r.get('content', '')[:200]}")
+            click.echo(f"    [{r.get('tool_name', '')}] {_preview(r)}")
         elif type_tag == "knowledge":
             click.echo(f"    [{r.get('knowledge_type', '')}] {r.get('content', '')[:200]}")
         elif type_tag == "document":
