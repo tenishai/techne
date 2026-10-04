@@ -24,6 +24,11 @@ Schema versions (PRAGMA user_version on codex.db):
       identifier (`f()`) rather than an attribute (`x.f()`) (techne#940). The two
       forms share one edge row, so without it a same-file `def f` cannot be told
       apart from `requests.f()`, and same-file callers were never proven.
+  6 — edges.to_orig: the ORIGINAL name of a renaming from-import (techne#1164).
+      `from a.b import real as helper` stored to_name='helper' and, to avoid
+      asking `a.b` for a `helper` it lacks, no module at all, so every call
+      through a renamed import stayed unresolved: `techne search`, which calls
+      `search` as `do_search`, was missing from `codex callers search`.
 """
 
 from __future__ import annotations
@@ -47,7 +52,7 @@ from techne.core.stores import (
 
 log = logging.getLogger(__name__)
 
-CODEX_VERSION = 5
+CODEX_VERSION = 6
 
 # v1 shape — the authoritative schema for fresh databases.
 # Incremental: CREATE TABLE IF NOT EXISTS + CREATE INDEX IF NOT EXISTS are
@@ -94,6 +99,11 @@ CREATE TABLE IF NOT EXISTS edges (
     -- attribute call (`x.f()`), NULL on non-call edges and on rows indexed
     -- before v5. Scope resolution binds a same-file callee only on 1.
     bare_call         INTEGER,
+    -- techne#1164. For kind='import' ONLY, and ONLY for a RENAMING from-import:
+    -- `from a.b import real as helper` stores to_name='helper', to_module='a.b',
+    -- to_orig='real', so the resolver asks `a.b` for `real`. NULL otherwise,
+    -- and on rows indexed before v6 (whose renamed imports carry no module).
+    to_orig           TEXT,
     PRIMARY KEY (from_symbol, to_name, kind)
 );
 CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_symbol);
@@ -435,6 +445,28 @@ def _codex_v4_to_v5(conn) -> None:
         )
 
 
+def _codex_v5_to_v6(conn) -> None:
+    """Add edges.to_orig (techne#1164). Structurally guarded, so re-entrant.
+
+    Nullable ADD COLUMN, like v4 and v5: a pre-v6 row for a renaming import has
+    no module either, so it stays unresolved until a re-parse, which is its
+    pre-v6 behaviour. The reparse debt is recorded as v4 records it (techne#864).
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(edges)").fetchall()}
+    if "to_orig" not in cols:
+        conn.execute("ALTER TABLE edges ADD COLUMN to_orig TEXT")
+    try:
+        has_rows = conn.execute("SELECT 1 FROM symbols LIMIT 1").fetchone() is not None
+    except Exception:  # noqa: BLE001 — no symbols table yet: nothing owed
+        has_rows = False
+    if has_rows:
+        conn.execute("CREATE TABLE IF NOT EXISTS codex_meta (key TEXT PRIMARY KEY, value TEXT)")
+        conn.execute(
+            "INSERT INTO codex_meta (key, value) VALUES ('reparse_owed_since', '6') "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+        )
+
+
 def _run_codex_steps(conn, current: int, target: int) -> None:
     """Chain all codex migration steps from *current* to *target*.
 
@@ -452,6 +484,8 @@ def _run_codex_steps(conn, current: int, target: int) -> None:
         _codex_v3_to_v4(conn)
     if current < 5:
         _codex_v4_to_v5(conn)
+    if current < 6:
+        _codex_v5_to_v6(conn)
     migrator.user_version_io.write(conn, target)
     conn.commit()
 
