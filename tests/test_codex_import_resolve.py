@@ -1596,3 +1596,55 @@ def test_a_v5_database_gains_to_orig_and_owes_a_reparse(tmp_path):
     conn.close()
     assert "to_orig" in cols
     assert owed == ("6",)
+
+
+class TestTheDecoyStaysUnreachableAfterV6:
+    """Prudence, PR #1165: before v6 no rename carried a module, so one structural
+    fact kept every rename off a same-named decoy. v6 rests that on two lines, and
+    each gets its own test: the shadow-merge must carry `to_orig` with the module,
+    and the resolver must never retry the bound name when the original misses."""
+
+    _db = TestExternalNeedsPositiveEvidence._db
+    _calls = TestExternalNeedsPositiveEvidence._calls
+    _UTIL = "def real():\n    return 1\n\n\ndef helper():\n    return 99\n"
+
+    def test_a_later_renaming_import_carries_its_original_through_the_shadow(self, tmp_path):
+        pytest.importorskip("tree_sitter_python")
+        db = self._db(
+            tmp_path,
+            {
+                "pkg/__init__.py": "",
+                "pkg/util.py": self._UTIL,
+                "other.py": "def helper():\n    return 0\n",
+                "app.py": (
+                    "from other import helper\nfrom pkg.util import real as helper\n\n\n"
+                    "def run():\n    return helper()\n"
+                ),
+            },
+        )
+        resolve_edges_by_import(sqlite3.connect(db))
+        assert self._calls(db)["helper"] == ("import_resolved", "pkg/util.py::real::function::1")
+
+    def test_a_rename_whose_original_is_absent_never_falls_back_to_the_bound_name(
+        self, tmp_path
+    ):
+        pytest.importorskip("tree_sitter_python")
+        db = self._db(
+            tmp_path,
+            {
+                "pkg/__init__.py": "",
+                "pkg/util.py": self._UTIL,
+                "app.py": (
+                    "from pkg.util import nothere as helper\n\n\ndef run():\n    return helper()\n"
+                ),
+            },
+        )
+        resolve_edges_by_import(sqlite3.connect(db))
+        status, to_symbol = self._calls(db)["helper"]
+        assert to_symbol is None and status == "unresolved"
+
+    def test_a_relative_renaming_import_records_no_original(self):
+        pytest.importorskip("tree_sitter_python")
+        node = _py_node("from . import x as y", "import_from_statement")
+        assert _extract_import_names(node, "python", with_orig=True) == [("y", None, None)]
+

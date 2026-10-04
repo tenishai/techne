@@ -251,7 +251,8 @@ def _extract_import_names(node, language: str, *, with_orig: bool = False) -> li
         import a.b.c               -> ("c",    None)
         import json as j           -> ("j",    None)
         from pathlib import Path   -> ("Path", "pathlib")
-        from a.b import c as d     -> ("d",    "a.b")
+        from a.b import c as d     -> ("d",    None)   (see below; with_orig gives
+                                      ("d", "a.b", "c"))
 
     The ``None`` is load-bearing, not a placeholder: it is what distinguishes a
     module brought into scope from a name brought out of one. Before this pair
@@ -367,7 +368,10 @@ def _extract_import_names(node, language: str, *, with_orig: bool = False) -> li
                                 else orig_node.text.decode("utf-8", errors="replace")
                             )
                         names.append((alias, module if alias == orig else None))
-                        if orig is not None and alias != orig:
+                        # No module, no rename record: a relative `from . import
+                        # x as y` stays unbound, and `to_orig` never appears
+                        # without the module it is looked up in (Prudence, #1165).
+                        if module is not None and orig is not None and alias != orig:
                             renamed[alias] = (module, orig)
                     else:
                         dotted = child.child_by_field_name("name")
@@ -423,7 +427,7 @@ def _extract_import_names(node, language: str, *, with_orig: bool = False) -> li
                                         else bound
                                     )
                                     names.append((bound, module if bound == orig else None))
-                                    if bound != orig:
+                                    if module is not None and bound != orig:
                                         renamed[bound] = (module, orig)
                     elif sub.type == "namespace_import":
                         ident = next((c for c in sub.children if c.type == "identifier"), None)
