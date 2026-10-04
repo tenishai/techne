@@ -15,6 +15,12 @@ All notable changes to techne are documented here. Format loosely follows
   bare emit could see 4 of 70 pending sessions. The same fix applies to the API and
   to `techne_reflect_emit` without a `session_id`. The SessionStart nudge and
   per-turn recall keep their newest-five window.
+- **`techne init` no longer dies with a traceback on macOS when a parent of the
+  working directory is unreadable** (#1153). macOS's `getcwd()` fails with EACCES
+  there; Linux's does not. `init` now treats the directory as "no project": it skips
+  curated-memory detection, so `auto` posture resolves to observe, and says why.
+  `memory doctor` and `memory sync` exit 1 with the same explanation. Run them from
+  your project directory.
 
 ## [0.18.0] — 2026-09-30
 
