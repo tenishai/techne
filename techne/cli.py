@@ -1889,12 +1889,12 @@ def outbox_dead(ctx):
 def outbox_flush_sinks(ctx):
     """Flush pending rows to registered sinks (manual trigger)."""
     config = ctx.obj["config"]
-    from techne.core.archivist import ensure_registered_for
     from techne.sync.outbox import flush_sinks
+    from techne.sync.sinks import ensure_sinks_registered
 
-    # Register sink:archivist so a fresh CLI process can drain pending team-memory
-    # rows that failed immediate delivery (techne#346 review).
-    ensure_registered_for(config)
+    # Register sink:archivist and installed packages' sinks so a fresh CLI process
+    # can drain pending rows that failed immediate delivery (techne#346, #1172).
+    ensure_sinks_registered(config)
     summary = flush_sinks(config.db_path)
     if not summary:
         click.echo("No pending rows.")
@@ -1908,15 +1908,26 @@ def outbox_flush_sinks(ctx):
 def outbox_prune_orphans(ctx):
     """Mark pending rows for unregistered targets as dead."""
     config = ctx.obj["config"]
-    from techne.core.archivist import ensure_registered_for
     from techne.sync.outbox import prune_orphans
+    from techne.sync.sinks import ensure_sinks_registered
 
     # REGISTER FIRST, exactly as flush-sinks above does (#484). Sinks are
     # per-process state: in a fresh CLI process there are none, so every
     # sink:archivist_knowledge row looks like a row for an unregistered target and
     # prune_orphans marks the whole live backlog dead. The command's help is
     # accurate — the defect was that a registered lane presented as unregistered.
-    ensure_registered_for(config)
+    found = ensure_sinks_registered(config)
+    # A REFUSED OR FAILED entry point's target names are unknowable (the gate runs
+    # before import), so its pending rows cannot be told from true orphans. Pruning
+    # now would mark them dead for good; refusing leaves them pending (#1172).
+    blocked = sorted(found.refused) + sorted(found.failed)
+    if blocked:
+        raise click.ClickException(
+            "Not pruning: outbox sink entry point(s) were not loaded, so their "
+            f"pending rows would be marked dead: {', '.join(blocked)}. Allow them in "
+            "`sync.allowed_sinks` (or uninstall the package), then re-run. "
+            "`techne sinks list` shows why each was not loaded."
+        )
     pruned = prune_orphans(config.db_path)
     click.echo(f"Pruned {pruned} orphan row(s).")
 
@@ -2002,9 +2013,16 @@ def sinks_list(ctx):
     """Show all registered sinks: name, description, schema fields."""
     import dataclasses
 
-    from techne.sync.sinks import list_sinks
+    from techne.sync.sinks import ensure_sinks_registered, list_sinks
 
+    # Register first: in a fresh process the registry is empty, so listing without
+    # it showed nothing, not even the built-in Archivist lanes (#1172).
+    found = ensure_sinks_registered(ctx.obj["config"])
     registered = list_sinks()
+    for name in sorted(found.refused):
+        click.echo(f"  refused entry point {name} (not in sync.allowed_sinks)")
+    for name, why in sorted(found.failed.items()):
+        click.echo(f"  failed entry point {name}: {why}")
     if not registered:
         click.echo("No sinks registered.")
         return

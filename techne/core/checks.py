@@ -2535,6 +2535,66 @@ def _describe_destination(key: str, value, default=None) -> str:
 
 
 @register_check
+def check_sink_entry_points(config) -> CheckResult:
+    """Installed packages' outbox sinks: loaded, refused, failed, and stranded rows
+    (techne#1172).
+
+    Runs discovery the way a drain does, then names every pending ``sink:`` target
+    that still has no registered sink. A refused entry point with nothing waiting
+    is a deliberate policy and reads DORMANT; rows waiting on a sink nobody
+    registered read BROKEN, because they will never drain on their own and
+    ``prune-orphans`` will not touch them while an entry point is refused.
+    """
+    from techne.core.database import connect
+    from techne.sync.sinks import ensure_sinks_registered, get_sink
+
+    found = ensure_sinks_registered(config)
+    conn = connect(config.db_path)
+    try:
+        targets = [
+            r[0]
+            for r in conn.execute(
+                "SELECT DISTINCT target FROM outbox WHERE status = 'pending' "
+                "AND target LIKE 'sink:%' ORDER BY target"
+            )
+        ]
+    finally:
+        conn.close()
+    stranded = [t for t in targets if get_sink(t) is None]
+    parts = []
+    if found.loaded:
+        parts.append(f"loaded: {', '.join(sorted(found.loaded))}")
+    if found.refused:
+        parts.append(f"refused (not in sync.allowed_sinks): {', '.join(sorted(found.refused))}")
+    if found.failed:
+        parts.append("failed: " + "; ".join(f"{k} ({v})" for k, v in sorted(found.failed.items())))
+    if stranded:
+        parts.append(f"pending rows with no sink: {', '.join(stranded)}")
+    if stranded:
+        verdict = Verdict.BROKEN
+        remedy = (
+            "Allow the package's entry point in `sync.allowed_sinks`, or fix the one "
+            "that failed; `techne sinks list` shows each. The rows stay pending until then."
+        )
+    else:
+        verdict = Verdict.LIVE if found.loaded else Verdict.DORMANT
+        remedy = None
+    return CheckResult(
+        name="sinks:entry-points",
+        subsystem="outbox",
+        kind=Kind.FAIL_OPEN,
+        verdict=verdict,
+        evidence=(
+            f"entry points: {len(found.loaded)} loaded, {len(found.refused)} refused, "
+            f"{len(found.failed)} failed; pending sink targets: {len(targets)}, "
+            f"with no sink: {len(stranded)}"
+        ),
+        detail="; ".join(parts) or "no sink entry points installed",
+        remedy=remedy,
+    )
+
+
+@register_check
 def check_config_trust(config) -> CheckResult:
     """Is the file that SELECTS egress writable by the agent it constrains?
 

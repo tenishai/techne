@@ -163,6 +163,13 @@ class SyncConfig:
     #: originally sketched. Governed by the operator layer: `sync` is a whole-block
     #: entry in EGRESS_KEYS, so this sub-key is covered with it.
     allow_unlisted_adapter: bool = False
+    #: Outbox sinks from installed packages (`techne.outbox_sinks` entry points,
+    #: techne#1172) are refused unless named here, by ENTRY-POINT name, or unless
+    #: `allow_unlisted_sinks` is set. A sink receives outbox payloads, so loading
+    #: one is the same egress decision as an adapter. Covered by the operator
+    #: layer with the rest of the `sync` block.
+    allowed_sinks: list[str] = field(default_factory=list)
+    allow_unlisted_sinks: bool = False
     # `auth`, `audience` and an `extra` catch-all for other `sync:` keys lived here
     # until techne#1074 and reached nothing: every `load_adapter` call passes only
     # `url`, `path` and `allow_unlisted`. A config.yaml that still carries them
@@ -1201,6 +1208,8 @@ class Config:
                 url=s.get("url", ""),
                 path=s.get("path", ""),
                 allow_unlisted_adapter=bool(s.get("allow_unlisted_adapter", False)),
+                allowed_sinks=[str(n) for n in (s.get("allowed_sinks") or [])],
+                allow_unlisted_sinks=bool(s.get("allow_unlisted_sinks", False)),
             )
 
         if "threads" in raw and isinstance(raw["threads"], dict):
@@ -1691,6 +1700,10 @@ class Config:
         # built-in posture (techne#389).
         if self.sync.allow_unlisted_adapter:
             data["sync"]["allow_unlisted_adapter"] = True
+        if self.sync.allowed_sinks:
+            data["sync"]["allowed_sinks"] = list(self.sync.allowed_sinks)
+        if self.sync.allow_unlisted_sinks:
+            data["sync"]["allow_unlisted_sinks"] = True
         # DEFAULT PATHS ARE NOT WRITTEN (techne#947). `techne init` is a load->save
         # round-trip, and writing the resolved default pinned this home's absolute
         # path into the file: a copied home kept pointing at the original store.
