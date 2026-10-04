@@ -5,6 +5,20 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Added
+
+- **Outbox sinks from installed packages** (#1172). A package can contribute sinks
+  through the `techne.outbox_sinks` entry-point group: each entry point is a zero-arg
+  callable returning an `OutboxSink` or a list of them. They are refused by default,
+  like sync adapters: allow one by entry-point name in `sync.allowed_sinks`, or set
+  `sync.allow_unlisted_sinks: true`. Every drain registers them (`outbox flush-sinks`,
+  session end and the lifecycle flushes), so their rows no longer wait for a process
+  that happened to import the package. `outbox prune-orphans` refuses to run while an
+  entry point is refused or failed, because it would mark that sink's pending rows dead.
+  `techne sinks list` now lists sinks in a fresh process, along with refused and failed
+  entry points, and `techne doctor` adds `sinks:entry-points`, which names any pending
+  sink rows that have no sink.
+
 ### Fixed
 
 - **`techne reflect emit` with no session id reaches every pending session, not just
