@@ -756,6 +756,21 @@ def test_an_fts_matched_row_shows_its_span_on_explicit_search(db, monkeypatch):
     assert off[0]["content"] == _DEEP[: search_mod._ROW_CHAR_CAP], "off: the head cut, as before"
 
 
+@pytest.mark.parametrize("stop", ["(the", "The,", '"the"'])
+def test_a_stopword_with_punctuation_is_still_a_stopword(db, monkeypatch, stop):
+    """Prudence, PR #1161: `(the` passed the raw-token check, and FTS highlighted
+    the `the` before the term, so the row kept its head cut."""
+    (rid,) = _obs(db, [_DEEP])
+    monkeypatch.setattr(search_mod, "_phrase_seat_row", lambda *_a, **_k: None)
+
+    page = search(
+        db, f"{stop} kubeconfig", table="all", limit=10, use_vectors=False, phrase_seat=True
+    )
+
+    assert [r["id"] for r in page] == [rid]
+    assert "kubeconfig rotated" in page[0]["content"]
+
+
 def test_only_lexically_matched_observation_rows_are_windowed(db):
     """A vec-only row has nothing saying its text holds a query term; a knowledge
     row would break federation's dedup (#1146 r1); a row whose span is already

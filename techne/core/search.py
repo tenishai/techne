@@ -2018,10 +2018,11 @@ def _window_matched_row(conn: sqlite3.Connection, row: dict, match: str) -> None
     row is), then `_WINDOW_SEP`, then a window over the span. The window starts up
     to a quarter of its width before the span: less when that keeps the span's end
     in view, at the span itself when the span is wider than the window, and earlier
-    when the span is near the row's end. The total width is unchanged. FTS5 `highlight()` finds the span, so porter stemming
-    applies exactly as it did in the MATCH that put the row there. A phrase MATCH
-    marks the phrase as one span; an OR of terms marks each term, so there the
-    window anchors on the first matched term. The head's
+    when the span is near the row's end. The total width is unchanged. FTS5
+    `highlight()` finds the span, so porter stemming applies exactly as it did in
+    the MATCH that put the row there. A phrase MATCH marks the phrase as one span;
+    an OR of terms marks each term, so there the window anchors on the first
+    matched term. The head's
     length goes in `content_head`, the window's offsets in `content_window` and the
     full length in `content_chars_total`. Any SQLite error, or a span only in
     `tags`/`kind`, leaves the row as it was.
@@ -2118,7 +2119,13 @@ def _window_page(
     phrase_key = None
     if cand is not None and cand.get("_phrase_match"):
         phrase_key = (cand["source_table"], cand["id"])
-    terms = [t for t in _fts_terms(query) if t.lower() not in _PHRASE_STOP]
+    # Normalized as `_phrase_seat_row` does: `(the` or `The,` is still a stopword,
+    # and FTS would highlight the `the` in the head (Prudence, PR #1161).
+    terms = [
+        t
+        for t in _fts_terms(query)
+        if t.replace('""', '"').strip(_IDENTIFIER_STRIP).lower() not in _PHRASE_STOP
+    ]
     lexical = " OR ".join(f'"{t}"' for t in terms)
     for r in page:
         if (r.get("source_table"), r.get("id")) == phrase_key:
