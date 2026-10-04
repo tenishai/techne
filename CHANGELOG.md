@@ -25,8 +25,9 @@ All notable changes to techne are documented here. Format loosely follows
   (#1147). Observation rows are cut to their first 500 chars, so a row FTS matched on
   a term past that cut showed nothing the query asked for: 4 of 16 such rows on the
   gold-v2 queries. 0.18.0 fixed this for the phrase-seated row only. Now every
-  observation row FTS matched keeps its first line (the tool and command), then ` … `,
-  then a window over the first matched term, at the same width, with
+  observation row FTS matched on a query term outside the stopwords keeps its first
+  line (the tool and command), then ` … `, then a window over the first matched term,
+  at the same width, with
   `content_head`, `content_window` and `content_chars_total` saying what is shown. The
   phrase-seated row takes the same shape, replacing the 0.18.0 `…`-prefixed window.
   On the 2026-09-28 snapshot every lexical row now shows a query term (16/16, 25/25

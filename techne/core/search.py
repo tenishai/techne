@@ -2018,7 +2018,9 @@ def _window_matched_row(conn: sqlite3.Connection, row: dict, match: str) -> None
     row is), then `_WINDOW_SEP`, then a window over the span, starting a quarter of
     its width before it, or earlier when the span is near the row's end. The total
     width is unchanged. FTS5 `highlight()` finds the span, so porter stemming
-    applies exactly as it did in the MATCH that put the row there. The head's
+    applies exactly as it did in the MATCH that put the row there. A phrase MATCH
+    marks the phrase as one span; an OR of terms marks each term, so there the
+    window anchors on the first matched term. The head's
     length goes in `content_head`, the window's offsets in `content_window` and the
     full length in `content_chars_total`. Any SQLite error, or a span only in
     `tags`/`kind`, leaves the row as it was.
@@ -2053,10 +2055,16 @@ def _window_matched_row(conn: sqlite3.Connection, row: dict, match: str) -> None
     if end <= width:
         return
     newline = full.find("\n")
-    head = min(width // 4, newline) if newline > 0 else width // 4
+    head = min(width // 4, newline) if newline >= 0 else width // 4
     span = width - head - len(_WINDOW_SEP)
     # Fill the width when the span is near the end of the row.
-    lo = max(head, min(start - span // 4, len(full) - span))
+    lo = min(start - span // 4, len(full) - span)
+    if lo <= head:
+        # Nothing would be elided between head and window, so `_WINDOW_SEP` would
+        # claim a gap that is not there. Only a single token longer than the window
+        # gets here (it starts near the head and ends past the cut); the head cut
+        # shows as much of it as a window could.
+        return
     window = full[lo : lo + span]
     row["content"] = full[:head] + _WINDOW_SEP + window
     row["content_head"] = head
@@ -2089,7 +2097,8 @@ def _window_page(
     observation row FTS matched (`match_source` "fts" or "fts+vec", which takes in
     the identifier head and the lexical tail) is windowed on an OR of the query's
     terms outside `_PHRASE_STOP`, so a stopword near the top does not count as
-    the span. ``fts_page`` says the whole page came from `search_fts` (an empty
+    the span. A row FTS matched only through a stopword (the OR fallback keeps
+    them) has no such term and keeps its head cut. ``fts_page`` says the whole page came from `search_fts` (an empty
     vector channel or ``use_vectors=False``), whose rows carry no `match_source`
     but are all lexical. Vec-only rows keep their head cut: nothing says their
     text holds a query term.

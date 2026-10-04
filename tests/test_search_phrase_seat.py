@@ -784,6 +784,31 @@ def test_only_lexically_matched_observation_rows_are_windowed(db):
     assert ["content_window" in r for r in page] == [False, True, True, False, False]
 
 
+def test_a_row_opening_with_a_newline_has_an_empty_head(db):
+    """Temperance, PR #1161: the head is the first line, and here it is empty."""
+    text = "\n" + _DEEP
+    (rid,) = _obs(db, [text])
+
+    row = _window(db, rid, '"kubeconfig"', text[: search_mod._ROW_CHAR_CAP])
+
+    assert row["content_head"] == 0
+    assert row["content"].startswith(search_mod._WINDOW_SEP)
+    assert "kubeconfig rotated" in row["content"]
+    assert len(row["content"]) == search_mod._ROW_CHAR_CAP
+
+
+def test_a_token_too_long_to_window_keeps_the_head_cut(db):
+    """Temperance, PR #1161: a window starting where the head ends would put the
+    separator inside contiguous text. Only a token longer than the window does it."""
+    text = "Ran: dump\n" + "x" * 60 + " " + "k" * 600 + " tail"
+    (rid,) = _obs(db, [text])
+    shown = text[: search_mod._ROW_CHAR_CAP]
+
+    row = _window(db, rid, '"' + "k" * 600 + '"', shown)
+
+    assert row == {"source_table": "observation", "id": rid, "content": shown}
+
+
 def test_window_page_is_a_no_op_when_disabled(db):
     (rid,) = _obs(db, [_DEEP])
     row = {"source_table": "observation", "id": rid, "content": _DEEP[:500], "match_source": "fts"}
