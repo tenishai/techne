@@ -206,8 +206,9 @@ By default recall consults the four built-in rungs in ladder order: `memory`,
 read-only sources through the `techne.recall_sources` entry-point group (each entry
 point is a zero-arg callable returning a `RecallSource`: `name`, `search(topic, limit)`,
 `health()`, and optionally `escalation = True` for reference material). Those are
-refused unless allowed (the allow-list keys belong to the operator layer), and
-config.yaml decides the order:
+refused unless allowed (the allow-list keys, `recall.allowed_sources` and
+`recall.allow_unlisted_sources`, belong to the operator layer), and config.yaml decides
+the order:
 
 ```yaml
 recall:
@@ -218,6 +219,7 @@ recall:
     - archivist:remote
     - {name: librarian:remote, fallback: true}
   allowed_sources: [remote-lib]     # entry-point names; refused by default
+  allow_unlisted_sources: false     # true loads every installed source
   fill: 10            # a fallback source runs only if the sources before it gave fewer rows
   source_limit: 5     # rows asked of each plugged-in source
   source_timeout_s: 3.0
@@ -250,9 +252,26 @@ inside the bounded call, so a slow constructor or a backend that is down reports
 `unavailable` instead of blocking recall, and recall logs that once per process.
 
 Rows from plugged-in sources carry `origin`, `recall_source` and `external: true`, and
-their text is credential-redacted. The two allow-list keys are governed by the
-operator layer. `techne doctor` reports `recall:sources`, which is broken when `order`
+their text is credential-redacted. The two allow-list keys, `recall.allowed_sources` and
+`recall.allow_unlisted_sources`, are governed by the operator layer; `recall.order` and
+the bounds are not. `techne doctor` reports `recall:sources`, which is broken when `order`
 names a source recall can't use.
+
+### Fields on a search row
+
+Rows from `techne_search` and `techne_recall` carry their text in `content`, which is often
+cut. These fields say what was cut:
+
+- `content_chars_total`: the row's full length before any cut, on knowledge rows and on
+  windowed observation rows. Compare it with the length of `content` to see how much is
+  missing.
+- `content_head`, `content_window`, `content_span`: set only on an observation row that a
+  lexical match put on the page for text past the normal cut, in explicit search
+  (`techne_search`, `techne_recall`, `techne search`). Its `content` is then the
+  row's first line (at most a quarter of the width, `content_head` chars), then ` … `, then a
+  window over the match. `content_window` is `[start, end)` of that window and
+  `content_span` is `[start, end)` of the first matched span, both as offsets into the full
+  row. Knowledge and thread rows are never windowed.
 
 
 ## Patterns (architect)
