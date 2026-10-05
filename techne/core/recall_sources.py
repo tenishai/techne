@@ -144,19 +144,36 @@ class AdapterSource:
     team backend while recall never read back from it. Wrapping it as a source puts
     that read-back under #1170's order, fallback and timeout rules rather than
     adding a second recall mechanism beside them.
+
+    THE ADAPTER IS BUILT LAZILY, inside the first `health()`, which `query_source`
+    runs in its bounded call. A sync adapter's constructor never had to be cheap (it
+    ran in hooks and the CLI), so constructing it on the recall thread let a slow
+    one block the MCP server; a constructor that raises now reaches the caller as
+    an ordinary `unavailable` with its real text, logged once, and is retried on the
+    next recall (Prudence, PR #1175).
+
+    Rows carry `source` (the `KnowledgeEntry.source` label) and `target`, not a
+    `source_url`: a team backend's entry names who wrote it, not a page to follow.
     """
 
     name = TEAM
     escalation = False
 
-    def __init__(self, adapter) -> None:
-        self._adapter = adapter
+    def __init__(self, cls: type, kwargs: dict) -> None:
+        self._cls = cls
+        self._kwargs = kwargs
+        self._adapter = None
+
+    def _get(self):
+        if self._adapter is None:
+            self._adapter = self._cls(**self._kwargs)
+        return self._adapter
 
     def search(self, topic: str, limit: int) -> list[dict]:
         from techne.sync.adapter import SyncQuery
 
         rows = []
-        for e in self._adapter.pull(SyncQuery(query=topic, limit=limit)) or []:
+        for e in self._get().pull(SyncQuery(query=topic, limit=limit)) or []:
             rows.append(
                 {
                     "type": "knowledge",
@@ -165,40 +182,49 @@ class AdapterSource:
                     "tags": e.tags,
                     "confidence": e.confidence,
                     "source": e.source,
+                    "target": e.target,
                 }
             )
         return rows
 
     def health(self) -> bool:
-        return bool(self._adapter.health())
+        return bool(self._get().health())
 
 
-#: (adapter, url, path) -> the wrapped adapter, or None when it cannot pull.
-_TEAM: dict[tuple[str, str, str], AdapterSource | None] = {}
+#: (adapter, url, path, allow_unlisted) -> the `team` source, or None when the
+#: adapter's class does not declare `supports_pull`. Process-lived: the MCP server
+#: loads its Config once, so a config change needs a restart either way.
+_TEAM: dict[tuple, AdapterSource | None] = {}
+#: Same key -> why the adapter CLASS could not be loaded (refused by the #389 gate,
+#: unknown name, import error). Kept for the process, like `_FAILED`; a restart retries.
+_TEAM_ERROR: dict[tuple, str] = {}
 
 
 def team_source(config: Config) -> AdapterSource | None:
-    """The `team` source, if the configured sync adapter opts in to read-back with
-    ``supports_pull = True``. The adapter is loaded through `load_adapter`, so the
-    #389 gate on unlisted adapters applies unchanged; techne's own `noop` and
-    `filesystem` adapters do not opt in, so a default install gains no source."""
-    key = (config.sync.adapter, config.sync.url, config.sync.path)
+    """The `team` source, if the configured sync adapter's CLASS declares
+    ``supports_pull = True``. The class comes from `adapter_class`, the same #389
+    gate `load_adapter` applies, checked before import; the instance is built later,
+    inside the bounded call. techne's own `noop` and `filesystem` do not declare it,
+    so a default install gains no source."""
+    key = (
+        config.sync.adapter,
+        config.sync.url,
+        config.sync.path,
+        bool(config.sync.allow_unlisted_adapter),
+    )
     if key in _TEAM:
         return _TEAM[key]
     src: AdapterSource | None = None
     try:
-        from techne.sync.adapter import load_adapter
+        from techne.sync.adapter import adapter_class
 
-        adapter = load_adapter(
-            config.sync.adapter,
-            allow_unlisted=config.sync.allow_unlisted_adapter,
-            url=config.sync.url,
-            path=config.sync.path,
-        )
-        if getattr(adapter, "supports_pull", False) is True:
-            src = AdapterSource(adapter)
-    except Exception as exc:  # noqa: BLE001 — the push side reports adapter faults
-        log.debug("recall: sync adapter %r not usable as a source: %s", key[0], exc)
+        cls = adapter_class(config.sync.adapter, allow_unlisted=key[3])
+        if getattr(cls, "supports_pull", False) is True:
+            kwargs = {k: v for k, v in {"url": key[1], "path": key[2]}.items() if v}
+            src = AdapterSource(cls, kwargs)
+    except Exception as exc:  # noqa: BLE001 — reported through the tier report and doctor
+        _TEAM_ERROR[key] = f"{type(exc).__name__}: {exc}"
+        _degraded(TEAM, f"the sync adapter could not be loaded: {_TEAM_ERROR[key]}")
     _TEAM[key] = src
     return src
 
@@ -356,7 +382,10 @@ def assemble(
 
 def _why_missing(name: str, found: SourceDiscovery, config: Config) -> str:
     if name == TEAM:
-        return "the configured sync adapter does not support pull (supports_pull = True)"
+        err = next(iter(_TEAM_ERROR.values()), None) if _TEAM_ERROR else None
+        if err:
+            return f"the sync adapter could not be loaded ({err}); a restart retries"
+        return "the configured sync adapter does not declare supports_pull = True"
     if not config.recall.allowed_sources and not config.recall.allow_unlisted_sources:
         return "not allowed: recall.allowed_sources is empty"
     if name in found.refused:

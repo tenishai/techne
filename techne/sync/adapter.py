@@ -152,7 +152,15 @@ def load_adapter(name: str, *, allow_unlisted: bool = False, **kwargs) -> SyncAd
     """
     # Drop unset config so minimal adapters can keep a no-arg __init__.
     kwargs = {k: v for k, v in kwargs.items() if v not in (None, "")}
+    return adapter_class(name, allow_unlisted=allow_unlisted)(**kwargs)
 
+
+def adapter_class(name: str, *, allow_unlisted: bool = False) -> type:
+    """The adapter CLASS for *name*, behind the same gate as `load_adapter`, without
+    constructing it (techne#1171): recall reads `supports_pull` off the class and
+    builds the instance inside its bounded call, so a slow or failing constructor
+    cannot block the recall thread. The unlisted-adapter check still runs before
+    `ep.load()`, since importing the module is already code execution."""
     # Check built-in adapters first
     builtins = {
         "noop": "techne.sync.noop:NoopAdapter",
@@ -164,8 +172,7 @@ def load_adapter(name: str, *, allow_unlisted: bool = False, **kwargs) -> SyncAd
         import importlib
 
         mod = importlib.import_module(module_path)
-        cls = getattr(mod, class_name)
-        return cls(**kwargs)
+        return getattr(mod, class_name)
 
     # Check entry points. REFUSED BY DEFAULT — see the docstring. The check sits
     # BEFORE `ep.load()` on purpose: `load()` imports the module, and import-time
@@ -185,7 +192,6 @@ def load_adapter(name: str, *, allow_unlisted: bool = False, **kwargs) -> SyncAd
                     "Under a locked operator layer that key is the operator's, not the "
                     "agent's, because `sync` is governed as a whole block."
                 )
-            cls = ep.load()
-            return cls(**kwargs)
+            return ep.load()
 
     raise ValueError(f"Unknown sync adapter: '{name}'. Available: {list(builtins.keys())}")

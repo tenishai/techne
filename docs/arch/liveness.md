@@ -1,7 +1,7 @@
 ---
 card: arch-card:techne-liveness
 updated: 2026-10-04
-anchor: techne/core/checks.py sha=f5e403bf37d7a0ef5a953a5a2dedcef0c5410401
+anchor: techne/core/checks.py sha=c966d4782770e8ec831cbb5d92e9f43779acacf7
 ---
 # liveness — subsystem health checks (techne#468/#469)
 
@@ -98,7 +98,7 @@ FAIL-MODES:
 
 **PER-LANE CONSUMER (techne#714 r2).** `check_outbox_targets` declares TWO lanes with TWO different drains: `sync:` is drained by `flush(adapter)`, `sink:` by `flush_sinks`. One predicate across both re-made the #469 r5 Critical on the never-enqueued branch — an eight-week-dead knowledge lane on a store-bound box with the typical `noop` adapter read DORMANT/ok=True. A sink lane is DECLARED only because something feeds it, so it has a consumer by construction. `TestNoopExcusesOnlySyncLanes` pins the pending-backlog branch; `TestPerLaneConsumer` now pins this one, in both directions.
 
-**RECALL SOURCES (techne#1170).** `check_recall_sources` runs `core.recall_sources.discover_sources` (the gated `techne.recall_sources` entry points) and checks `recall.order` against what loaded. A name the order lists that is unknown, refused or failed reads BROKEN, because every recall then reports that source `unavailable`; a refused entry point the order does not name is a deliberate policy (DORMANT); loaded sources read LIVE. Like `sinks:entry-points`, it imports allowed third-party code to answer the question recall itself would face.
+**RECALL SOURCES (techne#1170).** `check_recall_sources` runs `core.recall_sources.discover_sources` (the gated `techne.recall_sources` entry points) and checks `recall.order` against what loaded. A name the order lists that is unknown, refused or failed reads BROKEN, because every recall then reports that source `unavailable`; a refused entry point the order does not name is a deliberate policy (DORMANT); loaded sources read LIVE. Like `sinks:entry-points`, it imports allowed third-party code to answer the question recall itself would face. A `team` entry the order names but recall cannot use gets its own remedy, pointing at the sync adapter (`sync.adapter`, `sync.allow_unlisted_adapter`, `supports_pull`), because `team` is the adapter's read-back and the allow-list does not govern it (techne#1171).
 
 **INSTALLED PACKAGES' SINKS (techne#1172).** `check_sink_entry_points` runs the same `sync.sinks.ensure_sinks_registered` a drain runs (the built-in Archivist lanes, then the gated `techne.outbox_sinks` entry points) and then names every pending `sink:` target that still has no registered sink. Rows waiting on a sink nobody registered read BROKEN, because they never drain on their own. The remedy branches on who could own them: while an entry point is refused or failed, bare `outbox prune-orphans` refuses (a refused entry point's target names are unknowable before import, so its rows cannot be told from orphans) and the remedy is to allow or fix it, or to name a dead target with `prune-orphans --target`; with nothing refused or failed, the rows are true orphans and the remedy is plain `prune-orphans` (Prudence, PR #1173). A refused entry point with nothing waiting is a deliberate policy and reads DORMANT; a loaded one reads LIVE. Doctor registers sinks as a side effect here, which the other checks above deliberately do not; this one exists to answer the drain's question, so it has to stand the drain's registry up.
 

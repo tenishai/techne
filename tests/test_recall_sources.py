@@ -47,6 +47,7 @@ def _fresh(monkeypatch):
     monkeypatch.setattr(rs, "_WARNED", set())
     monkeypatch.setattr(rs, "_IN_FLIGHT", {})
     monkeypatch.setattr(rs, "_TEAM", {})
+    monkeypatch.setattr(rs, "_TEAM_ERROR", {})
 
 
 def _install(monkeypatch, *eps):
@@ -581,9 +582,13 @@ class PullAdapter:
 
 
 def _adapter(monkeypatch, adapter):
+    """Serve `adapter` as the configured sync adapter: its class is what
+    `adapter_class` returns, and constructing that class yields `adapter`."""
     import techne.sync.adapter as ad
 
-    monkeypatch.setattr(ad, "load_adapter", lambda name, **kw: adapter)
+    cls = type("Served", (), {"supports_pull": adapter.supports_pull})
+    cls.__new__ = lambda klass, **kw: adapter
+    monkeypatch.setattr(ad, "adapter_class", lambda name, **kw: cls)
 
 
 def test_a_pull_capable_adapter_feeds_recall_as_team(cfg, monkeypatch):
@@ -620,6 +625,7 @@ def test_the_builtin_adapters_add_no_team_source(cfg, monkeypatch):
         cfg.sync.adapter = name
         cfg.sync.path = str(cfg.data_dir / "sync")
         monkeypatch.setattr(rs, "_TEAM", {})
+        monkeypatch.setattr(rs, "_TEAM_ERROR", {})
         assert rs.team_source(cfg) is None
         assert _names(_recall(cfg)) == [
             "memory",
@@ -640,7 +646,7 @@ def test_an_adapter_that_does_not_opt_in_is_not_a_source(cfg, monkeypatch):
 
     rung = _tier(_recall(cfg), "team")
 
-    assert rung["state"] == "unavailable" and "does not support pull" in rung["detail"]
+    assert rung["state"] == "unavailable" and "does not declare supports_pull" in rung["detail"]
 
 
 def test_an_unreachable_backend_degrades_and_logs_once(cfg, monkeypatch, caplog):
@@ -666,3 +672,93 @@ def test_a_plugged_in_source_cannot_claim_the_team_name(cfg, monkeypatch):
     found = rs.discover_sources(cfg)
 
     assert "reserved" in found.failed["imposter"]
+
+
+# --- load failures and construction are reported truthfully and bounded (PR #1175) -------
+
+
+def test_a_refused_adapter_is_reported_as_a_load_failure_and_warned_once(cfg, monkeypatch, caplog):
+    import techne.sync.adapter as ad
+
+    def refuse(name, **kw):
+        raise ValueError("unlisted adapters are refused by default (techne#389)")
+
+    _install(monkeypatch)
+    monkeypatch.setattr(ad, "adapter_class", refuse)
+    cfg.sync.adapter = "teamstore"
+    cfg.recall.order = [RecallOrderEntry("memory"), RecallOrderEntry("team")]
+
+    with caplog.at_level("WARNING", logger="techne.core.recall_sources"):
+        first = _recall(cfg)
+        _recall(cfg)
+
+    rung = _tier(first, "team")
+    assert rung["state"] == "unavailable"
+    assert "could not be loaded" in rung["detail"] and "techne#389" in rung["detail"]
+    assert "supports_pull" not in rung["detail"]
+    assert len([r for r in caplog.records if "'team' unavailable" in r.getMessage()]) == 1
+
+
+def test_a_constructor_that_fails_once_is_retried(cfg, monkeypatch):
+    import techne.sync.adapter as ad
+
+    built = []
+    backend = PullAdapter()
+
+    class Flaky:
+        supports_pull = True
+
+        def __new__(cls, **kw):
+            built.append(1)
+            if len(built) == 1:
+                raise ConnectionError("backend not up yet")
+            return backend
+
+    _install(monkeypatch)
+    monkeypatch.setattr(ad, "adapter_class", lambda name, **kw: Flaky)
+    cfg.sync.adapter = "teamstore"
+
+    first, second = _recall(cfg), _recall(cfg)
+
+    assert _tier(first, "team")["state"] == "unavailable"
+    assert "backend not up yet" in _tier(first, "team")["detail"]
+    assert _tier(second, "team")["state"] == "hit"
+
+
+def test_a_slow_constructor_cannot_block_recall(cfg, monkeypatch):
+    import techne.sync.adapter as ad
+
+    class Slow:
+        supports_pull = True
+
+        def __new__(cls, **kw):
+            time.sleep(2.0)
+            return PullAdapter()
+
+    _install(monkeypatch)
+    monkeypatch.setattr(ad, "adapter_class", lambda name, **kw: Slow)
+    cfg.sync.adapter = "teamstore"
+    cfg.recall.source_timeout_s = 0.2
+
+    t0 = time.monotonic()
+    out = _recall(cfg)
+
+    assert time.monotonic() - t0 < 1.5
+    assert _tier(out, "team")["state"] == "unavailable"
+
+
+def test_doctor_points_team_at_the_sync_adapter_not_the_allow_list(cfg, monkeypatch):
+    from techne.core.checks import check_recall_sources
+
+    class PushOnly(PullAdapter):
+        supports_pull = False
+
+    _install(monkeypatch)
+    _adapter(monkeypatch, PushOnly())
+    cfg.sync.adapter = "pushonly"
+    cfg.recall.order = [RecallOrderEntry("team")]
+
+    result = check_recall_sources(cfg)
+
+    assert result.verdict.value == "broken"
+    assert "supports_pull" in result.remedy and "allowed_sources" not in result.remedy

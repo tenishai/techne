@@ -241,9 +241,13 @@ Each source reports one of these states:
 
 A sync adapter that can read back from its team backend joins as the source `team`.
 It opts in by declaring `supports_pull = True`. techne's own `noop` and `filesystem`
-adapters don't, so a default install gains nothing, and the adapter is gated as
-before by `sync.allow_unlisted_adapter`. Name `team` in `recall.order` to place it.
-A backend that is down reports `unavailable`, and recall logs that once per process.
+adapters don't, so a default install gains nothing. `team` is **not** governed by
+`recall.allowed_sources`: you already admitted the adapter's code through
+`sync.adapter` (and `sync.allow_unlisted_adapter` for a non-built-in). With no
+`order` set, a pull-capable adapter's `team` is appended after the built-in sources;
+to keep it out of recall, set an `order` without it. The adapter is constructed
+inside the bounded call, so a slow constructor or a backend that is down reports
+`unavailable` instead of blocking recall, and recall logs that once per process.
 
 Rows from plugged-in sources carry `origin`, `recall_source` and `external: true`, and
 their text is credential-redacted. The two allow-list keys are governed by the
