@@ -206,7 +206,8 @@ By default recall consults the four built-in rungs in ladder order: `memory`,
 read-only sources through the `techne.recall_sources` entry-point group (each entry
 point is a zero-arg callable returning a `RecallSource`: `name`, `search(topic, limit)`,
 `health()`, and optionally `escalation = True` for reference material). Those are
-refused unless allowed, and the operator decides the order:
+refused unless allowed (the allow-list keys belong to the operator layer), and
+config.yaml decides the order:
 
 ```yaml
 recall:
@@ -223,12 +224,19 @@ recall:
 ```
 
 Results come back grouped by source in that order, and `tiers` reports each source
-in the same order. A source has one of four states:
-- `skipped`: a fallback source that wasn't needed;
-- `excluded`: a built-in left out of `order`;
-- `unavailable`: a plugged-in source that was refused, failed to load, timed out or
-  reported unhealthy;
-- otherwise `hit` or `empty`.
+in the same order. Every source, built-in or plugged in, is searched only when the
+order reaches it: a source left out of `order` and a fallback that isn't needed are
+never searched. Setting an order replaces the default merge, which interleaves local
+and remote rows by match quality; with an order, an earlier source's rows always come
+first.
+
+Each source reports one of these states:
+- `hit` or `empty`: it was searched;
+- `skipped`: a fallback that wasn't needed, so it wasn't searched;
+- `excluded`: a built-in left out of `order`, not searched;
+- `unavailable`: a plugged-in source that wasn't allowed, failed to load, timed out,
+  reported unhealthy, or whose previous call is still running;
+- `unconfigured`: a built-in archivist rung with nothing configured behind it.
 
 Rows from plugged-in sources carry `origin`, `recall_source` and `external: true`, and
 their text is credential-redacted. The two allow-list keys are governed by the

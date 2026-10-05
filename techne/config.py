@@ -1448,7 +1448,8 @@ class Config:
             cfg.recall = RecallConfig(
                 order=order,
                 allowed_sources=[str(n) for n in (r.get("allowed_sources") or [])],
-                allow_unlisted_sources=bool(r.get("allow_unlisted_sources", False)),
+                # Only a real `true` opens an ingress gate: bool("false") is True.
+                allow_unlisted_sources=r.get("allow_unlisted_sources") is True,
                 fill=int(r.get("fill", _rd.fill)),
                 source_limit=int(r.get("source_limit", _rd.source_limit)),
                 source_timeout_s=float(r.get("source_timeout_s", _rd.source_timeout_s)),

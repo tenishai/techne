@@ -367,3 +367,13 @@ def _no_model_download_on_init(request, monkeypatch):
     if request.node.get_closest_marker("real_warm_vectors"):
         return
     monkeypatch.setattr("techne.cli._warm_vectors", lambda config: None, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_installed_recall_sources(monkeypatch):
+    """`techne_recall` and doctor discover `techne.recall_sources` entry points
+    (techne#1170), so a source package installed on the developer's box would change
+    what the suite sees. Pin the group empty; discovery tests install their fakes."""
+    import techne.core.recall_sources as rs_mod
+
+    monkeypatch.setattr(rs_mod, "entry_points", lambda group: [])

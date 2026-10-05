@@ -43,6 +43,9 @@ class FakeEntryPoint:
 @pytest.fixture(autouse=True)
 def _fresh(monkeypatch):
     monkeypatch.setattr(rs, "_LOADED", {})
+    monkeypatch.setattr(rs, "_FAILED", {})
+    monkeypatch.setattr(rs, "_WARNED", set())
+    monkeypatch.setattr(rs, "_IN_FLIGHT", {})
 
 
 def _install(monkeypatch, *eps):
@@ -84,14 +87,29 @@ def _tier(out, name):
 
 
 def test_no_order_and_no_source_takes_the_old_path(cfg, monkeypatch):
-    from techne.mcp_server import _fold_in_documents, _recall_rows
+    import techne.mcp_server as srv
 
     _install(monkeypatch)
-    rows = [{"id": 1, "content": "x"}]
-    got, kw = _recall_rows(cfg, "t", list(rows), "archivist")
-    assert kw == {}
-    assert got == _fold_in_documents(cfg, "t", [dict(r) for r in rows])
-    assert _names(_recall(cfg)) == ["memory", "archivist:local", "archivist:remote", "librarian"]
+
+    def _never(*a, **k):
+        raise AssertionError("the ordered path must not run without an order or a source")
+
+    monkeypatch.setattr(srv, "_ordered_recall", _never)
+    out = _recall(cfg)
+
+    assert _names(out) == ["memory", "archivist:local", "archivist:remote", "librarian"]
+    assert all("recall_source" not in r for r in out["search_results"])
+
+
+def test_the_idle_recall_path_does_not_scan_entry_points(cfg, monkeypatch):
+    """Nothing can be allowed, so the 9-27 ms scan is skipped on the recall path."""
+    scans = []
+    monkeypatch.setattr(rs, "entry_points", lambda group: scans.append(group) or [])
+
+    _recall(cfg)
+    assert scans == []
+    rs.discover_sources(cfg)  # doctor's call keeps scanning
+    assert scans == [rs.SOURCE_ENTRY_POINT_GROUP]
 
 
 def test_an_unlisted_source_is_refused_and_never_imported(cfg, monkeypatch):
@@ -313,3 +331,128 @@ def test_a_hand_written_recall_block_survives_a_save(tmp_path):
         ("librarian:remote", True),
     ]
     assert again.recall.allowed_sources == ["remote-lib"] and again.recall.fill == 4
+
+
+# --- the federation branch of the ordered path (Prudence, PR #1174) ---------------------
+
+
+def _federated(cfg, monkeypatch, remote_rows):
+    """A configured remote archivist whose fan-out returns `remote_rows`, and a log
+    of every fan-out call."""
+    import techne.core.federation as fed
+    import techne.mcp_server as srv
+
+    calls = []
+
+    def fan_out(db, conns, topic, limit=10, local_results=None, **kw):
+        calls.append(topic)
+        return local_results, [dict(r, _store="peer", _role="team") for r in remote_rows]
+
+    monkeypatch.setattr(fed, "fan_out_search", fan_out)
+    monkeypatch.setattr(srv, "_effective_connections", lambda c: {"peer": object()})
+    return calls
+
+
+@pytest.fixture
+def busy_cfg(cfg):
+    from techne.core.knowledge import store
+
+    for i in range(12):
+        store(cfg.db_path, f"deploy runbook kafka note {i}", type="fact", source="t")
+    return cfg
+
+
+def test_an_excluded_remote_costs_no_fan_out_and_no_memory_seats(busy_cfg, monkeypatch):
+    """Probe from Prudence's review: 12 local matches came back as 5, because the
+    merged page was cut to 10 before the order dropped the remote rows."""
+    _install(monkeypatch)
+    calls = _federated(
+        busy_cfg, monkeypatch, [{"id": 900 + i, "content": "remote"} for i in range(10)]
+    )
+    busy_cfg.recall.order = [RecallOrderEntry("memory"), RecallOrderEntry("librarian")]
+
+    out = _recall(busy_cfg)
+
+    assert calls == [], "an archivist the order leaves out is never searched"
+    rungs = [r["recall_tier_name"] for r in out["search_results"]]
+    assert rungs.count("memory") == 10, "memory keeps its whole page"
+    assert _tier(out, "archivist:remote")["state"] == "excluded"
+
+
+def test_a_remote_after_memory_keeps_its_own_rows_and_memory_keeps_its_page(busy_cfg, monkeypatch):
+    _install(monkeypatch)
+    _federated(busy_cfg, monkeypatch, [{"id": 900 + i, "content": "remote"} for i in range(4)])
+    busy_cfg.recall.order = [RecallOrderEntry("memory"), RecallOrderEntry("archivist:remote")]
+
+    out = _recall(busy_cfg)
+
+    rungs = [r["recall_tier_name"] for r in out["search_results"]]
+    assert rungs.count("memory") == 10, "memory keeps its whole page"
+    assert rungs[-4:] == ["archivist:remote"] * 4, "the remote follows, in order"
+    assert _tier(out, "archivist:remote")["results"] == 4
+
+
+def test_a_fallback_remote_that_is_not_reached_is_never_fanned_out_to(busy_cfg, monkeypatch):
+    _install(monkeypatch)
+    calls = _federated(busy_cfg, monkeypatch, [{"id": 901, "content": "remote"}])
+    busy_cfg.recall.order = [
+        RecallOrderEntry("memory"),
+        RecallOrderEntry("archivist:remote", fallback=True),
+    ]
+    busy_cfg.recall.fill = 5
+
+    out = _recall(busy_cfg)
+
+    assert calls == []
+    assert _tier(out, "archivist:remote")["state"] == "skipped"
+    assert "not searched" in _tier(out, "archivist:remote")["detail"]
+
+
+# --- a hung source cannot wedge the others (Prudence, PR #1174) --------------------------
+
+
+def test_one_hung_source_never_starves_a_healthy_one(cfg, monkeypatch):
+    import threading
+
+    release = threading.Event()
+    hung = FakeSource("hung")
+    hung.search = lambda topic, limit: release.wait(30) and []
+    healthy = FakeSource("healthy")
+    _install(
+        monkeypatch,
+        FakeEntryPoint("hung", lambda: hung),
+        FakeEntryPoint("healthy", lambda: healthy),
+    )
+    cfg.recall.allowed_sources = ["hung", "healthy"]
+    cfg.recall.source_timeout_s = 0.2
+    try:
+        for _ in range(rs._POOL._max_workers + 2):
+            out = _recall(cfg)
+            assert _tier(out, "healthy")["state"] == "hit", _tier(out, "healthy")
+            assert _tier(out, "hung")["state"] == "unavailable"
+        assert "still running" in _tier(out, "hung")["detail"]
+    finally:
+        release.set()
+
+
+def test_a_failed_factory_is_not_rerun_on_every_recall(cfg, monkeypatch):
+    def boom():
+        raise RuntimeError("no endpoint")
+
+    ep = FakeEntryPoint("broken", boom)
+    _install(monkeypatch, ep)
+    cfg.recall.allowed_sources = ["broken"]
+
+    for _ in range(3):
+        found = rs.discover_sources(cfg)
+    assert ep.loads == 1 and "no endpoint" in found.failed["broken"]
+
+
+@pytest.mark.parametrize("value, opens", [(True, True), ("true", False), ("false", False)])
+def test_only_a_real_true_opens_the_unlisted_sources_gate(tmp_path, value, opens):
+    import yaml
+
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump({"recall": {"allow_unlisted_sources": value}}))
+
+    assert Config.load(path).recall.allow_unlisted_sources is opens
