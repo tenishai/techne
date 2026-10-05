@@ -850,8 +850,10 @@ jobs:
       # contributions; GitHub computes author_association, so the PR author
       # cannot set it. COLLABORATOR is needed because the event payload reports
       # a PRIVATE org member as COLLABORATOR, not MEMBER (seen on PR #1183, where
-      # the REST API said MEMBER). It adds no one: this job only runs for
-      # same-repo PRs, and opening one already takes write access. Per PR, not
+      # the REST API said MEMBER). It adds no one while every writer is an org
+      # member: this job only runs for same-repo PRs, which take write access.
+      # Narrow it back to OWNER|MEMBER before any outside collaborator gets
+      # write access (tenishai/agora#20 checklist). Per PR, not
       # per commit: a member's PR carrying an outsider's commits skips too,
       # which is the same trusted-writer argument as the dependabot exemption.
       # `fork-pr` gets no member exemption.
