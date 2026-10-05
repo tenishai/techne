@@ -226,9 +226,10 @@ recall:
 Results come back grouped by source in that order, and `tiers` reports each source
 in the same order. Every source, built-in or plugged in, is searched only when the
 order reaches it: a source left out of `order` and a fallback that isn't needed are
-never searched. Setting an order replaces the default merge, which alternates local
-and remote rows, each in its own store's order; with an order, an earlier source's rows
-always come first.
+never searched. Setting an order replaces the default merge, which takes rows from the
+local page and each remote store in turn, each in its own store's order (local,
+remote, local, remote with one remote store), with reserved local seats kept in place;
+with an order, an earlier source's rows always come first.
 
 Each source reports one of these states:
 - `hit` or `empty`: it was searched;
