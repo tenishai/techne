@@ -48,6 +48,9 @@ All notable changes to techne are documented here. Format loosely follows
 
 - **Copyright notice names tenish and the techne contributors** (NOTICE, README). Contributors
   keep their copyright under the DCO.
+- **The DCO check skips pull requests opened by tenishai org members** (#1182). CI reads
+  the PR's `author_association` and skips the check for `OWNER` and `MEMBER`. Outside
+  contributors still sign off every commit, and PRs from forks are always checked.
 
 ### Fixed
 

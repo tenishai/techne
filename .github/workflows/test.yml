@@ -844,7 +844,15 @@ jobs:
       # one exact author adds no real capability. `fork-pr` gets no exemption —
       # a fork PR is not a trusted writer and can forge any commit author,
       # including this one, so a fork claiming to be dependabot still fails.
-      # This is the only place the two copies differ; see
+      #
+      # MEMBER EXEMPTION (#1182): a PR whose author_association is OWNER or
+      # MEMBER (a tenishai org member) skips the check. The DCO is for outside
+      # contributions; GitHub computes author_association, so the PR author
+      # cannot set it. Per PR, not per commit: a member's PR carrying an
+      # outsider's commits skips too, which is the same trusted-writer argument
+      # as the dependabot exemption. `fork-pr` gets no member exemption.
+      #
+      # These two exemptions are the only places the two copies differ; see
       # tests/test_ci_workflow_triggers.py::
       # test_dco_check_runs_on_both_sides_of_the_trust_split.
       - name: DCO sign-off check
@@ -853,8 +861,15 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_AUTHOR_ASSOCIATION: ${{ github.event.pull_request.author_association }}
         run: |
           set -euo pipefail
+          case "${PR_AUTHOR_ASSOCIATION:-}" in
+            OWNER|MEMBER)
+              echo "DCO: skipped, the PR author is a tenishai org member ($PR_AUTHOR_ASSOCIATION)"
+              exit 0
+              ;;
+          esac
           export GIT_NO_REPLACE_OBJECTS=1
           if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
             git fetch --no-tags --quiet --unshallow origin "$BASE_SHA" "$HEAD_SHA"
