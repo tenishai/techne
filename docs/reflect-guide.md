@@ -140,6 +140,19 @@ techne reflect ingest /tmp/batch.json
 Run it once against a 31-thread backlog and you drain at most 25, with nothing in the
 procedure telling you to go again. The CLI does echo `note` to stderr — read it.
 
+**Leave off `--session` to drain every session that is owed.** With no session id, emit picks
+the newest session that still has unreflected work, however old (techne#1158; it used to look
+only at the five most recent sessions). Each call still covers one session, so the same loop
+works its way back through the backlog. When nothing is owed, the CLI prints
+`No session to reflect on.` and exits 1, so a script stops on that exit code (over MCP,
+`techne_reflect_emit` returns an empty batch with the note "no session with unreflected
+work"):
+
+```sh
+techne reflect emit -o /tmp/batch.json &&   # the newest owed session, any age
+  techne reflect ingest /tmp/batch.json
+```
+
 **Backfilling an import: run `techne import` first, and re-run it on an old store.** Emit tracks
 what it has delivered by persisted thread id. Before techne#954, `techne import` wrote
 observations but no threads, so every imported thread fell back to a key that changes whenever

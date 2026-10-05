@@ -158,7 +158,7 @@ techne init
 | **Observations** | Tool calls and content captures during a session. Includes user prompts (`tool_name = UserPrompt`) when ingested via the historical transcript backfill. Source material for thread detection. |
 | **Knowledge** | Durable facts, decisions, patterns, evaluations, and procedures. Supersession-aware (revisions tracked). |
 | **Identity** | Key-value store for who-the-agent-is and who-it-works-with. Ingests structured markdown (`contacts.md`, `invariants.md`) and YAML on init. |
-| **Outbox** | Pluggable sync for shipping curated knowledge to a team-memory backend. Default adapter is `noop`; ships with a `filesystem` adapter; the protocol is open for custom adapters via entry points. |
+| **Outbox** | Pluggable sync for shipping curated knowledge to a team-memory backend. Default adapter is `noop`; ships with a `filesystem` adapter. Installed packages can add sync adapters, outbox sinks and recall sources through entry points; see [Extension points](#extension-points). |
 | **Search** | FTS5 across all content layers. Optional vector search via `sqlite-vec` + `fastembed` for semantic similarity. |
 | **Domain stores** | Where [the four functions](#the-four-functions) keep their data — the *layout*, not the mental model. `techne.db` is personal memory and answers as the **archivist** when unbound; larger or team-scoped domains get their own db file behind a `StoreAdapter` (db-per-domain) — **librarian** (`librarian.db`, documents), **architect** (`architect.db`, patterns), **codex** (code graph, *experimental* — **one db per repo** at `codex/<slug>-<hash>.db`). Each db carries only its own schema. Address the domain by name; the db path is what it happens to resolve to today, and the answer's `target` tells you. See [Domain stores](#domain-stores-db-per-domain) and `docs/db-per-domain.md`. |
 
@@ -461,11 +461,14 @@ techne outbox status                       # pending / synced / dead counts
 techne outbox flush                        # ship pending entries via configured adapter
 techne outbox dead                         # entries that failed permanently
 techne outbox flush-sinks                  # flush pending rows to registered sinks
-techne outbox prune-orphans                # mark pending rows for unregistered targets as dead
+techne outbox prune-orphans [--target T]   # mark pending rows for unregistered targets as dead;
+                                           # refuses while a sink entry point is refused or
+                                           # failed, unless --target names what to prune
 techne outbox purge [--target T] [--yes]   # delete drainable-but-unconfigured pending rows
 
 # Sinks
-techne sinks list                          # all registered sinks: name, description, schema fields
+techne sinks list                          # all registered sinks: name, description, schema
+                                           # fields; also refused and failed entry points
 techne sinks describe NAME                 # full schema field list for a named sink
 
 # Backfill + re-analysis
@@ -508,7 +511,9 @@ techne deposit [...]                       # deposit a raw observation into a FO
 techne reflect                             # show pending / promoted / discarded candidate counts
 techne reflect review [--status pending|promoted|discarded|all] [--limit N]
 techne reflect emit [--session ID] [--limit N] [-o FILE]
-                                           # emit per-thread reflection prompts for agent to answer
+                                           # emit per-thread reflection prompts for agent to answer;
+                                           # no --session = the newest session with unreflected
+                                           # work, of any age, one session per call
 techne reflect ingest RESPONSES_FILE       # feed agent-answered prompts back; writes candidates
 techne reflect promote CANDIDATE_ID [--by WHO] [--reason TEXT]
 techne reflect discard CANDIDATE_ID [--by WHO] [--reason TEXT]
@@ -834,6 +839,17 @@ conflict:                     # the contradiction rail — which candidate rows 
 
 sync:
   adapter: noop               # or 'filesystem'; custom adapters via entry points
+  allow_unlisted_adapter: false  # true permits a non-built-in adapter (default deny)
+  allowed_sinks: []           # `techne.outbox_sinks` entry-point names allowed to load
+  allow_unlisted_sinks: false # true loads every installed sink
+
+recall:                       # which sources recall consults, in what order (#1170)
+  order: []                   # [] = the built-in ladder, then any allowed plugged-in source
+  allowed_sources: []         # `techne.recall_sources` entry-point names allowed to load
+  allow_unlisted_sources: false
+  fill: 10                    # a `fallback: true` source runs only below this many rows
+  source_limit: 5             # rows asked of each plugged-in source
+  source_timeout_s: 3.0       # bound on each plugged-in source call
 ```
 
 Candidates are **ranked before truncation** as of 0.17.0 (#933) — by shared-token count, with an
@@ -845,9 +861,12 @@ changes the order reaching the model on every conflict check, not only when trun
 
 ### Operator-owned config (egress-selecting keys)
 
-The keys that choose **where memory can go** — `sync`, `connections`, `llm_api_base`,
-`llm_api_key`, `model`, `reflect.model`, `conflict.model`, `archivist_db_path`,
-`standalone`, `stores` — can be pinned in a `config.operator.yaml` that techne honors **only
+The keys that choose **where memory can go**, or what reaches the model's context — `sync`
+(the whole block, so `sync.allow_unlisted_adapter`, `sync.allowed_sinks` and
+`sync.allow_unlisted_sinks` ride with it), `connections`, `llm_api_base`, `llm_api_key`,
+`model`, `reflect.model`, `conflict.model`, `custodian.model`, `custodian.rail_models`,
+`archivist_db_path`, `standalone`, `archivist`, `recall.allowed_sources`,
+`recall.allow_unlisted_sources`, `stores`, `sources` — can be pinned in a `config.operator.yaml` that techne honors **only
 while the file is provably not writable by the process reading it**. Resolved in order:
 
 ```
@@ -865,6 +884,9 @@ names the tier in force and the lever that actually applies to it.
 > does not fall back to `config.yaml`. Watch `stores` especially: an omitted store DSN does
 > not error — it opens a new empty database at `<data_dir>/<domain>.db`, so domain memory
 > *looks* intact and is not.
+
+`recall.order`, `recall.fill`, `recall.source_limit` and `recall.source_timeout_s` are
+deliberately not governed: they only rank and bound sources that are already admitted.
 
 **Removed (#1074):** `search.expansion_ratio`, and the `sync.auth` / `sync.audience` fields.
 None of them reached any code. Configs carrying them still load.
@@ -933,9 +955,25 @@ Caller is responsible for namespacing external IDs across runtimes that share a 
 
 ---
 
-## Custom sync adapters
+## Extension points
 
-The outbox accepts arbitrary backends via entry points. To ship knowledge to your own team-memory service, write a class implementing the `SyncAdapter` Protocol and register it:
+An installed package can extend techne through three entry-point groups. Each is
+refused by default, because each one is an egress or ingress decision; the allow keys
+belong to the [operator layer](#operator-owned-config-egress-selecting-keys).
+
+| Entry-point group | What it adds | Allowed by |
+|---|---|---|
+| `techne.sync_adapters` | A team-memory backend for `techne outbox flush` | `sync.adapter: <name>` plus `sync.allow_unlisted_adapter: true` |
+| `techne.outbox_sinks` | An outbox sink that receives payloads | `sync.allowed_sinks: [<entry-point name>]`, or `sync.allow_unlisted_sinks: true` |
+| `techne.recall_sources` | A read-only source for `techne_recall` | `recall.allowed_sources: [<entry-point name>]`, or `recall.allow_unlisted_sources: true` |
+
+`techne doctor` (`sinks:entry-points`, `recall:sources`) shows which entry points
+loaded; it and `techne sinks list` both show which were refused or failed, and why.
+
+### Custom sync adapters
+
+To ship knowledge to your own team-memory service, write a class implementing the
+`SyncAdapter` Protocol and register it:
 
 ```toml
 # in your package's pyproject.toml
@@ -948,10 +986,19 @@ Then in techne config:
 ```yaml
 sync:
   adapter: mybackend
+  allow_unlisted_adapter: true   # a non-built-in adapter is refused without this
   url: https://my-team-memory.example.com/api
 ```
 
-`techne outbox flush` will route through your adapter. The `FilesystemAdapter` in `techne/sync/filesystem.py` is the simplest reference implementation.
+`techne outbox flush` will route through your adapter. The `FilesystemAdapter` in
+`techne/sync/filesystem.py` is the simplest reference implementation.
+
+An adapter whose class declares `supports_pull = True` also joins recall as the source
+`team`, reading back through its `pull`. It is not governed by `recall.allowed_sources`,
+since `sync.adapter` already admitted its code. With no `recall.order` set, `team` comes
+after the built-in sources and recall groups results by source; to keep it out of
+recall, set an order without it. See
+[docs/mcp-tools.md](docs/mcp-tools.md#choosing-what-recall-searches-and-in-what-order).
 
 ---
 
