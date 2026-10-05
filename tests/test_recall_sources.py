@@ -456,3 +456,51 @@ def test_only_a_real_true_opens_the_unlisted_sources_gate(tmp_path, value, opens
     path.write_text(yaml.safe_dump({"recall": {"allow_unlisted_sources": value}}))
 
     assert Config.load(path).recall.allow_unlisted_sources is opens
+
+
+def test_an_excluded_memory_is_never_searched_and_drops_no_team_rows(busy_cfg, monkeypatch):
+    """Prudence, PR #1174 r2: reaching an archivist searched memory anyway and
+    deduplicated against it, so a team row the operator also held locally vanished
+    for a local copy recall never returned."""
+    import techne.mcp_server as srv
+
+    _install(monkeypatch)
+    _federated(
+        busy_cfg,
+        monkeypatch,
+        [
+            {"id": 901, "content": "deploy runbook kafka note 3"},
+            {"id": 902, "content": "team only"},
+        ],
+    )
+    searches = []
+    real = srv._local_search
+    monkeypatch.setattr(srv, "_local_search", lambda *a, **k: searches.append(1) or real(*a, **k))
+    busy_cfg.recall.order = [RecallOrderEntry("archivist:remote")]
+
+    out = _recall(busy_cfg)
+
+    assert searches == [], "memory is not in the order, so it is not searched"
+    contents = [r["content"] for r in out["search_results"]]
+    assert contents == ["deploy runbook kafka note 3", "team only"]
+    assert _tier(out, "memory")["state"] == "excluded"
+
+
+def test_with_memory_in_the_order_a_duplicate_team_row_is_still_dropped(busy_cfg, monkeypatch):
+    _install(monkeypatch)
+    _federated(
+        busy_cfg,
+        monkeypatch,
+        [
+            {"id": 901, "content": "deploy runbook kafka note 3"},
+            {"id": 902, "content": "team only"},
+        ],
+    )
+    busy_cfg.recall.order = [RecallOrderEntry("memory"), RecallOrderEntry("archivist:remote")]
+
+    out = _recall(busy_cfg)
+
+    remote = [
+        r["content"] for r in out["search_results"] if r["recall_tier_name"] == "archivist:remote"
+    ]
+    assert remote == ["team only"], "the local copy is authoritative, as in the default path"

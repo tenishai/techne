@@ -562,21 +562,19 @@ def _ordered_recall(
         return cache["local"]
 
     def _remote_rows() -> list[dict]:
-        """One fan-out for both archivist rungs, deduplicated against the local page
-        and checked for contradictions, as the default path does. Degrades to none."""
+        """One fan-out for both archivist rungs. It does NOT touch the local page:
+        searching memory here would search a rung the order excluded or skipped, and
+        deduplicating against it would drop team rows for a local copy recall never
+        returns (Prudence, PR #1174 r2). Dedup and contradiction detection run after
+        assembly instead, only when both kinds of row are in the result."""
         if "remote" in cache:
             return cache["remote"]
-        cache["remote"], cache["conflicts"] = [], []
+        cache["remote"] = []
         if fan_out_connections:
-            from techne.core.federation import (
-                _cross_store_dedup,
-                detect_cross_store_contradictions,
-                fan_out_search,
-            )
+            from techne.core.federation import fan_out_search
 
             try:
-                local = _local_page()
-                _, remote = fan_out_search(
+                _, cache["remote"] = fan_out_search(
                     config.db_path,
                     fan_out_connections,
                     topic,
@@ -584,17 +582,8 @@ def _ordered_recall(
                     half_life_days=config.knowledge_confidence_half_life_days,
                     recency_weight=config.search.recency_weight,
                     bm25_weight=config.search.bm25_weight,
-                    local_results=local,
+                    local_results=[],  # not None: None makes it search locally itself
                 )
-                remote = _cross_store_dedup(local, remote)
-                cache["conflicts"] = detect_cross_store_contradictions(
-                    config.db_path,
-                    local,
-                    remote,
-                    max_candidates=config.conflict.max_comparison_candidates,
-                    min_shared_keywords=config.conflict.min_shared_keywords,
-                )
-                cache["remote"] = remote
             except Exception:
                 log.warning("federation: fan-out failed — continuing without it", exc_info=True)
         return cache["remote"]
@@ -611,6 +600,7 @@ def _ordered_recall(
         recall_sources.LIBRARIAN: lambda: recall_documents(config, topic),
     }
     rows, outcomes = recall_sources.assemble(config, topic, found, providers)
+    rows, conflicts = _reconcile_stores(config, rows)
 
     order = [e.name for e in recall_sources.effective_order(config, found)]
     escalation = {n: bool(getattr(s, "escalation", False)) for n, s in found.loaded.items()}
@@ -633,8 +623,35 @@ def _ordered_recall(
     out["search_results"] = _with_public_provenance(
         _public_rows(out["search_results"], _PUBLIC_UNDERSCORE_KEYS)
     )
-    _surface_conflicts(out, cache.get("conflicts") or [], args)
+    _surface_conflicts(out, conflicts, args)
     return out
+
+
+def _reconcile_stores(config: Config, rows: list[dict]) -> tuple[list[dict], list]:
+    """Cross-store dedup and contradiction detection on the ASSEMBLED result, as the
+    default path does on its merged page: only when memory and remote rows are both
+    in it, so neither runs against rows the order left out. A remote row whose
+    content duplicates a returned local one is dropped; order is otherwise kept."""
+    local = [r for r in rows if r.get("_store") == "local"]
+    remote = [r for r in rows if r.get("_store") not in (None, "local")]
+    if not (local and remote):
+        return rows, []
+    from techne.core.federation import _cross_store_dedup, detect_cross_store_contradictions
+
+    try:
+        kept = {id(r) for r in _cross_store_dedup(local, remote)}
+        conflicts = detect_cross_store_contradictions(
+            config.db_path,
+            local,
+            [r for r in remote if id(r) in kept],
+            max_candidates=config.conflict.max_comparison_candidates,
+            min_shared_keywords=config.conflict.min_shared_keywords,
+        )
+    except Exception:
+        log.warning("federation: dedup/contradiction pass failed", exc_info=True)
+        return rows, []
+    remote_ids = {id(r) for r in remote}
+    return [r for r in rows if id(r) not in remote_ids or id(r) in kept], conflicts
 
 
 def _surface_conflicts(out: dict, conflicts: list, args: dict) -> None:

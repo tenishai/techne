@@ -184,9 +184,9 @@ class RecallConfig:
     """Which sources recall consults, in what order, and which plugged-in ones may
     load at all (techne#1170).
 
-    An EMPTY `order` keeps today's behaviour exactly: the built-in ladder (memory,
-    the archivists, the librarian), each consulted, in that order, with no
-    plugged-in source unless one is allowed (allowed ones are then appended).
+    An empty `order` with no allowed source loaded keeps today's behaviour exactly.
+    An empty `order` with a source loaded consults the built-in ladder (memory, the
+    archivists, the librarian) and then the loaded sources, grouped by source.
     """
 
     order: list[RecallOrderEntry] = field(default_factory=list)

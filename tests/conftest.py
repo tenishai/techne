@@ -374,6 +374,10 @@ def _no_installed_recall_sources(monkeypatch):
     """`techne_recall` and doctor discover `techne.recall_sources` entry points
     (techne#1170), so a source package installed on the developer's box would change
     what the suite sees. Pin the group empty; discovery tests install their fakes."""
-    import techne.core.recall_sources as rs_mod
-
+    # Guarded: CI's eval-vec base leg runs THESE tests against origin/main's library,
+    # which may not have the module yet (#832's base-leg design).
+    try:
+        import techne.core.recall_sources as rs_mod
+    except ImportError:
+        return
     monkeypatch.setattr(rs_mod, "entry_points", lambda group: [])
