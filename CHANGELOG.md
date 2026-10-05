@@ -7,6 +7,20 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Added
 
+- **Pluggable recall sources and an operator-defined recall order** (#1170). An
+  installed package can add read-only sources to `techne_recall` through the
+  `techne.recall_sources` entry-point group. They are refused by default: allow one
+  by entry-point name in `recall.allowed_sources`, or set
+  `recall.allow_unlisted_sources: true`. Both keys are governed by the operator layer.
+  `recall.order` lists the sources to consult, built-in and plugged in, in the order
+  their results come back, for example `memory`, `librarian`, `archivist:local`,
+  `archivist:remote`, then a remote librarian. Marking an entry `fallback: true`
+  consults it only when the sources before it returned fewer than `recall.fill` rows.
+  Each plugged-in source call is bounded by `recall.source_timeout_s`, after a
+  `health()` probe, and a source that is down reports `unavailable` while recall
+  carries on. Plugged-in rows are stamped `origin`, `recall_source` and
+  `external: true`, and credential-redacted. `techne doctor` adds `recall:sources`.
+  With no `recall.order` set and no source allowed, recall's output is unchanged.
 - **Outbox sinks from installed packages** (#1172). A package can contribute sinks
   through the `techne.outbox_sinks` entry-point group: each entry point is a zero-arg
   callable returning an `OutboxSink` or a list of them. They are refused by default,

@@ -108,6 +108,12 @@ EGRESS_KEYS: tuple[str, ...] = (
     # an unpinned way to repoint what the old spelling cannot — the exact gap the
     # reflect.model/conflict.model pair exists to close.
     "archivist",
+    # techne#1170. Which installed packages may feed recall. Recall output goes straight
+    # into the model's context, so admitting a source is an INGRESS trust decision, the
+    # same reasoning as `connections` above. `recall.order` is not listed: it orders
+    # sources already admitted, which is tuning, not trust.
+    "recall.allowed_sources",
+    "recall.allow_unlisted_sources",
     # Domain-store DSNs (librarian/codex/architect/documents). Structurally
     # identical to archivist_db_path — an arbitrary path that domain memory is
     # written to (`core/stores.py:store_path`) — so the "destination, not
@@ -153,6 +159,14 @@ EGRESS_KEYS: tuple[str, ...] = (
 # only EGRESS_KEYS is consulted at runtime. Moving a name from here to there is
 # the change that has teeth.
 _NOT_A_DESTINATION: tuple[str, ...] = (
+    # techne#1170. `recall` is PARTIALLY governed: its allow-list keys are in
+    # EGRESS_KEYS. These four only order and bound sources already admitted:
+    # the order they are consulted in, the fill a fallback waits for, and the rows
+    # and seconds each call may take. None admits a source or picks a destination.
+    "recall.order",
+    "recall.fill",
+    "recall.source_limit",
+    "recall.source_timeout_s",
     # Local volume, not a destination: where THIS install keeps its own state.
     # The line #508 drew is "an arbitrary path memory is written to" — these are
     # the install's own root, not a chosen target.
