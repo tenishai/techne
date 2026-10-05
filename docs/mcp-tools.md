@@ -199,6 +199,42 @@ call stays the same while the infrastructure underneath changes.
 across all four rungs. The domain calls are for when you already know which function
 you want. `techne bindings` reports what each name currently resolves to.
 
+### Choosing what recall searches, and in what order
+
+By default recall consults the four built-in rungs in ladder order: `memory`,
+`archivist:local`, `archivist:remote`, `librarian`. An installed package can add
+read-only sources through the `techne.recall_sources` entry-point group (each entry
+point is a zero-arg callable returning a `RecallSource`: `name`, `search(topic, limit)`,
+`health()`, and optionally `escalation = True` for reference material). Those are
+refused unless allowed, and the operator decides the order:
+
+```yaml
+recall:
+  order:
+    - memory
+    - librarian
+    - archivist:local
+    - archivist:remote
+    - {name: librarian:remote, fallback: true}
+  allowed_sources: [remote-lib]     # entry-point names; refused by default
+  fill: 10            # a fallback source runs only if the sources before it gave fewer rows
+  source_limit: 5     # rows asked of each plugged-in source
+  source_timeout_s: 3.0
+```
+
+Results come back grouped by source in that order, and `tiers` reports each source
+in the same order. A source has one of four states:
+- `skipped`: a fallback source that wasn't needed;
+- `excluded`: a built-in left out of `order`;
+- `unavailable`: a plugged-in source that was refused, failed to load, timed out or
+  reported unhealthy;
+- otherwise `hit` or `empty`.
+
+Rows from plugged-in sources carry `origin`, `recall_source` and `external: true`, and
+their text is credential-redacted. The two allow-list keys are governed by the
+operator layer. `techne doctor` reports `recall:sources`, which is broken when `order`
+names a source recall can't use.
+
 
 ## Patterns (architect)
 

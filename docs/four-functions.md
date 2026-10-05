@@ -438,7 +438,8 @@ confidently about the wrong repo; see §4.
 **`techne_recall` is still the default for "what do we know about X".** It escalates
 across all four rungs for you. The four domain calls are for when you already know
 which function you want — reaching for them by reflex means doing the routing by hand
-that recall does better.
+that recall does better. The operator can change which sources recall consults, add
+installed ones, and set their order (`recall.order`, see docs/mcp-tools.md).
 
 ---
 

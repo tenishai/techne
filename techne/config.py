@@ -171,6 +171,39 @@ class SyncConfig:
 
 
 @dataclass
+class RecallOrderEntry:
+    """One source in `recall.order` (techne#1170). ``fallback`` sources are consulted
+    only when the sources before them returned fewer than `recall.fill` rows."""
+
+    name: str
+    fallback: bool = False
+
+
+@dataclass
+class RecallConfig:
+    """Which sources recall consults, in what order, and which plugged-in ones may
+    load at all (techne#1170).
+
+    An EMPTY `order` keeps today's behaviour exactly: the built-in ladder (memory,
+    the archivists, the librarian), each consulted, in that order, with no
+    plugged-in source unless one is allowed (allowed ones are then appended).
+    """
+
+    order: list[RecallOrderEntry] = field(default_factory=list)
+    #: `techne.recall_sources` entry points are refused unless named here, by
+    #: ENTRY-POINT name, or unless `allow_unlisted_sources` is set. Recall output
+    #: goes straight into the model's context, so admitting a source is an ingress
+    #: decision. Same convention as `sync.allowed_sinks` (techne#1172).
+    allowed_sources: list[str] = field(default_factory=list)
+    allow_unlisted_sources: bool = False
+    #: A fallback source runs only when the sources before it gave fewer rows.
+    fill: int = 10
+    #: Rows asked of each plugged-in source, and the bound on each call.
+    source_limit: int = 5
+    source_timeout_s: float = 3.0
+
+
+@dataclass
 class StoreSpec:
     """One domain store (db-per-domain, techne#88/#98). `adapter` selects the
     backend (sqlite day one; postgres/etc. later via techne#87). Empty `dsn`
@@ -856,6 +889,7 @@ class Config:
     custodian: CustodianConfig = field(default_factory=CustodianConfig)
     architect: ArchitectConfig = field(default_factory=ArchitectConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
+    recall: RecallConfig = field(default_factory=RecallConfig)
     injection: InjectionConfig = field(default_factory=InjectionConfig)
     posture: PostureConfig = field(default_factory=PostureConfig)
     conflict: ConflictConfig = field(default_factory=ConflictConfig)
@@ -1400,6 +1434,26 @@ class Config:
                 # with no targets.
                 pattern_targets=_pattern_targets(a.get("pattern_targets")),
             )
+        if "recall" in raw and isinstance(raw["recall"], dict):
+            r = raw["recall"]
+            _rd = RecallConfig()
+            order: list[RecallOrderEntry] = []
+            for item in r.get("order") or []:
+                if isinstance(item, dict) and item.get("name"):
+                    order.append(
+                        RecallOrderEntry(str(item["name"]), bool(item.get("fallback", False)))
+                    )
+                elif isinstance(item, str) and item:
+                    order.append(RecallOrderEntry(item))
+            cfg.recall = RecallConfig(
+                order=order,
+                allowed_sources=[str(n) for n in (r.get("allowed_sources") or [])],
+                allow_unlisted_sources=bool(r.get("allow_unlisted_sources", False)),
+                fill=int(r.get("fill", _rd.fill)),
+                source_limit=int(r.get("source_limit", _rd.source_limit)),
+                source_timeout_s=float(r.get("source_timeout_s", _rd.source_timeout_s)),
+            )
+
         if "search" in raw and isinstance(raw["search"], dict):
             s = raw["search"]
             _sd = SearchConfig()  # fallbacks follow the dataclass, not a copy of it (#1070)
@@ -1691,6 +1745,24 @@ class Config:
         # built-in posture (techne#389).
         if self.sync.allow_unlisted_adapter:
             data["sync"]["allow_unlisted_adapter"] = True
+        # Written only when it differs from the default, so an install that never
+        # set it keeps a config.yaml without the block (techne#1170).
+        if self.recall != RecallConfig():
+            rd = RecallConfig()
+            block: dict = {}
+            if self.recall.order:
+                block["order"] = [
+                    {"name": e.name, "fallback": True} if e.fallback else e.name
+                    for e in self.recall.order
+                ]
+            if self.recall.allowed_sources:
+                block["allowed_sources"] = list(self.recall.allowed_sources)
+            if self.recall.allow_unlisted_sources:
+                block["allow_unlisted_sources"] = True
+            for key in ("fill", "source_limit", "source_timeout_s"):
+                if getattr(self.recall, key) != getattr(rd, key):
+                    block[key] = getattr(self.recall, key)
+            data["recall"] = block
         # DEFAULT PATHS ARE NOT WRITTEN (techne#947). `techne init` is a load->save
         # round-trip, and writing the resolved default pinned this home's absolute
         # path into the file: a copied home kept pointing at the original store.

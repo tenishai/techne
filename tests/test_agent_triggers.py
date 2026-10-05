@@ -232,6 +232,10 @@ DOCTOR_CHECKS_AT_LAST_REVIEW = {
     # not check whether anything SCHEDULES A BACKUP; a card-backlog check does
     # not touch scheduling, so that trigger's claim stands as written.
     "check_pending_cards",
+    # techne#1170. RE-READ DONE: check_recall_sources reports which recall source
+    # entry points loaded or were refused and whether recall.order names an unusable
+    # one. It does not look at backup scheduling, so deployment.md's trigger stands.
+    "check_recall_sources",
     "check_config_trust",
     "check_hooks",
     "check_instance_identity",

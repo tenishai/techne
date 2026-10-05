@@ -510,6 +510,41 @@ def _fold_in_documents(config: Config, topic: str, memory_results: list[dict]) -
     return memory_results + recall_documents(config, topic)
 
 
+def _recall_rows(
+    config: Config, topic: str, core_rows: list[dict], archivist_name: str
+) -> tuple[list[dict], dict]:
+    """Memory/archivist rows plus whatever else recall consults, and the ladder
+    keywords that describe them (techne#1170).
+
+    With no `recall.order` and no allowed source loaded this is exactly
+    `_fold_in_documents`, and the keywords are empty, so the response is the
+    pre-#1170 one. Otherwise the rows are placed by source in the configured order,
+    fallbacks consulted only when the sources before them fell short of
+    `recall.fill`, and plugged-in sources called with a timeout.
+    """
+    from techne.core import recall_sources, tiers
+    from techne.core.librarian import recall_documents
+
+    found = recall_sources.discover_sources(config)
+    if not recall_sources.ordering_active(config, found):
+        return _fold_in_documents(config, topic, core_rows), {}
+
+    rows, outcomes = recall_sources.assemble(
+        config,
+        topic,
+        found,
+        core_rows,
+        rung_of=lambda r: tiers.rung_name_of(r, archivist_name),
+        librarian=lambda: recall_documents(config, topic),
+    )
+    order = [e.name for e in recall_sources.effective_order(config, found)]
+    escalation = {n: bool(getattr(s, "escalation", False)) for n, s in found.loaded.items()}
+    ladder = tiers.ladder_for(order, escalation)
+    plugin_numbers = {r.name: r.number for r in ladder if r.number > len(tiers.LADDER)}
+    overrides = {n: (o.state, o.detail) for n, o in outcomes.items()}
+    return rows, {"ladder": ladder, "overrides": overrides, "plugin_numbers": plugin_numbers}
+
+
 def _effective_connections(config: Config) -> dict:
     """config.connections plus the base Archivist as a `team` connection WHEN IT IS
     BOUND TO A STORE (techne#346 PR2, rebound by techne#552).
@@ -551,6 +586,7 @@ def _with_ladder(
     archivist_name: str,
     archivist_binding: str,
     extra: dict,
+    ladder_kw: dict | None = None,
 ) -> dict:
     """Attach the stated ladder to a recall response (techne#552, S1/S4/S5).
 
@@ -567,13 +603,15 @@ def _with_ladder(
 
     out = {"search_results": rows, **extra}
     try:
-        tiers.annotate_rows(rows, archivist_name)
+        kw = ladder_kw or {}
+        tiers.annotate_rows(rows, archivist_name, kw.get("ladder"), kw.get("plugin_numbers"))
         reports = tiers.build_reports(
             rows=rows,
             connections=fan_out_connections,
             archivist_name=archivist_name,
             archivist_binding=archivist_binding,
             librarian_available=_librarian_available(config),
+            **kw,
         )
         out["tiers"] = [r.as_dict() for r in reports]
         # S5's experience signal, asked of the knowledge layer directly — see
@@ -672,14 +710,16 @@ def _techne_recall(args: dict, config: Config) -> dict:
         # attach an `uncertainty` marker. Distinct key from `freshness`; a row can
         # carry both.
         annotate_uncertain(config.db_path, results)
+        recalled, ladder_kw = _recall_rows(config, topic, results, ARCHIVIST_CONNECTION_NAME)
         out = _with_ladder(
             config,
             topic,
-            _fold_in_documents(config, topic, results),
+            recalled,
             {},
             ARCHIVIST_CONNECTION_NAME,
             archivist_binding,
             {"identity_matches": _identity_matches()},
+            ladder_kw,
         )
         out["search_results"] = _with_public_provenance(
             _public_rows(out["search_results"], _PUBLIC_UNDERSCORE_KEYS)
@@ -765,14 +805,16 @@ def _techne_recall(args: dict, config: Config) -> dict:
     annotate_freshness(config.db_path, local_only)
     annotate_uncertain(config.db_path, local_only)
 
+    recalled, ladder_kw = _recall_rows(config, topic, merged, ARCHIVIST_CONNECTION_NAME)
     out: dict = _with_ladder(
         config,
         topic,
-        _fold_in_documents(config, topic, merged),
+        recalled,
         fan_out_connections,
         ARCHIVIST_CONNECTION_NAME,
         archivist_binding,
         {"identity_matches": _identity_matches()},
+        ladder_kw,
     )
     # After the merge and the tier ladder, both of which read row tags.
     out["search_results"] = _with_public_provenance(

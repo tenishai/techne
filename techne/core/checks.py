@@ -2535,6 +2535,55 @@ def _describe_destination(key: str, value, default=None) -> str:
 
 
 @register_check
+def check_recall_sources(config) -> CheckResult:
+    """Installed packages' recall sources, and whether `recall.order` names any
+    source recall cannot use (techne#1170).
+
+    An ordered source that is unknown, refused or failed to load reads BROKEN: the
+    operator asked recall to consult it and every recall reports it unavailable.
+    A refused entry point the order does not name is a deliberate policy (DORMANT);
+    loaded sources read LIVE.
+    """
+    from techne.core import recall_sources
+
+    found = recall_sources.discover_sources(config)
+    builtin = set(recall_sources.BUILTIN_SOURCES)
+    ordered = [e.name for e in config.recall.order]
+    unusable = [n for n in ordered if n not in builtin and n not in found.loaded]
+    parts = []
+    if found.loaded:
+        parts.append(f"loaded: {', '.join(sorted(found.loaded))}")
+    if found.refused:
+        parts.append(f"refused (not in recall.allowed_sources): {', '.join(sorted(found.refused))}")
+    if found.failed:
+        parts.append("failed: " + "; ".join(f"{k} ({v})" for k, v in sorted(found.failed.items())))
+    if unusable:
+        parts.append(f"recall.order names unusable source(s): {', '.join(unusable)}")
+    if unusable:
+        verdict = Verdict.BROKEN
+        remedy = (
+            "Allow the entry point in `recall.allowed_sources`, fix the one that failed, "
+            "or remove the name from `recall.order`."
+        )
+    else:
+        verdict = Verdict.LIVE if found.loaded else Verdict.DORMANT
+        remedy = None
+    return CheckResult(
+        name="recall:sources",
+        subsystem="recall",
+        kind=Kind.FAIL_OPEN,
+        verdict=verdict,
+        evidence=(
+            f"entry points: {len(found.loaded)} source(s) loaded, {len(found.refused)} "
+            f"refused, {len(found.failed)} failed; recall.order: {len(ordered)} entr(y/ies), "
+            f"{len(unusable)} unusable"
+        ),
+        detail="; ".join(parts) or "no recall source entry points installed",
+        remedy=remedy,
+    )
+
+
+@register_check
 def check_config_trust(config) -> CheckResult:
     """Is the file that SELECTS egress writable by the agent it constrains?
 
