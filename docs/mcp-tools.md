@@ -227,7 +227,7 @@ Results come back grouped by source in that order, and `tiers` reports each sour
 in the same order. Every source, built-in or plugged in, is searched only when the
 order reaches it: a source left out of `order` and a fallback that isn't needed are
 never searched. Setting an order replaces the default merge, which takes rows from the
-local page and each remote store in turn, each in its own store's order (local,
+local page and each remote store in turn within a match tier (a first-tier row from a later store goes before a second-tier local one), each in its own store's order (local,
 remote, local, remote with one remote store), with reserved local seats kept in place;
 with an order, an earlier source's rows always come first.
 

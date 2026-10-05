@@ -533,3 +533,14 @@ def test_a_fallback_counts_rows_after_cross_store_dedup(cfg, monkeypatch):
     assert src.calls == 1, "after dedup only 3 rows came back, below fill, so it runs"
     assert _tier(out, "librarian:remote")["state"] == "hit"
     assert len(out["search_results"]) == 4
+
+
+def test_both_entry_point_pins_are_active():
+    """Prudence, PR #1174 r4: a merge resolution dropped the autouse decorator from the
+    sink pin, leaving it a plain function nothing called. Both pins must be live."""
+    import importlib.metadata
+
+    import techne.sync.sinks as sinks_mod
+
+    assert sinks_mod.entry_points is not importlib.metadata.entry_points
+    assert rs.entry_points is not importlib.metadata.entry_points

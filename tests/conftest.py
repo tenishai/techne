@@ -381,6 +381,9 @@ def _no_installed_recall_sources(monkeypatch):
     except ImportError:
         return
     monkeypatch.setattr(rs_mod, "entry_points", lambda group: [])
+
+
+@pytest.fixture(autouse=True)
 def _no_installed_sink_entry_points(monkeypatch):
     """Every drain now discovers `techne.outbox_sinks` entry points (techne#1172), so
     a sink package installed on the developer's box would change what the suite
@@ -392,4 +395,3 @@ def _no_installed_sink_entry_points(monkeypatch):
     # where sinks.py may not import entry_points yet (#832's base-leg design).
     if hasattr(sinks_mod, "entry_points"):
         monkeypatch.setattr(sinks_mod, "entry_points", lambda group: [])
-
