@@ -1904,8 +1904,15 @@ def outbox_flush_sinks(ctx):
 
 
 @outbox.command("prune-orphans")
+@click.option(
+    "--target",
+    "targets",
+    multiple=True,
+    help="Prune only rows for this target (repeatable). Allowed while an entry point "
+    "is refused, because naming the target says the rows are not that package's.",
+)
 @click.pass_context
-def outbox_prune_orphans(ctx):
+def outbox_prune_orphans(ctx, targets):
     """Mark pending rows for unregistered targets as dead."""
     config = ctx.obj["config"]
     from techne.sync.outbox import prune_orphans
@@ -1921,14 +1928,16 @@ def outbox_prune_orphans(ctx):
     # before import), so its pending rows cannot be told from true orphans. Pruning
     # now would mark them dead for good; refusing leaves them pending (#1172).
     blocked = sorted(found.refused) + sorted(found.failed)
-    if blocked:
+    if blocked and not targets:
         raise click.ClickException(
             "Not pruning: outbox sink entry point(s) were not loaded, so their "
             f"pending rows would be marked dead: {', '.join(blocked)}. Allow them in "
-            "`sync.allowed_sinks` (or uninstall the package), then re-run. "
-            "`techne sinks list` shows why each was not loaded."
+            "`sync.allowed_sinks` and re-run, or prune only targets you know are dead "
+            "with `--target sink:<name>`. Uninstalling the package gives up its pending "
+            "rows: the next prune marks them dead. `techne sinks list` shows why each "
+            "entry point was not loaded."
         )
-    pruned = prune_orphans(config.db_path)
+    pruned = prune_orphans(config.db_path, list(targets) or None)
     click.echo(f"Pruned {pruned} orphan row(s).")
 
 
@@ -2045,8 +2054,10 @@ def sinks_describe(ctx, name):
     """Show full schema field list with types for a named sink."""
     import dataclasses
 
-    from techne.sync.sinks import get_sink
+    from techne.sync.sinks import ensure_sinks_registered, get_sink
 
+    # Register first, as `sinks list` does: a fresh process has none (#1172).
+    ensure_sinks_registered(ctx.obj["config"])
     sink = get_sink(name)
     if sink is None:
         click.echo(f"No sink registered: {name}", err=True)

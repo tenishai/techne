@@ -232,23 +232,134 @@ def test_the_allow_list_round_trips_through_config_yaml(tmp_path):
     assert back.sync.allow_unlisted_sinks is True
 
 
-def test_no_drain_site_registers_the_archivist_alone():
-    """Every site that drains or prunes must go through ensure_sinks_registered,
-    or an installed package's rows strand again at the site that forgot. This guard
-    found the session-end hook, which #1172's list of sites missed.
+def _calls(fn: ast.AST) -> set[str]:
+    out = set()
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Call):
+            out.add(getattr(node.func, "id", None) or getattr(node.func, "attr", None))
+    return out
 
-    Exempt: sinks.py (the helper itself) and archivist.py, whose own enqueue path
-    registers its own lane before writing to it, which is not a drain."""
+
+def test_every_drain_registers_installed_sinks_first():
+    """Prudence, PR #1173: the first version of this guard only forbade calling
+    `ensure_registered_for`, so deleting the session-end hook's registration left a
+    bare `flush_sinks` and 350 tests green. Now: any function that drains or prunes
+    must also call `ensure_sinks_registered`. sync/outbox.py, where the drains are
+    defined, is the only exemption."""
     root = Path(__file__).resolve().parent.parent / "techne"
-    exempt = {root / "sync" / "sinks.py", root / "core" / "archivist.py"}
     offenders = []
     for py in root.rglob("*.py"):
-        if py in exempt:
+        if py == root / "sync" / "outbox.py":
             continue
-        for node in ast.walk(ast.parse(py.read_text())):
-            if isinstance(node, ast.Call):
-                fn = node.func
-                name = getattr(fn, "id", None) or getattr(fn, "attr", None)
-                if name == "ensure_registered_for":
-                    offenders.append(f"{py.relative_to(root.parent)}:{node.lineno}")
+        for fn in ast.walk(ast.parse(py.read_text())):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            called = _calls(fn)
+            if (
+                called & {"flush_sinks", "prune_orphans"}
+                and "ensure_sinks_registered" not in called
+            ):
+                offenders.append(f"{py.relative_to(root.parent)}:{fn.name}")
     assert offenders == []
+
+
+def test_no_site_registers_the_archivist_alone():
+    """The old shape of the bug: calling `ensure_registered_for` directly skips the
+    installed packages. archivist.py's own enqueue path is exempt (an enqueue)."""
+    root = Path(__file__).resolve().parent.parent / "techne"
+    exempt = {root / "sync" / "sinks.py", root / "core" / "archivist.py"}
+    offenders = [
+        f"{py.relative_to(root.parent)}"
+        for py in root.rglob("*.py")
+        if py not in exempt and "ensure_registered_for" in _calls(ast.parse(py.read_text()))
+    ]
+    assert offenders == []
+
+
+def test_prune_orphans_refuses_while_an_allowed_entry_point_failed(config, db, monkeypatch):
+    """The `failed` half: an allowed sink whose factory raises at prune time has real
+    pending rows, and pruning would kill them (#484 by another door)."""
+    from techne.cli import main
+
+    def no_credentials():
+        raise RuntimeError("COURIER_TOKEN not set")
+
+    _pending_courier_row(db)
+    _install(monkeypatch, FakeEntryPoint("courier", no_credentials))
+    config.sync.allowed_sinks = ["courier"]
+    monkeypatch.setattr(Config, "load", classmethod(lambda cls, *a, **k: config))
+
+    with use_registry({}):
+        result = CliRunner().invoke(main, ["outbox", "prune-orphans"])
+
+    assert result.exit_code != 0 and "courier" in result.output
+    assert _status(db, "sink:courier") == "pending"
+
+
+def test_prune_orphans_target_prunes_only_the_named_dead_target(config, db, monkeypatch):
+    """A package the operator keeps refused must not block pruning a target they can
+    name as dead; the refused package's own rows stay."""
+    from techne.cli import main
+
+    _pending_courier_row(db)
+    ghost = OutboxSink(name="sink:ghost", payload_schema=Note, handler=_deliver)
+    with use_registry({ghost.name: ghost}):
+        enqueue(db, "sink:ghost", {"content": "nobody"}, deliver=False)
+    _install(monkeypatch, FakeEntryPoint("courier", lambda: _COURIER))
+    monkeypatch.setattr(Config, "load", classmethod(lambda cls, *a, **k: config))
+
+    with use_registry({}):
+        result = CliRunner().invoke(main, ["outbox", "prune-orphans", "--target", "sink:ghost"])
+
+    assert result.exit_code == 0, result.output
+    assert _status(db, "sink:ghost") == "dead"
+    assert _status(db, "sink:courier") == "pending"
+
+
+def test_doctor_points_a_true_orphan_at_prune_orphans(config, db, monkeypatch):
+    """Nothing installed can own `sink:ghost`, so the remedy is to prune it, not to
+    allow a package that does not exist (Prudence, PR #1173)."""
+    from techne.core.checks import check_sink_entry_points
+
+    ghost = OutboxSink(name="sink:ghost", payload_schema=Note, handler=_deliver)
+    with use_registry({ghost.name: ghost}):
+        enqueue(db, "sink:ghost", {"content": "nobody"}, deliver=False)
+    _install(monkeypatch)
+
+    with use_registry({}):
+        result = check_sink_entry_points(config)
+
+    assert result.verdict.value == "broken"
+    assert "prune-orphans" in result.remedy and "allowed_sinks" not in result.remedy
+
+
+def test_sinks_describe_registers_first(config, monkeypatch):
+    from techne.cli import main
+
+    _install(monkeypatch, FakeEntryPoint("courier", lambda: _COURIER))
+    config.sync.allowed_sinks = ["courier"]
+    monkeypatch.setattr(Config, "load", classmethod(lambda cls, *a, **k: config))
+
+    with use_registry({}):
+        result = CliRunner().invoke(main, ["sinks", "describe", "sink:courier"])
+
+    assert result.exit_code == 0, result.output
+    assert "Sink: sink:courier" in result.output
+
+
+@pytest.mark.parametrize("value, opens", [(True, True), ("true", False), ("false", False)])
+def test_only_a_real_true_opens_the_unlisted_gate(tmp_path, value, opens):
+    import yaml
+
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump({"sync": {"allow_unlisted_sinks": value}}))
+
+    assert Config.load(path).sync.allow_unlisted_sinks is opens
+
+
+def _status(db, target):
+    conn = init_db(db)
+    try:
+        return conn.execute("SELECT status FROM outbox WHERE target=?", (target,)).fetchone()[0]
+    finally:
+        conn.close()

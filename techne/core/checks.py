@@ -2194,8 +2194,9 @@ def check_outbox_targets(config) -> list[CheckResult]:
     # but it is subtly wrong HERE. On the team path it returns
     # `get_sink(...) is not None`, i.e. "is a sink REGISTERED IN THIS PROCESS".
     # That is true at enqueue time, because the writer registers first; it is
-    # FALSE inside `techne doctor`, which never registers anything (only
-    # `outbox flush-sinks` calls ensure_registered_for).
+    # FALSE inside `techne doctor` AT THIS POINT: since techne#1172 doctor's
+    # `check_sink_entry_points` registers every sink, but it is registered later in
+    # this file and so runs after this check. Reordering them changes this answer.
     #
     # Reusing it therefore reported a TEAM install's never-enqueued lane as
     # "correctly idle" — masking the eight-week-dead-lane case this check exists
@@ -2572,10 +2573,16 @@ def check_sink_entry_points(config) -> CheckResult:
         parts.append(f"pending rows with no sink: {', '.join(stranded)}")
     if stranded:
         verdict = Verdict.BROKEN
-        remedy = (
-            "Allow the package's entry point in `sync.allowed_sinks`, or fix the one "
-            "that failed; `techne sinks list` shows each. The rows stay pending until then."
-        )
+        if found.refused or found.failed:
+            remedy = (
+                "Allow the package's entry point in `sync.allowed_sinks`, or fix the one "
+                "that failed (`techne sinks list` shows each); rows for a target you know "
+                "is dead can be pruned with `techne outbox prune-orphans --target <target>`."
+            )
+        else:
+            # No package could own them: these are true orphans, and prune-orphans
+            # is not blocked here (Prudence, PR #1173).
+            remedy = "No installed package claims these targets: `techne outbox prune-orphans`."
     else:
         verdict = Verdict.LIVE if found.loaded else Verdict.DORMANT
         remedy = None

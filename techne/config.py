@@ -1209,7 +1209,8 @@ class Config:
                 path=s.get("path", ""),
                 allow_unlisted_adapter=bool(s.get("allow_unlisted_adapter", False)),
                 allowed_sinks=[str(n) for n in (s.get("allowed_sinks") or [])],
-                allow_unlisted_sinks=bool(s.get("allow_unlisted_sinks", False)),
+                # Only a real `true` opens an egress gate: bool("false") is True.
+                allow_unlisted_sinks=s.get("allow_unlisted_sinks") is True,
             )
 
         if "threads" in raw and isinstance(raw["threads"], dict):

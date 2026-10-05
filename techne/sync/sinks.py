@@ -158,6 +158,12 @@ def discover_sinks(config) -> SinkDiscovery:
 
     Never raises: a factory that fails is recorded in ``failed`` and the rest still
     load, so one broken package cannot stop the built-in lanes from draining.
+
+    FACTORIES MUST BE CHEAP AND SIDE-EFFECT FREE (no network): `techne doctor`, the
+    SessionStart banner and `techne_status` all run this, so a slow factory sits in
+    those hot paths. And a sink already registered in a long-lived process (the MCP
+    server) stays deliverable there after its name leaves `sync.allowed_sinks`, until
+    restart; the next process honours the change. The adapter gate behaves the same.
     """
     allowed = set(config.sync.allowed_sinks)
     allow_all = bool(config.sync.allow_unlisted_sinks)
