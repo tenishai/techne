@@ -996,7 +996,8 @@ sync:
 An adapter whose class declares `supports_pull = True` also joins recall as the source
 `team`, reading back through its `pull`. It is not governed by `recall.allowed_sources`,
 since `sync.adapter` already admitted its code. With no `recall.order` set, `team` comes
-after the built-in sources; to keep it out of recall, set an order without it. See
+after the built-in sources and recall groups results by source; to keep it out of
+recall, set an order without it. See
 [docs/mcp-tools.md](docs/mcp-tools.md#choosing-what-recall-searches-and-in-what-order).
 
 ---

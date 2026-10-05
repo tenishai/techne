@@ -116,7 +116,9 @@ graph engine worth adopting right now.
 - **A full edge resolver** (`edges.to_symbol` resolution). Partly built since this was
   written: `codex index` binds calls through their imports and same-file definitions on
   every run, including renaming imports (`from a import x as y` in Python,
-  `import { x as y }` in TypeScript) since codex schema v6. The v6 upgrade makes the next
+  `import { x as y } from 'pkg'` in TypeScript) since codex schema v6. Only absolute
+  imports bind: a relative or aliased one (`from . import x`, `'./util'`, `'@/x'`) stays
+  `unresolved`, renamed or not. The v6 upgrade makes the next
   `codex index` of each repo re-parse every file once. `codex index --lsp` resolves Python
   call edges through pyright. A name
   that neither pass can place still falls back to bare-name matching, marked

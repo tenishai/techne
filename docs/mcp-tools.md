@@ -246,8 +246,9 @@ It opts in by declaring `supports_pull = True`. techne's own `noop` and `filesys
 adapters don't, so a default install gains nothing. `team` is **not** governed by
 `recall.allowed_sources`: you already admitted the adapter's code through
 `sync.adapter` (and `sync.allow_unlisted_adapter` for a non-built-in). With no
-`order` set, a pull-capable adapter's `team` is appended after the built-in sources;
-to keep it out of recall, set an `order` without it. The adapter is constructed
+`order` set, a pull-capable adapter's `team` is appended after the built-in sources,
+and recall switches from the default interleaved merge to results grouped by source,
+as if that order had been set. To keep `team` out of recall, set an `order` without it. The adapter is constructed
 inside the bounded call, so a slow constructor or a backend that is down reports
 `unavailable` instead of blocking recall, and recall logs that once per process.
 

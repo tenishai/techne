@@ -3779,7 +3779,10 @@ def reflect_review(ctx, status, limit, show_raw):
 
 @reflect.command("emit")
 @click.option(
-    "--session", "session_id", default=None, help="Session to reflect on (default: latest)."
+    "--session",
+    "session_id",
+    default=None,
+    help="Session to reflect on (default: the newest session with unreflected work, any age).",
 )
 @click.option("--limit", default=None, type=int, help="Max threads to emit prompts for.")
 @click.option(
