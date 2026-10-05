@@ -227,7 +227,7 @@ Results come back grouped by source in that order, and `tiers` reports each sour
 in the same order. Every source, built-in or plugged in, is searched only when the
 order reaches it: a source left out of `order` and a fallback that isn't needed are
 never searched. Setting an order replaces the default merge, which takes rows from the
-local page and each remote store in turn within a match tier (a first-tier row from a later store goes before a second-tier local one), each in its own store's order (local,
+local page and each remote store in turn within a match tier (a first-tier row heading a later store's stream goes before a second-tier local one), each in its own store's order (local,
 remote, local, remote with one remote store), with reserved local seats kept in place;
 with an order, an earlier source's rows always come first.
 
@@ -238,6 +238,16 @@ Each source reports one of these states:
 - `unavailable`: a plugged-in source that wasn't allowed, failed to load, timed out,
   reported unhealthy, or whose previous call is still running;
 - `unconfigured`: a built-in archivist rung with nothing configured behind it.
+
+A sync adapter that can read back from its team backend joins as the source `team`.
+It opts in by declaring `supports_pull = True`. techne's own `noop` and `filesystem`
+adapters don't, so a default install gains nothing. `team` is **not** governed by
+`recall.allowed_sources`: you already admitted the adapter's code through
+`sync.adapter` (and `sync.allow_unlisted_adapter` for a non-built-in). With no
+`order` set, a pull-capable adapter's `team` is appended after the built-in sources;
+to keep it out of recall, set an `order` without it. The adapter is constructed
+inside the bounded call, so a slow constructor or a backend that is down reports
+`unavailable` instead of blocking recall, and recall logs that once per process.
 
 Rows from plugged-in sources carry `origin`, `recall_source` and `external: true`, and
 their text is credential-redacted. The two allow-list keys are governed by the

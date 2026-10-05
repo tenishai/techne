@@ -41,6 +41,10 @@ ARCHIVIST_LOCAL = "archivist:local"
 ARCHIVIST_REMOTE = "archivist:remote"
 LIBRARIAN = "librarian"
 BUILTIN_SOURCES: tuple[str, ...] = (MEMORY, ARCHIVIST_LOCAL, ARCHIVIST_REMOTE, LIBRARIAN)
+#: The sync adapter's read-back, when the adapter can pull (techne#1171). Not a
+#: built-in RUNG (it numbers from 5 like a plugged-in source) but a reserved name.
+TEAM = "team"
+_RESERVED = (*BUILTIN_SOURCES, TEAM)
 
 #: Source states beyond tiers' hit/empty/unconfigured/unavailable.
 STATE_SKIPPED = "skipped"
@@ -117,9 +121,9 @@ def discover_sources(config: Config, *, scan_refused: bool = True) -> SourceDisc
                 bad = [m for m in made if not isinstance(m, RecallSource)]
                 if bad:
                     raise TypeError(f"returned {type(bad[0]).__name__}, not a RecallSource")
-                clash = [m.name for m in made if m.name in BUILTIN_SOURCES]
+                clash = [m.name for m in made if m.name in _RESERVED]
                 if clash:
-                    raise ValueError(f"source name {clash[0]!r} is a built-in rung")
+                    raise ValueError(f"source name {clash[0]!r} is reserved by techne")
             except Exception as exc:  # noqa: BLE001 — recorded and reported, never fatal
                 found.failed[ep.name] = _FAILED[ep.name] = f"{type(exc).__name__}: {exc}"
                 log.warning("recall source entry point %r failed to load: %s", ep.name, exc)
@@ -127,7 +131,102 @@ def discover_sources(config: Config, *, scan_refused: bool = True) -> SourceDisc
             _LOADED[ep.name] = made
         for src in made:
             found.loaded[src.name] = src
+    team = team_source(config)
+    if team is not None:
+        found.loaded[TEAM] = team
     return found
+
+
+class AdapterSource:
+    """The configured sync adapter's `pull`, as the recall source `team` (techne#1171).
+
+    `SyncAdapter.pull` was defined and never called, so an adapter could push to a
+    team backend while recall never read back from it. Wrapping it as a source puts
+    that read-back under #1170's order, fallback and timeout rules rather than
+    adding a second recall mechanism beside them.
+
+    THE ADAPTER IS BUILT LAZILY, inside the first `health()`, which `query_source`
+    runs in its bounded call. A sync adapter's constructor never had to be cheap (it
+    ran in hooks and the CLI), so constructing it on the recall thread let a slow
+    one block the MCP server; a constructor that raises now reaches the caller as
+    an ordinary `unavailable` with its real text, logged once, and is retried on the
+    next recall (Prudence, PR #1175).
+
+    Rows carry `source` (the `KnowledgeEntry.source` label) and `target`, not a
+    `source_url`: a team backend's entry names who wrote it, not a page to follow.
+    """
+
+    name = TEAM
+    escalation = False
+
+    def __init__(self, cls: type, kwargs: dict) -> None:
+        self._cls = cls
+        self._kwargs = kwargs
+        self._adapter = None
+
+    def _get(self):
+        if self._adapter is None:
+            self._adapter = self._cls(**self._kwargs)
+        return self._adapter
+
+    def search(self, topic: str, limit: int) -> list[dict]:
+        from techne.sync.adapter import SyncQuery
+
+        rows = []
+        for e in self._get().pull(SyncQuery(query=topic, limit=limit)) or []:
+            rows.append(
+                {
+                    "type": "knowledge",
+                    "content": e.content,
+                    "knowledge_type": e.type,
+                    "tags": e.tags,
+                    "confidence": e.confidence,
+                    "source": e.source,
+                    "target": e.target,
+                }
+            )
+        return rows
+
+    def health(self) -> bool:
+        return bool(self._get().health())
+
+
+#: (adapter, url, path, allow_unlisted) -> the `team` source, or None when the
+#: adapter's class does not declare `supports_pull`. Process-lived: the MCP server
+#: loads its Config once, so a config change needs a restart either way.
+_TEAM: dict[tuple, AdapterSource | None] = {}
+#: Same key -> why the adapter CLASS could not be loaded (refused by the #389 gate,
+#: unknown name, import error). Kept for the process, like `_FAILED`; a restart retries.
+_TEAM_ERROR: dict[tuple, str] = {}
+
+
+def team_source(config: Config) -> AdapterSource | None:
+    """The `team` source, if the configured sync adapter's CLASS declares
+    ``supports_pull = True``. The class comes from `adapter_class`, the same #389
+    gate `load_adapter` applies, checked before import; the instance is built later,
+    inside the bounded call. techne's own `noop` and `filesystem` do not declare it,
+    so a default install gains no source."""
+    key = (
+        config.sync.adapter,
+        config.sync.url,
+        config.sync.path,
+        bool(config.sync.allow_unlisted_adapter),
+    )
+    if key in _TEAM:
+        return _TEAM[key]
+    src: AdapterSource | None = None
+    try:
+        from techne.sync.adapter import adapter_class
+
+        cls = adapter_class(config.sync.adapter, allow_unlisted=key[3])
+        if getattr(cls, "supports_pull", False) is True:
+            kwargs = {k: v for k, v in {"url": key[1], "path": key[2]}.items() if v}
+            src = AdapterSource(cls, kwargs)
+    except Exception as exc:  # noqa: BLE001 — reported through the tier report and doctor
+        _TEAM_ERROR[key] = f"{type(exc).__name__}: {exc}"
+        _degraded(TEAM, f"the sync adapter could not be loaded: {_TEAM_ERROR[key]}")
+    _TEAM[key] = src
+    return src
 
 
 def ordering_active(config: Config, found: SourceDiscovery) -> bool:
@@ -229,7 +328,8 @@ def assemble(
     ``providers`` maps each built-in rung to a callable that searches it. EVERY
     source is called only when the walk reaches it and it is not skipped: a
     fallback entry runs only when the rows gathered BEFORE it, as ``settle`` counts
-    them when given, number fewer than ``recall.fill``, and a source the order leaves out never runs at all.
+    them when given, number fewer than ``recall.fill``, and a source the order
+    leaves out never runs at all.
 
     ``settle`` turns the rows gathered so far into what the caller would receive
     (cross-store dedup). A fallback is decided on THAT count, not the raw one:
@@ -282,6 +382,11 @@ def assemble(
 
 
 def _why_missing(name: str, found: SourceDiscovery, config: Config) -> str:
+    if name == TEAM:
+        err = next(iter(_TEAM_ERROR.values()), None) if _TEAM_ERROR else None
+        if err:
+            return f"the sync adapter could not be loaded ({err}); a restart retries"
+        return "the configured sync adapter does not declare supports_pull = True"
     if not config.recall.allowed_sources and not config.recall.allow_unlisted_sources:
         return "not allowed: recall.allowed_sources is empty"
     if name in found.refused:
