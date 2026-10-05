@@ -1,13 +1,13 @@
 ---
 card: repo-card:techne
-updated: 2026-09-30
-anchor: pyproject.toml sha=bf65ba1f53c9d84529339efadc0b54fec8d71900
+updated: 2026-10-05
+anchor: pyproject.toml sha=bfb84a3b33b1196f6c8125d4cc493287524721cc
 ---
 # techne — repo card
 
 WHAT: local-first, single-SQLite-file persistent memory for AI coding agents (mainly Claude Code). Captures sessions/threads/observations, curates durable knowledge, self-maintains (reflect/consolidate/dream) on the agent's OWN model — no API key.
-STATE: main, v0.18.0, Alpha, active (the defaults-and-go-public pass. config.yaml holds only the keys you set, and `techne init` rewrites an older full-dump file; the recommended hooks are on by default and init downloads the embedding model; per-turn recall covers pasted content and hand-backs; FTS ranks before fetching and the MCP server keeps one read connection; a `supersede` verb on the CLI and MCP; schema v27 -> v28; CI tests the installed wheel, checks DCO sign-off and pins Actions to shas. Full notes: the 0.18.0 block in CHANGELOG.md.)
-STACK: Python 3.11+ (CI 3.12/3.13 matrix + a separate 3.14 `eval-vec` arm), Click CLI, stdlib sqlite3 (WAL) = sole store. Optional extras: `[vectors]` (sqlite-vec + fastembed/model2vec, semantic search), `[codex]` (tree-sitter code graph), `[llm]` (litellm, headless passes), `[security]`, `[watch]`, `[recommended]` = vectors+security. Install from git: `pipx install "techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.18.0"` — PyPI `techne` is an UNRELATED package. stdio MCP server. Dockerfile present.
+STATE: main, v0.18.1, Alpha, active (extension points and recall order: installed packages can add outbox sinks (`techne.outbox_sinks`) and read-only recall sources (`techne.recall_sources`), both refused until allowed by operator-governed keys; `recall.order` sets which sources recall consults and in what order, with fallbacks; a pull-capable sync adapter joins recall as `team`; codex resolves renaming imports, codex schema v5 -> v6; explicit search windows a lexically matched observation row onto its match. Full notes: the 0.18.1 block in CHANGELOG.md.)
+STACK: Python 3.11+ (CI 3.12/3.13 matrix + a separate 3.14 `eval-vec` arm), Click CLI, stdlib sqlite3 (WAL) = sole store. Optional extras: `[vectors]` (sqlite-vec + fastembed/model2vec, semantic search), `[codex]` (tree-sitter code graph), `[llm]` (litellm, headless passes), `[security]`, `[watch]`, `[recommended]` = vectors+security. Install from git: `pipx install "techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.18.1"` — PyPI `techne` is an UNRELATED package. stdio MCP server. Dockerfile present.
 ENTRY:
 - CLI techne → techne/cli.py:main (init/status/doctor/capabilities/threads/search/knowledge/reflect/custodian/architect/codex/librarian/archivist/bindings/vectors/skills/agents/guide…; `techne --help` is the full list. consolidate/dream/coord are MCP tools, not CLI groups)
 - MCP → techne/mcp_server.py (stdio JSON-RPC, 38 tools; `techne init --platform claude-code`)

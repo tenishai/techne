@@ -321,10 +321,11 @@ def ensure_registered_for(config) -> None:
     "can we finish writing what we already promised" is what made this a one-line
     regression rather than an obvious one.
 
-    Idempotent and cheap. Every DRAIN reaches it through
+    Idempotent and cheap. Every drain or enqueue site reaches it through
     ``sync.sinks.ensure_sinks_registered`` (techne#1172), which also registers
-    installed packages' sinks: the session-end sites, the session-end hook's
-    ``flush_sinks``, ``techne outbox flush-sinks`` and ``prune-orphans``. So a row that
+    installed packages' sinks. The drains are the session-end hook's ``flush_sinks``,
+    ``techne outbox flush-sinks`` and ``prune-orphans``; the lifecycle's session-end
+    sites (``run_session_end``, ``redetect_threads``) register and then enqueue. So a row that
     failed immediate delivery is still deliverable from a fresh CLI/hook process
     (techne#346 review).
 
