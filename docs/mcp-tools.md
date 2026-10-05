@@ -239,6 +239,12 @@ Each source reports one of these states:
   reported unhealthy, or whose previous call is still running;
 - `unconfigured`: a built-in archivist rung with nothing configured behind it.
 
+A sync adapter that can read back from its team backend joins as the source `team`.
+It opts in by declaring `supports_pull = True`. techne's own `noop` and `filesystem`
+adapters don't, so a default install gains nothing, and the adapter is gated as
+before by `sync.allow_unlisted_adapter`. Name `team` in `recall.order` to place it.
+A backend that is down reports `unavailable`, and recall logs that once per process.
+
 Rows from plugged-in sources carry `origin`, `recall_source` and `external: true`, and
 their text is credential-redacted. The two allow-list keys are governed by the
 operator layer. `techne doctor` reports `recall:sources`, which is broken when `order`

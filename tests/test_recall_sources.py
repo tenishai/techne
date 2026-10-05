@@ -46,6 +46,7 @@ def _fresh(monkeypatch):
     monkeypatch.setattr(rs, "_FAILED", {})
     monkeypatch.setattr(rs, "_WARNED", set())
     monkeypatch.setattr(rs, "_IN_FLIGHT", {})
+    monkeypatch.setattr(rs, "_TEAM", {})
 
 
 def _install(monkeypatch, *eps):
@@ -259,7 +260,7 @@ def test_a_source_that_fails_to_load_is_reported_and_recall_continues(cfg, monke
     rung = _tier(out, "broken")
     assert rung["state"] == "unavailable" and "no endpoint configured" in rung["detail"]
     found = rs.discover_sources(cfg)
-    assert "built-in rung" in found.failed["clash"]
+    assert "reserved" in found.failed["clash"]
 
 
 def test_returned_content_is_redacted_and_marked_external(cfg, monkeypatch):
@@ -544,3 +545,124 @@ def test_both_entry_point_pins_are_active():
 
     assert sinks_mod.entry_points is not importlib.metadata.entry_points
     assert rs.entry_points is not importlib.metadata.entry_points
+
+
+# --- the sync adapter's pull as the `team` source (techne#1171) --------------------------
+
+
+class PullAdapter:
+    """A team backend that can be read back."""
+
+    supports_pull = True
+
+    def __init__(self, healthy=True):
+        self.healthy = healthy
+        self.queries = []
+
+    def push(self, entries):
+        return None
+
+    def pull(self, query):
+        from techne.sync.adapter import KnowledgeEntry
+
+        self.queries.append(query)
+        return [
+            KnowledgeEntry(
+                content=f"team note on {query.query}",
+                type="fact",
+                tags="t",
+                confidence="high",
+                source="team-backend",
+            )
+        ]
+
+    def health(self):
+        return self.healthy
+
+
+def _adapter(monkeypatch, adapter):
+    import techne.sync.adapter as ad
+
+    monkeypatch.setattr(ad, "load_adapter", lambda name, **kw: adapter)
+
+
+def test_a_pull_capable_adapter_feeds_recall_as_team(cfg, monkeypatch):
+    _install(monkeypatch)
+    backend = PullAdapter()
+    _adapter(monkeypatch, backend)
+    cfg.sync.adapter = "teamstore"
+
+    out = _recall(cfg)
+
+    row = next(r for r in out["search_results"] if r.get("origin") == "team")
+    assert row["content"] == "team note on deploy runbook" and row["external"] is True
+    assert row["knowledge_type"] == "fact"
+    assert _tier(out, "team")["state"] == "hit"
+    assert backend.queries[0].limit == cfg.recall.source_limit
+
+
+def test_team_takes_its_place_in_the_order(cfg, monkeypatch):
+    _install(monkeypatch)
+    _adapter(monkeypatch, PullAdapter())
+    cfg.sync.adapter = "teamstore"
+    cfg.recall.order = [RecallOrderEntry("team"), RecallOrderEntry("memory")]
+
+    out = _recall(cfg)
+
+    assert out["search_results"][0]["origin"] == "team"
+    assert _names(out)[:2] == ["team", "memory"]
+
+
+def test_the_builtin_adapters_add_no_team_source(cfg, monkeypatch):
+    """noop and filesystem do not declare supports_pull: a default install is untouched."""
+    _install(monkeypatch)
+    for name in ("noop", "filesystem"):
+        cfg.sync.adapter = name
+        cfg.sync.path = str(cfg.data_dir / "sync")
+        monkeypatch.setattr(rs, "_TEAM", {})
+        assert rs.team_source(cfg) is None
+        assert _names(_recall(cfg)) == [
+            "memory",
+            "archivist:local",
+            "archivist:remote",
+            "librarian",
+        ]
+
+
+def test_an_adapter_that_does_not_opt_in_is_not_a_source(cfg, monkeypatch):
+    class PushOnly(PullAdapter):
+        supports_pull = False
+
+    _install(monkeypatch)
+    _adapter(monkeypatch, PushOnly())
+    cfg.sync.adapter = "pushonly"
+    cfg.recall.order = [RecallOrderEntry("memory"), RecallOrderEntry("team")]
+
+    rung = _tier(_recall(cfg), "team")
+
+    assert rung["state"] == "unavailable" and "does not support pull" in rung["detail"]
+
+
+def test_an_unreachable_backend_degrades_and_logs_once(cfg, monkeypatch, caplog):
+    _install(monkeypatch)
+    _adapter(monkeypatch, PullAdapter(healthy=False))
+    cfg.sync.adapter = "teamstore"
+
+    with caplog.at_level("WARNING", logger="techne.core.recall_sources"):
+        first = _recall(cfg)
+        second = _recall(cfg)
+
+    for out in (first, second):
+        assert _tier(out, "team")["state"] == "unavailable"
+        assert any(r.get("origin") == "memory" for r in out["search_results"])
+    warnings = [r for r in caplog.records if "'team' unavailable" in r.getMessage()]
+    assert len(warnings) == 1
+
+
+def test_a_plugged_in_source_cannot_claim_the_team_name(cfg, monkeypatch):
+    _install(monkeypatch, FakeEntryPoint("imposter", lambda: FakeSource("team")))
+    cfg.recall.allowed_sources = ["imposter"]
+
+    found = rs.discover_sources(cfg)
+
+    assert "reserved" in found.failed["imposter"]

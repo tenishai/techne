@@ -41,6 +41,10 @@ ARCHIVIST_LOCAL = "archivist:local"
 ARCHIVIST_REMOTE = "archivist:remote"
 LIBRARIAN = "librarian"
 BUILTIN_SOURCES: tuple[str, ...] = (MEMORY, ARCHIVIST_LOCAL, ARCHIVIST_REMOTE, LIBRARIAN)
+#: The sync adapter's read-back, when the adapter can pull (techne#1171). Not a
+#: built-in RUNG (it numbers from 5 like a plugged-in source) but a reserved name.
+TEAM = "team"
+_RESERVED = (*BUILTIN_SOURCES, TEAM)
 
 #: Source states beyond tiers' hit/empty/unconfigured/unavailable.
 STATE_SKIPPED = "skipped"
@@ -117,9 +121,9 @@ def discover_sources(config: Config, *, scan_refused: bool = True) -> SourceDisc
                 bad = [m for m in made if not isinstance(m, RecallSource)]
                 if bad:
                     raise TypeError(f"returned {type(bad[0]).__name__}, not a RecallSource")
-                clash = [m.name for m in made if m.name in BUILTIN_SOURCES]
+                clash = [m.name for m in made if m.name in _RESERVED]
                 if clash:
-                    raise ValueError(f"source name {clash[0]!r} is a built-in rung")
+                    raise ValueError(f"source name {clash[0]!r} is reserved by techne")
             except Exception as exc:  # noqa: BLE001 — recorded and reported, never fatal
                 found.failed[ep.name] = _FAILED[ep.name] = f"{type(exc).__name__}: {exc}"
                 log.warning("recall source entry point %r failed to load: %s", ep.name, exc)
@@ -127,7 +131,76 @@ def discover_sources(config: Config, *, scan_refused: bool = True) -> SourceDisc
             _LOADED[ep.name] = made
         for src in made:
             found.loaded[src.name] = src
+    team = team_source(config)
+    if team is not None:
+        found.loaded[TEAM] = team
     return found
+
+
+class AdapterSource:
+    """The configured sync adapter's `pull`, as the recall source `team` (techne#1171).
+
+    `SyncAdapter.pull` was defined and never called, so an adapter could push to a
+    team backend while recall never read back from it. Wrapping it as a source puts
+    that read-back under #1170's order, fallback and timeout rules rather than
+    adding a second recall mechanism beside them.
+    """
+
+    name = TEAM
+    escalation = False
+
+    def __init__(self, adapter) -> None:
+        self._adapter = adapter
+
+    def search(self, topic: str, limit: int) -> list[dict]:
+        from techne.sync.adapter import SyncQuery
+
+        rows = []
+        for e in self._adapter.pull(SyncQuery(query=topic, limit=limit)) or []:
+            rows.append(
+                {
+                    "type": "knowledge",
+                    "content": e.content,
+                    "knowledge_type": e.type,
+                    "tags": e.tags,
+                    "confidence": e.confidence,
+                    "source": e.source,
+                }
+            )
+        return rows
+
+    def health(self) -> bool:
+        return bool(self._adapter.health())
+
+
+#: (adapter, url, path) -> the wrapped adapter, or None when it cannot pull.
+_TEAM: dict[tuple[str, str, str], AdapterSource | None] = {}
+
+
+def team_source(config: Config) -> AdapterSource | None:
+    """The `team` source, if the configured sync adapter opts in to read-back with
+    ``supports_pull = True``. The adapter is loaded through `load_adapter`, so the
+    #389 gate on unlisted adapters applies unchanged; techne's own `noop` and
+    `filesystem` adapters do not opt in, so a default install gains no source."""
+    key = (config.sync.adapter, config.sync.url, config.sync.path)
+    if key in _TEAM:
+        return _TEAM[key]
+    src: AdapterSource | None = None
+    try:
+        from techne.sync.adapter import load_adapter
+
+        adapter = load_adapter(
+            config.sync.adapter,
+            allow_unlisted=config.sync.allow_unlisted_adapter,
+            url=config.sync.url,
+            path=config.sync.path,
+        )
+        if getattr(adapter, "supports_pull", False) is True:
+            src = AdapterSource(adapter)
+    except Exception as exc:  # noqa: BLE001 — the push side reports adapter faults
+        log.debug("recall: sync adapter %r not usable as a source: %s", key[0], exc)
+    _TEAM[key] = src
+    return src
 
 
 def ordering_active(config: Config, found: SourceDiscovery) -> bool:
@@ -282,6 +355,8 @@ def assemble(
 
 
 def _why_missing(name: str, found: SourceDiscovery, config: Config) -> str:
+    if name == TEAM:
+        return "the configured sync adapter does not support pull (supports_pull = True)"
     if not config.recall.allowed_sources and not config.recall.allow_unlisted_sources:
         return "not allowed: recall.allowed_sources is empty"
     if name in found.refused:
