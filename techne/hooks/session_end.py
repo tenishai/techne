@@ -134,11 +134,12 @@ def main():
                 print(f"techne: outbox flush deferred: {e}", file=sys.stderr)
 
             try:
-                from techne.core.archivist import ensure_registered_for
                 from techne.sync.outbox import flush_sinks
+                from techne.sync.sinks import ensure_sinks_registered
 
-                # So a row that failed immediate delivery is drainable here too (#346).
-                ensure_registered_for(config)
+                # So a row that failed immediate delivery is drainable here too
+                # (#346), installed packages' sinks included (#1172).
+                ensure_sinks_registered(config)
                 flush_sinks(config.db_path)
             except Exception as e:
                 print(f"techne: sink flush deferred: {e}", file=sys.stderr)
