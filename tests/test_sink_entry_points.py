@@ -217,6 +217,8 @@ def test_doctor_names_stranded_targets(config, db, monkeypatch, allowed, queued,
     assert result.verdict.value == verdict
     if verdict == "broken":
         assert "sink:courier" in result.detail and "courier" in result.detail
+        # A refused package could own these rows: allow it, not a bare prune (Prudence r2).
+        assert "allowed_sinks" in result.remedy
 
 
 def test_the_allow_list_round_trips_through_config_yaml(tmp_path):

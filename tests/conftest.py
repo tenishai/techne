@@ -377,5 +377,8 @@ def _no_installed_sink_entry_points(monkeypatch):
     discovery install their own fakes over this (Prudence, PR #1173)."""
     import techne.sync.sinks as sinks_mod
 
-    monkeypatch.setattr(sinks_mod, "entry_points", lambda group: [])
+    # Guarded: CI's eval-vec base leg runs THESE tests against origin/main's library,
+    # where sinks.py may not import entry_points yet (#832's base-leg design).
+    if hasattr(sinks_mod, "entry_points"):
+        monkeypatch.setattr(sinks_mod, "entry_points", lambda group: [])
 

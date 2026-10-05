@@ -678,10 +678,10 @@ def test_rows_marked_dead_are_re_enqueued_not_stranded(config, tmp_path):
     The trigger was real, not contrived: `techne outbox prune-orphans` once did not
     register the Archivist sinks (fixed by #484, and since #1172 through
     ensure_sinks_registered), so in that fresh process every sink:archivist_knowledge
-    row looked like an orphan and the whole pending backlog was marked dead. Before the pre-filter existed the next
-    teardown re-enqueued them and the archivist recovered; with an unfiltered
-    pre-filter it recovers never, and `INSERT OR IGNORE` cannot help because the
-    filter `continue`s before enqueue is reached.
+    row looked like an orphan and the whole pending backlog was marked dead. Before
+    the pre-filter existed the next teardown re-enqueued them and the archivist
+    recovered; with an unfiltered pre-filter it recovers never, and `INSERT OR
+    IGNORE` cannot help because the filter `continue`s before enqueue is reached.
 
     Kills the mutation that drops `AND status != 'dead'` — which survived the
     entire suite when this PR was first submitted. (Prudence, #482 review.)

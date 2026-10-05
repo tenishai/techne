@@ -1909,7 +1909,8 @@ def outbox_flush_sinks(ctx):
     "targets",
     multiple=True,
     help="Prune only rows for this target (repeatable). Allowed while an entry point "
-    "is refused, because naming the target says the rows are not that package's.",
+    "is refused: naming a target asserts its rows are dead, so name a refused "
+    "package's own target only to give up its rows.",
 )
 @click.pass_context
 def outbox_prune_orphans(ctx, targets):
