@@ -321,10 +321,12 @@ def ensure_registered_for(config) -> None:
     "can we finish writing what we already promised" is what made this a one-line
     regression rather than an obvious one.
 
-    Idempotent and cheap — call at EVERY entry point that enqueues OR drains sink rows
-    (the session-end sites, the session-end hook's ``flush_sinks``, and ``techne outbox
-    flush-sinks``), so a row that failed immediate delivery is still deliverable from a
-    fresh CLI/hook process (techne#346 review).
+    Idempotent and cheap. Every DRAIN reaches it through
+    ``sync.sinks.ensure_sinks_registered`` (techne#1172), which also registers
+    installed packages' sinks: the session-end sites, the session-end hook's
+    ``flush_sinks``, ``techne outbox flush-sinks`` and ``prune-orphans``. So a row that
+    failed immediate delivery is still deliverable from a fresh CLI/hook process
+    (techne#346 review).
 
     BUT PASS THE CONFIG ONLY FOR A STORE, because pinning `_HANDLER_DB` calls
     `archivist_db(config)`, which calls `init_db` — and that CREATES THE FILE. So the
@@ -403,10 +405,10 @@ def push_knowledge_to_archivist(config) -> int:
     # DELIVERED, which is the opposite of "already enqueued" for a pre-filter's
     # purposes, so sweeping those hashes in here silently drops the row forever.
     #
-    # Not hypothetical: `techne outbox prune-orphans` does not call
-    # `ensure_registered_for` (unlike `flush-sinks` directly above it in cli.py),
-    # so in that fresh process every sink:archivist_knowledge row looks like an
-    # orphan and the whole pending backlog is marked dead. Measured on a 3-fact
+    # Not hypothetical: `techne outbox prune-orphans` once did not register the
+    # Archivist sinks (fixed by #484; it now goes through ensure_sinks_registered),
+    # so in that fresh process every sink:archivist_knowledge row looked like an
+    # orphan and the whole pending backlog was marked dead. Measured on a 3-fact
     # store: BEFORE this pre-filter existed, the next teardown re-enqueued all 3
     # and the archivist recovered; with the pre-filter and no status clause, it
     # re-enqueued 0, permanently. `INSERT OR IGNORE` cannot save it — the filter
