@@ -187,7 +187,7 @@ def classify_outcome(reports: list[RungReport], *, direct: bool) -> dict[str, st
     return {"code": code, "summary": _OUTCOME_SUMMARY[code]}
 
 
-def tier_of(row: dict, archivist_name: str) -> int:
+def tier_of(row: dict, archivist_name: str, plugin_numbers: dict[str, int] | None = None) -> int:
     """Which rung produced this row.
 
     Reads the tags the existing read paths ALREADY write — `origin` from
@@ -196,8 +196,11 @@ def tier_of(row: dict, archivist_name: str) -> int:
     was simply never assembled into a ladder.
 
     The `_store`-absent case is the unfederated path, whose rows are local by
-    construction and carry no tag at all.
+    construction and carry no tag at all. A row from a plugged-in source carries
+    `recall_source` (techne#1170) and takes that source's rung number.
     """
+    if plugin_numbers and row.get("recall_source") in plugin_numbers:
+        return plugin_numbers[row["recall_source"]]
     if row.get("origin") == "library":
         return 4
     store = row.get("_store")
@@ -208,6 +211,44 @@ def tier_of(row: dict, archivist_name: str) -> int:
     return 3
 
 
+#: Built-in rung name by number, for the ordered path (techne#1170).
+BUILTIN_RUNG_NAMES = {r.number: r.name for r in LADDER}
+
+
+def rung_name_of(row: dict, archivist_name: str) -> str:
+    """The built-in rung a memory/archivist/library row belongs to, by name."""
+    return BUILTIN_RUNG_NAMES[tier_of(row, archivist_name)]
+
+
+def ladder_for(order: list[str], escalation: dict[str, bool]) -> tuple[Rung, ...]:
+    """The ladder in configured order (techne#1170). Built-in rungs keep their
+    numbers; any other named source gets a rung numbered from 5, in order of
+    appearance. Built-ins the order leaves out are appended, so the report still
+    shows them (as excluded) rather than hiding them."""
+    by_name = {r.name: r for r in LADDER}
+    rungs: list[Rung] = []
+    seen: set[str] = set()
+    next_number = len(LADDER) + 1
+    for name in order:
+        if name in seen:
+            continue
+        seen.add(name)
+        if name in by_name:
+            rungs.append(by_name[name])
+        else:
+            rungs.append(
+                Rung(
+                    next_number,
+                    name,
+                    "an installed source (external)",
+                    escalation=escalation.get(name, False),
+                )
+            )
+            next_number += 1
+    rungs.extend(r for r in LADDER if r.name not in seen)
+    return tuple(rungs)
+
+
 def build_reports(
     *,
     rows: list[dict],
@@ -215,6 +256,9 @@ def build_reports(
     archivist_name: str,
     archivist_binding: str,
     librarian_available: bool,
+    ladder: tuple[Rung, ...] | None = None,
+    overrides: dict[str, tuple[str, str]] | None = None,
+    plugin_numbers: dict[str, int] | None = None,
 ) -> list[RungReport]:
     """Report every rung, hit or not — the S1 requirement in one function.
 
@@ -223,10 +267,12 @@ def build_reports(
     the natural implementation filters to rungs that produced rows, and a caller
     then cannot tell "the team knows nothing about this" from "there is no team".
     """
-    counts: dict[int, int] = {r.number: 0 for r in LADDER}
+    ladder = ladder or LADDER
+    overrides = overrides or {}
+    counts: dict[int, int] = {r.number: 0 for r in ladder}
     for row in rows:
-        n = tier_of(row, archivist_name)
-        counts[n] += 1
+        n = tier_of(row, archivist_name, plugin_numbers)
+        counts[n] = counts.get(n, 0) + 1
 
     # Which remotes are real remotes? The local archivist auto-registers itself as
     # a connection (mcp_server._effective_connections), so its presence says
@@ -234,8 +280,18 @@ def build_reports(
     remotes = [name for name in connections if name != archivist_name]
 
     reports: list[RungReport] = []
-    for rung in LADDER:
-        n = counts[rung.number]
+    for rung in ladder:
+        n = counts.get(rung.number, 0)
+        # The ordered path (techne#1170) says how a source fared when that is not
+        # derivable from the rows: skipped as a fallback, left out of the order,
+        # or a plugged-in source's own state.
+        if rung.name in overrides and (
+            rung.number > len(LADDER) or overrides[rung.name][0] in ("skipped", "excluded")
+        ):
+            state, detail = overrides[rung.name]
+            binding = "plugged-in" if rung.number > len(LADDER) else "none"
+            reports.append(RungReport(rung, state, binding, n, detail=detail))
+            continue
         if rung.number == 1:
             reports.append(RungReport(rung, STATE_HIT if n else STATE_EMPTY, "local:knowledge", n))
         elif rung.number == 2:
@@ -309,16 +365,21 @@ def build_reports(
     return reports
 
 
-def annotate_rows(rows: list[dict], archivist_name: str) -> list[dict]:
+def annotate_rows(
+    rows: list[dict],
+    archivist_name: str,
+    ladder: tuple[Rung, ...] | None = None,
+    plugin_numbers: dict[str, int] | None = None,
+) -> list[dict]:
     """Stamp each row with the rung it came from (S1, per-row half).
 
     The ladder block says which rungs exist; this says which rung each ROW is
     from, so a caller reading a single result still knows whether it is our
     experience or somebody's document.
     """
-    by_number = {r.number: r for r in LADDER}
+    by_number = {r.number: r for r in (ladder or LADDER)}
     for row in rows:
-        n = tier_of(row, archivist_name)
+        n = tier_of(row, archivist_name, plugin_numbers)
         # `recall_tier`, NOT `tier`: observation rows already carry a `tier` column
         # (hot|warm|cold, database.py) which search surfaces verbatim, so writing an
         # int 1-4 there replaced an existing key AND changed its meaning. That is the

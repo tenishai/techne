@@ -2194,8 +2194,9 @@ def check_outbox_targets(config) -> list[CheckResult]:
     # but it is subtly wrong HERE. On the team path it returns
     # `get_sink(...) is not None`, i.e. "is a sink REGISTERED IN THIS PROCESS".
     # That is true at enqueue time, because the writer registers first; it is
-    # FALSE inside `techne doctor`, which never registers anything (only
-    # `outbox flush-sinks` calls ensure_registered_for).
+    # FALSE inside `techne doctor` AT THIS POINT: since techne#1172 doctor's
+    # `check_sink_entry_points` registers every sink, but it is registered later in
+    # this file and so runs after this check. Reordering them changes this answer.
     #
     # Reusing it therefore reported a TEAM install's never-enqueued lane as
     # "correctly idle" — masking the eight-week-dead-lane case this check exists
@@ -2532,6 +2533,130 @@ def _describe_destination(key: str, value, default=None) -> str:
     if key in _PRINTABLE_DESTINATIONS:
         return f"{key}={value}"
     return f"{key} set"
+
+
+@register_check
+def check_sink_entry_points(config) -> CheckResult:
+    """Installed packages' outbox sinks: loaded, refused, failed, and stranded rows
+    (techne#1172).
+
+    Runs discovery the way a drain does, then names every pending ``sink:`` target
+    that still has no registered sink. A refused entry point with nothing waiting
+    is a deliberate policy and reads DORMANT; rows waiting on a sink nobody
+    registered read BROKEN, because they will never drain on their own and
+    ``prune-orphans`` will not touch them while an entry point is refused.
+    """
+    from techne.core.database import connect
+    from techne.sync.sinks import ensure_sinks_registered, get_sink
+
+    found = ensure_sinks_registered(config)
+    conn = connect(config.db_path)
+    try:
+        targets = [
+            r[0]
+            for r in conn.execute(
+                "SELECT DISTINCT target FROM outbox WHERE status = 'pending' "
+                "AND target LIKE 'sink:%' ORDER BY target"
+            )
+        ]
+    finally:
+        conn.close()
+    stranded = [t for t in targets if get_sink(t) is None]
+    parts = []
+    if found.loaded:
+        parts.append(f"loaded: {', '.join(sorted(found.loaded))}")
+    if found.refused:
+        parts.append(f"refused (not in sync.allowed_sinks): {', '.join(sorted(found.refused))}")
+    if found.failed:
+        parts.append("failed: " + "; ".join(f"{k} ({v})" for k, v in sorted(found.failed.items())))
+    if stranded:
+        parts.append(f"pending rows with no sink: {', '.join(stranded)}")
+    if stranded:
+        verdict = Verdict.BROKEN
+        if found.refused or found.failed:
+            remedy = (
+                "Allow the package's entry point in `sync.allowed_sinks`, or fix the one "
+                "that failed (`techne sinks list` shows each); rows for a target you know "
+                "is dead can be pruned with `techne outbox prune-orphans --target <target>`."
+            )
+        else:
+            # No package could own them: these are true orphans, and prune-orphans
+            # is not blocked here (Prudence, PR #1173).
+            remedy = "No installed package claims these targets: `techne outbox prune-orphans`."
+    else:
+        verdict = Verdict.LIVE if found.loaded else Verdict.DORMANT
+        remedy = None
+    return CheckResult(
+        name="sinks:entry-points",
+        subsystem="outbox",
+        kind=Kind.FAIL_OPEN,
+        verdict=verdict,
+        evidence=(
+            f"entry points: {len(found.loaded)} loaded, {len(found.refused)} refused, "
+            f"{len(found.failed)} failed; pending sink targets: {len(targets)}, "
+            f"with no sink: {len(stranded)}"
+        ),
+        detail="; ".join(parts) or "no sink entry points installed",
+        remedy=remedy,
+    )
+
+
+@register_check
+def check_recall_sources(config) -> CheckResult:
+    """Installed packages' recall sources, and whether `recall.order` names any
+    source recall cannot use (techne#1170).
+
+    An ordered source that is unknown, refused or failed to load reads BROKEN: the
+    operator asked recall to consult it and every recall reports it unavailable.
+    A refused entry point the order does not name is a deliberate policy (DORMANT);
+    loaded sources read LIVE.
+    """
+    from techne.core import recall_sources
+
+    found = recall_sources.discover_sources(config)
+    builtin = set(recall_sources.BUILTIN_SOURCES)
+    ordered = [e.name for e in config.recall.order]
+    unusable = [n for n in ordered if n not in builtin and n not in found.loaded]
+    parts = []
+    if found.loaded:
+        parts.append(f"loaded: {', '.join(sorted(found.loaded))}")
+    if found.refused:
+        parts.append(f"refused (not in recall.allowed_sources): {', '.join(sorted(found.refused))}")
+    if found.failed:
+        parts.append("failed: " + "; ".join(f"{k} ({v})" for k, v in sorted(found.failed.items())))
+    if unusable:
+        parts.append(f"recall.order names unusable source(s): {', '.join(unusable)}")
+    if unusable:
+        verdict = Verdict.BROKEN
+        if unusable == [recall_sources.TEAM]:
+            # `team` is the sync adapter's read-back, not a plugged-in source: the
+            # allow-list does not govern it (techne#1171).
+            remedy = (
+                "`team` comes from the sync adapter: it must load (`sync.adapter`, and "
+                "`sync.allow_unlisted_adapter` for a non-built-in) and declare "
+                "`supports_pull = True`; otherwise remove `team` from `recall.order`."
+            )
+        else:
+            remedy = (
+                "Allow the entry point in `recall.allowed_sources`, fix the one that "
+                "failed, or remove the name from `recall.order`."
+            )
+    else:
+        verdict = Verdict.LIVE if found.loaded else Verdict.DORMANT
+        remedy = None
+    return CheckResult(
+        name="recall:sources",
+        subsystem="recall",
+        kind=Kind.FAIL_OPEN,
+        verdict=verdict,
+        evidence=(
+            f"entry points: {len(found.loaded)} source(s) loaded, {len(found.refused)} "
+            f"refused, {len(found.failed)} failed; recall.order: {len(ordered)} entr(y/ies), "
+            f"{len(unusable)} unusable"
+        ),
+        detail="; ".join(parts) or "no recall source entry points installed",
+        remedy=remedy,
+    )
 
 
 @register_check

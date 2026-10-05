@@ -5,9 +5,84 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Added
+
+- **Pluggable recall sources and an operator-defined recall order** (#1170). An
+  installed package can add read-only sources to `techne_recall` through the
+  `techne.recall_sources` entry-point group. They are refused by default: allow one
+  by entry-point name in `recall.allowed_sources`, or set
+  `recall.allow_unlisted_sources: true`. Both keys are governed by the operator layer.
+  `recall.order` lists the sources to consult, built-in and plugged in, in the order
+  their results come back, for example `memory`, `librarian`, `archivist:local`,
+  `archivist:remote`, then a remote librarian. Marking an entry `fallback: true`
+  consults it only when the sources before it returned fewer than `recall.fill` rows.
+  Each plugged-in source call is bounded by `recall.source_timeout_s`, after a
+  `health()` probe, and a source that is down reports `unavailable` while recall
+  carries on. Plugged-in rows are stamped `origin`, `recall_source` and
+  `external: true`, and credential-redacted. `techne doctor` adds `recall:sources`.
+  With no `recall.order` set and no source allowed, recall's output is unchanged.
+- **Outbox sinks from installed packages** (#1172). A package can contribute sinks
+  through the `techne.outbox_sinks` entry-point group: each entry point is a zero-arg
+  callable returning an `OutboxSink` or a list of them. They are refused by default,
+  like sync adapters: allow one by entry-point name in `sync.allowed_sinks`, or set
+  `sync.allow_unlisted_sinks: true` (only a real `true` counts). Every techne site that
+  drains or prunes sink rows registers them (`outbox flush-sinks`, `prune-orphans`, the
+  session-end hook), as do the lifecycle's enqueue sites, so their rows no longer wait
+  for a process that happened to import the package. Bare `outbox prune-orphans` refuses to run while an
+  entry point is refused or failed, because it would mark that sink's pending rows
+  dead. `--target sink:<name>` prunes only targets you name as dead.
+  `techne sinks list` and `sinks describe` now work in a fresh process, and `list` also
+  names refused and failed entry points. `techne doctor` adds `sinks:entry-points`, which
+  names pending sink rows that have no sink.
+- **Recall reads back from the team sync backend** (#1171). `SyncAdapter.pull` had no
+  caller. A sync adapter that declares `supports_pull = True` now joins recall as the
+  source `team`, under the same order, fallback and timeout rules: the adapter is
+  constructed inside the bounded call, its rows are stamped `origin: team`, a backend
+  that is down degrades to the other sources, and the failure is logged once per
+  process. `team` is not governed by `recall.allowed_sources`; the adapter was already
+  admitted through `sync.adapter`. `noop` and `filesystem` don't opt in, so nothing
+  changes for them. A new `adapter_class()` returns a sync adapter's class behind the
+  same gate as `load_adapter`.
+
 ### Changed
 
-- **Copyright notice names tenish and the techne contributors** (NOTICE, README). Contributors keep their copyright under the DCO.
+- **Copyright notice names tenish and the techne contributors** (NOTICE, README). Contributors
+  keep their copyright under the DCO.
+
+### Fixed
+
+- **`techne reflect emit` with no session id reaches every pending session, not just
+  the newest five** (#1158, found by Grip). It took its target from
+  `pending_reflection`'s window of 5. Once those five were emitted it said "no
+  session with unreflected work" while older sessions were still owed, and a bulk
+  drain that guarded on a wider window looped forever. On the operator's store the
+  bare emit could see 4 of 70 pending sessions. The same fix applies to the API and
+  to `techne_reflect_emit` without a `session_id`. The SessionStart nudge and
+  per-turn recall keep their newest-five window.
+- **`techne init` no longer dies with a traceback on macOS when a parent of the
+  working directory is unreadable** (#1153). macOS's `getcwd()` fails with EACCES
+  there; Linux's does not. `init` now treats the directory as "no project": it skips
+  curated-memory detection, so `auto` posture resolves to observe, and says why.
+  `memory doctor` and `memory sync` exit 1 with the same explanation. Run them from
+  your project directory.
+- **Explicit search shows why a lexically matched observation row is on the page**
+  (#1147). Observation rows are cut to their first 500 chars, so a row FTS matched on
+  a term past that cut showed nothing the query asked for: 4 of 16 such rows on the
+  gold-v2 queries. 0.18.0 fixed this for the phrase-seated row only. Now, when an
+  observation row FTS matched on a query term outside the stopwords has that term
+  past the cut, the row keeps its first line (the tool and command, up to a quarter of
+  the width), then ` … `, then a window over the first matched term, at the same
+  width, with
+  `content_head`, `content_window` and `content_chars_total` saying what is shown. The
+  phrase-seated row takes the same shape, replacing the 0.18.0 `…`-prefixed window.
+  On the 2026-09-28 snapshot every lexical row now shows a query term (16/16, 25/25
+  on 40 real prompts, 48/48 on the held-out phrase queries), and no page's order
+  changed. Explicit search only (`techne_search`, `techne search`, `techne_recall`;
+  `techne search` prints 200 chars of each row, and for a windowed row that is up to
+  60 chars of the first line, then ` … `, then the window from 40 chars before the
+  match, so the match shows there too (#1162));
+  the per-turn and inbound recall rails search knowledge rows, which are never
+  windowed, so injected text is unchanged.
 
 ## [0.18.0] — 2026-09-30
 

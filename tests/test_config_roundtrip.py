@@ -33,6 +33,10 @@ CONDITIONAL_KEYS = frozenset(
         "connections",
         "db_path",
         "data_dir",
+        # techne#1170: written only when it differs from the default, so an install
+        # that never set it keeps no block; a hand-written one survives load->save
+        # (tests/test_recall_sources.py::test_a_hand_written_recall_block_survives_a_save).
+        "recall",
     }
 )
 

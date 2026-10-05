@@ -512,7 +512,7 @@ def _window(db, rid, match, shown):
     conn = connect(db)
     try:
         row = {"source_table": "observation", "id": rid, "content": shown}
-        search_mod._window_seated_row(conn, row, match)
+        search_mod._window_matched_row(conn, row, match)
     finally:
         conn.close()
     return row
@@ -526,11 +526,25 @@ def test_a_span_past_the_cut_is_windowed_into_view(db):
     row = _window(db, rid, '"litestream replicate techne.db"', _LONG[: search_mod._ROW_CHAR_CAP])
 
     assert "litestream replicates # techne.db" in row["content"], "stemmed span is shown"
-    assert row["content"].startswith("…")
+    head = row["content_head"]
     lo, hi = row["content_window"]
-    assert lo <= span_at and hi - lo <= search_mod._ROW_CHAR_CAP
-    assert row["content"][1:] == _LONG[lo:hi]
+    assert head == search_mod._ROW_CHAR_CAP // 4, "no newline: a quarter of the width"
+    assert head < lo <= span_at
+    assert row["content"] == _LONG[:head] + search_mod._WINDOW_SEP + _LONG[lo:hi]
+    assert len(row["content"]) == search_mod._ROW_CHAR_CAP, "same width as the head cut"
     assert row["content_chars_total"] == len(_LONG)
+
+
+def test_the_head_is_the_first_line_when_it_is_short(db):
+    """The head keeps what the row is (`Ran: <command>`), not a fixed slice."""
+    text = "Ran: litestream status\n" + _LONG
+    (rid,) = _obs(db, [text])
+
+    row = _window(db, rid, '"litestream replicate"', text[: search_mod._ROW_CHAR_CAP])
+
+    assert row["content_head"] == text.index("\n")
+    assert row["content"].startswith("Ran: litestream status" + search_mod._WINDOW_SEP)
+    assert "litestream replicates # techne.db" in row["content"]
 
 
 def test_a_span_inside_the_head_leaves_the_row_alone(db):
@@ -565,8 +579,10 @@ def test_a_span_near_the_end_still_fills_the_width(db):
 
     row = _window(db, rid, '"litestream replicate"', text[:cap])
 
-    assert row["content_window"] == [len(text) - cap, len(text)]
-    assert row["content"] == "…" + text[-cap:]
+    head = cap // 4
+    span = cap - head - len(search_mod._WINDOW_SEP)
+    assert row["content_window"] == [len(text) - span, len(text)]
+    assert row["content"] == text[:head] + search_mod._WINDOW_SEP + text[-span:]
 
 
 def test_a_knowledge_row_is_not_windowed_so_federation_dedup_still_holds(db, monkeypatch):
@@ -594,7 +610,7 @@ def test_a_knowledge_row_is_not_windowed_so_federation_dedup_still_holds(db, mon
 def test_a_thread_row_or_a_bad_match_leaves_the_row_alone(db):
     (rid,) = _obs(db, [_LONG])
     thread = {"source_table": "thread", "id": "t-1", "content": "x"}
-    search_mod._window_seated_row(connect(db), thread, '"litestream replicate"')
+    search_mod._window_matched_row(connect(db), thread, '"litestream replicate"')
     assert thread == {"source_table": "thread", "id": "t-1", "content": "x"}
 
     shown = _LONG[: search_mod._ROW_CHAR_CAP]
@@ -717,3 +733,204 @@ def test_without_the_seat_an_fts_only_page_keeps_its_head_cut(db, monkeypatch):
 
     assert page[0]["content"] == _LONG[:500]
     assert all("content_window" not in r for r in page)
+
+
+# --- every lexically matched observation row shows its span (techne#1147) ------------
+
+#: A row FTS matches on `kubeconfig`, with the term far past the head cut and the
+#: stopword "the" inside it.
+_DEEP = "Ran: make deploy\n" + ("the build step ran; " * 50) + "kubeconfig rotated for the cluster"
+
+
+def test_an_fts_matched_row_shows_its_span_on_explicit_search(db, monkeypatch):
+    (rid,) = _obs(db, [_DEEP])
+    assert _DEEP.index("kubeconfig") > search_mod._ROW_CHAR_CAP
+    monkeypatch.setattr(search_mod, "_phrase_seat_row", lambda *_a, **_k: None)
+
+    on = search(db, "the kubeconfig", table="all", limit=10, use_vectors=False, phrase_seat=True)
+    off = search(db, "the kubeconfig", table="all", limit=10, use_vectors=False)
+
+    assert [r["id"] for r in on] == [r["id"] for r in off] == [rid], "order untouched"
+    assert on[0]["content"].startswith("Ran: make deploy" + search_mod._WINDOW_SEP)
+    assert "kubeconfig rotated" in on[0]["content"], "a stopword before the term is not the span"
+    assert off[0]["content"] == _DEEP[: search_mod._ROW_CHAR_CAP], "off: the head cut, as before"
+
+
+@pytest.mark.parametrize("stop", ["(the", "The,", '"the"'])
+def test_a_stopword_with_punctuation_is_still_a_stopword(db, monkeypatch, stop):
+    """Prudence, PR #1161: `(the` passed the raw-token check, and FTS highlighted
+    the `the` before the term, so the row kept its head cut."""
+    (rid,) = _obs(db, [_DEEP])
+    monkeypatch.setattr(search_mod, "_phrase_seat_row", lambda *_a, **_k: None)
+
+    page = search(
+        db, f"{stop} kubeconfig", table="all", limit=10, use_vectors=False, phrase_seat=True
+    )
+
+    assert [r["id"] for r in page] == [rid]
+    assert "kubeconfig rotated" in page[0]["content"]
+
+
+def test_only_lexically_matched_observation_rows_are_windowed(db):
+    """A vec-only row has nothing saying its text holds a query term; a knowledge
+    row would break federation's dedup (#1146 r1); a row whose span is already
+    shown keeps its head cut."""
+    near = "kubeconfig first. " + "padding words here. " * 40
+    deep_vec, deep_fts, deep_both, shown = _obs(db, [_DEEP, _DEEP, _DEEP, near])
+    cap = search_mod._ROW_CHAR_CAP
+
+    def row(table, rid, text, source):
+        return {"source_table": table, "id": rid, "content": text[:cap], "match_source": source}
+
+    page = [
+        row("observation", deep_vec, _DEEP, "vec"),
+        row("observation", deep_fts, _DEEP, "fts"),
+        row("observation", deep_both, _DEEP, "fts+vec"),
+        row("observation", shown, near, "fts"),
+        row("knowledge", deep_fts, _DEEP, "fts"),
+    ]
+
+    conn = connect(db)
+    try:
+        search_mod._window_page(conn, page, "the kubeconfig", None, True)
+    finally:
+        conn.close()
+
+    assert ["content_window" in r for r in page] == [False, True, True, False, False]
+
+
+def test_a_row_opening_with_a_newline_has_an_empty_head(db):
+    """Temperance, PR #1161: the head is the first line, and here it is empty."""
+    text = "\n" + _DEEP
+    (rid,) = _obs(db, [text])
+
+    row = _window(db, rid, '"kubeconfig"', text[: search_mod._ROW_CHAR_CAP])
+
+    assert row["content_head"] == 0
+    assert row["content"].startswith(search_mod._WINDOW_SEP)
+    assert "kubeconfig rotated" in row["content"]
+    assert len(row["content"]) == search_mod._ROW_CHAR_CAP
+
+
+def test_a_span_starting_inside_the_head_keeps_the_head_cut(db):
+    """The head cut already shows where the span starts."""
+    text = "k" * 600 + " tail" * 40
+    (rid,) = _obs(db, [text])
+    shown = text[: search_mod._ROW_CHAR_CAP]
+
+    row = _window(db, rid, '"' + "k" * 600 + '"', shown)
+
+    assert row == {"source_table": "observation", "id": rid, "content": shown}
+
+
+@pytest.mark.parametrize(
+    "middle, match",
+    [
+        ("kubeconfig " + "=" * 340 + " rotated", '"kubeconfig rotated"'),
+        ("k" * 360, '"' + "k" * 360 + '"'),
+    ],
+    ids=["phrase", "long_token"],
+)
+def test_a_span_just_past_the_head_is_shown_whole_after_a_real_gap(db, middle, match):
+    """Temperance, PR #1161 r1 (P2, P3): a span starting a little past the head
+    and ending past the cut fits the window, so it is shown whole, and the window
+    starts past the head, so the separator stands for chars really left out."""
+    text = "p " * 75 + middle + " tail" * 40
+    (rid,) = _obs(db, [text])
+    start = text.index(middle)
+    end = start + len(middle)
+
+    row = _window(db, rid, match, text[: search_mod._ROW_CHAR_CAP])
+
+    head = row["content_head"]
+    lo, hi = row["content_window"]
+    assert head < lo <= start and end <= hi, "a real gap, and the whole span in view"
+    assert row["content"] == text[:head] + search_mod._WINDOW_SEP + text[lo:hi]
+    assert len(row["content"]) == search_mod._ROW_CHAR_CAP
+
+
+def test_window_invariants_hold_on_random_rows(db):
+    """Seeded fuzz (Temperance, PR #1161): every windowed row keeps the width,
+    shows where its span starts, has a real gap behind the separator, and shows
+    the whole span whenever it fits the window."""
+    import random
+
+    from techne.cli import _preview
+
+    rng = random.Random(1147)
+    words = "alpha beta gamma delta step build run echo".split()
+    cap = search_mod._ROW_CHAR_CAP
+    windowed = 0
+    for _ in range(400):
+        body = " ".join(rng.choice(words) for _ in range(rng.randint(100, 500)))
+        if rng.random() < 0.5:
+            k = rng.randint(0, 40)
+            body = body[:k] + "\n" + body[k:]
+        tok = "kubeconfig" if rng.random() < 0.6 else "k" * rng.randint(20, 700)
+        pos = rng.choice([rng.randint(0, 20), rng.randint(120, 230), rng.randint(0, len(body))])
+        body = body[:pos] + " " + tok + " " + body[pos:]
+        (rid,) = _obs(db, [body])
+        start = body.index(" " + tok + " ") + 1
+
+        row = _window(db, rid, '"' + tok + '"', body[:cap])
+
+        if "content_window" not in row:
+            continue
+        windowed += 1
+        head = row["content_head"]
+        lo, hi = row["content_window"]
+        assert len(row["content"]) == cap
+        assert head < lo <= start < hi
+        if len(tok) <= cap - head - len(search_mod._WINDOW_SEP):
+            assert start + len(tok) <= hi
+        # techne search's 200-char preview keeps the span's start in view (#1162).
+        assert tok[:20] in _preview(row)
+    assert windowed > 100, "the fuzz must actually window rows"
+
+
+def test_window_page_is_a_no_op_when_disabled(db):
+    (rid,) = _obs(db, [_DEEP])
+    row = {"source_table": "observation", "id": rid, "content": _DEEP[:500], "match_source": "fts"}
+    before = dict(row)
+
+    conn = connect(db)
+    try:
+        search_mod._window_page(conn, [row], "kubeconfig", None, False)
+    finally:
+        conn.close()
+
+    assert row == before
+
+
+# --- techne search's 200-char preview shows a windowed row's match (techne#1162) ------
+
+#: A long first line (it fills the 125-char head) and the term near the row's end,
+#: where the window is pulled back to fill the width, putting the term ~350 chars in.
+_LATE = "Ran: " + "x" * 140 + "\n" + ("echo build step; " * 60) + "kubeconfig rotated."
+
+
+def test_techne_search_shows_the_match_of_a_long_headed_row(db, monkeypatch):
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.config import Config
+
+    _obs(db, [_LATE])
+    monkeypatch.setattr(search_mod, "search_vec", _scoped([]))
+    cfg = Config()
+    cfg.db_path = db
+    cfg.data_dir = db.parent
+    monkeypatch.setattr(Config, "load", classmethod(lambda cls, *a, **k: cfg))
+
+    out = CliRunner().invoke(main, ["search", "kubeconfig", "--limit", "5"]).output
+
+    line = next(ln for ln in out.splitlines() if ln.strip().startswith("[Bash]"))
+    assert "kubeconfig" in line, line
+    assert len(line.strip()) <= len("[Bash] ") + 200
+
+
+def test_the_preview_of_an_unwindowed_row_is_the_plain_cut():
+    from techne.cli import _preview
+
+    row = {"content": "y" * 450}
+    assert _preview(row) == "y" * 200

@@ -367,3 +367,31 @@ def _no_model_download_on_init(request, monkeypatch):
     if request.node.get_closest_marker("real_warm_vectors"):
         return
     monkeypatch.setattr("techne.cli._warm_vectors", lambda config: None, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_installed_recall_sources(monkeypatch):
+    """`techne_recall` and doctor discover `techne.recall_sources` entry points
+    (techne#1170), so a source package installed on the developer's box would change
+    what the suite sees. Pin the group empty; discovery tests install their fakes."""
+    # Guarded: CI's eval-vec base leg runs THESE tests against origin/main's library,
+    # which may not have the module yet (#832's base-leg design).
+    try:
+        import techne.core.recall_sources as rs_mod
+    except ImportError:
+        return
+    monkeypatch.setattr(rs_mod, "entry_points", lambda group: [])
+
+
+@pytest.fixture(autouse=True)
+def _no_installed_sink_entry_points(monkeypatch):
+    """Every drain now discovers `techne.outbox_sinks` entry points (techne#1172), so
+    a sink package installed on the developer's box would change what the suite
+    sees: a refused one makes `prune-orphans` refuse. Pin the group empty; tests of
+    discovery install their own fakes over this (Prudence, PR #1173)."""
+    import techne.sync.sinks as sinks_mod
+
+    # Guarded: CI's eval-vec base leg runs THESE tests against origin/main's library,
+    # where sinks.py may not import entry_points yet (#832's base-leg design).
+    if hasattr(sinks_mod, "entry_points"):
+        monkeypatch.setattr(sinks_mod, "entry_points", lambda group: [])

@@ -396,14 +396,16 @@ def resolve_edges_by_import(conn) -> dict:
     # a path we have indexed, or it does not.
     known_files = {r[0] for r in conn.execute("SELECT DISTINCT file FROM symbols")}
 
-    # binding lookup: (importing file, bound name) -> source module
-    bindings: dict[tuple[str, str], str] = {}
-    for file, to_name, to_module in conn.execute(
-        """SELECT s.file, e.to_name, e.to_module
+    # binding lookup: (importing file, bound name) -> (source module, name in it).
+    # The name in the module is the bound name, unless the import renamed it
+    # (`from a.b import real as helper` asks `a.b` for `real`, techne#1164).
+    bindings: dict[tuple[str, str], tuple[str, str]] = {}
+    for file, to_name, to_module, to_orig in conn.execute(
+        """SELECT s.file, e.to_name, e.to_module, e.to_orig
              FROM edges e JOIN symbols s ON s.id = e.from_symbol
             WHERE e.kind = 'import' AND e.to_module IS NOT NULL"""
     ):
-        bindings[(file, to_name)] = to_module
+        bindings[(file, to_name)] = (to_module, to_orig or to_name)
 
     resolved = external = 0
     unresolved_no_binding = unresolved_in_repo_no_symbol = 0
@@ -422,10 +424,11 @@ def resolve_edges_by_import(conn) -> dict:
     ).fetchall()
 
     for rowid, file, to_name, language in rows:
-        module = bindings.get((file, to_name))
-        if module is None:
+        binding = bindings.get((file, to_name))
+        if binding is None:
             unresolved_no_binding += 1
             continue
+        module, source_name = binding
 
         paths = _match_paths(module, language, known_files, path_memo)
         if not paths:
@@ -478,7 +481,7 @@ def resolve_edges_by_import(conn) -> dict:
             "SELECT id FROM symbols WHERE file IN (%s) AND name = ? "
             "AND kind IN ('function', 'class')"
             % ",".join("?" * len(paths)),
-            (*paths, to_name),
+            (*paths, source_name),
         ).fetchall()
         hit = next((row for row in candidates if row[0] not in nested_ids), None)
         if hit is None:

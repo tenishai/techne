@@ -510,6 +510,196 @@ def _fold_in_documents(config: Config, topic: str, memory_results: list[dict]) -
     return memory_results + recall_documents(config, topic)
 
 
+def _ordered_recall(
+    config: Config,
+    args: dict,
+    topic: str,
+    found,
+    fan_out_connections: dict,
+    archivist_binding: str,
+    identity_matches: list[dict],
+) -> dict:
+    """`techne_recall` when `recall.order` is set or a source is loaded (techne#1170).
+
+    EVERY SOURCE IS A LAZY PROVIDER, called only when the order reaches it and it is
+    not a skipped fallback. The first version searched memory and the federation
+    together, cut the merged page to ten, and only then applied the order, so a
+    remote archivist left out of the order still cost a fan-out AND took seats from
+    memory: 12 local matches came back as 5 (Prudence, PR #1174). Here each source
+    keeps its own page, nothing is cut before ordering, and the archivists share one
+    fan-out that runs only if an archivist rung is reached. Rows are grouped by source
+    in order, which overrides the default merge's cross-store interleave (#1079,
+    #1089): that is what setting an order means.
+    """
+    from techne.core import recall_sources, tiers
+    from techne.core.anchor import annotate_freshness
+    from techne.core.archivist import ARCHIVIST_CONNECTION_NAME
+    from techne.core.knowledge import annotate_uncertain
+    from techne.core.librarian import recall_documents
+
+    cache: dict = {}
+
+    def _local_page() -> list[dict]:
+        if "local" not in cache:
+            rows = _local_search(
+                config,
+                topic,
+                table="all",
+                limit=10,
+                half_life_days=config.knowledge_confidence_half_life_days,
+                include_archived=False,
+                curated_head_slots=config.search.curated_head_slots,
+                identifier_head_slots=config.search.identifier_head_slots,
+                identifier_rare_fraction=config.search.identifier_rare_fraction,
+                phrase_seat=True,  # techne#1142: recall is an explicit call
+            )
+            for r in rows:
+                r["_store"] = "local"
+                r["_role"] = "local"
+            annotate_freshness(config.db_path, rows)
+            annotate_uncertain(config.db_path, rows)
+            cache["local"] = rows
+        return cache["local"]
+
+    def _remote_rows() -> list[dict]:
+        """One fan-out for both archivist rungs. It does NOT touch the local page:
+        searching memory here would search a rung the order excluded or skipped, and
+        deduplicating against it would drop team rows for a local copy recall never
+        returns (Prudence, PR #1174 r2). Dedup and contradiction detection run after
+        assembly instead, only when both kinds of row are in the result."""
+        if "remote" in cache:
+            return cache["remote"]
+        cache["remote"] = []
+        if fan_out_connections:
+            from techne.core.federation import fan_out_search
+
+            try:
+                _, cache["remote"] = fan_out_search(
+                    config.db_path,
+                    fan_out_connections,
+                    topic,
+                    limit=10,
+                    half_life_days=config.knowledge_confidence_half_life_days,
+                    recency_weight=config.search.recency_weight,
+                    bm25_weight=config.search.bm25_weight,
+                    local_results=[],  # not None: None makes it search locally itself
+                )
+            except Exception:
+                log.warning("federation: fan-out failed — continuing without it", exc_info=True)
+        return cache["remote"]
+
+    remote_names = (None, "local", ARCHIVIST_CONNECTION_NAME)
+    providers = {
+        recall_sources.MEMORY: _local_page,
+        recall_sources.ARCHIVIST_LOCAL: lambda: [
+            r for r in _remote_rows() if r.get("_store") == ARCHIVIST_CONNECTION_NAME
+        ],
+        recall_sources.ARCHIVIST_REMOTE: lambda: [
+            r for r in _remote_rows() if r.get("_store") not in remote_names
+        ],
+        recall_sources.LIBRARIAN: lambda: recall_documents(config, topic),
+    }
+    rows, outcomes = recall_sources.assemble(
+        config, topic, found, providers, settle=_dedup_stores
+    )
+    rows, conflicts = _reconcile_stores(config, rows)
+
+    order = [e.name for e in recall_sources.effective_order(config, found)]
+    escalation = {n: bool(getattr(s, "escalation", False)) for n, s in found.loaded.items()}
+    ladder = tiers.ladder_for(order, escalation)
+    ladder_kw = {
+        "ladder": ladder,
+        "overrides": {n: (o.state, o.detail) for n, o in outcomes.items()},
+        "plugin_numbers": {r.name: r.number for r in ladder if r.number > len(tiers.LADDER)},
+    }
+    out = _with_ladder(
+        config,
+        topic,
+        rows,
+        fan_out_connections,
+        ARCHIVIST_CONNECTION_NAME,
+        archivist_binding,
+        {"identity_matches": identity_matches},
+        ladder_kw,
+    )
+    out["search_results"] = _with_public_provenance(
+        _public_rows(out["search_results"], _PUBLIC_UNDERSCORE_KEYS)
+    )
+    _surface_conflicts(out, conflicts, args)
+    return out
+
+
+def _dedup_stores(rows: list[dict]) -> list[dict]:
+    """`rows` with every remote row that duplicates a local one dropped, order kept.
+    The dedup half of `_reconcile_stores`, cheap enough to count with (#1177)."""
+    local = [r for r in rows if r.get("_store") == "local"]
+    remote = [r for r in rows if r.get("_store") not in (None, "local")]
+    if not (local and remote):
+        return rows
+    from techne.core.federation import _cross_store_dedup
+
+    kept = {id(r) for r in _cross_store_dedup(local, remote)}
+    remote_ids = {id(r) for r in remote}
+    return [r for r in rows if id(r) not in remote_ids or id(r) in kept]
+
+
+def _reconcile_stores(config: Config, rows: list[dict]) -> tuple[list[dict], list]:
+    """Cross-store dedup and contradiction detection on the ASSEMBLED result, as the
+    default path does on its merged page: only when memory and remote rows are both
+    in it, so neither runs against rows the order left out. A remote row whose
+    content duplicates a returned local one is dropped; order is otherwise kept."""
+    local = [r for r in rows if r.get("_store") == "local"]
+    remote = [r for r in rows if r.get("_store") not in (None, "local")]
+    if not (local and remote):
+        return rows, []
+    from techne.core.federation import _cross_store_dedup, detect_cross_store_contradictions
+
+    try:
+        kept = {id(r) for r in _cross_store_dedup(local, remote)}
+        conflicts = detect_cross_store_contradictions(
+            config.db_path,
+            local,
+            [r for r in remote if id(r) in kept],
+            max_candidates=config.conflict.max_comparison_candidates,
+            min_shared_keywords=config.conflict.min_shared_keywords,
+        )
+    except Exception:
+        log.warning("federation: dedup/contradiction pass failed", exc_info=True)
+        return rows, []
+    remote_ids = {id(r) for r in remote}
+    return [r for r in rows if id(r) not in remote_ids or id(r) in kept], conflicts
+
+
+def _surface_conflicts(out: dict, conflicts: list, args: dict) -> None:
+    """Step E — surface conflict prompts; recall itself does NOT write.
+
+    A COUNT BY DEFAULT, THE ITEMS ON REQUEST (techne#863). Each item carries its
+    focus content plus a full adjudication prompt, uncapped: ten of them were 92,859
+    of a 103,091-char recall, the call overflowed the tool-output ceiling, and the
+    7k of context actually asked for never reached the caller. Adjudication is a
+    write-path chore, not retrieval context, so recall reports that it exists and
+    how to get it — the opt-in returns exactly what it used to.
+    """
+    if not conflicts:
+        return
+    if args.get("include_federation_conflicts"):
+        out["federation_conflicts"] = conflicts
+        out["_federation_note"] = (
+            "Cross-store contradictions detected. For each item in federation_conflicts: "
+            "answer the prompt field using your own model (JSON verdict array), then call "
+            "techne_federation_conflict_ingest with the result to stage a reviewable "
+            "candidate."
+        )
+    else:
+        out["federation_conflicts_pending"] = len(conflicts)
+        out["_federation_note"] = (
+            f"{len(conflicts)} cross-store contradiction(s) found for this topic; left "
+            "out of recall because adjudicating them is maintenance, not context. To "
+            "adjudicate, call techne_recall again with include_federation_conflicts=true "
+            "and feed each verdict to techne_federation_conflict_ingest."
+        )
+
+
 def _effective_connections(config: Config) -> dict:
     """config.connections plus the base Archivist as a `team` connection WHEN IT IS
     BOUND TO A STORE (techne#346 PR2, rebound by techne#552).
@@ -551,6 +741,7 @@ def _with_ladder(
     archivist_name: str,
     archivist_binding: str,
     extra: dict,
+    ladder_kw: dict | None = None,
 ) -> dict:
     """Attach the stated ladder to a recall response (techne#552, S1/S4/S5).
 
@@ -567,13 +758,15 @@ def _with_ladder(
 
     out = {"search_results": rows, **extra}
     try:
-        tiers.annotate_rows(rows, archivist_name)
+        kw = ladder_kw or {}
+        tiers.annotate_rows(rows, archivist_name, kw.get("ladder"), kw.get("plugin_numbers"))
         reports = tiers.build_reports(
             rows=rows,
             connections=fan_out_connections,
             archivist_name=archivist_name,
             archivist_binding=archivist_binding,
             librarian_available=_librarian_available(config),
+            **kw,
         )
         out["tiers"] = [r.as_dict() for r in reports]
         # S5's experience signal, asked of the knowledge layer directly — see
@@ -646,6 +839,21 @@ def _techne_recall(args: dict, config: Config) -> dict:
             if topic.lower() in entry["key"].lower() or topic.lower() in entry["value"].lower():
                 results_i.append(entry)
         return results_i[:5]
+
+    # ---- Ordered path (techne#1170): an operator order or an installed source ----
+    from techne.core import recall_sources
+
+    found = recall_sources.discover_sources(config, scan_refused=False)
+    if recall_sources.ordering_active(config, found):
+        return _ordered_recall(
+            config,
+            args,
+            topic,
+            found,
+            fan_out_connections,
+            archivist_binding,
+            _identity_matches(),
+        )
 
     # ---- Noop gate (techne#222 §2): nothing to fan out to → local-only ----
     if not fan_out_connections:
@@ -779,30 +987,7 @@ def _techne_recall(args: dict, config: Config) -> dict:
         _public_rows(out["search_results"], _PUBLIC_UNDERSCORE_KEYS)
     )
 
-    # Step E — surface conflict prompts; recall itself does NOT write.
-    # A COUNT BY DEFAULT, THE ITEMS ON REQUEST (techne#863). Each item carries its
-    # focus content plus a full adjudication prompt, uncapped: ten of them were 92,859
-    # of a 103,091-char recall, the call overflowed the tool-output ceiling, and the
-    # 7k of context actually asked for never reached the caller. Adjudication is a
-    # write-path chore, not retrieval context, so recall reports that it exists and
-    # how to get it — the opt-in returns exactly what it used to.
-    if conflicts:
-        if args.get("include_federation_conflicts"):
-            out["federation_conflicts"] = conflicts
-            out["_federation_note"] = (
-                "Cross-store contradictions detected. For each item in federation_conflicts: "
-                "answer the prompt field using your own model (JSON verdict array), then call "
-                "techne_federation_conflict_ingest with the result to stage a reviewable "
-                "candidate."
-            )
-        else:
-            out["federation_conflicts_pending"] = len(conflicts)
-            out["_federation_note"] = (
-                f"{len(conflicts)} cross-store contradiction(s) found for this topic; left "
-                "out of recall because adjudicating them is maintenance, not context. To "
-                "adjudicate, call techne_recall again with include_federation_conflicts=true "
-                "and feed each verdict to techne_federation_conflict_ingest."
-            )
+    _surface_conflicts(out, conflicts, args)
 
     return out
 

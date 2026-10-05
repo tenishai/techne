@@ -1077,6 +1077,9 @@ _EGRESS_PROBES: dict[str, object] = {
     # (techne#555), so a made-up rail raises rather than silently probing nothing,
     # exactly like `connections`' role above.
     "custodian.rail_models": {"faithfulness": "openai/probe-rail"},
+    # techne#1170. Which installed packages may feed recall: an ingress trust choice.
+    "recall.allowed_sources": ["probe-source"],
+    "recall.allow_unlisted_sources": True,
     "archivist_db_path": "/tmp/probe-archivist.db",
     "standalone": False,
     "stores": {"librarian": {"adapter": "sqlite", "dsn": "/tmp/probe-lib.db"}},

@@ -664,8 +664,11 @@ def sweep_delivered(
         conn.close()
 
 
-def prune_orphans(db_path: Path) -> int:
+def prune_orphans(db_path: Path, targets: list[str] | None = None) -> int:
     """Mark pending ``sink:`` rows whose sink isn't registered as dead.
+
+    ``targets`` restricts it to rows for those targets (techne#1172): the operator
+    naming a target is what resolves the ambiguity a refused entry point leaves.
 
     Only ``sink:`` targets can orphan — a ``sync:`` row belongs to the adapter
     by construction (its lane is in the target prefix, not the registry), so it
@@ -681,7 +684,11 @@ def prune_orphans(db_path: Path) -> int:
             "SELECT id, target FROM outbox WHERE status = 'pending' AND target LIKE 'sink:%'"
         ).fetchall()
 
-        orphan_ids = [r["id"] for r in rows if get_sink(r["target"]) is None]
+        orphan_ids = [
+            r["id"]
+            for r in rows
+            if get_sink(r["target"]) is None and (targets is None or r["target"] in targets)
+        ]
         if not orphan_ids:
             return 0
 
