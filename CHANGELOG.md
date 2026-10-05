@@ -75,8 +75,8 @@ All notable changes to techne are documented here. Format loosely follows
   (#1147). Observation rows are cut to their first 500 chars, so a row FTS matched on
   a term past that cut showed nothing the query asked for: 4 of the 16 lexically
   matched observation rows on the gold-v2 queries showed no query term at all. 0.18.0
-  fixed this for the phrase-seated row only. Now, when the first query term (outside
-  the stopwords) that FTS matched in an observation row lies past the cut, the row
+  fixed this for the phrase-seated row only. Now, when the first matched query term
+  (outside the stopwords) in an observation row's text lies past the cut, the row
   keeps its first line (the tool and command, up to a quarter of the width), then
   ` … `, then a window over that term, at the same width, with `content_head`,
   `content_window`, `content_span` and `content_chars_total` saying what is shown. A
@@ -95,8 +95,8 @@ All notable changes to techne are documented here. Format loosely follows
   so every call through it stayed unresolved: `techne search`, which calls `search` as
   `do_search`, was missing from `codex callers search`. Codex schema v6 adds
   `edges.to_orig`, the original name, and the resolver asks the source module for it.
-  Only absolute imports bind; relative and aliased specifiers stay `unresolved`, as
-  before.
+  Only absolute imports bind; relative and path-alias specifiers (`./x`, `@/x`) stay
+  `unresolved`, as before.
 
 ### Docs
 
@@ -110,8 +110,8 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Upgrading
 
-Nothing in the core store, hooks, skills or config format changed, so there is no
-`techne init` step this time.
+The core schema, skills and hook registration are unchanged, and the new config keys
+are opt-in, so there is no `techne init` step this time.
 
 **1. Upgrade the install.**
 
@@ -120,8 +120,9 @@ Nothing in the core store, hooks, skills or config format changed, so there is n
 From a checkout, `git pull`, then `python -m pip install -e ".[recommended]"`.
 
 **2. Restart Claude Code** (or whatever runs `techne` as an MCP server), so the server
-loads the new code. `techne doctor`'s `runtime:loaded` line says whether a long-lived
-process is still running the old code.
+loads the new code. On a checkout or `~/.techne/runtime` install, `techne doctor`'s
+`runtime:loaded` line says whether a long-lived process is still running the old code;
+on a pipx install it can't tell, so restart.
 
 **3. Codex re-parses each indexed repo once (schema v5 -> v6).** The first codex command
 to open a repo's index adds the `edges.to_orig` column and records that a re-parse is
@@ -129,9 +130,10 @@ owed. The next `techne codex index` of that repo re-parses every file, not only 
 ones, so it takes as long as a first index. Until then, calls through renaming imports
 stay unresolved, as they were in 0.18.0. If you don't use codex, there is nothing to do.
 
-**4. New keys are opt-in.** `recall.*`, `sync.allowed_sinks` and
-`sync.allow_unlisted_sinks` default to off and change nothing until you set them. See
-"Extension points" in the README.
+**4. New keys are opt-in.** The `recall:` block, `sync.allowed_sinks` and
+`sync.allow_unlisted_sinks` change nothing until you set them: no plugged-in source or
+sink loads, and with no `recall.order` recall answers as before. See "Extension points"
+in the README.
 
 ## [0.18.0] — 2026-09-30
 
