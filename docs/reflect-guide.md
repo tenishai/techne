@@ -149,8 +149,8 @@ works its way back through the backlog. When nothing is owed, the CLI prints
 work"):
 
 ```sh
-techne reflect emit -o /tmp/batch.json   # the newest owed session, any age
-techne reflect ingest /tmp/batch.json
+techne reflect emit -o /tmp/batch.json &&   # the newest owed session, any age
+  techne reflect ingest /tmp/batch.json
 ```
 
 **Backfilling an import: run `techne import` first, and re-run it on an old store.** Emit tracks

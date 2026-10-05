@@ -967,8 +967,8 @@ belong to the [operator layer](#operator-owned-config-egress-selecting-keys).
 | `techne.outbox_sinks` | An outbox sink that receives payloads | `sync.allowed_sinks: [<entry-point name>]`, or `sync.allow_unlisted_sinks: true` |
 | `techne.recall_sources` | A read-only source for `techne_recall` | `recall.allowed_sources: [<entry-point name>]`, or `recall.allow_unlisted_sources: true` |
 
-`techne sinks list` and `techne doctor` (`sinks:entry-points`, `recall:sources`) show
-which entry points loaded, and why the others were refused or failed.
+`techne doctor` (`sinks:entry-points`, `recall:sources`) shows which entry points
+loaded; it and `techne sinks list` both show which were refused or failed, and why.
 
 ### Custom sync adapters
 
