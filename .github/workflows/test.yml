@@ -1112,8 +1112,10 @@ jobs:
       # author string already has write access and could forge a matching
       # Signed-off-by too. A fork PR is not a trusted writer and can forge any
       # commit author, including this one, so a fork claiming to be dependabot
-      # must still sign off — this check stays strict here. This is the only
-      # place the two copies differ; see tests/test_ci_workflow_triggers.py::
+      # must still sign off — this check stays strict here. NO MEMBER
+      # EXEMPTION either (#1182): this step never reads author_association.
+      # The bot and member exemptions in `arch-cards` are the only places the
+      # two copies differ; see tests/test_ci_workflow_triggers.py::
       # test_dco_check_runs_on_both_sides_of_the_trust_split.
       - name: DCO sign-off check
         if: ${{ !cancelled() && github.event_name == 'pull_request' }}
