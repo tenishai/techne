@@ -1513,10 +1513,10 @@ def _unsigned(w, c, e):
     return _history(w, c, e, feature=[{"msg": "a", "signoff": None}])
 
 
-# COLLABORATOR: the pull_request event reports a PRIVATE org member as
-# COLLABORATOR (PR #1183's run did, while the REST API said MEMBER).
+# COLLABORATOR: the pull_request event reported a private org member as
+# COLLABORATOR (PR #1183's run, while the REST API said MEMBER).
 @pytest.mark.parametrize("association", ["OWNER", "MEMBER", "COLLABORATOR"])
-def test_dco_check_skips_a_pr_opened_by_an_org_member(tmp_path, association):
+def test_dco_check_skips_owner_member_and_collaborator_prs(tmp_path, association):
     r = _run_dco(tmp_path, _unsigned, association=association)
     assert r.returncode == 0, r.stdout + r.stderr
     assert f"write access to this repo ({association})" in r.stdout

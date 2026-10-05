@@ -50,8 +50,8 @@ All notable changes to techne are documented here. Format loosely follows
   keep their copyright under the DCO.
 - **The DCO check skips pull requests opened by tenishai org members** (#1182). CI reads
   the PR's `author_association` and skips the check for `OWNER`, `MEMBER` and
-  `COLLABORATOR` (the event reports a private org member as `COLLABORATOR`). Outside
-  contributors still sign off every commit, and PRs from forks are always checked.
+  `COLLABORATOR` (the event reported a private org member as `COLLABORATOR`). Pull
+  requests opened by anyone else are still checked, and PRs from forks always are.
 
 ### Fixed
 

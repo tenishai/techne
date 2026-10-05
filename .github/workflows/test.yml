@@ -846,14 +846,15 @@ jobs:
       # including this one, so a fork claiming to be dependabot still fails.
       #
       # MEMBER EXEMPTION (#1182): a PR whose author_association is OWNER,
-      # MEMBER or COLLABORATOR skips the check. The DCO is for outside
-      # contributions; GitHub computes author_association, so the PR author
-      # cannot set it. COLLABORATOR is needed because the event payload reports
-      # a PRIVATE org member as COLLABORATOR, not MEMBER (seen on PR #1183, where
-      # the REST API said MEMBER). It adds no one while every writer is an org
-      # member: this job only runs for same-repo PRs, which take write access.
-      # Narrow it back to OWNER|MEMBER before any outside collaborator gets
-      # write access (tenishai/agora#20 checklist). Per PR, not
+      # MEMBER or COLLABORATOR skips the check. The sign-off rule is enforced on
+      # PRs from people outside the team. author_association comes from
+      # GitHub's event payload, not from anything in the PR. COLLABORATOR is
+      # there because the payload reported a private org member that way (PR
+      # #1183's run, while the REST API said MEMBER). It adds no one while every
+      # repo collaborator is an org member. Narrow it back to OWNER|MEMBER
+      # before any outside collaborator is added (tenishai/agora#20
+      # checklist). Same-repo PRs from other authors, such as Dependabot
+      # (NONE), are still checked. Per PR, not
       # per commit: a member's PR carrying an outsider's commits skips too,
       # which is the same trusted-writer argument as the dependabot exemption.
       # `fork-pr` gets no member exemption.
