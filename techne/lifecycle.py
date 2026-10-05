@@ -533,9 +533,11 @@ def run_session_end(
 
     agent_identity = os.environ.get("TECHNE_IDENTITY", "")
     queued = 0
-    from techne.core.archivist import ensure_registered_for
+    from techne.sync.sinks import ensure_sinks_registered
 
-    ensure_registered_for(config)  # team topology: stand up sink:archivist (#224/#346)
+    # Team topology: stand up sink:archivist (#224/#346) and installed packages'
+    # sinks (#1172).
+    ensure_sinks_registered(config)
     if _has_live_consumer(config):
         target = _thread_summary_target(config)
         for t in threads:
@@ -682,9 +684,9 @@ def redetect_threads(
 
     queued = 0
     if sync:
-        from techne.core.archivist import ensure_registered_for
+        from techne.sync.sinks import ensure_sinks_registered
 
-        ensure_registered_for(config)
+        ensure_sinks_registered(config)
     if sync and _has_live_consumer(config):
         agent_identity = os.environ.get("TECHNE_IDENTITY", "")
         target = _thread_summary_target(config)

@@ -236,6 +236,10 @@ DOCTOR_CHECKS_AT_LAST_REVIEW = {
     # entry points loaded or were refused and whether recall.order names an unusable
     # one. It does not look at backup scheduling, so deployment.md's trigger stands.
     "check_recall_sources",
+    # techne#1172. RE-READ DONE: check_sink_entry_points reports which outbox sink
+    # entry points loaded or were refused and which pending sink rows have no sink.
+    # It does not look at backup scheduling, so deployment.md's trigger stands.
+    "check_sink_entry_points",
     "check_config_trust",
     "check_hooks",
     "check_instance_identity",
