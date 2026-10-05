@@ -5,6 +5,8 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.18.1] — 2026-10-05
+
 ### Added
 
 - **Pluggable recall sources and an operator-defined recall order** (#1170). An
@@ -28,9 +30,9 @@ All notable changes to techne are documented here. Format loosely follows
   `sync.allow_unlisted_sinks: true` (only a real `true` counts). Every techne site that
   drains or prunes sink rows registers them (`outbox flush-sinks`, `prune-orphans`, the
   session-end hook), as do the lifecycle's enqueue sites, so their rows no longer wait
-  for a process that happened to import the package. Bare `outbox prune-orphans` refuses to run while an
-  entry point is refused or failed, because it would mark that sink's pending rows
-  dead. `--target sink:<name>` prunes only targets you name as dead.
+  for a process that happened to import the package. Bare `outbox prune-orphans`
+  refuses to run while an entry point is refused or failed, because it would mark that
+  sink's pending rows dead. `--target sink:<name>` prunes only targets you name as dead.
   `techne sinks list` and `sinks describe` now work in a fresh process, and `list` also
   names refused and failed entry points. `techne doctor` adds `sinks:entry-points`, which
   names pending sink rows that have no sink.
@@ -46,8 +48,8 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Changed
 
-- **Copyright notice names tenish and the techne contributors** (NOTICE, README). Contributors
-  keep their copyright under the DCO.
+- **Copyright notice names tenish and the techne contributors** (NOTICE, README). The
+  DCO is used instead of a CLA, so contributors keep their copyright.
 - **The DCO check skips pull requests opened by tenishai org members** (#1182). CI reads
   the PR's `author_association` and skips the check for `OWNER`, `MEMBER` and
   `COLLABORATOR` (the event reported a private org member as `COLLABORATOR`). Pull
@@ -71,13 +73,14 @@ All notable changes to techne are documented here. Format loosely follows
   your project directory.
 - **Explicit search shows why a lexically matched observation row is on the page**
   (#1147). Observation rows are cut to their first 500 chars, so a row FTS matched on
-  a term past that cut showed nothing the query asked for: 4 of 16 such rows on the
-  gold-v2 queries. 0.18.0 fixed this for the phrase-seated row only. Now, when an
-  observation row FTS matched on a query term outside the stopwords has that term
-  past the cut, the row keeps its first line (the tool and command, up to a quarter of
-  the width), then ` … `, then a window over the first matched term, at the same
-  width, with
-  `content_head`, `content_window` and `content_chars_total` saying what is shown. The
+  a term past that cut showed nothing the query asked for: 4 of the 16 lexically
+  matched observation rows on the gold-v2 queries showed no query term at all. 0.18.0
+  fixed this for the phrase-seated row only. Now, when the first matched query term
+  (outside the stopwords) in an observation row's text lies past the cut, the row
+  keeps its first line (the tool and command, up to a quarter of the width), then
+  ` … `, then a window over that term, at the same width, with `content_head`,
+  `content_window`, `content_span` and `content_chars_total` saying what is shown. A
+  row whose first matched term is already inside the cut is left as it is. The
   phrase-seated row takes the same shape, replacing the 0.18.0 `…`-prefixed window.
   On the 2026-09-28 snapshot every lexical row now shows a query term (16/16, 25/25
   on 40 real prompts, 48/48 on the held-out phrase queries), and no page's order
@@ -87,6 +90,50 @@ All notable changes to techne are documented here. Format loosely follows
   match, so the match shows there too (#1162));
   the per-turn and inbound recall rails search knowledge rows, which are never
   windowed, so injected text is unchanged.
+- **Codex resolves calls through a renaming import** (#1164). `from a import x as y`
+  in Python and `import { x as y } from 'pkg'` in TypeScript bound `y` with no module,
+  so every call through it stayed unresolved: `techne search`, which calls `search` as
+  `do_search`, was missing from `codex callers search`. Codex schema v6 adds
+  `edges.to_orig`, the original name, and the resolver asks the source module for it.
+  Only absolute imports bind; relative and path-alias specifiers (`./x`, `@/x`) stay
+  `unresolved`, as before.
+
+### Docs
+
+- **The README documents the extension points** (#1185): the three entry-point groups
+  (`techne.sync_adapters`, `techne.outbox_sinks`, `techne.recall_sources`), the key that
+  admits each, and the `recall:` and `sync` allow keys. Its custom sync adapter example
+  now sets `sync.allow_unlisted_adapter: true`; without it, the adapter it showed was
+  refused. The operator-owned key list now matches the code, and `docs/mcp-tools.md`
+  documents the search row fields (`content_chars_total`, `content_head`,
+  `content_window`, `content_span`).
+
+### Upgrading
+
+The core schema, skills and hook registration are unchanged, and the new config keys
+are opt-in, so there is no `techne init` step this time.
+
+**1. Upgrade the install.**
+
+    pipx install --force "techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.18.1"
+
+From a checkout, `git pull`, then `python -m pip install -e ".[recommended]"`.
+
+**2. Restart Claude Code** (or whatever runs `techne` as an MCP server), so the server
+loads the new code. On a checkout or `~/.techne/runtime` install, `techne doctor`'s
+`runtime:loaded` line says whether a long-lived process is still running the old code;
+on a pipx install it can't tell, so restart.
+
+**3. Codex re-parses each indexed repo once (schema v5 -> v6).** The first codex command
+to open a repo's index adds the `edges.to_orig` column and records that a re-parse is
+owed. The next `techne codex index` of that repo re-parses every file, not only changed
+ones, so it takes as long as a first index. Until then, calls through renaming imports
+stay unresolved, as they were in 0.18.0. If you don't use codex, there is nothing to do.
+
+**4. New keys are opt-in.** The `recall:` block, `sync.allowed_sinks` and
+`sync.allow_unlisted_sinks` change nothing until you set them: no plugged-in source or
+sink loads, and with no `recall.order` recall answers as before. See "Extension points"
+in the README.
 
 ## [0.18.0] — 2026-09-30
 
