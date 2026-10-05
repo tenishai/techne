@@ -5,6 +5,10 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Changed
+
+- **Copyright notice names tenishai and the techne contributors** (NOTICE, README). Contributors keep their copyright under the DCO.
+
 ## [0.18.0] — 2026-09-30
 
 ### Deprecated
