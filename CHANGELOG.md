@@ -44,6 +44,11 @@ All notable changes to techne are documented here. Format loosely follows
   changes for them. A new `adapter_class()` returns a sync adapter's class behind the
   same gate as `load_adapter`.
 
+### Changed
+
+- **Copyright notice names tenish and the techne contributors** (NOTICE, README). Contributors
+  keep their copyright under the DCO.
+
 ### Fixed
 
 - **`techne reflect emit` with no session id reaches every pending session, not just
