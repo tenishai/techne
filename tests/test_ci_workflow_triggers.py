@@ -1297,15 +1297,17 @@ BOT_AUTHOR = "dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com
 
 def test_dco_check_runs_on_both_sides_of_the_trust_split():
     """In-repo PRs reach only `arch-cards`, fork PRs only `fork-pr`, so the check
-    lives in both and the two copies must stay identical except for one
-    documented exemption (PR #1135): `arch-cards` skips a commit authored
+    lives in both and the two copies must stay identical except for two
+    documented exemptions. PR #1135: `arch-cards` skips a commit authored
     exactly as dependabot[bot], `fork-pr` does not, because a fork PR can forge
-    any commit author and dependabot[bot]'s is no exception."""
+    any commit author and dependabot[bot]'s is no exception. #1182: `arch-cards`
+    skips a PR whose author_association is OWNER, MEMBER or COLLABORATOR;
+    `fork-pr` has no such exemption."""
     jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
     trusted, forked = (_dco_step(j) for j in DCO_JOBS)
 
     for key in set(trusted) | set(forked):
-        if key == "run":
+        if key in ("run", "env"):
             continue
         assert trusted.get(key) == forked.get(key), (
             f"DCO step {key!r} differs between arch-cards and fork-pr"
@@ -1334,15 +1336,23 @@ def test_dco_check_runs_on_both_sides_of_the_trust_split():
     )
     hunks = [line for line in diff if not line.startswith(("--- ", "+++ "))]
     assert hunks == [
-        "@@ -13,0 +14 @@",
+        "@@ -1,0 +2,6 @@",
+        '+case "${PR_AUTHOR_ASSOCIATION:-}" in',
+        "+  OWNER|MEMBER|COLLABORATOR)",
+        '+    echo "DCO: skipped, the PR author has write access to this repo '
+        '($PR_AUTHOR_ASSOCIATION)"',
+        "+    exit 0",
+        "+    ;;",
+        "+esac",
+        "@@ -13,0 +20 @@",
         "+skipped=0",
-        "@@ -15,0 +17,5 @@",
+        "@@ -15,0 +23,5 @@",
         f'+  if [ "$author" = "{BOT_AUTHOR}" ]; then',
         '+    echo "DCO: skipping ${c:0:12} as a bot commit ($author)"',
         "+    skipped=$((skipped + 1))",
         "+    continue",
         "+  fi",
-        "@@ -26 +32 @@",
+        "@@ -26 +38 @@",
         '-echo "DCO: $(echo "$commits" | wc -l | tr -d \' \') commit(s) signed off by their authors"',
         '+echo "DCO: $(($(echo "$commits" | wc -l | tr -d \' \') - skipped)) commit(s) signed off '
         'by their authors$( [ "$skipped" -gt 0 ] && printf \' (%s skipped as bot commits)\' '
@@ -1353,12 +1363,16 @@ def test_dco_check_runs_on_both_sides_of_the_trust_split():
 
     for job in DCO_JOBS:
         assert not jobs[job].get("continue-on-error"), f"{job} swallows a failing DCO check"
+    shas = {
+        "BASE_SHA": "${{ github.event.pull_request.base.sha }}",
+        "HEAD_SHA": "${{ github.event.pull_request.head.sha }}",
+    }
+    assert forked["env"] == shas, "fork-pr must not see author_association"
+    assert trusted["env"] == shas | {
+        "PR_AUTHOR_ASSOCIATION": "${{ github.event.pull_request.author_association }}"
+    }
     for step in (trusted, forked):
         assert step["if"] == "${{ !cancelled() && github.event_name == 'pull_request' }}"
-        assert step["env"] == {
-            "BASE_SHA": "${{ github.event.pull_request.base.sha }}",
-            "HEAD_SHA": "${{ github.event.pull_request.head.sha }}",
-        }
         assert not step.get("continue-on-error"), "a failing DCO check would read green"
         assert "uses" not in step, "the check is inline shell reading git metadata, not an action"
         # No `${{ }}` inside the script: PR-controlled values reach it through env only.
@@ -1397,12 +1411,13 @@ def _git(repo: Path, *args: str, env: dict, stdin: str | None = None) -> str:
 
 
 def _run_dco(
-    tmp_path: Path, build, tamper=None, job: str = "arch-cards"
+    tmp_path: Path, build, tamper=None, job: str = "arch-cards", association: str = "CONTRIBUTOR"
 ) -> subprocess.CompletedProcess[str]:
     """Build a repo with `build(work, commit, env)`, shallow-clone it the way
     actions/checkout does, fetch origin/main at depth 1 like arch-cards, then run
     `job`'s own DCO script (default `arch-cards`; pass `job="fork-pr"` to run the
-    strict copy instead)."""
+    strict copy instead). `association` is the PR's author_association; the
+    default CONTRIBUTOR is an outside contributor, so the check runs."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")} | {
         "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_CONFIG_NOSYSTEM": "1",
@@ -1455,7 +1470,7 @@ def _run_dco(
     return subprocess.run(
         ["bash", "-c", script],
         cwd=ci,
-        env=env | {"BASE_SHA": base, "HEAD_SHA": head},
+        env=env | {"BASE_SHA": base, "HEAD_SHA": head, "PR_AUTHOR_ASSOCIATION": association},
         capture_output=True,
         text=True,
     )
@@ -1492,6 +1507,33 @@ def test_dco_check_fails_an_unsigned_commit_and_names_it(tmp_path):
     assert r.returncode == 1, r.stdout + r.stderr
     assert f"commit {shas['bad'][:12]} has no" in r.stdout
     assert "Developer Certificate of Origin" in r.stdout
+
+
+def _unsigned(w, c, e):
+    return _history(w, c, e, feature=[{"msg": "a", "signoff": None}])
+
+
+# COLLABORATOR: the pull_request event reported a private org member as
+# COLLABORATOR (PR #1183's run, while the REST API said MEMBER).
+@pytest.mark.parametrize("association", ["OWNER", "MEMBER", "COLLABORATOR"])
+def test_dco_check_skips_owner_member_and_collaborator_prs(tmp_path, association):
+    r = _run_dco(tmp_path, _unsigned, association=association)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert f"write access to this repo ({association})" in r.stdout
+
+
+@pytest.mark.parametrize(
+    "association", ["CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", "FIRST_TIMER", "NONE", "MANNEQUIN", ""]
+)
+def test_dco_check_still_runs_for_non_members(tmp_path, association):
+    r = _run_dco(tmp_path, _unsigned, association=association)
+    assert r.returncode == 1, r.stdout + r.stderr
+
+
+def test_fork_pr_ignores_a_member_association(tmp_path):
+    """fork-pr never reads author_association, even if the env somehow carries it."""
+    r = _run_dco(tmp_path, _unsigned, job="fork-pr", association="MEMBER")
+    assert r.returncode == 1, r.stdout + r.stderr
 
 
 def test_dco_check_fails_a_signoff_that_does_not_match_the_author(tmp_path):
