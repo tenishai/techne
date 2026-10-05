@@ -64,8 +64,9 @@ All notable changes to techne are documented here. Format loosely follows
   On the 2026-09-28 snapshot every lexical row now shows a query term (16/16, 25/25
   on 40 real prompts, 48/48 on the held-out phrase queries), and no page's order
   changed. Explicit search only (`techne_search`, `techne search`, `techne_recall`;
-  `techne search` prints the first 200 chars of each row, so for a row with a long
-  first line the term is past what it prints, and only the MCP tools show it);
+  `techne search` prints 200 chars of each row, and for a windowed row that is up to
+  60 chars of the first line, then ` … `, then the window from 40 chars before the
+  match, so the match shows there too (#1162));
   the per-turn and inbound recall rails search knowledge rows, which are never
   windowed, so injected text is unchanged.
 
