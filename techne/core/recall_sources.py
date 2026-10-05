@@ -328,7 +328,8 @@ def assemble(
     ``providers`` maps each built-in rung to a callable that searches it. EVERY
     source is called only when the walk reaches it and it is not skipped: a
     fallback entry runs only when the rows gathered BEFORE it, as ``settle`` counts
-    them when given, number fewer than ``recall.fill``, and a source the order leaves out never runs at all.
+    them when given, number fewer than ``recall.fill``, and a source the order
+    leaves out never runs at all.
 
     ``settle`` turns the rows gathered so far into what the caller would receive
     (cross-store dedup). A fallback is decided on THAT count, not the raw one:
