@@ -135,8 +135,9 @@ exempt from the sign-off requirement — Dependabot signs off as `dependabot[bot
 <support@github.com>`, which never matches its noreply author email — but only
 for same-repo dependency-update PRs; the check stays strict on PRs from forks.
 
-Pull requests opened by members of the tenishai GitHub organization are not
-checked; the sign-off requirement is for contributions from outside the project.
+Pull requests opened from a branch in this repository, which takes write access,
+are not checked; the sign-off requirement is for contributions from outside the
+project.
 Every pull request from a fork is checked, whoever opened it.
 
 ## Using AI tools

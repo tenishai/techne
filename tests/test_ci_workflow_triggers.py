@@ -1301,8 +1301,8 @@ def test_dco_check_runs_on_both_sides_of_the_trust_split():
     documented exemptions. PR #1135: `arch-cards` skips a commit authored
     exactly as dependabot[bot], `fork-pr` does not, because a fork PR can forge
     any commit author and dependabot[bot]'s is no exception. #1182: `arch-cards`
-    skips a PR whose author_association is OWNER or MEMBER; `fork-pr` has no
-    such exemption."""
+    skips a PR whose author_association is OWNER, MEMBER or COLLABORATOR;
+    `fork-pr` has no such exemption."""
     jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
     trusted, forked = (_dco_step(j) for j in DCO_JOBS)
 
@@ -1338,8 +1338,9 @@ def test_dco_check_runs_on_both_sides_of_the_trust_split():
     assert hunks == [
         "@@ -1,0 +2,6 @@",
         '+case "${PR_AUTHOR_ASSOCIATION:-}" in',
-        "+  OWNER|MEMBER)",
-        '+    echo "DCO: skipped, the PR author is a tenishai org member ($PR_AUTHOR_ASSOCIATION)"',
+        "+  OWNER|MEMBER|COLLABORATOR)",
+        '+    echo "DCO: skipped, the PR author has write access to this repo '
+        '($PR_AUTHOR_ASSOCIATION)"',
         "+    exit 0",
         "+    ;;",
         "+esac",
@@ -1512,14 +1513,18 @@ def _unsigned(w, c, e):
     return _history(w, c, e, feature=[{"msg": "a", "signoff": None}])
 
 
-@pytest.mark.parametrize("association", ["OWNER", "MEMBER"])
+# COLLABORATOR: the pull_request event reports a PRIVATE org member as
+# COLLABORATOR (PR #1183's run did, while the REST API said MEMBER).
+@pytest.mark.parametrize("association", ["OWNER", "MEMBER", "COLLABORATOR"])
 def test_dco_check_skips_a_pr_opened_by_an_org_member(tmp_path, association):
     r = _run_dco(tmp_path, _unsigned, association=association)
     assert r.returncode == 0, r.stdout + r.stderr
-    assert f"tenishai org member ({association})" in r.stdout
+    assert f"write access to this repo ({association})" in r.stdout
 
 
-@pytest.mark.parametrize("association", ["COLLABORATOR", "CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", "NONE", ""])
+@pytest.mark.parametrize(
+    "association", ["CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", "FIRST_TIMER", "NONE", "MANNEQUIN", ""]
+)
 def test_dco_check_still_runs_for_non_members(tmp_path, association):
     r = _run_dco(tmp_path, _unsigned, association=association)
     assert r.returncode == 1, r.stdout + r.stderr

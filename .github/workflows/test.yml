@@ -845,12 +845,16 @@ jobs:
       # a fork PR is not a trusted writer and can forge any commit author,
       # including this one, so a fork claiming to be dependabot still fails.
       #
-      # MEMBER EXEMPTION (#1182): a PR whose author_association is OWNER or
-      # MEMBER (a tenishai org member) skips the check. The DCO is for outside
+      # MEMBER EXEMPTION (#1182): a PR whose author_association is OWNER,
+      # MEMBER or COLLABORATOR skips the check. The DCO is for outside
       # contributions; GitHub computes author_association, so the PR author
-      # cannot set it. Per PR, not per commit: a member's PR carrying an
-      # outsider's commits skips too, which is the same trusted-writer argument
-      # as the dependabot exemption. `fork-pr` gets no member exemption.
+      # cannot set it. COLLABORATOR is needed because the event payload reports
+      # a PRIVATE org member as COLLABORATOR, not MEMBER (seen on PR #1183, where
+      # the REST API said MEMBER). It adds no one: this job only runs for
+      # same-repo PRs, and opening one already takes write access. Per PR, not
+      # per commit: a member's PR carrying an outsider's commits skips too,
+      # which is the same trusted-writer argument as the dependabot exemption.
+      # `fork-pr` gets no member exemption.
       #
       # These two exemptions are the only places the two copies differ; see
       # tests/test_ci_workflow_triggers.py::
@@ -865,8 +869,8 @@ jobs:
         run: |
           set -euo pipefail
           case "${PR_AUTHOR_ASSOCIATION:-}" in
-            OWNER|MEMBER)
-              echo "DCO: skipped, the PR author is a tenishai org member ($PR_AUTHOR_ASSOCIATION)"
+            OWNER|MEMBER|COLLABORATOR)
+              echo "DCO: skipped, the PR author has write access to this repo ($PR_AUTHOR_ASSOCIATION)"
               exit 0
               ;;
           esac
