@@ -504,3 +504,32 @@ def test_with_memory_in_the_order_a_duplicate_team_row_is_still_dropped(busy_cfg
         r["content"] for r in out["search_results"] if r["recall_tier_name"] == "archivist:remote"
     ]
     assert remote == ["team only"], "the local copy is authoritative, as in the default path"
+
+
+def test_a_fallback_counts_rows_after_cross_store_dedup(cfg, monkeypatch):
+    """techne#1177 (Prudence's repro, PR #1174 r3): a remote returning copies of
+    local rows was counted toward `fill`, so the fallback was skipped while recall
+    returned fewer than `fill` rows."""
+    from techne.core.database import connect
+
+    conn = connect(cfg.db_path)
+    try:
+        local = [r[0] for r in conn.execute("SELECT content FROM knowledge ORDER BY id")]
+    finally:
+        conn.close()
+    _federated(cfg, monkeypatch, [{"id": 900 + i, "content": c} for i, c in enumerate(local[:2])])
+    src = FakeSource("librarian:remote")
+    _install(monkeypatch, FakeEntryPoint("remote-lib", lambda: src))
+    cfg.recall.allowed_sources = ["remote-lib"]
+    cfg.recall.order = [
+        RecallOrderEntry("memory"),
+        RecallOrderEntry("archivist:remote"),
+        RecallOrderEntry("librarian:remote", fallback=True),
+    ]
+    cfg.recall.fill = 4
+
+    out = _recall(cfg)
+
+    assert src.calls == 1, "after dedup only 3 rows came back, below fill, so it runs"
+    assert _tier(out, "librarian:remote")["state"] == "hit"
+    assert len(out["search_results"]) == 4

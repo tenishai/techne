@@ -599,7 +599,9 @@ def _ordered_recall(
         ],
         recall_sources.LIBRARIAN: lambda: recall_documents(config, topic),
     }
-    rows, outcomes = recall_sources.assemble(config, topic, found, providers)
+    rows, outcomes = recall_sources.assemble(
+        config, topic, found, providers, settle=_dedup_stores
+    )
     rows, conflicts = _reconcile_stores(config, rows)
 
     order = [e.name for e in recall_sources.effective_order(config, found)]
@@ -625,6 +627,20 @@ def _ordered_recall(
     )
     _surface_conflicts(out, conflicts, args)
     return out
+
+
+def _dedup_stores(rows: list[dict]) -> list[dict]:
+    """`rows` with every remote row that duplicates a local one dropped, order kept.
+    The dedup half of `_reconcile_stores`, cheap enough to count with (#1177)."""
+    local = [r for r in rows if r.get("_store") == "local"]
+    remote = [r for r in rows if r.get("_store") not in (None, "local")]
+    if not (local and remote):
+        return rows
+    from techne.core.federation import _cross_store_dedup
+
+    kept = {id(r) for r in _cross_store_dedup(local, remote)}
+    remote_ids = {id(r) for r in remote}
+    return [r for r in rows if id(r) not in remote_ids or id(r) in kept]
 
 
 def _reconcile_stores(config: Config, rows: list[dict]) -> tuple[list[dict], list]:

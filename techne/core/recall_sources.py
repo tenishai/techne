@@ -221,6 +221,7 @@ def assemble(
     topic: str,
     found: SourceDiscovery,
     providers: dict[str, Callable[[], list[dict]]],
+    settle: Callable[[list[dict]], list[dict]] | None = None,
 ) -> tuple[list[dict], dict[str, SourceOutcome]]:
     """Walk the effective order; return the rows in source order, and per-source
     outcomes for every source the order names.
@@ -229,6 +230,12 @@ def assemble(
     source is called only when the walk reaches it and it is not skipped: a
     fallback entry runs only when the rows gathered BEFORE it number fewer than
     ``recall.fill``, and a source the order leaves out never runs at all.
+
+    ``settle`` turns the rows gathered so far into what the caller would receive
+    (cross-store dedup). A fallback is decided on THAT count, not the raw one:
+    remote copies of local rows are exactly what federation sync produces, and
+    counting them skipped a fallback while returning fewer than `fill` rows
+    (techne#1177, Prudence PR #1174 r3).
     """
     rows: list[dict] = []
     outcomes: dict[str, SourceOutcome] = {}
@@ -236,13 +243,15 @@ def assemble(
         name = entry.name
         if name in outcomes:
             continue  # named twice: the first position wins
-        if entry.fallback and len(rows) >= config.recall.fill:
-            outcomes[name] = SourceOutcome(
-                STATE_SKIPPED,
-                detail=f"fallback, not searched: the sources before it returned "
-                f"{len(rows)} row(s), fill is {config.recall.fill}",
-            )
-            continue
+        if entry.fallback:
+            have = len(settle(rows)) if settle else len(rows)
+            if have >= config.recall.fill:
+                outcomes[name] = SourceOutcome(
+                    STATE_SKIPPED,
+                    detail=f"fallback, not searched: the sources before it returned "
+                    f"{have} row(s), fill is {config.recall.fill}",
+                )
+                continue
         if name in providers:
             got = providers[name]()
             if name != LIBRARIAN:
