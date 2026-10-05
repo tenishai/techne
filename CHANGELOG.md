@@ -34,6 +34,15 @@ All notable changes to techne are documented here. Format loosely follows
   `techne sinks list` and `sinks describe` now work in a fresh process, and `list` also
   names refused and failed entry points. `techne doctor` adds `sinks:entry-points`, which
   names pending sink rows that have no sink.
+- **Recall reads back from the team sync backend** (#1171). `SyncAdapter.pull` had no
+  caller. A sync adapter that declares `supports_pull = True` now joins recall as the
+  source `team`, under the same order, fallback and timeout rules: the adapter is
+  constructed inside the bounded call, its rows are stamped `origin: team`, a backend
+  that is down degrades to the other sources, and the failure is logged once per
+  process. `team` is not governed by `recall.allowed_sources`; the adapter was already
+  admitted through `sync.adapter`. `noop` and `filesystem` don't opt in, so nothing
+  changes for them. A new `adapter_class()` returns a sync adapter's class behind the
+  same gate as `load_adapter`.
 
 ### Fixed
 

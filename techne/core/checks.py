@@ -2628,10 +2628,19 @@ def check_recall_sources(config) -> CheckResult:
         parts.append(f"recall.order names unusable source(s): {', '.join(unusable)}")
     if unusable:
         verdict = Verdict.BROKEN
-        remedy = (
-            "Allow the entry point in `recall.allowed_sources`, fix the one that failed, "
-            "or remove the name from `recall.order`."
-        )
+        if unusable == [recall_sources.TEAM]:
+            # `team` is the sync adapter's read-back, not a plugged-in source: the
+            # allow-list does not govern it (techne#1171).
+            remedy = (
+                "`team` comes from the sync adapter: it must load (`sync.adapter`, and "
+                "`sync.allow_unlisted_adapter` for a non-built-in) and declare "
+                "`supports_pull = True`; otherwise remove `team` from `recall.order`."
+            )
+        else:
+            remedy = (
+                "Allow the entry point in `recall.allowed_sources`, fix the one that "
+                "failed, or remove the name from `recall.order`."
+            )
     else:
         verdict = Verdict.LIVE if found.loaded else Verdict.DORMANT
         remedy = None
