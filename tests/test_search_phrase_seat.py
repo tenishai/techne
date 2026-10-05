@@ -855,6 +855,8 @@ def test_window_invariants_hold_on_random_rows(db):
     the whole span whenever it fits the window."""
     import random
 
+    from techne.cli import _preview
+
     rng = random.Random(1147)
     words = "alpha beta gamma delta step build run echo".split()
     cap = search_mod._ROW_CHAR_CAP
@@ -881,6 +883,8 @@ def test_window_invariants_hold_on_random_rows(db):
         assert head < lo <= start < hi
         if len(tok) <= cap - head - len(search_mod._WINDOW_SEP):
             assert start + len(tok) <= hi
+        # techne search's 200-char preview keeps the span's start in view (#1162).
+        assert tok[:20] in _preview(row)
     assert windowed > 100, "the fuzz must actually window rows"
 
 
@@ -896,3 +900,37 @@ def test_window_page_is_a_no_op_when_disabled(db):
         conn.close()
 
     assert row == before
+
+
+# --- techne search's 200-char preview shows a windowed row's match (techne#1162) ------
+
+#: A long first line (it fills the 125-char head) and the term near the row's end,
+#: where the window is pulled back to fill the width, putting the term ~350 chars in.
+_LATE = "Ran: " + "x" * 140 + "\n" + ("echo build step; " * 60) + "kubeconfig rotated."
+
+
+def test_techne_search_shows_the_match_of_a_long_headed_row(db, monkeypatch):
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.config import Config
+
+    _obs(db, [_LATE])
+    monkeypatch.setattr(search_mod, "search_vec", _scoped([]))
+    cfg = Config()
+    cfg.db_path = db
+    cfg.data_dir = db.parent
+    monkeypatch.setattr(Config, "load", classmethod(lambda cls, *a, **k: cfg))
+
+    out = CliRunner().invoke(main, ["search", "kubeconfig", "--limit", "5"]).output
+
+    line = next(ln for ln in out.splitlines() if ln.strip().startswith("[Bash]"))
+    assert "kubeconfig" in line, line
+    assert len(line.strip()) <= len("[Bash] ") + 200
+
+
+def test_the_preview_of_an_unwindowed_row_is_the_plain_cut():
+    from techne.cli import _preview
+
+    row = {"content": "y" * 450}
+    assert _preview(row) == "y" * 200
