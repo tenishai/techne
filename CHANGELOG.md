@@ -5,6 +5,21 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Added
+
+- **`model_engine: claude-code` runs techne's own model calls through your `claude` CLI**
+  (#1189). A new top-level `model_engine` key chooses how every model call techne makes
+  itself goes out: LLM thread detection and summaries, session-end reflection and the
+  headless custodian rails. `litellm`, the default, is unchanged. `claude-code` runs
+  the user's own `claude -p` on their Claude login, so it needs no API key and no
+  `[llm]` extra, and counts against the plan's usage limits; the model keys still pick
+  the model, as a Claude alias or id. The call is isolated so it can't feed techne
+  (`--restricted`, hooks disabled, no MCP servers or tools, no session transcript, a
+  temporary working directory) and is bounded at 300s unless `llm_timeout` is set.
+  techne never reads or stores Claude credentials. `model_engine` is operator-governed
+  (`EGRESS_KEYS`), and `techne doctor` adds `model:engine`. The resident emit/ingest
+  path is unaffected.
+
 ## [0.18.1] — 2026-10-05
 
 ### Added

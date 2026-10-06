@@ -88,6 +88,11 @@ EGRESS_KEYS: tuple[str, ...] = (
     "model",
     "reflect.model",
     "conflict.model",
+    # techne#1189. The engine picks the TRANSPORT for every call the model keys
+    # above aim: "claude-code" sends memory content through the user's `claude`
+    # CLI instead of LiteLLM. Pinning the models without the engine would leave an
+    # unpinned way to reroute the same traffic.
+    "model_engine",
     # techne#555. The custodian binds a model to the emit→ingest rails and runs them
     # UNATTENDED, so these are the highest-value destination keys in the file: a
     # compromised agent that set `custodian.model` to its own endpoint would ship the

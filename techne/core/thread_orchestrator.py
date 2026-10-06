@@ -590,7 +590,15 @@ def _make_generate_fn(config: Config):
     (e.g., a LiteLLM proxy server providing centralized budget enforcement
     and observability). When unset, LiteLLM uses its standard env-var-based
     provider routing.
+
+    `config.model_engine` chooses the transport (techne#1189). "claude-code" hands
+    the call to the user's own `claude -p` (`techne/core/model_engine.py`); the
+    model keys still choose the model.
     """
+    if getattr(config, "model_engine", "litellm") == "claude-code":
+        from techne.core.model_engine import claude_code_generate_fn
+
+        return claude_code_generate_fn(config)
 
     def generate(prompt: str) -> str:
         try:
