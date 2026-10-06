@@ -12,8 +12,9 @@ All notable changes to techne are documented here. Format loosely follows
 - **The distribution is now `tenish-techne`.** tenish names every released Python
   distribution `tenish-<project>` (decided 2026-10-06, tenishai/agora discussion 46). The
   import package, the `techne` command, the MCP server and every config path are
-  unchanged. Install lines in README.md, docs/modules.md and the integration docs now read
-  `tenish-techne[...] @ git+https://github.com/tenishai/techne.git@v0.18.2`. The wheel is
+  unchanged. Install lines in README.md and docs/modules.md now read
+  `tenish-techne[...] @ git+https://github.com/tenishai/techne.git@v0.18.2`, and
+  integrations/README.md's `<tag>` form names `tenish-techne`. The wheel is
   `tenish_techne-0.18.2-py3-none-any.whl`; `pyproject.toml` now names the `techne`
   package for hatchling, which would otherwise look for `tenish_techne/`.
 - **Version and install lookups find either name.** `techne --version`, `techne doctor`'s

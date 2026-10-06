@@ -11,7 +11,7 @@ distribution metadata. The revision is the finer identifier, and for an
 INSTALLED build it was reported as None, because `_revision_info` reads git and
 an installed build has no checkout.
 
-PEP 610 closes that: `pip install "techne @ git+...@<sha>"` writes
+PEP 610 closes that: `pip install "tenish-techne @ git+...@<sha>"` writes
 `direct_url.json` into the dist-info carrying `vcs_info.commit_id` -- the
 RESOLVED sha, not just the ref asked for. Confirmed against a real install:
 

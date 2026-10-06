@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -9,7 +10,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from techne import install_spec
+from techne import DIST_NAME, install_spec
 from techne.config import CLAUDE_CODE, Config
 from techne.platforms.claude_code.paths import claude_config_dir, claude_json_path
 
@@ -469,7 +470,9 @@ def _heal_command() -> str:
     Three cases, mirroring preflight_guard._pip_install_editable's venv detection:
 
     - **pipx** (sys.executable contains ``pipx/venvs/``):
-      ``pipx reinstall --python "$(command -v python3)" techne``.
+      ``pipx reinstall --python "$(command -v python3)" <venv>``, where ``<venv>`` is
+      the pipx environment the interpreter lives in (``tenish-techne`` for 0.18.2+,
+      ``techne`` for an install made before the rename).
       Explicitly passes ``--python`` to force the PATH-resolved ``python3`` rather than
       pipx's default (``sys.executable`` on non-Windows — i.e. the Python that pipx
       itself runs under; verified against pipx source at pypa/pipx main, 2026-07-07).
@@ -503,7 +506,9 @@ def _heal_command() -> str:
 
     if is_pipx:
         # Use --python to avoid relying on pipx's DEFAULT_PYTHON (= its own sys.executable).
-        return 'pipx reinstall --python "$(command -v python3)" techne'
+        venv_name = re.search(r"pipx/venvs/([^/]+)/", exe)
+        name = venv_name.group(1) if venv_name else DIST_NAME
+        return f'pipx reinstall --python "$(command -v python3)" {shlex.quote(name)}'
 
     if not in_venv:
         # system install: fresh editable install under PATH's python3, then re-point PY
@@ -521,7 +526,7 @@ def _heal_command() -> str:
         f"python3 -m venv {venv_prefix} && "
         f"{venv_prefix}/bin/pip install -e {repo}"
         f"; or if installed via pipx/uv: "
-        f"pipx reinstall techne / uv tool install --force techne"
+        f"pipx reinstall {DIST_NAME} / uv tool install --force '{install_spec()}'"
     )
     return f"echo {shlex.quote(msg)} >&2; exit 1"
 

@@ -169,11 +169,11 @@ techne is delivered as an **MCP server**, so its tools (`store`, `recall`, `sear
 | You want… | Install | Adds |
 |---|---|---|
 | Just agent memory (capture, FTS recall, threads, knowledge) | `techne` | core (lightweight) |
-| Semantic recall | `techne[vectors]` | `fastembed` (Python <3.14) or `model2vec` (3.14+), plus `sqlite-vec` |
-| Autonomous/headless model passes | `techne[llm]` | operator-model gateway |
-| Code-graph | `techne[codex]` | tree-sitter + grammars |
-| CVE pre-install audit | `techne[security]` | `pip-audit` |
-| Continuous filesystem ingest | `techne[watch]` | `watchdog` |
+| Semantic recall | `tenish-techne[vectors]` | `fastembed` (Python <3.14) or `model2vec` (3.14+), plus `sqlite-vec` |
+| Autonomous/headless model passes | `tenish-techne[llm]` | operator-model gateway |
+| Code-graph | `tenish-techne[codex]` | tree-sitter + grammars |
+| CVE pre-install audit | `tenish-techne[security]` | `pip-audit` |
+| Continuous filesystem ingest | `tenish-techne[watch]` | `watchdog` |
 
 Install any row from git: `pipx install "tenish-techne[<extras>] @ git+https://github.com/tenishai/techne.git@v0.18.2"`. **The PyPI package named
 `techne` is a different project** — `pip install techne` does not install this one.
