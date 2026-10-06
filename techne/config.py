@@ -947,6 +947,10 @@ class Config:
     # model2vec; raise it for a higher-cosine backend (e.g. fastembed/bge).
     tag_threshold: float = 0.42
     model: str = "claude-haiku-4-5-20251001"
+    # How techne's own model calls go out (techne#1189): "litellm" (the default) or
+    # "claude-code", which runs the user's own `claude -p`. The model keys still pick
+    # the model. Egress-selecting, so it is governed by the operator layer.
+    model_engine: str = "litellm"
     # Optional LiteLLM proxy targeting. When unset, litellm.completion() uses
     # its standard env-var-based provider routing (ANTHROPIC_API_KEY, etc.).
     # Set llm_api_base when you're running a LiteLLM proxy server (e.g., for
@@ -1193,6 +1197,15 @@ class Config:
             cfg.instance_name = str(raw["instance_name"])
         if "model" in raw:
             cfg.model = raw["model"]
+        if "model_engine" in raw:
+            from techne.core.model_engine import MODEL_ENGINES
+
+            engine = str(raw["model_engine"])
+            if engine not in MODEL_ENGINES:
+                raise ValueError(
+                    f"model_engine must be one of {', '.join(MODEL_ENGINES)}; got {engine!r}."
+                )
+            cfg.model_engine = engine
         if "llm_api_base" in raw:
             cfg.llm_api_base = str(raw["llm_api_base"])
         if "llm_api_key" in raw:
@@ -1586,6 +1599,7 @@ class Config:
             "archivist_db_path": self.archivist_db_path,
             "instance_name": self.instance_name,
             "model": self.model,
+            "model_engine": self.model_engine,
             "sync": {
                 "adapter": self.sync.adapter,
             },

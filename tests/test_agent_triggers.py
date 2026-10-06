@@ -246,6 +246,9 @@ DOCTOR_CHECKS_AT_LAST_REVIEW = {
     "check_maintenance_rails",
     "check_mcp_registration",
     "check_model_bound_rails",
+    # Reviewed 2026-10-05 for techne#1189: check_model_engine reads config.model_engine
+    # and whether `claude` is on PATH. Nothing about backup scheduling.
+    "check_model_engine",
     "check_outbox_targets",
     "check_runtime_loaded",
     "check_runtime_revision",

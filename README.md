@@ -709,6 +709,7 @@ the problem the sparse file exists to fix. Set only the keys you change.
 # db_path: /Volumes/data/techne.db
 platform: claude-code
 model: claude-haiku-4-5-20251001   # only used if threads.summarizer is "llm"
+model_engine: litellm              # or 'claude-code': run your own `claude -p` (no API key)
 
 threads:
   detector: heuristic         # 'heuristic' (default, no LLM) or 'llm'
@@ -864,8 +865,8 @@ changes the order reaching the model on every conflict check, not only when trun
 The keys that choose **where memory can go**, or what reaches the model's context — `sync`
 (the whole block, so `sync.allow_unlisted_adapter`, `sync.allowed_sinks` and
 `sync.allow_unlisted_sinks` ride with it), `connections`, `llm_api_base`, `llm_api_key`,
-`model`, `reflect.model`, `conflict.model`, `custodian.model`, `custodian.rail_models`,
-`archivist_db_path`, `standalone`, `archivist`, `recall.allowed_sources`,
+`model`, `model_engine`, `reflect.model`, `conflict.model`, `custodian.model`,
+`custodian.rail_models`, `archivist_db_path`, `standalone`, `archivist`, `recall.allowed_sources`,
 `recall.allow_unlisted_sources`, `stores`, `sources` — can be pinned in a `config.operator.yaml` that techne honors **only
 while the file is provably not writable by the process reading it**. Resolved in order:
 
@@ -914,6 +915,38 @@ llm_api_key: sk-your-virtual-key      # optional; omit to use the provider's env
 ```
 
 Without the `[llm]` extra, the operator path degrades gracefully — the resident (agent's-own-model) path covers everything an interactive session needs. Switch providers by changing the one `model` line.
+
+### Claude Code engine (`model_engine: claude-code`)
+
+If you use Claude Code, techne can run its own model calls through your `claude` CLI
+instead of LiteLLM, with no API key and no `[llm]` extra:
+
+```yaml
+model_engine: claude-code
+model: haiku                    # a Claude alias or id, passed to `claude -p --model`
+custodian:
+  model: haiku                  # the per-rail model keys work the same way
+```
+
+This covers every call techne makes itself: LLM thread detection and summaries,
+session-end reflection and the headless custodian rails. The resident path is unchanged.
+Each call runs `claude -p` with the credential it finds in its environment and your
+Claude Code login. Settings files are ignored, so an `apiKeyHelper` or a settings `env`
+key does not apply. Normally that's your Claude login, so calls count against your plan's
+usage limits. **If `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` is set, `claude -p` uses
+it instead and the calls bill that key**; unset it in the environment techne runs in to
+use your plan. techne never stores or logs your credentials; it only checks whether
+those two variables are set. `llm_api_base` and
+`llm_api_key` are LiteLLM settings and aren't used by this engine. The call is isolated so it
+can't feed techne: user, project and local settings are ignored (so techne's hooks
+don't fire), no MCP servers or tools load, no session transcript is written, and it
+runs from a temporary directory.
+
+`techne doctor` reports `model:engine`. It reads broken if `claude` is not on PATH,
+and names `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` when one is set in its
+environment.
+`model_engine` is egress-selecting, so it can be pinned in `config.operator.yaml`
+(see [Operator-owned config](#operator-owned-config-egress-selecting-keys)).
 
 ---
 
