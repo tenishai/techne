@@ -526,7 +526,8 @@ def _heal_command() -> str:
         f"python3 -m venv {venv_prefix} && "
         f"{venv_prefix}/bin/pip install -e {repo}"
         f"; or if installed via pipx/uv: "
-        f"pipx reinstall {DIST_NAME} / uv tool install --force '{install_spec()}'"
+        f"pipx reinstall {DIST_NAME} (or techne, for an install from before 0.18.2) / "
+        f"uv tool install --force '{install_spec()}'"
     )
     return f"echo {shlex.quote(msg)} >&2; exit 1"
 

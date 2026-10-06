@@ -54,7 +54,8 @@ def check_entry_points() -> list[str]:
     eps = _techne_entry_points()
     if not eps:
         return [
-            f"no entry points found for distribution {techne.DIST_NAME!r} at all — metadata is missing"
+            f"no entry points found for distribution {techne._distribution().metadata['Name']!r} "
+            "at all — metadata is missing"
         ]
 
     failures = []
