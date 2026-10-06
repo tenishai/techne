@@ -25,8 +25,10 @@ All notable changes to techne are documented here. Format loosely follows
 ### Fixed
 
 - **Install hints no longer point at the unrelated PyPI `techne`.** The messages for a
-  missing extra said `pip install techne[codex]`, `[watch]` or `[llm]`; on PyPI `techne` is
-  a different project. They now give `tenish-techne[<extra>] @ git+https://github.com/tenishai/techne.git`.
+  missing extra said `pip install techne[codex]`, `[watch]`, `[llm]` or `install
+  techne[vectors]`; on PyPI `techne` is a different project. The `[codex]`, `[watch]` and
+  `[llm]` hints now give the full `tenish-techne[<extra>] @ git+https://github.com/tenishai/techne.git`
+  form; the `[vectors]` messages name `tenish-techne[vectors]`.
 
 ### Upgrading
 
