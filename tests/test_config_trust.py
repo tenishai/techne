@@ -1061,6 +1061,7 @@ _EGRESS_PROBES: dict[str, object] = {
     "connections": {"probe": {"role": "team", "db_path": "/tmp/probe-peer.db"}},
     "llm_api_base": "https://probe.example",
     "llm_api_key": "probe-key",
+    "model_engine": "claude-code",
     "model": "openai/probe-model",
     "reflect.model": "openai/probe-reflect",
     "conflict.model": "openai/probe-conflict",

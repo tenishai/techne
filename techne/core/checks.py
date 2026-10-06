@@ -1943,6 +1943,57 @@ def _rail_binding(config, rail: str) -> tuple[bool, str]:
 
 
 @register_check
+def check_model_engine(config) -> CheckResult:
+    """Can the configured model engine send a call at all? (techne#1189)
+
+    ``litellm`` is the default and reads DORMANT: whether a LiteLLM call can succeed is
+    the model-bound rail checks' question, answered from their markers. ``claude-code``
+    depends on one thing this check can see cheaply, the ``claude`` CLI on PATH. Without
+    it every model call raises, so it reads BROKEN with the remedy. Whether the CLI is
+    signed in is not probed: that would mean a model call from the SessionStart hot path.
+    """
+    from techne.core.model_engine import CLAUDE_CODE, claude_binary, credential_override
+
+    engine = getattr(config, "model_engine", "litellm")
+    if engine != CLAUDE_CODE:
+        return CheckResult(
+            name="model:engine",
+            subsystem="model",
+            kind=Kind.FAIL_OPEN,
+            verdict=Verdict.DORMANT,
+            detail=f"{engine} (default): model calls go through LiteLLM",
+            evidence="config.model_engine",
+        )
+    binary = claude_binary()
+    if binary is None:
+        return CheckResult(
+            name="model:engine",
+            subsystem="model",
+            kind=Kind.FAIL_OPEN,
+            verdict=Verdict.BROKEN,
+            detail="claude-code: the `claude` CLI is not on PATH, so every model call fails",
+            evidence="shutil.which('claude') is None",
+            remedy="Install Claude Code, or set model_engine: litellm",
+        )
+    override = credential_override()
+    detail = f"claude-code: model calls run `claude -p` ({binary})"
+    if override:
+        # Billing, not health: the calls work, they just don't go to the plan. Read from
+        # doctor's own environment; a hook or MCP server started elsewhere may differ.
+        detail += f"; {override} is set here, so `claude -p` bills it, not the plan login"
+    else:
+        detail += " on the Claude Code login"
+    return CheckResult(
+        name="model:engine",
+        subsystem="model",
+        kind=Kind.FAIL_OPEN,
+        verdict=Verdict.LIVE,
+        detail=detail,
+        evidence="shutil.which('claude'); ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY set?",
+    )
+
+
+@register_check
 def check_model_bound_rails(config) -> list[CheckResult]:
     """Did a MODEL-BOUND rail actually produce, or did it fail where nobody was looking?
 
