@@ -127,8 +127,10 @@ def pytest_sessionstart(session):  # noqa: ARG001 — pytest hook signature
     import sys
 
     try:
-        importlib.metadata.version("techne")
-    except importlib.metadata.PackageNotFoundError:
+        import techne
+
+        techne._distribution()
+    except (ImportError, importlib.metadata.PackageNotFoundError):
         pytest.exit(
             f"techne is not installed in this interpreter ({sys.executable}).\n"
             "Running the suite here produces failures that look like a packaging "

@@ -74,9 +74,9 @@ run_pass() {
     echo "    -> $out"
 
     echo "  + installed package version matches pyproject"
-    got_version="$("$venv/bin/python" -c "import importlib.metadata as m; print(m.version('techne'))")"
+    got_version="$("$venv/bin/python" -c "import importlib.metadata as m; print(m.version('tenish-techne'))")"
     [ "$got_version" = "$EXPECTED_VERSION" ] \
-      || fail "$label: importlib.metadata reports techne==$got_version, pyproject declares $EXPECTED_VERSION"
+      || fail "$label: importlib.metadata reports tenish-techne==$got_version, pyproject declares $EXPECTED_VERSION"
 
     echo "  + entry points (console_scripts, techne.sync_adapters)"
     "$venv/bin/python" "$REPO_ROOT/tests/test_entry_points.py"

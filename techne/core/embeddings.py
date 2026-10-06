@@ -307,7 +307,7 @@ def _select_backend(config: "Config | None") -> tuple[str, str]:
     # is impossible; both `if`s above are exhaustive for any True flag. Only
     # the neither-importable case falls through.
     raise ImportError(
-        "no embedding backend available — install techne[vectors] "
+        "no embedding backend available — install tenish-techne[vectors] "
         "(model2vec on py3.14+, fastembed on <3.14)"
     )
 

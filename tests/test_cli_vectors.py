@@ -123,7 +123,7 @@ class TestVectorsBackfill:
         result = _invoke(["vectors", "backfill"])
         assert result.exit_code == 0, result.output
         assert "vector search unavailable" in result.output
-        assert "techne[vectors]" in result.output
+        assert "tenish-techne[vectors]" in result.output
 
     def test_uninitialized_db_reports_and_exits_zero(self, tmp_path, monkeypatch):
         db_path = tmp_path / "nope" / "techne.db"

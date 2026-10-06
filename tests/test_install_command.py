@@ -15,7 +15,7 @@ from techne.cli import main
 from techne.core import capabilities as caps
 from techne.core.capabilities import install_command_for
 
-GIT = '"techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.17.0"'
+GIT = '"tenish-techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.17.0"'
 
 
 def _cmd(direct_url=None, prefix="/usr", base_prefix="/usr", executable="/usr/bin/python3"):
@@ -109,7 +109,7 @@ def test_init_gives_an_editable_install_the_editable_command(isolated, monkeypat
 
 
 class _FakeDistribution:
-    """Stands in for `importlib.metadata.distribution("techne")`.
+    """Stands in for `importlib.metadata.distribution` (see `techne._distribution`).
 
     Real `Distribution.read_text(filename)` returns None for a dist-info file that
     isn't there; this mirrors that instead of raising, so a caller that asks for

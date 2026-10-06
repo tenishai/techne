@@ -23,7 +23,7 @@ Key design decisions
   that appear outside any function or class definition.
 
 * Lazy grammar imports:  tree_sitter_python / tree_sitter_typescript are
-  optional extras (techne[codex]).  Missing grammars degrade gracefully:
+  optional extras (tenish-techne[codex]).  Missing grammars degrade gracefully:
   files for that language are silently skipped.
 
 * Watch mode:  mirrors JsonlTranscriptSource — a watchdog Observer calls
@@ -38,6 +38,8 @@ import os
 import threading
 from collections.abc import Callable, Iterator
 from pathlib import Path
+
+from techne import install_spec
 
 log = logging.getLogger(__name__)
 
@@ -161,7 +163,9 @@ class _GrammarCache:
             self._queries[language] = query
             log.debug("codex_grammar_loaded language=%s", language)
         except ImportError:
-            log.debug("codex_grammar_unavailable language=%s (install techne[codex])", language)
+            log.debug(
+                "codex_grammar_unavailable language=%s (install tenish-techne[codex])", language
+            )
             self._langs[language] = None
         except Exception:
             log.exception("codex_grammar_load_failed language=%s", language)
@@ -1277,7 +1281,8 @@ class RepoSource:
             if count == 0:
                 log.warning(
                     "codex: walked %d source file(s) under %s but produced an empty "
-                    "graph — tree-sitter grammars missing (`pip install 'techne[codex]'`) "
+                    "graph — tree-sitter grammars missing "
+                    f"(`pip install '{install_spec('codex')}'`) "
                     "or an unsupported repo layout?",
                     files,
                     self._root,
@@ -1291,7 +1296,7 @@ class RepoSource:
             from watchdog.observers import Observer
         except ImportError as exc:
             raise RuntimeError(
-                "watchdog is not installed; run `pip install techne[codex]`"
+                f"watchdog is not installed; run `pip install '{install_spec('codex')}'`"
             ) from exc
 
         from techne.watch import Debouncer

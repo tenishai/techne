@@ -395,7 +395,10 @@ def test_watch_raises_startup_config_error_when_watchdog_missing(
         resync_interval_seconds=3600,
     )
 
-    with pytest.raises(StartupConfigError, match=r"pip install techne\[watch\]"):
+    with pytest.raises(
+        StartupConfigError,
+        match=r"pip install .tenish-techne\[watch\] @ git\+https://github\.com/tenishai/techne\.git",
+    ):
         watch(config, install_signal_handlers=False)
 
 
@@ -499,7 +502,9 @@ def test_watch_cmd_exits_ex_config_on_startup_config_error(monkeypatch) -> None:
     init_db(Config.load().db_path)
 
     def _boom(*_args, **_kwargs):
-        raise StartupConfigError("watchdog is not installed; run `pip install techne[watch]`")
+        raise StartupConfigError(
+            "watchdog is not installed; run `pip install tenish-techne[watch]`"
+        )
 
     monkeypatch.setattr(watch_mod, "watch", _boom)
 

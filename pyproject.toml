@@ -3,8 +3,8 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "techne"
-version = "0.18.1"
+name = "tenish-techne"
+version = "0.18.2"
 description = "Agentic memory and knowledge system for AI coding agents"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
@@ -148,6 +148,11 @@ markers = [
 # carry anchor shas that mean nothing outside a git checkout. Shipping them would
 # quadruple the payload to teach nobody. These seven are the ones an operator or
 # their agent reads, and six of the seven carry trigger blocks.
+[tool.hatch.build.targets.wheel]
+# The distribution is tenish-techne; the import package is still `techne`, so
+# name it here (hatchling would otherwise look for a tenish_techne/ package).
+packages = ["techne"]
+
 [tool.hatch.build.targets.wheel.force-include]
 "docs/four-functions.md" = "techne/docs/four-functions.md"
 "docs/investigating.md" = "techne/docs/investigating.md"

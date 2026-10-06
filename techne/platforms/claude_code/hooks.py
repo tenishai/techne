@@ -9,6 +9,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+from techne import install_spec
 from techne.config import CLAUDE_CODE, Config
 from techne.platforms.claude_code.paths import claude_config_dir, claude_json_path
 
@@ -403,7 +404,7 @@ def _interpreter() -> Path:
             "command, so a PYTHONPATH-only install would leave every hook dead with "
             "ModuleNotFoundError (techne#458).\n"
             "Install it INTO an interpreter instead:\n"
-            "  pipx install techne          # or: pipx install -e <checkout>\n"
+            f"  pipx install '{install_spec()}'   # or: pipx install -e <checkout>\n"
             "  <python> -m pip install -e <canonical-techne-checkout>\n"
             "A --target layout cannot be made to work here: the probe strips exactly "
             "the PYTHONPATH entry that supplies techne, so re-running init after "
@@ -417,7 +418,7 @@ def _interpreter() -> Path:
         "Writing one of them anyway would break every techne hook with "
         "ModuleNotFoundError (techne#458).\n"
         "Install techne so its entry point resolves, then re-run `techne init`:\n"
-        "  pipx install techne        # or: pipx install -e <checkout>\n"
+        f"  pipx install '{install_spec()}'   # or: pipx install -e <checkout>\n"
         f"  {sys.executable} -m pip install -e <canonical-techne-checkout>\n"
         "NOTE: running `techne init` from inside the source checkout is NOT enough "
         "— the repo cwd makes techne importable there but not from where hooks run."

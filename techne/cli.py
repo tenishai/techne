@@ -5711,7 +5711,8 @@ def vectors_backfill(ctx, do_tags, all_tags, no_download):
         import sqlite_vec  # noqa: F401
     except ImportError:
         click.echo(
-            "vector search unavailable: no embedding backend installed — install techne[vectors]"
+            "vector search unavailable: no embedding backend installed — "
+            "install tenish-techne[vectors]"
         )
         ctx.exit(0)
     # NO backend_available() GATE HERE (#408). This command is the string
@@ -5732,7 +5733,8 @@ def vectors_backfill(ctx, do_tags, all_tags, no_download):
 
     if not embeddings_mod.backend_available():
         click.echo(
-            "vector search unavailable: no embedding backend installed — install techne[vectors]"
+            "vector search unavailable: no embedding backend installed — "
+            "install tenish-techne[vectors]"
         )
         # REPORT WHAT ACTUALLY HAPPENED. backfill_vectors returns {} for three
         # different outcomes and this caller cannot tell them apart, so the old
@@ -5747,7 +5749,7 @@ def vectors_backfill(ctx, do_tags, all_tags, no_download):
             # the [vectors] extra, so this is the reachable case.
             click.echo(
                 "index hygiene did NOT run: the vector toolchain is incomplete "
-                "(needs numpy and a loadable sqlite-vec) — install techne[vectors]."
+                "(needs numpy and a loadable sqlite-vec) — install tenish-techne[vectors]."
             )
         elif counts.get("sweep_errors"):
             click.echo(
@@ -5946,7 +5948,7 @@ def _import_resolve_pass(db_path: Path) -> dict:
 def codex_index(ctx, repo, languages, lsp, rebuild):
     """Walk REPO and index Python + TypeScript symbols into its per-repo db.
 
-    Uses tree-sitter for parsing; requires `pip install techne[codex]`.
+    Uses tree-sitter for parsing; requires the tenish-techne[codex] extra.
     Incremental: files whose SHA-256 hash is unchanged are skipped — pass
     --rebuild to re-parse regardless.
     With --lsp, a language server then resolves call edges to exact symbols.
@@ -6297,7 +6299,7 @@ def codex_watch(ctx, repo, languages, debounce_ms):
     """Watch REPO for file changes and re-index its per-repo db (Ctrl-C to stop).
 
     Runs an initial index first (fresh baseline + persists repo_root), then
-    starts the watchdog observer. Requires `pip install techne[codex]` for
+    starts the watchdog observer. Requires the `codex` extra for
     watchdog support.
     """
     import time

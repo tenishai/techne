@@ -31,7 +31,7 @@ def test_standalone_init_says_search_is_keyword_only_without_a_backend(isolated,
     monkeypatch.setattr("techne.core.embeddings.backend_available", lambda: False)
     out = _init("--platform", "standalone")
     assert "keyword-only" in out, out
-    assert "techne[recommended] @ git+https://github.com/tenishai/techne.git@" in out, (
+    assert "tenish-techne[recommended] @ git+https://github.com/tenishai/techne.git@" in out, (
         "the hint must give the git install form: PyPI `techne` is an unrelated package"
     )
     assert "techne vectors backfill" in out

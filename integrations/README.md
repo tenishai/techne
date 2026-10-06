@@ -8,7 +8,7 @@ Code a **foreign runtime** loads to talk to techne, as opposed to
 | language           | Python               | TypeScript (today) |
 | who runs it        | techne imports and runs it | the foreign client loads and runs it |
 | ships in the wheel | yes                  | no |
-| how it's installed | `pipx install "techne @ git+https://github.com/tenishai/techne.git@<tag>"` (PyPI `techne` is an unrelated project) | the operator points the client at an absolute path in the source checkout |
+| how it's installed | `pipx install "tenish-techne @ git+https://github.com/tenishai/techne.git@<tag>"` (PyPI `techne` is an unrelated project) | the operator points the client at an absolute path in the source checkout |
 
 If techne imports the code, it belongs in `techne/platforms/`. If a client such
 as opencode or pi loads and executes the code itself — even though that code

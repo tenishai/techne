@@ -5,6 +5,40 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.18.2] — 2026-10-06
+
+### Changed
+
+- **The distribution is now `tenish-techne`.** tenish names every released Python
+  distribution `tenish-<project>` (decided 2026-10-06, tenishai/agora discussion 46). The
+  import package, the `techne` command, the MCP server and every config path are
+  unchanged. Install lines in README.md, docs/modules.md and the integration docs now read
+  `tenish-techne[...] @ git+https://github.com/tenishai/techne.git@v0.18.2`. The wheel is
+  `tenish_techne-0.18.2-py3-none-any.whl`; `pyproject.toml` now names the `techne`
+  package for hatchling, which would otherwise look for `tenish_techne/`.
+- **Version and install lookups find either name.** `techne --version`, `techne doctor`'s
+  install checks and the reinstall hint look the distribution up as `tenish-techne`, then
+  `techne`, so an editable install made before this release keeps reporting its version
+  until it is reinstalled.
+
+### Fixed
+
+- **Install hints no longer point at the unrelated PyPI `techne`.** The messages for a
+  missing extra said `pip install techne[codex]`, `[watch]` or `[llm]`; on PyPI `techne` is
+  a different project. They now give `tenish-techne[<extra>] @ git+https://github.com/tenishai/techne.git`.
+
+### Upgrading
+
+- **pipx:** `pipx uninstall techne`, then `pipx install "tenish-techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.18.2"`,
+  then `techne init`. pipx keeps the old `techne` environment and its `techne` command, so
+  a plain `--force` install of the new name refuses or leaves the hooks on the old
+  interpreter; `techne init` rewrites `~/.claude/techne-hook.sh` to the new one.
+- **Editable checkouts:** reinstall once (`pip install -e ".[recommended]"`) so the
+  metadata carries the new name. Until then lookups fall back to `techne` and keep working.
+- Restart the MCP server. No schema, config or hook format changed.
+- **Downstream pins:** a dependency on `techne` must become `tenish-techne` once it pins
+  0.18.2 or later; an install from a git tag checks the name inside the tag.
+
 ### Added
 
 - **Agent self-lessons: `lesson`, `grant` and `charter`** (#1195). A home for what an
