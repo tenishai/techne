@@ -7,9 +7,11 @@ how to send it:
 
 * ``litellm`` (the default): LiteLLM, exactly as before this module existed.
 * ``claude-code``: the user's own ``claude`` CLI, run as ``claude -p``. It answers with
-  whatever credential that binary would use if the user ran ``claude -p`` in the same
-  environment. techne never reads or stores a credential, and does not change the
-  environment the child inherits.
+  the credential ``claude -p`` finds in its environment and login. Settings files are
+  ignored (``--restricted``, below), so an ``apiKeyHelper`` or a settings ``env`` key
+  does not apply. techne never stores or logs a credential, only checks whether the
+  environment variables below are set, and does not change the environment the child
+  inherits.
 
 WHICH CREDENTIAL, AND SO WHO PAYS (Prudence, PR #1190 r1). Claude Code's
 authentication precedence (code.claude.com/docs/en/iam) puts ``ANTHROPIC_AUTH_TOKEN``
@@ -17,7 +19,7 @@ and then ``ANTHROPIC_API_KEY`` above the subscription login, and "in non-interac
 mode (``-p``), the key is always used when present". So with either variable exported,
 these calls bill that key, not the plan. Scrubbing them was considered and rejected: it
 would break a user whose Claude Code deliberately runs on a Console key or a gateway
-token, and the engine's contract is "what ``claude -p`` does here". The README says so,
+token who sets it in the environment. The README says so,
 and ``check_model_engine`` names the variable when it is set (`credential_override`).
 
 The engine picks the transport; the model keys (`model`, `reflect.model`,

@@ -930,11 +930,13 @@ custodian:
 
 This covers every call techne makes itself: LLM thread detection and summaries,
 session-end reflection and the headless custodian rails. The resident path is unchanged.
-Each call runs `claude -p` with whatever credential Claude Code would use in the same
-environment. Normally that's your Claude login, so calls count against your plan's
+Each call runs `claude -p` with the credential it finds in its environment and your
+Claude Code login. Settings files are ignored, so an `apiKeyHelper` or a settings `env`
+key does not apply. Normally that's your Claude login, so calls count against your plan's
 usage limits. **If `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` is set, `claude -p` uses
 it instead and the calls bill that key**; unset it in the environment techne runs in to
-use your plan. techne never reads or stores your credentials. `llm_api_base` and
+use your plan. techne never stores or logs your credentials; it only checks whether
+those two variables are set. `llm_api_base` and
 `llm_api_key` are LiteLLM settings and aren't used by this engine. The call is isolated so it
 can't feed techne: user, project and local settings are ignored (so techne's hooks
 don't fire), no MCP servers or tools load, no session transcript is written, and it

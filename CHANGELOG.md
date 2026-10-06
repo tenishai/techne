@@ -11,15 +11,16 @@ All notable changes to techne are documented here. Format loosely follows
   (#1189). A new top-level `model_engine` key chooses how every model call techne makes
   itself goes out: LLM thread detection and summaries, session-end reflection and the
   headless custodian rails. `litellm`, the default, is unchanged. `claude-code` runs
-  the user's own `claude -p` with whatever credential Claude Code would use, so a
-  Claude Code login needs no API key and no `[llm]` extra, and calls count against
+  the user's own `claude -p` with the credential it finds in its environment and
+  login (settings files, and so `apiKeyHelper`, are ignored), so a Claude Code login
+  needs no API key and no `[llm]` extra, and calls count against
   the plan's usage limits. If `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` is set,
   `claude -p` uses it instead and the calls bill that key. The model keys still pick
   the model, as a Claude alias or id. The call is isolated so it can't feed techne
   (`--restricted`, hooks disabled, no MCP servers or tools, no session transcript, a
   temporary working directory). It's bounded by `custodian.timeout_seconds` on the
-  custodian rails and at 300s elsewhere. techne never reads or stores Claude
-  credentials. `model_engine` is operator-governed (`EGRESS_KEYS`), and `techne doctor`
+  custodian rails and at 300s elsewhere. techne never stores or logs Claude
+  credentials, and only checks whether those two variables are set. `model_engine` is operator-governed (`EGRESS_KEYS`), and `techne doctor`
   adds `model:engine`, which names an API key or auth token in its environment. The
   resident emit/ingest path is unaffected.
 
