@@ -6,13 +6,24 @@ reflection, the headless custodian rails) goes through
 how to send it:
 
 * ``litellm`` (the default): LiteLLM, exactly as before this module existed.
-* ``claude-code``: the user's own ``claude`` CLI, run as ``claude -p``. It answers on
-  whatever login the user gave the unmodified binary through Anthropic's own flow.
-  techne never reads, stores or passes a credential.
+* ``claude-code``: the user's own ``claude`` CLI, run as ``claude -p``. It answers with
+  whatever credential that binary would use if the user ran ``claude -p`` in the same
+  environment. techne never reads or stores a credential, and does not change the
+  environment the child inherits.
+
+WHICH CREDENTIAL, AND SO WHO PAYS (Prudence, PR #1190 r1). Claude Code's
+authentication precedence (code.claude.com/docs/en/iam) puts ``ANTHROPIC_AUTH_TOKEN``
+and then ``ANTHROPIC_API_KEY`` above the subscription login, and "in non-interactive
+mode (``-p``), the key is always used when present". So with either variable exported,
+these calls bill that key, not the plan. Scrubbing them was considered and rejected: it
+would break a user whose Claude Code deliberately runs on a Console key or a gateway
+token, and the engine's contract is "what ``claude -p`` does here". The README says so,
+and ``check_model_engine`` names the variable when it is set (`credential_override`).
 
 The engine picks the transport; the model keys (`model`, `reflect.model`,
-`conflict.model`, `custodian.model`, `custodian.rail_models`) still pick the model. Under
-``claude-code`` that value goes to ``--model``, so it must be a Claude alias or id.
+`custodian.model`, `custodian.rail_models`) still pick the model. Under ``claude-code``
+that value goes to ``--model``, so it must be a Claude alias or id. ``llm_api_base`` and
+``llm_api_key`` are LiteLLM settings and are not used.
 
 The resident path is unaffected: prompts the live session answers over MCP
 (``*_emit`` / ``*_ingest``) never come through here.
@@ -33,6 +44,7 @@ observation count did not move.
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import subprocess
 import tempfile
@@ -44,12 +56,13 @@ CLAUDE_CODE = "claude-code"
 MODEL_ENGINES = (LITELLM, CLAUDE_CODE)
 
 #: A ``claude -p`` call always has a bound. LiteLLM's path leaves it unset unless the
-#: caller asks (`llm_timeout`), but a subprocess that never returns would hang its
-#: caller with nothing reporting it, so this engine applies a default.
+#: caller sets ``llm_timeout`` on its config copy (only the custodian does, from
+#: ``custodian.timeout_seconds``), but a subprocess that never returns would hang its
+#: caller with nothing reporting it, so this engine applies a default otherwise.
 DEFAULT_CLAUDE_TIMEOUT_S = 300
 
-#: The isolation flags described in the module docstring. Kept as one tuple so the
-#: test can pin the exact set.
+#: The isolation flags described in the module docstring. The test pins the exact
+#: sequence against a literal of its own, so a dropped flag fails it.
 ISOLATION_ARGS = (
     "--restricted",
     "--settings",
@@ -65,9 +78,23 @@ ISOLATION_ARGS = (
 )
 
 
+#: Environment credentials Claude Code ranks above the subscription login under ``-p``.
+CREDENTIAL_OVERRIDES = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")
+
+
 def claude_binary() -> str | None:
     """The ``claude`` CLI on PATH, or None."""
     return shutil.which("claude")
+
+
+def credential_override(env=None) -> str | None:
+    """The first environment credential that ``claude -p`` would use instead of the
+    subscription login, or None. Reads only whether the variable is set, never its value."""
+    env = os.environ if env is None else env
+    for name in CREDENTIAL_OVERRIDES:
+        if env.get(name):
+            return name
+    return None
 
 
 def claude_code_generate_fn(config):

@@ -110,8 +110,21 @@ def test_call_is_isolated_and_passes_prompt_on_stdin(fake_claude):
     c = calls[0]
     argv = c["argv"]
     assert argv[:2] == ["/opt/bin/claude", "-p"]
-    # Every isolation flag, in order, so a dropped one fails here.
-    assert tuple(argv[2 : 2 + len(model_engine.ISOLATION_ARGS)]) == model_engine.ISOLATION_ARGS
+    # Every isolation flag, in order, against a literal so a dropped one fails here
+    # (Prudence, PR #1190 r1: comparing against ISOLATION_ARGS itself pinned nothing).
+    assert argv[2:-2] == [
+        "--restricted",
+        "--settings",
+        '{"disableAllHooks":true}',
+        "--strict-mcp-config",
+        "--mcp-config",
+        '{"mcpServers":{}}',
+        "--tools",
+        "",
+        "--no-session-persistence",
+        "--output-format",
+        "text",
+    ]
     for flag in ("--restricted", "--strict-mcp-config", "--no-session-persistence"):
         assert flag in argv
     assert argv[argv.index("--tools") + 1] == ""
@@ -183,4 +196,33 @@ def test_doctor_claude_code_without_cli_is_broken_with_remedy(monkeypatch):
 
 def test_doctor_claude_code_with_cli_is_live(monkeypatch):
     monkeypatch.setattr(model_engine.shutil, "which", lambda name: "/opt/bin/claude")
-    assert check_model_engine(_cfg(model_engine="claude-code")).verdict == Verdict.LIVE
+    for name in model_engine.CREDENTIAL_OVERRIDES:
+        monkeypatch.delenv(name, raising=False)
+    r = check_model_engine(_cfg(model_engine="claude-code"))
+    assert r.verdict == Verdict.LIVE
+    assert "bills" not in r.detail
+
+
+@pytest.mark.parametrize("var", ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"])
+def test_doctor_names_an_env_credential_that_claude_p_would_bill(monkeypatch, var):
+    monkeypatch.setattr(model_engine.shutil, "which", lambda name: "/opt/bin/claude")
+    for name in model_engine.CREDENTIAL_OVERRIDES:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(var, "sk-not-read")
+    r = check_model_engine(_cfg(model_engine="claude-code"))
+    assert r.verdict == Verdict.LIVE
+    assert f"{var} is set here" in r.detail
+    assert "sk-not-read" not in r.detail
+
+
+def test_auth_token_outranks_api_key():
+    env = {"ANTHROPIC_API_KEY": "k", "ANTHROPIC_AUTH_TOKEN": "t"}
+    assert model_engine.credential_override(env) == "ANTHROPIC_AUTH_TOKEN"
+    assert model_engine.credential_override({}) is None
+
+
+def test_child_inherits_the_environment_unchanged(fake_claude):
+    """No env= override: the engine is "what `claude -p` does here", credentials and all."""
+    calls, _ = fake_claude
+    model_engine.claude_code_generate_fn(_cfg())("x")
+    assert "env" not in calls[0]

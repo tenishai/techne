@@ -930,13 +930,19 @@ custodian:
 
 This covers every call techne makes itself: LLM thread detection and summaries,
 session-end reflection and the headless custodian rails. The resident path is unchanged.
-Each call runs `claude -p` on your own Claude login, so it counts against your plan's
-usage limits. techne never reads or stores your credentials. The call is isolated so it
+Each call runs `claude -p` with whatever credential Claude Code would use in the same
+environment. Normally that's your Claude login, so calls count against your plan's
+usage limits. **If `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` is set, `claude -p` uses
+it instead and the calls bill that key**; unset it in the environment techne runs in to
+use your plan. techne never reads or stores your credentials. `llm_api_base` and
+`llm_api_key` are LiteLLM settings and aren't used by this engine. The call is isolated so it
 can't feed techne: user, project and local settings are ignored (so techne's hooks
 don't fire), no MCP servers or tools load, no session transcript is written, and it
 runs from a temporary directory.
 
-`techne doctor` reports `model:engine`; it reads broken if `claude` is not on PATH.
+`techne doctor` reports `model:engine`. It reads broken if `claude` is not on PATH,
+and names `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` when one is set in its
+environment.
 `model_engine` is egress-selecting, so it can be pinned in `config.operator.yaml`
 (see [Operator-owned config](#operator-owned-config-egress-selecting-keys)).
 

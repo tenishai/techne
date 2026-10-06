@@ -1952,7 +1952,7 @@ def check_model_engine(config) -> CheckResult:
     it every model call raises, so it reads BROKEN with the remedy. Whether the CLI is
     signed in is not probed: that would mean a model call from the SessionStart hot path.
     """
-    from techne.core.model_engine import CLAUDE_CODE, claude_binary
+    from techne.core.model_engine import CLAUDE_CODE, claude_binary, credential_override
 
     engine = getattr(config, "model_engine", "litellm")
     if engine != CLAUDE_CODE:
@@ -1975,13 +1975,21 @@ def check_model_engine(config) -> CheckResult:
             evidence="shutil.which('claude') is None",
             remedy="Install Claude Code, or set model_engine: litellm",
         )
+    override = credential_override()
+    detail = f"claude-code: model calls run `claude -p` ({binary})"
+    if override:
+        # Billing, not health: the calls work, they just don't go to the plan. Read from
+        # doctor's own environment; a hook or MCP server started elsewhere may differ.
+        detail += f"; {override} is set here, so `claude -p` bills it, not the plan login"
+    else:
+        detail += " on the Claude Code login"
     return CheckResult(
         name="model:engine",
         subsystem="model",
         kind=Kind.FAIL_OPEN,
         verdict=Verdict.LIVE,
-        detail=f"claude-code: model calls run `claude -p` ({binary}) on the user's own login",
-        evidence="shutil.which('claude')",
+        detail=detail,
+        evidence="shutil.which('claude'); ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY set?",
     )
 
 
