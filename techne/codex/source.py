@@ -164,7 +164,9 @@ class _GrammarCache:
             log.debug("codex_grammar_loaded language=%s", language)
         except ImportError:
             log.debug(
-                "codex_grammar_unavailable language=%s (install tenish-techne[codex])", language
+                "codex_grammar_unavailable language=%s (pip install '%s')",
+                language,
+                install_spec("codex"),
             )
             self._langs[language] = None
         except Exception:

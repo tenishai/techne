@@ -2,7 +2,7 @@
 card: arch-card:techne-codex
 updated: 2026-10-03
 anchor: techne/core/codex.py sha=b46ecd48e918d3be447e126db57340b7bbaab4a1
-anchor: techne/codex/source.py sha=4588b4120468c35bb32fb4190c293d1b31eee0ac
+anchor: techne/codex/source.py sha=ebb0ada5e3ed849a329d37cd56cc57b6b31ab12f
 anchor: techne/codex/import_resolve.py sha=189671b7b56cedb585307141ea8cbfcacba04407
 ---
 # codex — code-graph store (EXPERIMENTAL)
