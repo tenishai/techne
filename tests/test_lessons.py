@@ -266,6 +266,24 @@ def test_consolidate_never_clusters_lessons(db):
     assert types == {"fact"}
 
 
+
+def test_conflict_check_never_pairs_lessons(db):
+    from techne.config import Config
+    from techne.core.conflict import conflict_check_emit
+
+    cfg = Config()
+    cfg.db_path = db
+    a = lessons.add(db, rule="use postgres for the datastore", tier="principle", tags="datastore")
+    b = lessons.add(db, rule="we switched to sqlite", tier="principle", tags="datastore")
+    f1 = knowledge.store(db, "use postgres for the datastore", tags="datastore")
+    f2 = knowledge.store(db, "we switched to sqlite", tags="datastore")
+    seen = set()
+    for item in conflict_check_emit(cfg):
+        seen |= {item["focus_id"], *item["comparison_ids"]}
+    assert {f1, f2} <= seen  # the control: same-tag facts are paired
+    assert not seen & {a, b}
+
+
 # ---- review -------------------------------------------------------------------
 
 
