@@ -480,6 +480,11 @@ def _record_enqueued(config, session_id: str, threads, due, mode: str) -> None:
         sent.get(thread_row_id(session_id, t), {}).get("obs") != len(t.observation_indices)
         for t in threads
     )
+    if state["owed"] and mode != MODE_FINAL:
+        # Owed again after a final pass: the session was swept while quiet, then
+        # resumed. Re-arm the sweep, or a second death without SessionEnd would
+        # never be finalized (Prudence, PR 1198 r1).
+        state["finalized"] = False
     _save_sync_state(config, session_id, state)
 
 

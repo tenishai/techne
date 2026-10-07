@@ -229,6 +229,31 @@ def test_quiet_session_with_owed_work_is_finalized(env):
     assert finalize_quiet_sessions(config) == []  # done once
 
 
+def test_resumed_session_is_swept_again_after_a_second_quiet_death(env):
+    """A sweep finalizes a quiet session; the operator resumes it, leaves work below
+    the gate, and it dies again without SessionEnd. The sweep must finalize it a
+    second time, or that held-back work is never sent (Prudence, PR 1198 r1)."""
+    from techne.core.state import ABANDONED_SESSION_IDLE_HOURS
+
+    config, sid = env
+    n = _add_obs(config, sid, 3)
+    run_session_end(config, sid, mode=MODE_CHECKPOINT)
+    _age_sync_state(config, sid, ABANDONED_SESSION_IDLE_HOURS + 1)
+    assert finalize_quiet_sessions(config) == [sid]
+    first = _summary_rows(config, status="pending")
+
+    _add_obs(config, sid, 3, start=n)  # resumed: below the gate, so owed again
+    run_session_end(config, sid, mode=MODE_CHECKPOINT)
+    assert _sync_state(config, sid)["owed"] is True
+    assert _sync_state(config, sid)["finalized"] is False
+    _age_sync_state(config, sid, ABANDONED_SESSION_IDLE_HOURS + 1)
+    assert finalize_quiet_sessions(config) == [sid]
+    pending = _summary_rows(config, status="pending")
+    # The newer revision replaced the still-pending one for the same thread.
+    assert len(pending) == len(first)
+    assert _sync_state(config, sid)["owed"] is False
+
+
 def test_quiet_session_sweep_skips_the_calling_session(env):
     from techne.core.state import ABANDONED_SESSION_IDLE_HOURS
 
