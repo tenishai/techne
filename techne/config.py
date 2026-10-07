@@ -650,6 +650,14 @@ class InjectionConfig:
         overturning facts (tagged memory-type:correction), filled right after
         identity so a correction is never evicted by merely-newer routine facts
         (the confident-wrong fix). 0.0 disables the reservation.
+    principle_char_budget: char ceiling for the agent's principles, operator
+        grants and charter (techne#1195). A SEPARATE budget, not a share of
+        char_budget: one operator's 32 principles at ~100 chars already exceed the
+        whole knowledge budget. Injected at startup AND after compact or /clear,
+        the one block that survives a compaction. 0 disables the band.
+    principle_clauses: how many of each principle's newest family entries are
+        injected under it as recognition aids. A general rule did not recognise
+        new variants of its own failure in the one history we have.
     """
 
     enabled: bool = True
@@ -660,6 +668,8 @@ class InjectionConfig:
     thread_per_item_chars: int = 200
     recent_reserve_frac: float = 0.4
     correction_reserve_frac: float = 0.3
+    principle_char_budget: int = 4000
+    principle_clauses: int = 2
 
 
 @dataclass
@@ -1514,6 +1524,10 @@ class Config:
                 correction_reserve_frac=float(
                     i.get("correction_reserve_frac", _ind.correction_reserve_frac)
                 ),
+                principle_char_budget=int(
+                    i.get("principle_char_budget", _ind.principle_char_budget)
+                ),
+                principle_clauses=int(i.get("principle_clauses", _ind.principle_clauses)),
             )
 
         if "staleness_hours" in raw:
@@ -1698,6 +1712,8 @@ class Config:
                 "thread_per_item_chars": self.injection.thread_per_item_chars,
                 "recent_reserve_frac": self.injection.recent_reserve_frac,
                 "correction_reserve_frac": self.injection.correction_reserve_frac,
+                "principle_char_budget": self.injection.principle_char_budget,
+                "principle_clauses": self.injection.principle_clauses,
             },
             "staleness_hours": self.staleness_hours,
             "tag_threshold": self.tag_threshold,

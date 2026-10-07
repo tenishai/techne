@@ -1494,6 +1494,286 @@ def identity_show(ctx, prefix):
 
 @main.group()
 @click.pass_context
+def lesson(ctx):
+    """Agent self-lessons, standing grants and charter (techne#1195)."""
+    pass
+
+
+def _lesson_errors(fn):
+    """A refused lesson write is an operator answer, not a crash: print the reason."""
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+
+    return wrapper
+
+
+def _lesson_agent(config, agent):
+    from techne.core.lessons import agent_for
+
+    return agent if agent is not None else agent_for(config)
+
+
+_AGENT_HELP = (
+    "Stable agent id the row belongs to. Default: config instance_name; "
+    "'' for every agent on this store."
+)
+
+
+@lesson.command("add")
+@click.argument("rule")
+@click.option("--tier", type=click.Choice(["principle", "entry"]), default="principle")
+@click.option("--body", default="", help="Incident, mechanism and why.")
+@click.option("--parent", "parent_id", type=int, help="Principle this entry belongs to.")
+@click.option("--session", "evidence_session", help="Session the mistake happened in.")
+@click.option("--agent", default=None, help=_AGENT_HELP)
+@click.pass_context
+@_lesson_errors
+def lesson_add(ctx, rule, tier, body, parent_id, evidence_session, agent):
+    """Add a principle or an entry."""
+    from techne.core import lessons
+
+    config = ctx.obj["config"]
+    new_id = lessons.add(
+        config.db_path,
+        rule=rule,
+        tier=tier,
+        body=body,
+        agent_id=_lesson_agent(config, agent) or None,
+        parent_id=parent_id,
+        evidence_session=evidence_session,
+        source="operator",
+    )
+    click.echo(f"stored {tier} {new_id}")
+
+
+@lesson.command("grant")
+@click.argument("rule")
+@click.option("--body", default="")
+@click.option("--agent", default=None, help=_AGENT_HELP)
+@click.pass_context
+@_lesson_errors
+def lesson_grant(ctx, rule, body, agent):
+    """Add a standing permission the agent always sees."""
+    from techne.core import lessons
+
+    config = ctx.obj["config"]
+    new_id = lessons.add_operator(
+        config.db_path,
+        kind="grant",
+        rule=rule,
+        body=body,
+        agent_id=_lesson_agent(config, agent) or None,
+    )
+    click.echo(f"stored grant {new_id}")
+
+
+@lesson.command("charter")
+@click.argument("rule")
+@click.option("--body", default="")
+@click.option("--agent", default=None, help=_AGENT_HELP)
+@click.pass_context
+@_lesson_errors
+def lesson_charter(ctx, rule, body, agent):
+    """Add a trust boundary the agent always sees and cannot change."""
+    from techne.core import lessons
+
+    config = ctx.obj["config"]
+    new_id = lessons.add_operator(
+        config.db_path,
+        kind="charter",
+        rule=rule,
+        body=body,
+        agent_id=_lesson_agent(config, agent) or None,
+    )
+    click.echo(f"stored charter {new_id}")
+
+
+@lesson.command("refine")
+@click.argument("knowledge_id", type=int)
+@click.argument("rule")
+@click.option("--body", default=None, help="Replace the body (default: keep it).")
+@click.pass_context
+@_lesson_errors
+def lesson_refine(ctx, knowledge_id, rule, body):
+    """Rewrite a principle, grant or charter; its family moves to the new revision."""
+    from techne.core import lessons
+
+    config = ctx.obj["config"]
+    new_id = lessons.refine(
+        config.db_path, knowledge_id, rule, body=body, operator=True, source="operator"
+    )
+    click.echo(f"{knowledge_id} -> {new_id}")
+
+
+@lesson.command("link")
+@click.argument("entry_id", type=int)
+@click.argument("principle_id", type=int)
+@click.pass_context
+@_lesson_errors
+def lesson_link(ctx, entry_id, principle_id):
+    """File an entry under a principle's family."""
+    from techne.core import lessons
+
+    lessons.link(ctx.obj["config"].db_path, entry_id, principle_id)
+    click.echo(f"linked {entry_id} -> {principle_id}")
+
+
+@lesson.command("enforced-by")
+@click.argument("knowledge_id", type=int)
+@click.argument("mechanism", required=False, default="")
+@click.pass_context
+@_lesson_errors
+def lesson_enforced_by(ctx, knowledge_id, mechanism):
+    """Record the hook, test or guard that now enforces a principle ('' clears)."""
+    from techne.core import lessons
+
+    lessons.set_enforced_by(
+        ctx.obj["config"].db_path, knowledge_id, mechanism, operator=True
+    )
+    click.echo(f"{knowledge_id}: enforced_by={mechanism or None}")
+
+
+@lesson.command("retire")
+@click.argument("knowledge_id", type=int)
+@click.pass_context
+@_lesson_errors
+def lesson_retire(ctx, knowledge_id):
+    """Stop injecting a principle, grant or charter. It stays searchable."""
+    from techne.core import lessons
+
+    lessons.retire(ctx.obj["config"].db_path, knowledge_id, operator=True)
+    click.echo(f"retired {knowledge_id}")
+
+
+@lesson.command("list")
+@click.option("--tier", type=click.Choice(["principle", "entry"]))
+@click.option("--kind", type=click.Choice(["lesson", "grant", "charter"]))
+@click.option("--agent", default=None, help=_AGENT_HELP)
+@click.pass_context
+@_lesson_errors
+def lesson_list(ctx, tier, kind, agent):
+    """List live lessons with their family counts."""
+    from techne.core import lessons
+
+    config = ctx.obj["config"]
+    rows = lessons.list_lessons(
+        config.db_path, agent_id=_lesson_agent(config, agent) or None, tier=tier, kind=kind
+    )
+    for r in rows:
+        label = r["tier"] or r["type"]
+        extra = ""
+        if r["tier"] == "principle":
+            extra = f"  recurrences={r['recurrences']} loaded_failures={r['loaded_failures']}"
+            if r["enforced_by"]:
+                extra += f" enforced_by={r['enforced_by']}"
+        elif r["parent_id"]:
+            extra = f"  parent={r['parent_id']}"
+        click.echo(f"  {r['id']:>6} {label:<9} {r['rule'][:100]}{extra}")
+    click.echo(f"{len(rows)} row(s)")
+
+
+@lesson.command("show")
+@click.option("--agent", default=None, help=_AGENT_HELP)
+@click.pass_context
+@_lesson_errors
+def lesson_show(ctx, agent):
+    """Print the principle band exactly as a session would receive it."""
+    from techne.core import lessons
+
+    config = ctx.obj["config"]
+    block = lessons.select_principles(
+        config.db_path,
+        agent_id=_lesson_agent(config, agent) or None,
+        char_budget=config.injection.principle_char_budget,
+        clauses=config.injection.principle_clauses,
+    )
+    click.echo(block.text or "(empty)")
+    click.echo(f"-- {block.chars}/{config.injection.principle_char_budget} chars")
+
+
+@lesson.command("review")
+@click.option("--agent", default=None, help=_AGENT_HELP)
+@click.option("--cold-days", default=30, show_default=True)
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+@_lesson_errors
+def lesson_review(ctx, agent, cold_days, as_json):
+    """What to look at: over budget, failing while loaded, cold, long, unlinked."""
+    import json as _json
+
+    from techne.core import lessons
+
+    config = ctx.obj["config"]
+    report = lessons.review(
+        config.db_path,
+        agent_id=_lesson_agent(config, agent) or None,
+        char_budget=config.injection.principle_char_budget,
+        clauses=config.injection.principle_clauses,
+        cold_days=cold_days,
+    )
+    if as_json:
+        click.echo(_json.dumps(report, indent=2, default=str))
+        return
+    b, c = report["budget"], report["counts"]
+    click.echo(
+        f"agent={report['agent_id']}  principles={c['principles']} entries={c['entries']} "
+        f"grants={c['grants']} charter={c['charter']}"
+    )
+    click.echo(f"band: {b['chars_used']}/{b['char_budget']} chars, {b['injected']} injected")
+    if b["dropped"]:
+        click.echo(f"  OVER BUDGET — not injected: {b['dropped']}")
+    sections = (
+        ("enforce_candidates", "Failing while loaded — enforce with a hook/test instead"),
+        ("cold", f"Cold (no reaffirm or recurrence in {cold_days}d) — keep, merge or retire?"),
+        ("long", "Long — split into a one-line rule plus entries"),
+        ("unlinked_entries", "Entries with no principle — `techne lesson link`"),
+        ("enforced", "Enforced elsewhere — candidates to retire"),
+    )
+    for key, title in sections:
+        if report[key]:
+            click.echo(f"\n{title}:")
+            for r in report[key]:
+                click.echo(f"  {r['id']:>6}  {r['rule'][:100]}")
+
+
+@lesson.command("import")
+@click.argument("path", type=click.Path(exists=True, dir_okay=False))
+@click.option("--agent", default=None, help=_AGENT_HELP)
+@click.option("--dry-run", is_flag=True)
+@click.pass_context
+@_lesson_errors
+def lesson_import(ctx, path, agent, dry_run):
+    """Import a personal-observations markdown file (principles, grants, dated entries)."""
+    from pathlib import Path as _Path
+
+    from techne.core import lessons
+
+    config = ctx.obj["config"]
+    result = lessons.import_markdown(
+        config.db_path,
+        _Path(path).read_text(encoding="utf-8"),
+        agent_id=_lesson_agent(config, agent) or None,
+        dry_run=dry_run,
+    )
+    counts = result["parsed"] if dry_run else result["imported"]
+    click.echo(
+        ("would import: " if dry_run else "imported: ")
+        + ", ".join(f"{k}={v}" for k, v in counts.items())
+    )
+    if result["skipped"]:
+        click.echo(f"skipped sections (not recognised): {result['skipped']}")
+    if not dry_run and counts.get("entry"):
+        click.echo("entries arrive unlinked: `techne lesson review` lists them for `link`")
+
+
+@main.group()
+@click.pass_context
 def archivist(ctx):
     """Interrogate the team Archivist (read-only)."""
     pass

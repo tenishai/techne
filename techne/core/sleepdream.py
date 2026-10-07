@@ -44,7 +44,8 @@ from techne.config import Config
 log = logging.getLogger(__name__)
 from techne.core._resident import extract_json_object
 from techne.core.database import connect
-from techne.core.knowledge import VALID_CONFIDENCE, VALID_TYPES, content_fingerprint
+from techne.core.knowledge import GENERIC_TYPES as VALID_TYPES  # techne#1195
+from techne.core.knowledge import LESSON_TYPES_SQL, VALID_CONFIDENCE, content_fingerprint
 from techne.core.redaction import redact_credentials
 from techne.core.search import build_or_fts_query
 
@@ -175,8 +176,11 @@ def consolidate_clusters(
 
 #: Live knowledge that consolidation may cluster. The WHERE is shared with the Tier-1
 #: neighbour query so a neighbour slot is never spent on a row Tier 1 would discard.
+# Lesson types (techne#1195) are excluded: a merge would mint a row without its
+# lesson_meta, and lessons are retired by the operator, not by a rail.
 _CLUSTERABLE = (
-    "k.superseded_by IS NULL AND k.status != 'archived' AND k.type != 'document_card'"
+    "k.superseded_by IS NULL AND k.status != 'archived' AND k.type != 'document_card' "
+    f"AND k.type NOT IN {LESSON_TYPES_SQL}"
 )
 _LIVE_CLUSTERABLE_SQL = (
     f"SELECT k.id, k.type, k.content, k.tags, k.confidence FROM knowledge k WHERE {_CLUSTERABLE}"
@@ -337,20 +341,25 @@ def _insert_consolidation_candidate(
     )
 
 
-def _has_document_card(conn, target_ids: list[int]) -> bool:
-    """True when any of *target_ids* is a `document_card` row (techne#823)."""
+def _has_type(conn, target_ids: list[int], types_sql: str) -> bool:
+    """True when any of *target_ids* has a type in the SQL tuple *types_sql*."""
     ids = [int(i) for i in target_ids]
     if not ids:
         return False
     placeholders = ",".join("?" * len(ids))
     return (
         conn.execute(
-            f"SELECT 1 FROM knowledge WHERE type = 'document_card' AND id IN ({placeholders}) "
+            f"SELECT 1 FROM knowledge WHERE type IN {types_sql} AND id IN ({placeholders}) "
             "LIMIT 1",
             ids,
         ).fetchone()
         is not None
     )
+
+
+def _has_document_card(conn, target_ids: list[int]) -> bool:
+    """True when any of *target_ids* is a `document_card` row (techne#823)."""
+    return _has_type(conn, target_ids, "('document_card')")
 
 
 def consolidate_ingest(
@@ -403,6 +412,23 @@ def consolidate_ingest(
                 status="discarded",
                 decided_by="consolidate-guard",
                 decision_reason="refused: document_card target",
+                raw=raw_for_store,
+                model_used=model_used,
+            )
+            counts["refused"] += 1
+        # The same backstop for lesson types (techne#1195): a merge would supersede a
+        # principle without rewriting its rule, so the band would render the old one.
+        elif verdict is not None and _has_type(conn, target_ids, LESSON_TYPES_SQL):
+            _insert_consolidation_candidate(
+                conn,
+                target_ids=target_ids,
+                cluster_hash=ch,
+                content="(refused — a target is a lesson, techne#1195)",
+                ktype="fact",
+                confidence="low",
+                status="discarded",
+                decided_by="consolidate-guard",
+                decision_reason="refused: lesson-type target",
                 raw=raw_for_store,
                 model_used=model_used,
             )
@@ -552,6 +578,7 @@ def recombine_groups(config: Config, *, max_groups: int = 10, group_size: int = 
         raw = conn.execute(
             "SELECT id, type, content, tags, confidence, updated_at FROM knowledge "
             "WHERE superseded_by IS NULL AND confidence='high' AND status != 'archived' "
+            f"AND type NOT IN {LESSON_TYPES_SQL} "
             "ORDER BY updated_at DESC"
         ).fetchall()
         rows_all = [dict(r) for r in raw]

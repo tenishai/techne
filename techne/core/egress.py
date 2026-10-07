@@ -8,7 +8,9 @@ flooded regardless of how many high-confidence memories are stored.
 Selection rules:
   1. Eligibility: superseded_by IS NULL AND confidence='high' AND type NOT IN
      PULL_ONLY_TYPES (patterns + documents + document cards are pull-only
-     reference material — recall-able but never auto-injected)
+     reference material — recall-able but never auto-injected) AND type NOT IN
+     LESSON_TYPES (agent self-lessons, grants and charter have their own band with
+     its own budget, core/lessons.select_principles, techne#1195)
   2. Bands fill in order; each appends to the render list until the budget runs out:
      a. Identity      — tagged memory-type:user (the anchor; always first)
      b. Corrections   — tagged memory-type:correction: facts that OVERTURN a prior
@@ -57,7 +59,7 @@ from pathlib import Path
 from typing import TypedDict
 
 from techne.core.database import connect
-from techne.core.knowledge import PULL_ONLY_TYPES, decay_score
+from techne.core.knowledge import LESSON_TYPES, PULL_ONLY_TYPES, decay_score
 
 logger = logging.getLogger(__name__)
 
@@ -150,7 +152,11 @@ def select_tier0_injection(
     try:
         # Fetch all eligible candidates in one query. Include last_confirmed_at
         # and confidence_numeric for the within-band decay sort (techne#214).
-        placeholders = ",".join("?" * len(PULL_ONLY_TYPES))
+        # Lesson types (techne#1195) are excluded too: they have their own band,
+        # rendered by core/lessons.select_principles with its own budget, so they
+        # neither compete with nor double-count against this one.
+        excluded = PULL_ONLY_TYPES + LESSON_TYPES
+        placeholders = ",".join("?" * len(excluded))
         # status='uncertain' rows stay eligible but sort last within their band
         # (techne#117): a high-confidence row whose basis was superseded must not
         # be auto-asserted ahead of a trustworthy current row.
@@ -168,7 +174,7 @@ def select_tier0_injection(
                  AND type NOT IN ({placeholders})
                  AND status != 'archived'
                ORDER BY (status = 'uncertain'), updated_at DESC""",
-            PULL_ONLY_TYPES,
+            excluded,
         ).fetchall()
     finally:
         conn.close()

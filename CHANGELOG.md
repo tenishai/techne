@@ -7,6 +7,23 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Added
 
+- **Agent self-lessons: `lesson`, `grant` and `charter`** (#1195). A home for what an
+  agent learns about its own behaviour, separate from facts about the user or the world.
+  A `principle` is a one-line rule. It is injected at session start in its own band
+  (`injection.principle_char_budget`, default 4000 characters, not a share of the
+  knowledge budget), and it is the only block re-injected after `compact` or `/clear`.
+  An `entry` holds the incident; filed under its principle, it counts as a recurrence,
+  and the newest one or two are shown under the principle (`injection.principle_clauses`).
+  An entry that names its session records whether its principle was loaded when the
+  mistake happened, so `techne lesson review` can point at rules that keep failing while
+  loaded and suggest enforcing them with a hook or test instead. `grant` (standing
+  permission) and `charter` (trust boundary) are operator-only: no MCP or reflection
+  path can write, change, merge or retire one. Lessons are scoped by `instance_name`,
+  so agents sharing a store don't receive each other's principles. Agents write through
+  the new `techne_lesson` MCP tool; operators use `techne lesson`, including `import` for
+  an existing personal-observations markdown file. Schema v29 adds the `lesson_meta`
+  table. Nothing is migrated automatically.
+
 - **`model_engine: claude-code` runs techne's own model calls through your `claude` CLI**
   (#1189). A new top-level `model_engine` key chooses how every model call techne makes
   itself goes out: LLM thread detection and summaries, session-end reflection and the

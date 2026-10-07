@@ -28,6 +28,7 @@ from pathlib import Path
 from techne.config import Config
 from techne.core._resident import extract_json_array
 from techne.core.database import connect
+from techne.core.knowledge import LESSON_TYPES_SQL
 from techne.core.redaction import redact_credentials
 from techne.core.sleepdream import SYSTEM_SLEEP_SESSION, _cluster_hash, _ensure_system_session
 
@@ -522,7 +523,9 @@ def conflict_check_emit(config: Config, *, max_items: int | None = None) -> list
             dict(r)
             for r in conn.execute(
                 """SELECT id, type, content, tags, confidence, event_at, created_at
-                   FROM knowledge WHERE superseded_by IS NULL AND status != 'archived'"""
+                   FROM knowledge WHERE superseded_by IS NULL AND status != 'archived'
+                   AND type NOT IN """
+                + LESSON_TYPES_SQL
             )
         ]
 

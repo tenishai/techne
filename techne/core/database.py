@@ -6,7 +6,7 @@ from pathlib import Path
 
 from techne.core import migrator
 
-SCHEMA_VERSION = 28
+SCHEMA_VERSION = 29
 
 # THE ONE ON-DISK TIMESTAMP SHAPE (#515). Every TEXT timestamp column is compared
 # LEXICALLY by SQLite, so the storage format IS the ordering primitive — a second
@@ -383,6 +383,30 @@ CREATE TABLE IF NOT EXISTS knowledge_deps (
     PRIMARY KEY (dependent_id, trigger_id, kind)
 );
 CREATE INDEX IF NOT EXISTS idx_knowledge_deps_trigger ON knowledge_deps(trigger_id);
+
+-- Agent self-lessons (techne#1195). One row per knowledge row of type lesson,
+-- grant or charter, carrying the structure the knowledge row does not have.
+-- `agent_id` is the stable agent the lesson belongs to (config instance_name),
+-- NULL meaning every agent on this store. It is an ID, not a display name, so a
+-- rename never orphans a lesson. `tier` is principle or entry for a lesson and
+-- NULL for grant and charter. `rule` is the one line that gets injected.
+-- `parent_id` links an entry to the principle whose family it belongs to, and is
+-- repointed when that principle is refined. `loaded_when_failed` is set on an
+-- entry that names its evidence session: 1 if the parent principle was injected
+-- in that session, 0 if not, NULL if unknown.
+-- (No semicolons in this comment — the SCHEMA_SQL parser's stop heuristic, #56.)
+CREATE TABLE IF NOT EXISTS lesson_meta (
+    knowledge_id       INTEGER PRIMARY KEY REFERENCES knowledge(id),
+    agent_id           TEXT,
+    tier               TEXT,
+    rule               TEXT NOT NULL,
+    parent_id          INTEGER REFERENCES knowledge(id),
+    enforced_by        TEXT,
+    evidence_session   TEXT,
+    loaded_when_failed INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_lesson_meta_parent ON lesson_meta(parent_id);
+CREATE INDEX IF NOT EXISTS idx_lesson_meta_agent ON lesson_meta(agent_id, tier);
 
 -- Identity (key-value store for agent identity)
 CREATE TABLE IF NOT EXISTS identity (
@@ -1670,4 +1694,25 @@ END;
             _add_column_if_missing(conn, "reflection_queue", "parked_at", "TIMESTAMP")
             _add_column_if_missing(conn, "reflection_queue", "parked_reason", "TEXT")
         conn.execute("INSERT INTO schema_version (version) VALUES (28)")
+    if from_version < 29 and to_version >= 29:
+        # techne#1195: agent self-lessons. A new table only, nothing backfilled:
+        # existing self-lessons live in identity under ad hoc keys and moving them
+        # is an operator decision, not a migration. A numbered step rather than
+        # SCHEMA_SQL alone for the same reason as v28 -- an already-reconciled
+        # store skips the reconciler, and lesson writes would fail on it.
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS lesson_meta (
+                knowledge_id       INTEGER PRIMARY KEY REFERENCES knowledge(id),
+                agent_id           TEXT,
+                tier               TEXT,
+                rule               TEXT NOT NULL,
+                parent_id          INTEGER REFERENCES knowledge(id),
+                enforced_by        TEXT,
+                evidence_session   TEXT,
+                loaded_when_failed INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_lesson_meta_parent ON lesson_meta(parent_id);
+            CREATE INDEX IF NOT EXISTS idx_lesson_meta_agent ON lesson_meta(agent_id, tier);
+        """)
+        conn.execute("INSERT INTO schema_version (version) VALUES (29)")
     conn.commit()
