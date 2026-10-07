@@ -933,9 +933,10 @@ session-end reflection and the headless custodian rails. The resident path is un
 Each call runs `claude -p`, normally on your Claude Code login, so it counts against
 your plan's usage limits. `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` are not passed
 to it even when they're set, because `claude -p` would otherwise bill that key instead
-of the plan. Only those two are withheld: if your Claude Code is set up to run on
-Bedrock, Vertex or Foundry (`CLAUDE_CODE_USE_*`), a `CLAUDE_CODE_OAUTH_TOKEN` or an
-`ANTHROPIC_PROFILE`, these calls use that too.
+of the plan. Only those two are withheld: if your Claude Code is set up another way,
+for example Bedrock, Vertex or Foundry (`CLAUDE_CODE_USE_*`), a
+`CLAUDE_CODE_OAUTH_TOKEN`, a named `ANTHROPIC_PROFILE` or the federation variables,
+these calls use that too.
 Settings files are ignored, so an `apiKeyHelper` or a settings `env` key does not apply
 either. techne never stores or logs your credentials. `llm_api_base` and
 `llm_api_key` are LiteLLM settings and aren't used by this engine. The call is isolated so it

@@ -15,8 +15,9 @@ All notable changes to techne are documented here. Format loosely follows
   and no `[llm]` extra, and calls count against the plan's usage limits.
   `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` are not passed to `claude -p` (#1194),
   so an exported key never bills instead of the plan; settings files, and so
-  `apiKeyHelper`, are ignored. A Claude Code set up for Bedrock, Vertex or Foundry, a
-  `CLAUDE_CODE_OAUTH_TOKEN` or an `ANTHROPIC_PROFILE` is used as configured.
+  `apiKeyHelper`, are ignored. A Claude Code set up another way (for example Bedrock,
+  Vertex or Foundry, a `CLAUDE_CODE_OAUTH_TOKEN`, a named `ANTHROPIC_PROFILE` or the
+  federation variables) is used as configured.
   The model keys still pick the model, as a Claude alias or id. The call is isolated so
   it can't feed techne (`--restricted`, hooks disabled, no MCP servers or tools, no
   session transcript, a temporary working directory). It's bounded by

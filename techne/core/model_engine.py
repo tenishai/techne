@@ -21,10 +21,12 @@ techne's WITHOUT those two variables (`child_env`). That reads no credential; it
 declines to forward one. ``check_model_engine`` still names a variable that is set, and
 says it is withheld (`credential_override`).
 
-ONLY THOSE TWO. The same precedence list also ranks ``CLAUDE_CODE_USE_BEDROCK`` /
-``_VERTEX`` / ``_FOUNDRY``, ``CLAUDE_CODE_OAUTH_TOKEN`` and ``ANTHROPIC_PROFILE`` above
-the login. They pass through unchanged: each is a deliberate choice of where Claude Code
-itself runs (a cloud provider, a long-lived subscription token, a federation profile),
+ONLY THOSE TWO. Other sources also outrank the login, among them
+``CLAUDE_CODE_USE_BEDROCK`` / ``_VERTEX`` / ``_FOUNDRY``, ``CLAUDE_CODE_OAUTH_TOKEN``,
+``ANTHROPIC_PROFILE`` (a named profile of any auth mode) and the federation variables
+``ANTHROPIC_FEDERATION_RULE_ID`` + ``ANTHROPIC_ORGANIZATION_ID``. They pass through
+unchanged: each is a deliberate choice of where Claude Code itself runs (a cloud
+provider, a long-lived subscription token, an Anthropic profile or federation identity),
 not a key that happens to be lying in the environment, and withholding them would break
 a Claude Code that is set up that way. So the claim is "never an exported Anthropic key",
 not "always the subscription login".
