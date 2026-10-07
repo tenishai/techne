@@ -509,7 +509,7 @@ def test_codex_watch_requires_watchdog(tmp_path, monkeypatch):
     monkeypatch.setattr(Config, "load", classmethod(lambda cls, *a, **k: cfg))
 
     def patched_start_watch(self):
-        raise RuntimeError("watchdog is not installed; run `pip install techne[codex]`")
+        raise RuntimeError("watchdog is not installed; run `pip install tenish-techne[codex]`")
 
     runner = CliRunner()
     with patch("techne.codex.source.RepoSource.start_watch", patched_start_watch):

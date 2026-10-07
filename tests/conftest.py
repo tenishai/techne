@@ -126,9 +126,18 @@ def pytest_sessionstart(session):  # noqa: ARG001 — pytest hook signature
     import importlib.metadata
     import sys
 
-    try:
-        importlib.metadata.version("techne")
-    except importlib.metadata.PackageNotFoundError:
+    # Both names, read straight from importlib.metadata: the eval-vec job runs
+    # these tests against origin/main's library too, which may predate
+    # techne._distribution() and the 0.18.2 rename to tenish-techne.
+    installed = False
+    for dist_name in ("tenish-techne", "techne"):
+        try:
+            importlib.metadata.version(dist_name)
+            installed = True
+            break
+        except importlib.metadata.PackageNotFoundError:
+            continue
+    if not installed:
         pytest.exit(
             f"techne is not installed in this interpreter ({sys.executable}).\n"
             "Running the suite here produces failures that look like a packaging "

@@ -208,7 +208,7 @@ def test_banner_vectors_no_backend_warns(config):
     vline = [ln for ln in banner.splitlines() if "vector" in ln.lower()][0]
     assert "⚠️" in vline
     assert "keyword-only" in vline
-    assert "techne[vectors]" in vline
+    assert "tenish-techne[vectors] @ git+https://github.com/tenishai/techne.git" in vline
 
 
 def test_banner_vectors_reembed_needed_warns(config):

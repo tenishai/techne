@@ -9,6 +9,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from techne import install_spec
 from techne._log import get_logger
 from techne.config import Config
 from techne.core.redaction import redact_credentials
@@ -606,7 +607,8 @@ def _make_generate_fn(config: Config):
         except ImportError as exc:
             raise RuntimeError(
                 "techne's operator-model path requires litellm. Install it with: "
-                "pip install 'techne[llm]'  (the default resident emit/ingest path needs no extra)."
+                f"pip install '{install_spec('llm')}'  "
+                "(the default resident emit/ingest path needs no extra)."
             ) from exc
 
         kwargs: dict = {

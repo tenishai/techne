@@ -95,7 +95,7 @@ def test_no_backend_falls_back_to_the_install_hint(isolated, real_warm, monkeypa
     monkeypatch.setattr("techne.core.embeddings.backend_available", lambda: False)
     out = _init()
     assert real_warm == []
-    assert "techne[recommended] @ git+https://github.com/tenishai/techne.git@" in out
+    assert "tenish-techne[recommended] @ git+https://github.com/tenishai/techne.git@" in out
 
 
 def test_no_vectors_skips_the_download(isolated, real_warm, monkeypatch):

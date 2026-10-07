@@ -29,6 +29,7 @@ import logging
 import threading
 from pathlib import Path
 
+from techne import install_spec
 from techne.core.database import connect, normalize_timestamp
 from techne.core.extension_state import get_state, set_state
 from techne.core.redaction import redact_credentials
@@ -457,7 +458,7 @@ class JsonlTranscriptSource:
             from watchdog.observers import Observer
         except ImportError as exc:
             raise RuntimeError(
-                "watchdog is not installed; run `pip install techne[watch]`"
+                f"watchdog is not installed; run `pip install '{install_spec('watch')}'`"
             ) from exc
 
         def _on_change(path: Path) -> None:

@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import importlib.metadata
 
-DIST_NAME = "techne"
+import techne
 
 
 def _techne_entry_points() -> list[importlib.metadata.EntryPoint]:
@@ -39,7 +39,7 @@ def _techne_entry_points() -> list[importlib.metadata.EntryPoint]:
     ``Distribution.entry_points`` answers exactly that: entry points read off
     the ``techne`` distribution's own metadata.
     """
-    dist = importlib.metadata.distribution(DIST_NAME)
+    dist = techne._distribution()
     return list(dist.entry_points)
 
 
@@ -54,7 +54,8 @@ def check_entry_points() -> list[str]:
     eps = _techne_entry_points()
     if not eps:
         return [
-            f"no entry points found for distribution {DIST_NAME!r} at all — metadata is missing"
+            f"no entry points found for distribution {techne._distribution().metadata['Name']!r} "
+            "at all — metadata is missing"
         ]
 
     failures = []

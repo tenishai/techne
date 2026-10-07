@@ -11,7 +11,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from techne import __version__, _is_installed_path
+from techne import __version__, _is_installed_path, install_spec
 from techne.config import Config
 from techne.core.repo import git_dirs as _git_dirs
 from techne.core.repo import read_ref as _read_ref
@@ -37,7 +37,7 @@ def _parse_ts(ts: str):
 def _installed_revision() -> str | None:
     """The commit an INSTALLED build was built from, via PEP 610 (techne#965).
 
-    `pip install "techne @ git+https://...@<sha>"` writes `direct_url.json` into
+    `pip install "tenish-techne @ git+https://...@<sha>"` writes `direct_url.json` into
     the dist-info with `vcs_info.commit_id` -- the resolved sha, not merely the
     ref that was asked for. Verified against a real install:
 
@@ -60,9 +60,11 @@ def _installed_revision() -> str | None:
     """
     try:
         import json
-        from importlib.metadata import PackageNotFoundError, distribution
+        from importlib.metadata import PackageNotFoundError
 
-        raw = distribution("techne").read_text("direct_url.json")
+        from techne import _distribution
+
+        raw = _distribution().read_text("direct_url.json")
         if not raw:
             return None
         commit = (json.loads(raw).get("vcs_info") or {}).get("commit_id")
@@ -693,7 +695,7 @@ def format_banner(health: dict) -> str:
         if not vec.get("backend"):
             lines.append(
                 "> ⚠️ vector search off — no embedding backend; recall is keyword-only. "
-                "Install techne[vectors], then `techne vectors backfill`"
+                f"Run `pip install '{install_spec('vectors')}'`, then `techne vectors backfill`"
             )
         elif vec.get("reembed_needed"):
             lines.append(

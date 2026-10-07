@@ -41,6 +41,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from techne import install_spec
 from techne.core.state import add_observation
 from techne.exit_codes import StartupConfigError
 
@@ -266,7 +267,7 @@ def watch(
         # respawning every RestartSec forever. Subclasses RuntimeError, so
         # callers that only catch RuntimeError are unaffected.
         raise StartupConfigError(
-            "watchdog is not installed; run `pip install techne[watch]`"
+            f"watchdog is not installed; run `pip install '{install_spec('watch')}'`"
         ) from exc
 
     def ingest(path: Path) -> None:

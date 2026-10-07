@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -9,6 +10,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+from techne import DIST_NAME, install_spec
 from techne.config import CLAUDE_CODE, Config
 from techne.platforms.claude_code.paths import claude_config_dir, claude_json_path
 
@@ -403,7 +405,7 @@ def _interpreter() -> Path:
             "command, so a PYTHONPATH-only install would leave every hook dead with "
             "ModuleNotFoundError (techne#458).\n"
             "Install it INTO an interpreter instead:\n"
-            "  pipx install techne          # or: pipx install -e <checkout>\n"
+            f"  pipx install '{install_spec()}'   # or: pipx install -e <checkout>\n"
             "  <python> -m pip install -e <canonical-techne-checkout>\n"
             "A --target layout cannot be made to work here: the probe strips exactly "
             "the PYTHONPATH entry that supplies techne, so re-running init after "
@@ -417,7 +419,7 @@ def _interpreter() -> Path:
         "Writing one of them anyway would break every techne hook with "
         "ModuleNotFoundError (techne#458).\n"
         "Install techne so its entry point resolves, then re-run `techne init`:\n"
-        "  pipx install techne        # or: pipx install -e <checkout>\n"
+        f"  pipx install '{install_spec()}'   # or: pipx install -e <checkout>\n"
         f"  {sys.executable} -m pip install -e <canonical-techne-checkout>\n"
         "NOTE: running `techne init` from inside the source checkout is NOT enough "
         "— the repo cwd makes techne importable there but not from where hooks run."
@@ -468,7 +470,9 @@ def _heal_command() -> str:
     Three cases, mirroring preflight_guard._pip_install_editable's venv detection:
 
     - **pipx** (sys.executable contains ``pipx/venvs/``):
-      ``pipx reinstall --python "$(command -v python3)" techne``.
+      ``pipx reinstall --python "$(command -v python3)" <venv>``, where ``<venv>`` is
+      the pipx environment the interpreter lives in (``tenish-techne`` for 0.18.2+,
+      ``techne`` for an install made before the rename).
       Explicitly passes ``--python`` to force the PATH-resolved ``python3`` rather than
       pipx's default (``sys.executable`` on non-Windows — i.e. the Python that pipx
       itself runs under; verified against pipx source at pypa/pipx main, 2026-07-07).
@@ -502,7 +506,9 @@ def _heal_command() -> str:
 
     if is_pipx:
         # Use --python to avoid relying on pipx's DEFAULT_PYTHON (= its own sys.executable).
-        return 'pipx reinstall --python "$(command -v python3)" techne'
+        venv_name = re.search(r"pipx/venvs/([^/]+)/", exe)
+        name = venv_name.group(1) if venv_name else DIST_NAME
+        return f'pipx reinstall --python "$(command -v python3)" {shlex.quote(name)}'
 
     if not in_venv:
         # system install: fresh editable install under PATH's python3, then re-point PY
@@ -520,7 +526,8 @@ def _heal_command() -> str:
         f"python3 -m venv {venv_prefix} && "
         f"{venv_prefix}/bin/pip install -e {repo}"
         f"; or if installed via pipx/uv: "
-        f"pipx reinstall techne / uv tool install --force techne"
+        f"pipx reinstall {DIST_NAME} (or techne, for an install from before 0.18.2) / "
+        f"uv tool install --force '{install_spec()}'"
     )
     return f"echo {shlex.quote(msg)} >&2; exit 1"
 

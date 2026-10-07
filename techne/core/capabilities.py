@@ -206,10 +206,11 @@ CAPABILITIES: tuple[Capability, ...] = (
 def _direct_url() -> dict | None:
     """techne's PEP 610 `direct_url.json`, or None (the file `--version` reads too)."""
     import json
-    from importlib.metadata import distribution
+
+    from techne import _distribution
 
     try:
-        raw = distribution("techne").read_text("direct_url.json")
+        raw = _distribution().read_text("direct_url.json")
         data = json.loads(raw) if raw else None
     except Exception:  # noqa: BLE001 — an install hint must never fail its caller
         return None
@@ -232,10 +233,10 @@ def _installer() -> str | None:
     uv-created venvs (`uv venv`) have no pip at all, so an editable install's
     reinstall command needs `uv pip install`, not `-m pip install` (#1128).
     """
-    from importlib.metadata import distribution
+    from techne import _distribution
 
     try:
-        raw = distribution("techne").read_text("INSTALLER")
+        raw = _distribution().read_text("INSTALLER")
     except Exception:  # noqa: BLE001 — an install hint must never fail its caller
         return None
     return raw.strip() if raw else None
@@ -285,7 +286,7 @@ def install_command_for(
     - pipx venv: the pipx form, as before.
     - uv tool venv: `uv tool install` (those venvs have no pip).
     - any other venv: that venv's pip, with the git URL. Never plain
-      `techne[recommended]`: PyPI `techne` is an unrelated package.
+      `tenish-techne[recommended]`: PyPI has no `tenish-techne`, so that fails.
     - no venv: the pipx form, the documented install.
     """
     import re
@@ -300,7 +301,9 @@ def install_command_for(
         return f'{cd}{python} -m pip install -e ".[recommended]"'
 
     tag = f"v{version}" if re.fullmatch(r"\d+\.\d+\.\d+", version) else "<tag>"
-    spec = f'"techne[recommended] @ git+https://github.com/tenishai/techne.git@{tag}"'
+    from techne import install_spec
+
+    spec = f'"{install_spec("recommended", tag)}"'
     venv = prefix.replace("\\", "/")
     if "/pipx/venvs/" in venv or prefix == base_prefix:
         return f"pipx install --force {spec}"
