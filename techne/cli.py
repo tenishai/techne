@@ -3527,9 +3527,9 @@ def session_end(ctx, session_id, summary):
     (`mode="final"`), sending every thread with new work and recording the end.
     Clients that signal turn completion from a plugin (e.g. opencode on
     `session.idle`) call it per turn. That is safe, since thread IDs are
-    content-addressed and an unchanged thread is never re-sent, but each turn
-    with new work sends its threads again and re-stamps the end; a checkpoint
-    flag here is what would change that (techne#1187). Outbox enqueue stays
+    content-addressed and an unchanged thread is never re-sent, but every call
+    re-stamps the end, and each turn with new work sends its threads again; a
+    checkpoint flag here is what would change that (techne#1187). Outbox enqueue stays
     gated on a live consumer (#79), so a noop adapter won't accumulate a backlog.
     """
     config = ctx.obj["config"]

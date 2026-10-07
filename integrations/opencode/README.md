@@ -80,8 +80,8 @@ export TECHNE_BIN="/ABS/PATH/techne/.venv/bin/techne"
   final pass (Claude Code runs it on SessionEnd): detects threads + summaries +
   resume points for the opencode session, so it surfaces in `techne_resume` /
   `techne_threads` / the login banner. Firing per turn is safe
-  (content-addressed thread IDs), but each turn with new work records the
-  session as ended and, with a sync adapter, sends its threads again.
+  (content-addressed thread IDs), but every call records the session as ended,
+  and with a sync adapter each turn with new work sends its threads again.
 - The first observation for a session creates the session row stamped
   `platform: opencode`.
 

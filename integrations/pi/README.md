@@ -85,9 +85,9 @@ export TECHNE_BIN="/ABS/PATH/techne/.venv/bin/techne"
   runs `techne session-end`, which is the final pass (Claude Code runs it on
   SessionEnd): detects threads + summaries + resume points for the pi session,
   so it surfaces in `techne_resume` / `techne_threads` / the login banner.
-  Firing per settled run is safe (content-addressed thread IDs), but each run
-  with new work records the session as ended and, with a sync adapter, sends
-  its threads again.
+  Firing per settled run is safe (content-addressed thread IDs), but every call
+  records the session as ended, and with a sync adapter each run with new work
+  sends its threads again.
 - The first observation for a session creates the session row stamped
   `platform: pi`.
 
