@@ -930,21 +930,19 @@ custodian:
 
 This covers every call techne makes itself: LLM thread detection and summaries,
 session-end reflection and the headless custodian rails. The resident path is unchanged.
-Each call runs `claude -p` with the credential it finds in its environment and your
-Claude Code login. Settings files are ignored, so an `apiKeyHelper` or a settings `env`
-key does not apply. Normally that's your Claude login, so calls count against your plan's
-usage limits. **If `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` is set, `claude -p` uses
-it instead and the calls bill that key**; unset it in the environment techne runs in to
-use your plan. techne never stores or logs your credentials; it only checks whether
-those two variables are set. `llm_api_base` and
+Each call runs `claude -p` on your Claude Code login, so it counts against your plan's
+usage limits. `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` are not passed to it even
+when they're set, because `claude -p` would otherwise bill that key instead of the plan.
+Settings files are ignored, so an `apiKeyHelper` or a settings `env` key does not apply
+either. techne never stores or logs your credentials. `llm_api_base` and
 `llm_api_key` are LiteLLM settings and aren't used by this engine. The call is isolated so it
 can't feed techne: user, project and local settings are ignored (so techne's hooks
 don't fire), no MCP servers or tools load, no session transcript is written, and it
 runs from a temporary directory.
 
 `techne doctor` reports `model:engine`. It reads broken if `claude` is not on PATH,
-and names `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` when one is set in its
-environment.
+and when `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` is set in its environment, it
+names the variable and says this engine ignores it.
 `model_engine` is egress-selecting, so it can be pinned in `config.operator.yaml`
 (see [Operator-owned config](#operator-owned-config-egress-selecting-keys)).
 

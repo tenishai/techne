@@ -1977,12 +1977,12 @@ def check_model_engine(config) -> CheckResult:
         )
     override = credential_override()
     detail = f"claude-code: model calls run `claude -p` ({binary})"
+    detail += " on the Claude Code login"
     if override:
-        # Billing, not health: the calls work, they just don't go to the plan. Read from
-        # doctor's own environment; a hook or MCP server started elsewhere may differ.
-        detail += f"; {override} is set here, so `claude -p` bills it, not the plan login"
-    else:
-        detail += " on the Claude Code login"
+        # Said so an operator who exported a key isn't surprised it goes unused: the
+        # engine withholds it from the child (techne#1194). Read from doctor's own
+        # environment; a hook or MCP server started elsewhere may differ.
+        detail += f"; {override} is set here and ignored by this engine"
     return CheckResult(
         name="model:engine",
         subsystem="model",

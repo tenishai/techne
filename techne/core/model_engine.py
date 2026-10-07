@@ -6,21 +6,20 @@ reflection, the headless custodian rails) goes through
 how to send it:
 
 * ``litellm`` (the default): LiteLLM, exactly as before this module existed.
-* ``claude-code``: the user's own ``claude`` CLI, run as ``claude -p``. It answers with
-  the credential ``claude -p`` finds in its environment and login. Settings files are
-  ignored (``--restricted``, below), so an ``apiKeyHelper`` or a settings ``env`` key
-  does not apply. techne never stores or logs a credential, only checks whether the
-  environment variables below are set, and does not change the environment the child
-  inherits.
+* ``claude-code``: the user's own ``claude`` CLI, run as ``claude -p`` on the Claude
+  Code login. Settings files are ignored (``--restricted``, below), so an
+  ``apiKeyHelper`` or a settings ``env`` key does not apply. techne never stores or logs
+  a credential.
 
-WHICH CREDENTIAL, AND SO WHO PAYS (Prudence, PR #1190 r1). Claude Code's
-authentication precedence (code.claude.com/docs/en/iam) puts ``ANTHROPIC_AUTH_TOKEN``
-and then ``ANTHROPIC_API_KEY`` above the subscription login, and "in non-interactive
-mode (``-p``), the key is always used when present". So with either variable exported,
-these calls bill that key, not the plan. Scrubbing them was considered and rejected: it
-would break a user whose Claude Code deliberately runs on a Console key or a gateway
-token who sets it in the environment. The README says so,
-and ``check_model_engine`` names the variable when it is set (`credential_override`).
+ALWAYS THE LOGIN, NEVER AN ENVIRONMENT KEY (techne#1194). Claude Code's authentication
+precedence (code.claude.com/docs/en/iam) puts ``ANTHROPIC_AUTH_TOKEN`` and then
+``ANTHROPIC_API_KEY`` above the subscription login, and "in non-interactive mode
+(``-p``), the key is always used when present". PR #1190 let the child inherit them, so
+an exported key silently billed that key instead of the plan. The operator decided the
+engine is for the login (2026-10-06), so the child's environment is a copy of techne's
+WITHOUT those two variables (`child_env`). That reads no credential; it only declines to
+forward one. ``check_model_engine`` still names a variable that is set, and says it is
+ignored here (`credential_override`).
 
 The engine picks the transport; the model keys (`model`, `reflect.model`,
 `custodian.model`, `custodian.rail_models`) still pick the model. Under ``claude-code``
@@ -81,6 +80,7 @@ ISOLATION_ARGS = (
 
 
 #: Environment credentials Claude Code ranks above the subscription login under ``-p``.
+#: `child_env` withholds them so the call always runs on the login (techne#1194).
 CREDENTIAL_OVERRIDES = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")
 
 
@@ -89,9 +89,16 @@ def claude_binary() -> str | None:
     return shutil.which("claude")
 
 
+def child_env(env=None) -> dict:
+    """A copy of *env* (default ``os.environ``) without `CREDENTIAL_OVERRIDES`."""
+    env = os.environ if env is None else env
+    return {k: v for k, v in env.items() if k not in CREDENTIAL_OVERRIDES}
+
+
 def credential_override(env=None) -> str | None:
-    """The first environment credential that ``claude -p`` would use instead of the
-    subscription login, or None. Reads only whether the variable is set, never its value."""
+    """The first environment credential that a bare ``claude -p`` would use instead of the
+    subscription login, or None. This engine withholds it (`child_env`); doctor reports
+    it. Reads only whether the variable is set, never its value."""
     env = os.environ if env is None else env
     for name in CREDENTIAL_OVERRIDES:
         if env.get(name):
@@ -134,6 +141,7 @@ def claude_code_generate_fn(config):
                     text=True,
                     timeout=timeout,
                     cwd=cwd,
+                    env=child_env(),
                 )
             except subprocess.TimeoutExpired as exc:
                 raise RuntimeError(f"`claude -p` did not answer within {timeout}s") from exc
