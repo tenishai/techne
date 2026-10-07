@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -200,18 +201,18 @@ def test_doctor_claude_code_with_cli_is_live(monkeypatch):
         monkeypatch.delenv(name, raising=False)
     r = check_model_engine(_cfg(model_engine="claude-code"))
     assert r.verdict == Verdict.LIVE
-    assert "bills" not in r.detail
+    assert "withheld" not in r.detail
 
 
 @pytest.mark.parametrize("var", ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"])
-def test_doctor_names_an_env_credential_that_claude_p_would_bill(monkeypatch, var):
+def test_doctor_names_an_env_credential_and_says_it_is_withheld(monkeypatch, var):
     monkeypatch.setattr(model_engine.shutil, "which", lambda name: "/opt/bin/claude")
     for name in model_engine.CREDENTIAL_OVERRIDES:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv(var, "sk-not-read")
     r = check_model_engine(_cfg(model_engine="claude-code"))
     assert r.verdict == Verdict.LIVE
-    assert f"{var} is set here" in r.detail
+    assert f"{var} is set here and withheld from it" in r.detail
     assert "sk-not-read" not in r.detail
 
 
@@ -221,8 +222,17 @@ def test_auth_token_outranks_api_key():
     assert model_engine.credential_override({}) is None
 
 
-def test_child_inherits_the_environment_unchanged(fake_claude):
-    """No env= override: the engine is "what `claude -p` does here", credentials and all."""
+def test_child_env_withholds_both_credentials_and_keeps_the_rest(fake_claude, monkeypatch):
+    """An exported Anthropic key or auth token must not reach `claude -p`, which would
+    bill it instead of the plan (techne#1194). Everything else passes through."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-not-forwarded")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "tok-not-forwarded")
+    monkeypatch.setenv("TECHNE_ENGINE_PROBE", "kept")
     calls, _ = fake_claude
     model_engine.claude_code_generate_fn(_cfg())("x")
-    assert "env" not in calls[0]
+    env = calls[0]["env"]
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "ANTHROPIC_AUTH_TOKEN" not in env
+    assert env["TECHNE_ENGINE_PROBE"] == "kept"
+    assert env["PATH"] == os.environ["PATH"]
+    assert env.get("HOME") == os.environ.get("HOME")
