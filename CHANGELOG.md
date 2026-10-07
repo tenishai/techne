@@ -5,42 +5,7 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
-## [0.18.2] — 2026-10-06
-
-### Changed
-
-- **The distribution is now `tenish-techne`.** tenish names every released Python
-  distribution `tenish-<project>` (decided 2026-10-06, tenishai/agora discussion 46). The
-  import package, the `techne` command, the MCP server and every config path are
-  unchanged. Install lines in README.md and docs/modules.md now read
-  `tenish-techne[...] @ git+https://github.com/tenishai/techne.git@v0.18.2`, and
-  integrations/README.md's `<tag>` form names `tenish-techne`. The wheel is
-  `tenish_techne-0.18.2-py3-none-any.whl`; `pyproject.toml` now names the `techne`
-  package for hatchling, which would otherwise look for `tenish_techne/`.
-- **Version and install lookups find either name.** `techne --version`, `techne doctor`'s
-  install checks and the reinstall hint look the distribution up as `tenish-techne`, then
-  `techne`, so an editable install made before this release keeps reporting its version
-  until it is reinstalled.
-
-### Fixed
-
-- **Install hints no longer point at the unrelated PyPI `techne`.** The messages for a
-  missing extra said `pip install techne[codex]`, `[watch]`, `[llm]` or `install
-  techne[vectors]`; on PyPI `techne` is a different project. Every one of them, `[vectors]`
-  included (#1197), now gives the full
-  `tenish-techne[<extra>] @ git+https://github.com/tenishai/techne.git` form.
-
-### Upgrading
-
-- **pipx:** `pipx uninstall techne`, then `pipx install "tenish-techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.18.2"`,
-  then `techne init`. pipx keeps the old `techne` environment and its `techne` command, so
-  a plain `--force` install of the new name refuses or leaves the hooks on the old
-  interpreter; `techne init` rewrites `~/.claude/techne-hook.sh` to the new one.
-- **Editable checkouts:** reinstall once (`pip install -e ".[recommended]"`) so the
-  metadata carries the new name. Until then lookups fall back to `techne` and keep working.
-- Restart the MCP server. No schema, config or hook format changed.
-- **Downstream pins:** a dependency on `techne` must become `tenish-techne` once it pins
-  0.18.2 or later; an install from a git tag checks the name inside the tag.
+## [0.18.2] — 2026-10-07
 
 ### Added
 
@@ -81,6 +46,21 @@ All notable changes to techne are documented here. Format loosely follows
   auth token set in its environment and says it is withheld. The resident
   emit/ingest path is unaffected.
 
+### Changed
+
+- **The distribution is now `tenish-techne`.** tenish names every released Python
+  distribution `tenish-<project>` (decided 2026-10-06, tenishai/agora discussion 46). The
+  import package, the `techne` command, the MCP server and every config path are
+  unchanged. Install lines in README.md and docs/modules.md now read
+  `tenish-techne[...] @ git+https://github.com/tenishai/techne.git@v0.18.2`, and
+  integrations/README.md's `<tag>` form names `tenish-techne`. The wheel is
+  `tenish_techne-0.18.2-py3-none-any.whl`; `pyproject.toml` now names the `techne`
+  package for hatchling, which would otherwise look for `tenish_techne/`.
+- **Version and install lookups find either name.** `techne --version`, `techne doctor`'s
+  install checks and the reinstall hint look the distribution up as `tenish-techne`, then
+  `techne`, so an editable install made before this release keeps reporting its version
+  until it is reinstalled.
+
 ### Fixed
 
 - **Stop no longer ends the session or re-sends every thread each turn** (#1187, found by
@@ -96,13 +76,29 @@ All notable changes to techne are documented here. Format loosely follows
   session that dies without SessionEnd gets its final pass from a later Stop once it has
   been quiet for 6 hours. A still-pending summary for the same thread is replaced rather
   than queued beside it.
+- **Install hints no longer point at the unrelated PyPI `techne`.** The messages for a
+  missing extra said `pip install techne[codex]`, `[watch]`, `[llm]` or `install
+  techne[vectors]`; on PyPI `techne` is a different project. Every one of them, `[vectors]`
+  included (#1197), now gives the full
+  `tenish-techne[<extra>] @ git+https://github.com/tenishai/techne.git` form.
 
 ### Upgrading
 
-- Run `techne init` to register the SessionEnd hook. It is registered with
-  `timeout: 60`, because Claude Code otherwise gives SessionEnd hooks 1.5 s in total.
-  Until you do, Stop still checkpoints, and each session gets its final pass and its
-  `ended_at` from the 6-hour quiet-session sweep instead.
+- **pipx:** `pipx uninstall techne`, then `pipx install "tenish-techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.18.2"`,
+  then `techne init`. pipx keeps the old `techne` environment and its `techne` command, so
+  a plain `--force` install of the new name refuses or leaves the hooks on the old
+  interpreter; `techne init` rewrites `~/.claude/techne-hook.sh` to the new one.
+- **Editable checkouts:** reinstall once (`pip install -e ".[recommended]"`) so the
+  metadata carries the new name. Until then lookups fall back to `techne` and keep working.
+- Restart the MCP server. Schema v29 (the `lesson_meta` table) is applied when the store
+  is next opened.
+- **Downstream pins:** a dependency on `techne` must become `tenish-techne` once it pins
+  0.18.2 or later; an install from a git tag checks the name inside the tag.
+- **Every install: run `techne init`** (the pipx step above already does). It registers the
+  new SessionEnd hook (#1187) with `timeout: 60`, because Claude Code otherwise gives
+  SessionEnd hooks 1.5 s in total. Until it is registered, Stop still checkpoints, and
+  each session gets its final pass and its `ended_at` from the 6-hour quiet-session sweep
+  instead.
 
 ## [0.18.1] — 2026-10-05
 
