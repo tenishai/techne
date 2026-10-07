@@ -300,7 +300,12 @@ def refine(
             ).fetchone()["content"]
             body = old[len(meta["rule"]) :].strip() if old.startswith(meta["rule"]) else ""
         new_id = _supersede_in_conn(
-            conn, knowledge_id, _content(rule, body), source, operator=operator
+            conn,
+            knowledge_id,
+            _content(rule, body),
+            source,
+            operator=operator,
+            lesson_path=True,
         )
         conn.execute(
             "UPDATE lesson_meta SET rule = ? WHERE knowledge_id = ?",
@@ -374,9 +379,11 @@ def reaffirm(db_path: Path, knowledge_id: int) -> None:
         conn.close()
 
 
-def retire(db_path: Path, knowledge_id: int) -> None:
+def retire(db_path: Path, knowledge_id: int, *, operator: bool = False) -> None:
     """Archive a principle, grant or charter: it stops being injected and stays
-    searchable. Operator-only — the CLI is the one caller."""
+    searchable. Operator-only: the CLI passes operator=True, and nothing else does."""
+    if not operator:
+        raise ValueError(f"knowledge entry {knowledge_id}: only the operator retires a lesson")
     conn = connect(db_path)
     try:
         conn.execute("BEGIN IMMEDIATE")

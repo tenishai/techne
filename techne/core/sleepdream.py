@@ -341,20 +341,25 @@ def _insert_consolidation_candidate(
     )
 
 
-def _has_document_card(conn, target_ids: list[int]) -> bool:
-    """True when any of *target_ids* is a `document_card` row (techne#823)."""
+def _has_type(conn, target_ids: list[int], types_sql: str) -> bool:
+    """True when any of *target_ids* has a type in the SQL tuple *types_sql*."""
     ids = [int(i) for i in target_ids]
     if not ids:
         return False
     placeholders = ",".join("?" * len(ids))
     return (
         conn.execute(
-            f"SELECT 1 FROM knowledge WHERE type = 'document_card' AND id IN ({placeholders}) "
+            f"SELECT 1 FROM knowledge WHERE type IN {types_sql} AND id IN ({placeholders}) "
             "LIMIT 1",
             ids,
         ).fetchone()
         is not None
     )
+
+
+def _has_document_card(conn, target_ids: list[int]) -> bool:
+    """True when any of *target_ids* is a `document_card` row (techne#823)."""
+    return _has_type(conn, target_ids, "('document_card')")
 
 
 def consolidate_ingest(
@@ -407,6 +412,23 @@ def consolidate_ingest(
                 status="discarded",
                 decided_by="consolidate-guard",
                 decision_reason="refused: document_card target",
+                raw=raw_for_store,
+                model_used=model_used,
+            )
+            counts["refused"] += 1
+        # The same backstop for lesson types (techne#1195): a merge would supersede a
+        # principle without rewriting its rule, so the band would render the old one.
+        elif verdict is not None and _has_type(conn, target_ids, LESSON_TYPES_SQL):
+            _insert_consolidation_candidate(
+                conn,
+                target_ids=target_ids,
+                cluster_hash=ch,
+                content="(refused — a target is a lesson, techne#1195)",
+                ktype="fact",
+                confidence="low",
+                status="discarded",
+                decided_by="consolidate-guard",
+                decision_reason="refused: lesson-type target",
                 raw=raw_for_store,
                 model_used=model_used,
             )

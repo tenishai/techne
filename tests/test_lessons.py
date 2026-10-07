@@ -107,10 +107,10 @@ def test_grant_and_charter_are_operator_only(db):
             lessons.reaffirm(db, kid)
         conn = connect(db)
         try:
-            with pytest.raises(ValueError, match="only the operator"):
-                knowledge._supersede_in_conn(conn, kid, "x", "reflect")
+            with pytest.raises(ValueError, match="techne lesson"):
+                knowledge._supersede_in_conn(conn, kid, "x", "reflect", operator=True)
             survivor = knowledge.store(db, "survivor")
-            with pytest.raises(ValueError, match="only the operator"):
+            with pytest.raises(ValueError, match="techne lesson"):
                 knowledge._retire_in_conn(conn, kid, survivor)
         finally:
             conn.close()
@@ -122,6 +122,52 @@ def test_grant_and_charter_are_operator_only(db):
         assert row.fetchone()["enforced_by"] == "operator hook"
     finally:
         conn.close()
+
+
+def test_generic_paths_never_change_a_lesson(db):
+    """Only `techne lesson` changes a lesson. A generic supersede would leave the band
+    rendering the old rule; a generic retire would strand the family on a dead row."""
+    p = lessons.add(db, rule="Verify before asserting a negative.", tier="principle")
+    e = lessons.add(db, rule="asserted a negative", tier="entry", parent_id=p)
+    fact = knowledge.store(db, "a plain fact")
+    with pytest.raises(ValueError, match="techne lesson"):
+        knowledge.store(db, "replaces the principle", supersedes=[p])
+    with pytest.raises(ValueError, match="techne lesson"):
+        knowledge.supersede(db, p, "new rule text")
+    with pytest.raises(ValueError, match="techne lesson"):
+        knowledge.retire(db, p, fact)
+    with pytest.raises(ValueError, match="only the operator"):
+        lessons.retire(db, p)
+    conn = connect(db)
+    try:
+        assert conn.execute("SELECT superseded_by FROM knowledge WHERE id = ?", (p,)).fetchone()[0] is None
+        assert conn.execute("SELECT parent_id FROM lesson_meta WHERE knowledge_id = ?", (e,)).fetchone()[0] == p
+    finally:
+        conn.close()
+    assert "Verify before asserting a negative." in lessons.select_principles(db, agent_id=None, char_budget=4000).text
+
+
+def test_consolidate_ingest_refuses_lesson_targets(db):
+    from techne.config import Config
+    from techne.core.sleepdream import consolidate_ingest
+
+    cfg = Config()
+    cfg.db_path = db
+    p = lessons.add(db, rule="Verify before asserting a negative.", tier="principle")
+    fact = knowledge.store(db, "Verify before asserting a negative.")
+    verdict = json.dumps(
+        {"verdict": "merge", "content": "merged", "type": "fact", "confidence": "high", "reason": "same"}
+    )
+    counts = consolidate_ingest(cfg, [p, fact], "ignored", verdict)
+    assert counts["refused"] == 1 and counts["written"] == 0, counts
+    conn = connect(db)
+    try:
+        statuses = [r[0] for r in conn.execute(
+            "SELECT status FROM knowledge_candidates WHERE origin = 'consolidate'"
+        )]
+    finally:
+        conn.close()
+    assert statuses == ["discarded"]
 
 
 def test_reaffirm_touches_only_live_lessons(db):
@@ -172,7 +218,7 @@ def test_delete_drops_meta_and_unlinks_family(db):
 
 def test_retire_stops_injection_and_keeps_the_row(db):
     p = lessons.add(db, rule="Retire me.", tier="principle")
-    lessons.retire(db, p)
+    lessons.retire(db, p, operator=True)
     assert lessons.select_principles(db, agent_id=None, char_budget=4000).text == ""
     conn = connect(db)
     try:
@@ -223,6 +269,17 @@ def test_band_orders_charter_grants_principles_with_newest_clauses(db):
     text = lessons.select_principles(db, agent_id=None, char_budget=4000, clauses=2).text
     assert text.index("Core identity") < text.index("May merge") < text.index("Never assert")
     assert "variant 2" in text and "variant 1" in text and "variant 0" not in text
+
+
+def test_band_orders_principles_by_recurrence_then_newest(db):
+    old_hot = lessons.add(db, rule="old and recurring", tier="principle")
+    lessons.add(db, rule="never failed", tier="principle")
+    warm = lessons.add(db, rule="newer, failed once", tier="principle")
+    for parent, n in ((old_hot, 2), (warm, 1)):
+        for i in range(n):
+            lessons.add(db, rule=f"failure {parent}.{i}", tier="entry", parent_id=parent)
+    text = lessons.select_principles(db, agent_id=None, char_budget=4000, clauses=0).text
+    assert text.index("old and recurring") < text.index("newer, failed once") < text.index("never failed")
 
 
 def test_band_drops_visibly_when_over_budget(db):
@@ -444,3 +501,38 @@ def test_resume_does_not_reinject(tmp_path):
     assert out["hookSpecificOutput"]["additionalContext"] == REACTIVATION_LINE.format(
         source="resume"
     )
+
+
+def test_cold_start_sends_the_band_and_logs_it(tmp_path):
+    from techne.core.extension_state import get_state
+    from techne.hooks.session_start import DEFERRED_CONTEXT_KEY
+
+    def seed(db):
+        lessons.add(db, rule="Never assert a negative.", tier="principle")
+
+    _, db = _run_session_start(tmp_path, {"session_id": "s-start", "source": "startup"}, seed)
+    conn = connect(db)
+    try:
+        stash = get_state(conn, f"{DEFERRED_CONTEXT_KEY}:s-start")
+        logged = conn.execute(
+            "SELECT session_id FROM context_injections WHERE source = ?",
+            (lessons.INJECTION_SOURCE,),
+        ).fetchall()
+    finally:
+        conn.close()
+    assert "Never assert a negative." in stash["summary"]
+    assert [r[0] for r in logged] == ["s-start"]
+
+
+def test_a_broken_band_never_breaks_session_start(db, monkeypatch, capsys):
+    from techne.config import Config
+    from techne.hooks.session_start import _principle_band
+
+    def boom(*a, **k):
+        raise RuntimeError("band exploded")
+
+    monkeypatch.setattr(lessons, "select_principles", boom)
+    cfg = Config()
+    cfg.db_path = db
+    assert _principle_band(cfg, "s-broken") == ""
+    assert "principle band skipped: band exploded" in capsys.readouterr().err

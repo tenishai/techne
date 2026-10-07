@@ -1647,7 +1647,7 @@ def lesson_retire(ctx, knowledge_id):
     """Stop injecting a principle, grant or charter. It stays searchable."""
     from techne.core import lessons
 
-    lessons.retire(ctx.obj["config"].db_path, knowledge_id)
+    lessons.retire(ctx.obj["config"].db_path, knowledge_id, operator=True)
     click.echo(f"retired {knowledge_id}")
 
 

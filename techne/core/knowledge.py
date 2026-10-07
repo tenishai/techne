@@ -258,15 +258,23 @@ def supersede(db_path: Path, old_id: int, new_content: str, source: str = "sessi
 
 
 def _supersede_in_conn(
-    conn, old_id: int, new_content: str, source: str, *, operator: bool = False
+    conn,
+    old_id: int,
+    new_content: str,
+    source: str,
+    *,
+    operator: bool = False,
+    lesson_path: bool = False,
 ) -> int:
     """Core of supersede() on a caller-owned connection — no commit/close — so it can
     run inside another transaction (e.g. promote_candidate's action dispatch, #108).
     Body is verbatim from the public supersede(); the caller owns the transaction.
 
-    A lesson-type row (techne#1195) keeps its lesson_meta: the new revision gets a
-    copy and the old one's family entries are repointed at it. A grant or charter
-    is refused unless ``operator`` is set — only `techne lesson` passes it."""
+    A lesson-type row (techne#1195) changes only through lessons.refine, which passes
+    ``lesson_path`` and rewrites the meta rule; any other supersede would leave the
+    band rendering the old rule. The new revision gets a copy of the lesson_meta and
+    the old one's family entries are repointed at it. A grant or charter is also
+    refused unless ``operator`` is set — only `techne lesson` passes it."""
     old = conn.execute(
         "SELECT type, tags, confidence, anchor_path, anchor_symbol, superseded_by "
         "FROM knowledge WHERE id = ?",
@@ -279,6 +287,8 @@ def _supersede_in_conn(
             f"Knowledge entry {old_id} is already superseded by {old['superseded_by']}; "
             "supersede the latest revision instead"
         )
+    if old["type"] in LESSON_TYPES and not lesson_path:
+        _refuse_lesson_type(old["type"], old_id)
     _refuse_operator_type(old["type"], old_id, operator)
 
     # Re-derive numeric from the enum so the two can't drift (self-heals any
@@ -350,6 +360,13 @@ def _supersede_in_conn(
     return new_id
 
 
+def _refuse_lesson_type(ktype: str, knowledge_id: int) -> None:
+    raise ValueError(
+        f"knowledge entry {knowledge_id} is a {ktype}: it changes only with "
+        "`techne lesson refine` or `techne lesson retire` (techne#1195)"
+    )
+
+
 def _refuse_operator_type(ktype: str, knowledge_id: int, operator: bool) -> None:
     if ktype in OPERATOR_TYPES and not operator:
         raise ValueError(
@@ -374,7 +391,7 @@ def _carry_lesson_meta(conn, old_id: int, new_id: int) -> None:
     conn.execute("UPDATE lesson_meta SET parent_id = ? WHERE parent_id = ?", (new_id, old_id))
 
 
-def _retire_in_conn(conn, old_id: int, survivor_id: int, *, operator: bool = False) -> int:
+def _retire_in_conn(conn, old_id: int, survivor_id: int) -> int:
     """Retire *old_id* by pointing its `superseded_by` at an EXISTING live *survivor_id*
     row — without minting a new revision (techne#213 contradiction detection).
 
@@ -395,6 +412,9 @@ def _retire_in_conn(conn, old_id: int, survivor_id: int, *, operator: bool = Fal
 
     Preserve-not-delete: *old_id* is retained (retrievable with include_superseded),
     never hard-deleted. Returns *survivor_id* (the id that stays live).
+
+    A lesson-type row is refused (techne#1195): retiring a principle into another
+    row would strand its family entries, so lessons retire with `techne lesson retire`.
     """
     if old_id == survivor_id:
         raise ValueError("cannot retire a knowledge entry into itself")
@@ -403,7 +423,8 @@ def _retire_in_conn(conn, old_id: int, survivor_id: int, *, operator: bool = Fal
     ).fetchone()
     if old is None:
         raise ValueError(f"Knowledge entry {old_id} not found")
-    _refuse_operator_type(old["type"], old_id, operator)
+    if old["type"] in LESSON_TYPES:
+        _refuse_lesson_type(old["type"], old_id)
     if old["superseded_by"] is not None:
         raise ValueError(
             f"Knowledge entry {old_id} is already superseded by {old['superseded_by']}; "
@@ -440,9 +461,6 @@ def _retire_in_conn(conn, old_id: int, survivor_id: int, *, operator: bool = Fal
     # #117 cascade — identical to _supersede_in_conn: live dependents of the retired
     # entry go `uncertain` until reconfirmed. The survivor is NOT auto-propagated.
     _cascade_uncertain(conn, old_id)
-    # A retired principle's family moves to the survivor (techne#1195), so its
-    # recurrence evidence is not stranded on a dead row.
-    conn.execute("UPDATE lesson_meta SET parent_id = ? WHERE parent_id = ?", (survivor_id, old_id))
     return survivor_id
 
 
