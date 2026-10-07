@@ -101,6 +101,10 @@ def test_grant_and_charter_are_operator_only(db):
     for kid in (g, c):
         with pytest.raises(ValueError, match="only the operator"):
             lessons.refine(db, kid, "widened")
+        with pytest.raises(ValueError, match="only the operator"):
+            lessons.set_enforced_by(db, kid, "an agent wrote this")
+        with pytest.raises(ValueError, match="not a lesson"):
+            lessons.reaffirm(db, kid)
         conn = connect(db)
         try:
             with pytest.raises(ValueError, match="only the operator"):
@@ -111,6 +115,36 @@ def test_grant_and_charter_are_operator_only(db):
         finally:
             conn.close()
     assert lessons.refine(db, g, "May merge doc-only PRs after self-review.", operator=True)
+    lessons.set_enforced_by(db, c, "operator hook", operator=True)
+    conn = connect(db)
+    try:
+        row = conn.execute("SELECT enforced_by FROM lesson_meta WHERE knowledge_id = ?", (c,))
+        assert row.fetchone()["enforced_by"] == "operator hook"
+    finally:
+        conn.close()
+
+
+def test_reaffirm_touches_only_live_lessons(db):
+    p = lessons.add(db, rule="Verify before asserting a negative.", tier="principle")
+    conn = connect(db)
+    try:
+        conn.execute("UPDATE knowledge SET last_confirmed_at = '2000-01-01 00:00:00' WHERE id = ?", (p,))
+        conn.commit()
+    finally:
+        conn.close()
+    lessons.reaffirm(db, p)
+    conn = connect(db)
+    try:
+        seen = conn.execute("SELECT last_confirmed_at FROM knowledge WHERE id = ?", (p,)).fetchone()
+        assert seen["last_confirmed_at"] > "2000-01-01 00:00:00"
+    finally:
+        conn.close()
+    newer = lessons.refine(db, p, "Verify before asserting any negative.")
+    with pytest.raises(ValueError, match="superseded by"):
+        lessons.reaffirm(db, p)
+    lessons.reaffirm(db, newer)
+    with pytest.raises(ValueError, match="not a lesson"):
+        lessons.reaffirm(db, knowledge.store(db, "a plain fact"))
 
 
 def test_merge_refuses_lessons(db):

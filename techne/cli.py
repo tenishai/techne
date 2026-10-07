@@ -1633,7 +1633,9 @@ def lesson_enforced_by(ctx, knowledge_id, mechanism):
     """Record the hook, test or guard that now enforces a principle ('' clears)."""
     from techne.core import lessons
 
-    lessons.set_enforced_by(ctx.obj["config"].db_path, knowledge_id, mechanism)
+    lessons.set_enforced_by(
+        ctx.obj["config"].db_path, knowledge_id, mechanism, operator=True
+    )
     click.echo(f"{knowledge_id}: enforced_by={mechanism or None}")
 
 

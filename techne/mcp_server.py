@@ -301,7 +301,7 @@ def _techne_lesson(args: dict, config: Config) -> dict:
     """Agent self-lessons (techne#1195). The agent writes principles and entries;
     grants, charter and retirement are the operator's, through `techne lesson`, so
     no action here creates, changes or retires one."""
-    from techne.core import knowledge, lessons
+    from techne.core import lessons
 
     action = args.get("action")
     agent_id = lessons.agent_for(config)
@@ -334,8 +334,7 @@ def _techne_lesson(args: dict, config: Config) -> dict:
         return {"linked": int(args["id"]), "parent_id": int(args["parent_id"])}
     if action == "reaffirm":
         kid = _int("id")
-        if not knowledge.reaffirm(config.db_path, kid):
-            raise ValueError(f"knowledge entry {kid} not found")
+        lessons.reaffirm(config.db_path, kid)
         return {"reaffirmed": kid}
     if action == "enforced_by":
         lessons.set_enforced_by(config.db_path, _int("id"), args.get("enforced_by"))

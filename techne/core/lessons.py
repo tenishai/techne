@@ -35,7 +35,7 @@ from pathlib import Path
 
 from techne._log import get_logger
 from techne.core.database import connect
-from techne.core.knowledge import CONFIDENCE_NUMERIC, OPERATOR_TYPES
+from techne.core.knowledge import CONFIDENCE_NUMERIC, OPERATOR_TYPES, _refuse_operator_type
 from techne.core.redaction import redact_credentials
 
 log = get_logger(__name__)
@@ -338,16 +338,37 @@ def link(db_path: Path, entry_id: int, principle_id: int) -> None:
         conn.close()
 
 
-def set_enforced_by(db_path: Path, knowledge_id: int, enforced_by: str | None) -> None:
-    """Record the hook, test or guard that now makes a principle's mistake loud."""
+def set_enforced_by(
+    db_path: Path, knowledge_id: int, enforced_by: str | None, *, operator: bool = False
+) -> None:
+    """Record the hook, test or guard that now makes a principle's mistake loud.
+    On a grant or charter only the operator may (the CLI passes operator=True)."""
     conn = connect(db_path)
     try:
+        row = _require_live(conn, knowledge_id)
+        _refuse_operator_type(row["type"], knowledge_id, operator)
         cur = conn.execute(
             "UPDATE lesson_meta SET enforced_by = ? WHERE knowledge_id = ?",
             ((enforced_by or "").strip() or None, knowledge_id),
         )
         if cur.rowcount == 0:
             raise ValueError(f"knowledge entry {knowledge_id} is not a lesson")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def reaffirm(db_path: Path, knowledge_id: int) -> None:
+    """Mark a live lesson still true (last_confirmed_at). Grants and charter are
+    not reaffirmed by the agent: they are the operator's to change."""
+    conn = connect(db_path)
+    try:
+        _require_live(conn, knowledge_id, ktype="lesson")
+        conn.execute(
+            "UPDATE knowledge SET last_confirmed_at = CURRENT_TIMESTAMP, "
+            "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (knowledge_id,),
+        )
         conn.commit()
     finally:
         conn.close()
