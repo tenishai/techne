@@ -297,6 +297,66 @@ def _techne_store(args: dict, config: Config) -> dict:
     return result
 
 
+def _techne_lesson(args: dict, config: Config) -> dict:
+    """Agent self-lessons (techne#1195). The agent writes principles and entries;
+    grants, charter and retirement are the operator's, through `techne lesson`, so
+    no action here creates, changes or retires one."""
+    from techne.core import lessons
+
+    action = args.get("action")
+    agent_id = lessons.agent_for(config)
+
+    def _int(name: str) -> int:
+        value = args.get(name)
+        if value is None or isinstance(value, bool):
+            raise ValueError(f"techne_lesson {action}: '{name}' (integer) is required")
+        return int(value)
+
+    if action == "add":
+        new_id = lessons.add(
+            config.db_path,
+            rule=args.get("rule") or "",
+            tier=args.get("tier") or "entry",
+            body=args.get("body") or "",
+            agent_id=agent_id,
+            parent_id=args.get("parent_id"),
+            evidence_session=args.get("evidence_session"),
+            tags=args.get("tags") or "",
+        )
+        return {"id": new_id, "stored": True}
+    if action == "refine":
+        new_id = lessons.refine(
+            config.db_path, _int("id"), args.get("rule") or "", body=args.get("body")
+        )
+        return {"id": new_id, "supersedes": int(args["id"])}
+    if action == "link":
+        lessons.link(config.db_path, _int("id"), _int("parent_id"))
+        return {"linked": int(args["id"]), "parent_id": int(args["parent_id"])}
+    if action == "reaffirm":
+        kid = _int("id")
+        lessons.reaffirm(config.db_path, kid)
+        return {"reaffirmed": kid}
+    if action == "enforced_by":
+        lessons.set_enforced_by(config.db_path, _int("id"), args.get("enforced_by"))
+        return {"id": int(args["id"]), "enforced_by": args.get("enforced_by")}
+    if action == "list":
+        rows = lessons.list_lessons(
+            config.db_path, agent_id=agent_id, tier=args.get("tier"), kind=args.get("kind")
+        )
+        return {"agent_id": agent_id, "lessons": rows, "count": len(rows)}
+    if action == "review":
+        return lessons.review(
+            config.db_path,
+            agent_id=agent_id,
+            char_budget=config.injection.principle_char_budget,
+            clauses=config.injection.principle_clauses,
+        )
+    raise ValueError(
+        "techne_lesson: 'action' must be one of add, refine, link, reaffirm, "
+        "enforced_by, list, review"
+    )
+
+
 def _techne_observe(args: dict, config: Config) -> dict:
     """Record an observation from any MCP client — the platform-agnostic capture path.
 
@@ -1127,6 +1187,51 @@ TOOLS = [
                 },
             },
             "required": ["content"],
+        },
+    },
+    {
+        "name": "techne_lesson",
+        "description": (
+            "Call this when the operator corrects you, or you retract your own claim, and "
+            "the cause is a repeatable habit of yours — to record a self-lesson: what you "
+            "did, why, and the rule. An `entry` holds the incident; a `principle` is a "
+            "one-line rule injected at every session start and after compaction. File an "
+            "entry under its principle with `parent_id`, and pass `evidence_session` (your "
+            "own session id) so techne records whether the principle was loaded when the "
+            "mistake happened. `refine` rewrites a principle, `reaffirm` marks it still "
+            "true, `review` lists what is over budget, cold, long or failing while loaded. "
+            "Grants, charter and retirement are the operator's (`techne lesson`)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["add", "refine", "link", "reaffirm", "enforced_by", "list", "review"],
+                },
+                "tier": {"type": "string", "enum": ["principle", "entry"], "default": "entry"},
+                "rule": {"type": "string", "description": "The one-line rule."},
+                "body": {
+                    "type": "string",
+                    "description": "Incident, mechanism and why (entries); optional.",
+                },
+                "id": {"type": "integer", "description": "The lesson to refine/link/reaffirm."},
+                "parent_id": {
+                    "type": "integer",
+                    "description": "The principle whose family this entry belongs to.",
+                },
+                "evidence_session": {
+                    "type": "string",
+                    "description": "The session the mistake happened in (usually your own).",
+                },
+                "enforced_by": {
+                    "type": "string",
+                    "description": "The hook, test or guard that now makes the mistake loud.",
+                },
+                "kind": {"type": "string", "enum": ["lesson", "grant", "charter"]},
+                "tags": {"type": "string"},
+            },
+            "required": ["action"],
         },
     },
     {
@@ -3026,6 +3131,7 @@ def _techne_reminder_dismiss(args: dict, config: Config) -> dict:
 TOOL_HANDLERS = {
     "techne_search": _techne_search,
     "techne_store": _techne_store,
+    "techne_lesson": _techne_lesson,
     "techne_observe": _techne_observe,
     "techne_threads": _techne_threads,
     "techne_resume": _techne_resume,

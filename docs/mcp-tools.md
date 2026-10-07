@@ -64,6 +64,10 @@ Read-only and guarded (techne#554): one `SELECT`, over the distilled knowledge t
 
 Call this when you learn a durable fact, make or are given a decision, get user feedback or a correction, or finish reasoning you'd hate to redo — to store a durable personal-memory entry (fact, decision, evaluation, procedure). Store the conclusion, not the transcript. Architectural patterns go to the Architect store via `techne architect ingest`, not here (techne#137). When this entry replaces or corrects an existing one, pass its id in `supersedes`: writing "SUPERSEDES #N" in the content does nothing, and #N keeps surfacing as current (techne#887).
 
+### `techne_lesson`
+
+Call this when the operator corrects you, or you retract your own claim, and the cause is a repeatable habit of yours — to record a self-lesson: what you did, why, and the rule. An `entry` holds the incident; a `principle` is a one-line rule injected at every session start and after compaction. File an entry under its principle with `parent_id`, and pass `evidence_session` (your own session id) so techne records whether the principle was loaded when the mistake happened. `refine` rewrites a principle, `reaffirm` marks it still true, `review` lists what is over budget, cold, long or failing while loaded. Grants, charter and retirement are the operator's (`techne lesson`).
+
 ### `techne_observe`
 
 Record an observation into memory from any client. The platform-agnostic capture path — call this on each turn/tool-use when no native hook exists. Supply your own session_id; techne ensures the session and tags its platform.

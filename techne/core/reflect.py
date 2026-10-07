@@ -25,7 +25,7 @@ log = logging.getLogger(__name__)
 from techne.core._resident import extract_json_array_or_none
 from techne.core._resident import prompt_hash as _prompt_hash
 from techne.core.database import connect
-from techne.core.knowledge import VALID_TYPES as KNOWLEDGE_TYPES
+from techne.core.knowledge import GENERIC_TYPES as KNOWLEDGE_TYPES
 from techne.core.redaction import redact_credentials
 from techne.core.sleepdream import RESIDENT_PRODUCER
 from techne.core.threads import Thread, _make_generate_fn
@@ -2422,9 +2422,9 @@ def _apply_add(conn, row, db_path: Path) -> int | None:
     from techne.core.knowledge import (
         CONFIDENCE_NUMERIC,
         VALID_CONFIDENCE,
-        VALID_TYPES,
         _add_dep_in_conn,
     )
+    from techne.core.knowledge import GENERIC_TYPES as VALID_TYPES  # techne#1195
 
     scope = row["scope"]
     source = f"reflect-promote:{row['source_session_id']}:{row['id']}"
@@ -2511,9 +2511,9 @@ def _apply_merge(conn, row, db_path: Path) -> int | None:
     from techne.core.knowledge import (
         CONFIDENCE_NUMERIC,
         VALID_CONFIDENCE,
-        VALID_TYPES,
         _merge_in_conn,
     )
+    from techne.core.knowledge import GENERIC_TYPES as VALID_TYPES  # techne#1195
 
     targets = json.loads(row["target_ids"] or "[]")
     if len(targets) < 2:
