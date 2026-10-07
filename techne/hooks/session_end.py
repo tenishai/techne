@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""SessionEnd (Stop) hook — archives session, runs thread detection, ages threads.
+"""Stop and SessionEnd hook — archives session, runs thread detection, ages threads.
+
+Registered on BOTH events (techne#1187). Claude Code fires Stop at the end of every
+turn, so on Stop this runs as a CHECKPOINT: threads are re-detected, but a thread
+summary is enqueued only once it passes the checkpoint gate, and `ended_at` is left
+alone. SessionEnd fires once, when the session really ends, and runs the FINAL pass.
 
 Must never fail session teardown: Claude Code treats any non-zero exit as a
 hard hook failure. Every error path here exits 0 and surfaces the issue on
@@ -110,8 +115,13 @@ def main():
                 )
                 sys.exit(0)
 
+            from techne.lifecycle import MODE_CHECKPOINT, MODE_FINAL, finalize_quiet_sessions
+
+            mode = MODE_FINAL if data.get("hook_event_name") == "SessionEnd" else MODE_CHECKPOINT
             try:
-                result = run_session_end(config, session_id, summary=data.get("summary"))
+                result = run_session_end(
+                    config, session_id, summary=data.get("summary"), mode=mode
+                )
             except Exception as e:
                 print(f"techne: session_end failed: {e}", file=sys.stderr)
                 record_hook_run(
@@ -121,6 +131,22 @@ def main():
                     error={"stage": "run_session_end", "msg": f"{type(e).__name__}: {e}"},
                 )
                 sys.exit(0)
+
+            # Recovery for sessions that died without SessionEnd (killed, crashed, or
+            # an install that has not re-run `techne init` since #1187). Stop used to
+            # stamp `ended_at` every turn, so such a session still got an end; now
+            # only the final pass does, and this sweep is what gives it one. It only
+            # touches sessions silent for ABANDONED_SESSION_IDLE_HOURS, so a live peer
+            # is never closed. Then their owed sync: one per run, never this session.
+            try:
+                from techne.core.state import close_abandoned_sessions
+
+                close_abandoned_sessions(config.db_path)
+                finalize_quiet_sessions(config, exclude_session_id=session_id)
+            except HookTimeout:
+                raise
+            except Exception as e:
+                print(f"techne: quiet-session finalize deferred: {e}", file=sys.stderr)
 
             try:
                 adapter = load_adapter(
@@ -158,7 +184,10 @@ def main():
                 config.db_path,
                 HOOK_NAME,
                 outcome="ok",
-                detail=f"{obs_count} obs, {result['threads']} threads",
+                detail=(
+                    f"{mode}: {obs_count} obs, {result['threads']} threads,"
+                    f" {result['queued']} queued"
+                ),
             )
     except Exception as e:
         # Catches HookTimeout too. This is the path that mattered most: before

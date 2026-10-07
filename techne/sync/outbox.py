@@ -48,8 +48,14 @@ def enqueue(
     content_hash: str | None = None,
     *,
     deliver: bool = True,
+    supersede_key: str | None = None,
 ):
     """Add an entry to the outbox. Deduplicates by content_hash.
+
+    ``supersede_key`` names a payload field (e.g. ``thread_id``). When given, any
+    still-PENDING row for the same target whose payload has the same value for that
+    field is deleted first, so the outbox holds at most one pending revision of each
+    keyed item (techne#1187). Delivered rows are never touched.
 
     The *target* must declare its delivery lane via a namespace prefix (#51):
 
@@ -95,6 +101,16 @@ def enqueue(
 
     conn = connect(db_path)
     try:
+        if supersede_key is not None:
+            # Coalesce (techne#1187): a still-pending row for the same key is an
+            # older revision of this one. Nobody has received it yet, so replacing
+            # it loses nothing, and keeping it would ship two versions of one thing.
+            conn.execute(
+                """DELETE FROM outbox
+                    WHERE target = ? AND status = 'pending'
+                      AND json_extract(data_json, '$.' || ?) = ?""",
+                (target, supersede_key, data.get(supersede_key)),
+            )
         cursor = conn.execute(
             """INSERT OR IGNORE INTO outbox (target, data_json, content_hash)
                VALUES (?, ?, ?)""",

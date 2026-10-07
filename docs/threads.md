@@ -82,13 +82,24 @@ Cutting on scores alone over-segments, so the segments are then merged until sta
 
 ## When it runs
 
-At **session end**, via `run_session_end` — the client's stop hook for Claude Code, and
-`session.idle` for the opencode plugin. The hook skips sessions with fewer than **10**
-observations; the underlying function does not, so a manual re-run always processes.
+Via `run_session_end`, at three points for Claude Code (#1187):
 
-Nothing runs during the session. Threads are a *retrospective* reading of what happened, not
-a running classification, which is why they can use signals like "how long was the gap
-before the next thing" at all.
+- **Stop**, at the end of every turn, as a *checkpoint*. Threads are re-detected over the
+  whole session so far, but a thread summary is sent to the sync lane only once that thread
+  has grown by `checkpoint_min_new_observations` since its last send and at least
+  `checkpoint_min_interval_minutes` have passed. `ended_at` is not stamped.
+- **PreCompact**, which sends every thread with new work.
+- **SessionEnd**, the *final* pass: every thread with new work is sent and the session's
+  end is recorded. A session that never fires SessionEnd (killed, crashed) gets its final
+  pass from a later session's Stop, once it has been quiet for 6 hours (`ABANDONED_SESSION_IDLE_HOURS`).
+
+opencode's plugin calls it on `session.idle`, and the `techne session-end` CLI runs the
+final pass. The hooks skip sessions with fewer than **10** observations; the underlying
+function does not, so a manual re-run always processes.
+
+Each pass re-reads the whole session, so a thread is a *retrospective* reading of what has
+happened so far, not a running classification, which is why it can use signals like "how
+long was the gap before the next thing" at all.
 
 ## How a thread outlives its session
 
@@ -139,6 +150,8 @@ Tuning lives under `threads` in `~/.techne/config.yaml`:
 | `entity_patterns` | — | extra regexes for entity extraction |
 | `complete_after_hours` | 48 | active → completed |
 | `stale_after_days` | 30 | completed → stale |
+| `checkpoint_min_new_observations` | 10 | growth a thread needs before Stop re-sends its summary |
+| `checkpoint_min_interval_minutes` | 5 | minimum gap between a thread's Stop sends |
 
 The defaults are deterministic and free. The LLM detector is available and is not required
 for anything — including on a fresh install, which is the point of the heuristic existing.

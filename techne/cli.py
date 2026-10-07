@@ -444,7 +444,7 @@ def _render_liveness(config) -> tuple[int, int]:
         # settings.json registration is CLAUDE-CODE's mechanism, and both sibling
         # surfaces already guard on it (`techne status` above; render_drift_block,
         # session_start.py). check_hook_drift does NOT self-guard —
-        # _expected_registrations returns SessionStart/PreCompact/PostCompact/Stop
+        # _expected_registrations returns SessionStart/PreCompact/PostCompact/Stop/SessionEnd
         # for any config at all. Without this guard, an operator on another
         # platform who merely HAS a ~/.claude/settings.json on the machine (the
         # ordinary case, not a corner one) gets a doctor that exits 1 on a
@@ -3523,12 +3523,14 @@ def deposit(ctx, target, session_id, content, tool_name, agent_identity, tier):
 def session_end(ctx, session_id, summary):
     """Run end-of-session processing on a session — detect threads, summarize, age.
 
-    The CLI sibling of the Claude Code Stop hook, for clients that signal
-    turn/session completion from a plugin (e.g. an opencode plugin firing on
-    `session.idle`). Idempotent: thread IDs are content-addressed and written
-    INSERT-OR-IGNORE, so replaying a session is a no-op — safe to call once per
-    turn. Outbox enqueue stays gated on a live consumer (#79), so a noop adapter
-    won't accumulate a backlog.
+    The CLI sibling of the Claude Code SessionEnd hook: it runs the FINAL pass
+    (`mode="final"`), sending every thread with new work and recording the end.
+    Clients that signal turn completion from a plugin (e.g. opencode on
+    `session.idle`) call it per turn. That is safe, since thread IDs are
+    content-addressed and an unchanged thread is never re-sent, but every call
+    re-stamps the end, and each turn with new work sends its threads again; a
+    checkpoint flag here is what would change that (techne#1187). Outbox enqueue stays
+    gated on a live consumer (#79), so a noop adapter won't accumulate a backlog.
     """
     config = ctx.obj["config"]
     from techne.core.state import ABANDONED_SESSION_IDLE_HOURS

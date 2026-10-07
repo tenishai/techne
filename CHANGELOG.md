@@ -44,6 +44,29 @@ All notable changes to techne are documented here. Format loosely follows
   auth token set in its environment and says it is withheld. The resident
   emit/ingest path is unaffected.
 
+### Fixed
+
+- **Stop no longer ends the session or re-sends every thread each turn** (#1187, found by
+  Grip). Claude Code fires Stop at the end of every turn, and techne ran its session-end
+  pass there, so every turn stamped `ended_at` (a live session read as ended) and, with a
+  sync adapter configured, enqueued every thread summary again. The running counts in the
+  summary changed its hash, so nothing was deduplicated: a 100-turn, 5-thread session
+  could send about 500 near-duplicate rows. Stop is now a checkpoint. A thread is re-sent
+  only after it grows by `threads.checkpoint_min_new_observations` (default 10) and
+  `threads.checkpoint_min_interval_minutes` (default 5) have passed, and `ended_at` is
+  left alone. A new SessionEnd registration runs the final pass, which sends every thread
+  with new work and records the end. PreCompact sends every thread with new work. A
+  session that dies without SessionEnd gets its final pass from a later Stop once it has
+  been quiet for 6 hours. A still-pending summary for the same thread is replaced rather
+  than queued beside it.
+
+### Upgrading
+
+- Run `techne init` to register the SessionEnd hook. It is registered with
+  `timeout: 60`, because Claude Code otherwise gives SessionEnd hooks 1.5 s in total.
+  Until you do, Stop still checkpoints, and each session gets its final pass and its
+  `ended_at` from the 6-hour quiet-session sweep instead.
+
 ## [0.18.1] — 2026-10-05
 
 ### Added

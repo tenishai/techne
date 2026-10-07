@@ -363,14 +363,17 @@ class TestPreflightGuard:
         entry = self._session_start_entry()
         assert entry.get("timeout") == 120, entry
 
-    def test_only_session_start_carries_a_timeout(self, fake_home, cfg):
+    def test_only_session_start_and_session_end_carry_a_timeout(self, fake_home, cfg):
         # Scope guard. SessionStart is the sole chain that can reach the
         # network; blanket-bounding the others would cap unrelated hooks at a
-        # number chosen for a download.
+        # number chosen for a download. SessionEnd is the other exception, and
+        # its timeout RAISES a budget rather than capping one: Claude Code gives
+        # SessionEnd hooks 1.5 s unless a hook asks for more (techne#1187).
         claude_code.register_hooks(cfg)
         settings = json.loads(claude_code.SETTINGS_PATH.read_text())
+        assert settings["hooks"]["SessionEnd"][0]["hooks"][0]["timeout"] == 60
         for event, groups in settings["hooks"].items():
-            if event == "SessionStart":
+            if event in ("SessionStart", "SessionEnd"):
                 continue
             for group in groups:
                 for h in group["hooks"]:
