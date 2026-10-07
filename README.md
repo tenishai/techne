@@ -718,6 +718,10 @@ threads:
   link_threshold: 0.05        # BM25-derived similarity threshold for cross-session linking
   complete_after_hours: 48    # active → completed if no resume_points and stale
   stale_after_days: 30        # completed → stale
+  # Thread-summary sync on Stop, which fires every turn (#1187): re-send a thread
+  # only after this much growth and time. SessionEnd and PreCompact ignore both.
+  checkpoint_min_new_observations: 10
+  checkpoint_min_interval_minutes: 5
   # Extend the heuristic detector with your own MCP server families.
   # Keys are tool names; values are family strings.
   tool_families:

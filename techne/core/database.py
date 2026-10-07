@@ -1505,7 +1505,9 @@ END;
         # exists to build could not discriminate at all.
         #
         # Backfills the historical NULLs from last known activity. The ongoing
-        # fix is the sweep in core/state.py, wired into session_start; this step
+        # fix is the sweep in core/state.py, called from lifecycle.run_session_start
+        # and from the Stop/SessionEnd hook (NOT the SessionStart hook, which never
+        # calls run_session_start; techne#1187); this step
         # only repairs what the old behaviour already lost.
         #
         from techne.core.state import close_abandoned_sessions_in_conn

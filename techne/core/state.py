@@ -149,13 +149,20 @@ def _resolve_summary_column(source: str) -> str:
 def end_session(
     db_path: Path,
     session_id: str,
-    summary: str = "",
+    summary: str | None = "",
     *,
     source: str = "manual",
     summary_llm_source: str | None = None,
     derive_if_idle_hours: int | None = None,
+    mark_ended: bool = True,
 ):
     """Mark a session ended and store its summary.
+
+    `mark_ended=False` stores the summary and leaves `ended_at` alone. The Stop hook
+    passes it: Stop fires at the end of every TURN, so stamping there marked live
+    sessions as ended (techne#1187). Only the final pass (SessionEnd, the CLI, a
+    sweep of a quiet session) records the end. `summary=None` records the end and
+    leaves every summary column as it is.
 
     `source` routes the summary to the right typed column:
     - 'manual'    → sessions.summary (highest priority at read time)
@@ -176,15 +183,18 @@ def end_session(
     conn = connect(db_path)
     try:
         llm_src = summary_llm_source if source == "llm" else None
-        # "Now" and "clean" are right for the Stop hook, which fires as the session
-        # ends. They are wrong for a replay of a session that went quiet long ago
-        # (issue #986): `techne session-end` on a session dead for 30 days recorded a
-        # clean exit 30 days late. A caller that can be replaying passes
+        # "Now" and "clean" are right for the SessionEnd hook, which fires as the
+        # session ends (Stop passes mark_ended=False, above). They are wrong for a
+        # replay of a session that went quiet long ago (issue #986): `techne
+        # session-end` on a session dead for 30 days recorded a clean exit 30 days
+        # late. A caller that can be replaying passes
         # `derive_if_idle_hours`; past that silence the end is DERIVED from last
         # activity, the same value and stamp `close_abandoned_sessions` writes.
         ended_sql = "ended_at = CURRENT_TIMESTAMP, ended_at_source = 'clean'"
         ended_args: tuple = ()
-        if derive_if_idle_hours is not None:
+        if not mark_ended:
+            ended_sql = "ended_at = ended_at"
+        elif derive_if_idle_hours is not None:
             row = conn.execute(
                 f"""SELECT {_LAST_SEEN_SQL} AS last_seen,
                            replace(substr(s.ended_at, 1, 19), 'T', ' ') AS ended,
@@ -205,12 +215,22 @@ def end_session(
                 else:
                     ended_sql = "ended_at = ?, ended_at_source = 'derived'"
                     ended_args = (row["last_seen"],)
-        conn.execute(
-            f"""UPDATE sessions SET {ended_sql}, {column} = ?,
-                    summary_llm_source = COALESCE(?, summary_llm_source)
-                WHERE id = ?""",
-            (*ended_args, redact_credentials(summary) if summary else None, llm_src, session_id),
-        )
+        if summary is None:
+            conn.execute(
+                f"UPDATE sessions SET {ended_sql} WHERE id = ?", (*ended_args, session_id)
+            )
+        else:
+            conn.execute(
+                f"""UPDATE sessions SET {ended_sql}, {column} = ?,
+                        summary_llm_source = COALESCE(?, summary_llm_source)
+                    WHERE id = ?""",
+                (
+                    *ended_args,
+                    redact_credentials(summary) if summary else None,
+                    llm_src,
+                    session_id,
+                ),
+            )
         conn.commit()
     finally:
         conn.close()

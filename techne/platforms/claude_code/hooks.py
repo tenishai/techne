@@ -631,7 +631,13 @@ def _backfill_command() -> str:
 # have the harness cancel the WHOLE chain — guard and banner included — and
 # docs/arch/liveness.md:44 notes this path is fail-open, so they would get no
 # diagnostic. Raise this constant with that knob, or clamp that knob to this.
-_HOOK_TIMEOUTS_S = {"SessionStart": 120}
+#
+# SessionEnd (techne#1187): Claude Code gives ALL SessionEnd hooks a shared 1.5 s
+# budget unless a hook's own `timeout` is longer, which raises the budget to match,
+# up to 60 s (https://code.claude.com/docs/en/hooks). 1.5 s is less than a cold
+# Python start plus thread detection, so without this the final pass would be cut
+# off on most exits. The hook bounds its own work with `hooks.timeout_s` as well.
+_HOOK_TIMEOUTS_S = {"SessionStart": 120, "SessionEnd": 60}
 
 
 def _matcher_of(group: dict) -> str:
@@ -801,7 +807,10 @@ def register_hooks(config: Config, *, allow_worktree: bool = False):
         "SessionStart": session_start,
         "PreCompact": _hook_command("techne.hooks.pre_compact"),
         "PostCompact": _hook_command("techne.hooks.post_compact"),
+        # Same module on both (techne#1187): Stop fires every turn and runs it as a
+        # checkpoint; SessionEnd fires once and runs the final pass.
         "Stop": _hook_command("techne.hooks.session_end"),
+        "SessionEnd": _hook_command("techne.hooks.session_end"),
     }
     if config.hooks.post_tool_use:
         commands_per_event["PostToolUse"] = _hook_command("techne.hooks.post_tool_use")
@@ -882,6 +891,7 @@ def _expected_registrations(config: Config) -> list[tuple[str, str]]:
         ("PreCompact", ""),
         ("PostCompact", ""),
         ("Stop", ""),
+        ("SessionEnd", ""),
     ]
     if config.hooks.post_tool_use:
         expected.append(("PostToolUse", ""))
