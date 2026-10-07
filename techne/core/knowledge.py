@@ -23,6 +23,13 @@ VALID_TYPES = (
     # injected. Pull-only (recall-able, never auto-injected). tags carry
     # doc:/ver:/backing:/pending.
     "document_card",
+    # Agent self-lessons (techne#1195). Each row has a lesson_meta row beside it,
+    # so they are written only through core/lessons.py: store() refuses them.
+    # `lesson` is the agent's own (tier principle or entry), `grant` a standing
+    # permission and `charter` a trust boundary, both operator-written.
+    "lesson",
+    "grant",
+    "charter",
 )
 VALID_CONFIDENCE = ("high", "medium", "low")
 
@@ -39,6 +46,24 @@ REDIRECTED_TYPES = {
 # into session-start context (push). egress filters these out. `pattern` stays
 # listed so any legacy rows on not-yet-cleaned installs are still pull-only.
 PULL_ONLY_TYPES = ("pattern", "document", "document_card")
+
+# Types that need a lesson_meta row (techne#1195). Written only by core/lessons.py,
+# injected only by the principle band (never the general tier-0 bands), and kept
+# out of consolidate/dream/conflict candidate selection: a merge would mint a row
+# without its lesson_meta, and lessons are retired by the operator, not by a rail.
+LESSON_TYPES = ("lesson", "grant", "charter")
+
+# Lesson types only the operator writes or retires (techne#1195). No agent-facing
+# path (MCP store, reflection promote) may create, supersede, retire or merge one.
+OPERATOR_TYPES = ("grant", "charter")
+
+# The types an agent or a reflection rail may name in a plain store. Reflection
+# prompts and the CLI's --type choices use this, not VALID_TYPES, so neither
+# offers a type that store() would refuse.
+GENERIC_TYPES = tuple(t for t in VALID_TYPES if t not in LESSON_TYPES)
+
+# SQL fragment excluding lesson types, for candidate selection that must skip them.
+LESSON_TYPES_SQL = "(" + ",".join(f"'{t}'" for t in LESSON_TYPES) + ")"
 
 # Mapping the legacy text enum to canonical numeric values (0..1).
 # The migration in core/database.py uses the same values for backfill.
@@ -107,8 +132,13 @@ def store(
             f"knowledge type '{type}' is not stored in personal memory (techne#137); "
             f"it belongs in {REDIRECTED_TYPES[type]}"
         )
+    if type in LESSON_TYPES:
+        raise ValueError(
+            f"knowledge type '{type}' needs lesson structure (techne#1195); "
+            "write it with `techne lesson` or the techne_lesson tool"
+        )
     if type not in VALID_TYPES:
-        raise ValueError(f"Invalid knowledge type '{type}'. Must be one of: {VALID_TYPES}")
+        raise ValueError(f"Invalid knowledge type '{type}'. Must be one of: {GENERIC_TYPES}")
     if confidence not in VALID_CONFIDENCE:
         raise ValueError(f"Invalid confidence '{confidence}'. Must be one of: {VALID_CONFIDENCE}")
 
@@ -227,10 +257,16 @@ def supersede(db_path: Path, old_id: int, new_content: str, source: str = "sessi
         conn.close()
 
 
-def _supersede_in_conn(conn, old_id: int, new_content: str, source: str) -> int:
+def _supersede_in_conn(
+    conn, old_id: int, new_content: str, source: str, *, operator: bool = False
+) -> int:
     """Core of supersede() on a caller-owned connection — no commit/close — so it can
     run inside another transaction (e.g. promote_candidate's action dispatch, #108).
-    Body is verbatim from the public supersede(); the caller owns the transaction."""
+    Body is verbatim from the public supersede(); the caller owns the transaction.
+
+    A lesson-type row (techne#1195) keeps its lesson_meta: the new revision gets a
+    copy and the old one's family entries are repointed at it. A grant or charter
+    is refused unless ``operator`` is set — only `techne lesson` passes it."""
     old = conn.execute(
         "SELECT type, tags, confidence, anchor_path, anchor_symbol, superseded_by "
         "FROM knowledge WHERE id = ?",
@@ -243,6 +279,7 @@ def _supersede_in_conn(conn, old_id: int, new_content: str, source: str) -> int:
             f"Knowledge entry {old_id} is already superseded by {old['superseded_by']}; "
             "supersede the latest revision instead"
         )
+    _refuse_operator_type(old["type"], old_id, operator)
 
     # Re-derive numeric from the enum so the two can't drift (self-heals any
     # row a pre-#131 supersede left inconsistent). Fall back to medium if the
@@ -308,10 +345,36 @@ def _supersede_in_conn(conn, old_id: int, new_content: str, source: str) -> int:
     # auto-propagated; a dependent stays uncertain until reconfirm()ed. supersede
     # is a deliberate update, so this is off the hot ingest path.
     _cascade_uncertain(conn, old_id)
+    if old["type"] in LESSON_TYPES:
+        _carry_lesson_meta(conn, old_id, new_id)
     return new_id
 
 
-def _retire_in_conn(conn, old_id: int, survivor_id: int) -> int:
+def _refuse_operator_type(ktype: str, knowledge_id: int, operator: bool) -> None:
+    if ktype in OPERATOR_TYPES and not operator:
+        raise ValueError(
+            f"knowledge entry {knowledge_id} is a {ktype}: only the operator changes it "
+            "(techne#1195), with `techne lesson`"
+        )
+
+
+def _carry_lesson_meta(conn, old_id: int, new_id: int) -> None:
+    """Copy *old_id*'s lesson_meta to its new revision *new_id* and repoint the
+    family entries that named *old_id* as their parent (techne#1195). Without this a
+    refined principle would lose its structure and its recurrence evidence."""
+    conn.execute(
+        """INSERT OR REPLACE INTO lesson_meta
+             (knowledge_id, agent_id, tier, rule, parent_id, enforced_by,
+              evidence_session, loaded_when_failed)
+           SELECT ?, agent_id, tier, rule, parent_id, enforced_by,
+                  evidence_session, loaded_when_failed
+           FROM lesson_meta WHERE knowledge_id = ?""",
+        (new_id, old_id),
+    )
+    conn.execute("UPDATE lesson_meta SET parent_id = ? WHERE parent_id = ?", (new_id, old_id))
+
+
+def _retire_in_conn(conn, old_id: int, survivor_id: int, *, operator: bool = False) -> int:
     """Retire *old_id* by pointing its `superseded_by` at an EXISTING live *survivor_id*
     row — without minting a new revision (techne#213 contradiction detection).
 
@@ -335,9 +398,12 @@ def _retire_in_conn(conn, old_id: int, survivor_id: int) -> int:
     """
     if old_id == survivor_id:
         raise ValueError("cannot retire a knowledge entry into itself")
-    old = conn.execute("SELECT superseded_by FROM knowledge WHERE id = ?", (old_id,)).fetchone()
+    old = conn.execute(
+        "SELECT superseded_by, type FROM knowledge WHERE id = ?", (old_id,)
+    ).fetchone()
     if old is None:
         raise ValueError(f"Knowledge entry {old_id} not found")
+    _refuse_operator_type(old["type"], old_id, operator)
     if old["superseded_by"] is not None:
         raise ValueError(
             f"Knowledge entry {old_id} is already superseded by {old['superseded_by']}; "
@@ -374,6 +440,9 @@ def _retire_in_conn(conn, old_id: int, survivor_id: int) -> int:
     # #117 cascade — identical to _supersede_in_conn: live dependents of the retired
     # entry go `uncertain` until reconfirmed. The survivor is NOT auto-propagated.
     _cascade_uncertain(conn, old_id)
+    # A retired principle's family moves to the survivor (techne#1195), so its
+    # recurrence evidence is not stranded on a dead row.
+    conn.execute("UPDATE lesson_meta SET parent_id = ? WHERE parent_id = ?", (survivor_id, old_id))
     return survivor_id
 
 
@@ -604,7 +673,7 @@ def merge_into(
     """
     if not old_ids:
         raise ValueError("merge_into requires at least one old id")
-    if type not in VALID_TYPES:
+    if type not in GENERIC_TYPES:
         raise ValueError(f"merge_into: invalid type {type!r}")
     numeric = CONFIDENCE_NUMERIC.get(confidence, CONFIDENCE_NUMERIC["medium"])
     conn = connect(db_path)
@@ -657,10 +726,15 @@ def _merge_in_conn(
             raise ValueError(f"merge_into: duplicate old id {oid}")
         seen.add(oid)
         row = conn.execute(
-            "SELECT superseded_by, status FROM knowledge WHERE id = ?", (oid,)
+            "SELECT superseded_by, status, type FROM knowledge WHERE id = ?", (oid,)
         ).fetchone()
         if row is None:
             raise ValueError(f"merge_into: knowledge entry {oid} not found")
+        if row["type"] in LESSON_TYPES:
+            raise ValueError(
+                f"merge_into: entry {oid} is a {row['type']}; lessons are merged with "
+                "`techne lesson refine`, which keeps their structure (techne#1195)"
+            )
         if row["superseded_by"] is not None:
             raise ValueError(
                 f"merge_into: entry {oid} is already superseded — merge live rows only"
@@ -1015,6 +1089,10 @@ def delete(db_path: Path, entry_id: int) -> bool:
             "DELETE FROM knowledge_deps WHERE dependent_id = ? OR trigger_id = ?",
             (entry_id, entry_id),
         )
+        # lesson_meta (techne#1195) references knowledge by FK like the two above:
+        # drop this entry's row, and unlink family entries that named it as parent.
+        conn.execute("DELETE FROM lesson_meta WHERE knowledge_id = ?", (entry_id,))
+        conn.execute("UPDATE lesson_meta SET parent_id = NULL WHERE parent_id = ?", (entry_id,))
         cur = conn.execute("DELETE FROM knowledge WHERE id = ?", (entry_id,))
         conn.commit()
         return cur.rowcount > 0

@@ -88,6 +88,7 @@ class TestHandleRequest:
             "architect_search",
             "techne_search",
             "techne_store",
+            "techne_lesson",
             "techne_observe",
             "techne_threads",
             "techne_resume",

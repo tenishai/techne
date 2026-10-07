@@ -44,7 +44,8 @@ from techne.config import Config
 log = logging.getLogger(__name__)
 from techne.core._resident import extract_json_object
 from techne.core.database import connect
-from techne.core.knowledge import VALID_CONFIDENCE, VALID_TYPES, content_fingerprint
+from techne.core.knowledge import GENERIC_TYPES as VALID_TYPES  # techne#1195
+from techne.core.knowledge import LESSON_TYPES_SQL, VALID_CONFIDENCE, content_fingerprint
 from techne.core.redaction import redact_credentials
 from techne.core.search import build_or_fts_query
 
@@ -175,8 +176,11 @@ def consolidate_clusters(
 
 #: Live knowledge that consolidation may cluster. The WHERE is shared with the Tier-1
 #: neighbour query so a neighbour slot is never spent on a row Tier 1 would discard.
+# Lesson types (techne#1195) are excluded: a merge would mint a row without its
+# lesson_meta, and lessons are retired by the operator, not by a rail.
 _CLUSTERABLE = (
-    "k.superseded_by IS NULL AND k.status != 'archived' AND k.type != 'document_card'"
+    "k.superseded_by IS NULL AND k.status != 'archived' AND k.type != 'document_card' "
+    f"AND k.type NOT IN {LESSON_TYPES_SQL}"
 )
 _LIVE_CLUSTERABLE_SQL = (
     f"SELECT k.id, k.type, k.content, k.tags, k.confidence FROM knowledge k WHERE {_CLUSTERABLE}"
@@ -552,6 +556,7 @@ def recombine_groups(config: Config, *, max_groups: int = 10, group_size: int = 
         raw = conn.execute(
             "SELECT id, type, content, tags, confidence, updated_at FROM knowledge "
             "WHERE superseded_by IS NULL AND confidence='high' AND status != 'archived' "
+            f"AND type NOT IN {LESSON_TYPES_SQL} "
             "ORDER BY updated_at DESC"
         ).fetchall()
         rows_all = [dict(r) for r in raw]

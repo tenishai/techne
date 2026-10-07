@@ -160,6 +160,48 @@ DEFERRED_CONTEXT_KEY = "session_start:deferred"
 #: unchanged for all three. An absent, unknown or non-string source keeps the full
 #: banner.
 REACTIVATION_SOURCES = frozenset({"resume", "clear", "compact"})
+
+#: Sources where the agent's principle band (techne#1195) is injected even though the
+#: rest of the model's context is replaced by REACTIVATION_LINE. Compaction is where a
+#: lesson's "why" is lost and the agent re-learns it in the same session; `clear`
+#: otherwise gets nothing back. `resume` is absent because the restored transcript
+#: already carries the band it was given.
+PRINCIPLE_REINJECT_SOURCES = frozenset({"clear", "compact"})
+
+
+def _principle_band(config, session_id: str | None) -> str:
+    """Render the principle band and log which ids went out under
+    `lessons.INJECTION_SOURCE`, so a later failure can be checked against "was the
+    rule loaded?". Call it only where the band is actually sent. Never raises: a
+    broken band must not cost the session its context."""
+    try:
+        if not config.injection.enabled or config.injection.principle_char_budget <= 0:
+            return ""
+        from techne.core import lessons
+
+        block = lessons.select_principles(
+            config.db_path,
+            agent_id=lessons.agent_for(config),
+            char_budget=config.injection.principle_char_budget,
+            clauses=config.injection.principle_clauses,
+        )
+        if block.text:
+            from techne.hooks._injection_log import log_context_injection
+
+            log_context_injection(
+                config.db_path,
+                source=lessons.INJECTION_SOURCE,
+                session_id=session_id,
+                trigger=None,
+                rows=[{"id": i} for i in block.injected_ids],
+                injected_text=block.text,
+            )
+        return block.text
+    except Exception as exc:  # noqa: BLE001
+        print(f"techne: principle band skipped: {exc}", file=sys.stderr)
+        return ""
+
+
 REACTIVATION_LINE = (
     "techne memory is active for this session ({source}). Per-turn recall continues; "
     "call techne_resume for threads and knowledge, techne_inbox for peer sessions."
@@ -490,6 +532,16 @@ def _run_phases_2_to_9(
         print(f"techne: resume context failed: {exc}", file=sys.stderr)
 
     # ------------------------------------------------------------------
+    # Phase 6b: agent principle band (techne#1195) — ahead of Key Knowledge, in its
+    # own budget. Cold start only here: on a reactivation source the model's context
+    # is replaced in Phase 9, which adds the band itself for compact and clear.
+    # ------------------------------------------------------------------
+    if not (isinstance(source, str) and source in REACTIVATION_SOURCES):
+        principle_block = _principle_band(config, session_id)
+        if principle_block:
+            output_parts.append(principle_block)
+
+    # ------------------------------------------------------------------
     # Phase 7: Tier-0 knowledge injection (non-fatal)
     # ------------------------------------------------------------------
     try:
@@ -691,6 +743,10 @@ def _run_phases_2_to_9(
             # stashed either: deferring the full summary would re-inject it on the
             # next prompt, which is the re-injection this avoids.
             summary = REACTIVATION_LINE.format(source=source)
+            if source in PRINCIPLE_REINJECT_SOURCES:
+                band = _principle_band(config, session_id)
+                if band:
+                    summary = f"{summary}\n\n{band}"
         deferred = False
         if config.hooks.defer_session_start_context and session_id and not reactivation:
             try:

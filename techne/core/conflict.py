@@ -522,7 +522,8 @@ def conflict_check_emit(config: Config, *, max_items: int | None = None) -> list
             dict(r)
             for r in conn.execute(
                 """SELECT id, type, content, tags, confidence, event_at, created_at
-                   FROM knowledge WHERE superseded_by IS NULL AND status != 'archived'"""
+                   FROM knowledge WHERE superseded_by IS NULL AND status != 'archived'
+                   AND type NOT IN ('lesson', 'grant', 'charter')"""
             )
         ]
 
