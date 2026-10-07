@@ -85,9 +85,11 @@ All notable changes to techne are documented here. Format loosely follows
 ### Upgrading
 
 - **pipx:** `pipx uninstall techne`, then `pipx install "tenish-techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.18.2"`,
-  then `techne init`. pipx keeps the old `techne` environment and its `techne` command, so
-  a plain `--force` install of the new name refuses or leaves the hooks on the old
-  interpreter; `techne init` rewrites `~/.claude/techne-hook.sh` to the new one.
+  then `techne init`. pipx treats the new name as a separate app and keeps the old `techne`
+  environment. Without the uninstall, a plain install leaves the `techne` command on the
+  old environment, and `--force` moves the command but leaves the old environment behind.
+  Either way the hooks stay on the old interpreter until `techne init` rewrites
+  `~/.claude/techne-hook.sh`.
 - **Editable checkouts:** reinstall once (`pip install -e ".[recommended]"`) so the
   metadata carries the new name. Until then lookups fall back to `techne` and keep working.
 - Restart the MCP server. Schema v29 (the `lesson_meta` table) is applied when the store
