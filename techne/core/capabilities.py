@@ -286,7 +286,7 @@ def install_command_for(
     - pipx venv: the pipx form, as before.
     - uv tool venv: `uv tool install` (those venvs have no pip).
     - any other venv: that venv's pip, with the git URL. Never plain
-      `tenish-techne[recommended]`: PyPI `techne` is an unrelated package.
+      `tenish-techne[recommended]`: PyPI has no `tenish-techne`, so that fails.
     - no venv: the pipx form, the documented install.
     """
     import re
