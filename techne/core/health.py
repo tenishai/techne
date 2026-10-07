@@ -11,7 +11,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from techne import __version__, _is_installed_path
+from techne import __version__, _is_installed_path, install_spec
 from techne.config import Config
 from techne.core.repo import git_dirs as _git_dirs
 from techne.core.repo import read_ref as _read_ref
@@ -695,7 +695,7 @@ def format_banner(health: dict) -> str:
         if not vec.get("backend"):
             lines.append(
                 "> ⚠️ vector search off — no embedding backend; recall is keyword-only. "
-                "Install tenish-techne[vectors], then `techne vectors backfill`"
+                f"Run `pip install '{install_spec('vectors')}'`, then `techne vectors backfill`"
             )
         elif vec.get("reembed_needed"):
             lines.append(
