@@ -6,20 +6,28 @@ reflection, the headless custodian rails) goes through
 how to send it:
 
 * ``litellm`` (the default): LiteLLM, exactly as before this module existed.
-* ``claude-code``: the user's own ``claude`` CLI, run as ``claude -p`` on the Claude
-  Code login. Settings files are ignored (``--restricted``, below), so an
+* ``claude-code``: the user's own ``claude`` CLI, run as ``claude -p``, normally on the
+  Claude Code login. Settings files are ignored (``--restricted``, below), so an
   ``apiKeyHelper`` or a settings ``env`` key does not apply. techne never stores or logs
   a credential.
 
-ALWAYS THE LOGIN, NEVER AN ENVIRONMENT KEY (techne#1194). Claude Code's authentication
-precedence (code.claude.com/docs/en/iam) puts ``ANTHROPIC_AUTH_TOKEN`` and then
+NEVER AN EXPORTED ANTHROPIC KEY (techne#1194). Claude Code's authentication precedence
+(code.claude.com/docs/en/iam) puts ``ANTHROPIC_AUTH_TOKEN`` and then
 ``ANTHROPIC_API_KEY`` above the subscription login, and "in non-interactive mode
 (``-p``), the key is always used when present". PR #1190 let the child inherit them, so
 an exported key silently billed that key instead of the plan. The operator decided the
-engine is for the login (2026-10-06), so the child's environment is a copy of techne's
-WITHOUT those two variables (`child_env`). That reads no credential; it only declines to
-forward one. ``check_model_engine`` still names a variable that is set, and says it is
-ignored here (`credential_override`).
+engine is not for those keys (2026-10-06), so the child's environment is a copy of
+techne's WITHOUT those two variables (`child_env`). That reads no credential; it only
+declines to forward one. ``check_model_engine`` still names a variable that is set, and
+says it is withheld (`credential_override`).
+
+ONLY THOSE TWO. The same precedence list also ranks ``CLAUDE_CODE_USE_BEDROCK`` /
+``_VERTEX`` / ``_FOUNDRY``, ``CLAUDE_CODE_OAUTH_TOKEN`` and ``ANTHROPIC_PROFILE`` above
+the login. They pass through unchanged: each is a deliberate choice of where Claude Code
+itself runs (a cloud provider, a long-lived subscription token, a federation profile),
+not a key that happens to be lying in the environment, and withholding them would break
+a Claude Code that is set up that way. So the claim is "never an exported Anthropic key",
+not "always the subscription login".
 
 The engine picks the transport; the model keys (`model`, `reflect.model`,
 `custodian.model`, `custodian.rail_models`) still pick the model. Under ``claude-code``
@@ -80,7 +88,7 @@ ISOLATION_ARGS = (
 
 
 #: Environment credentials Claude Code ranks above the subscription login under ``-p``.
-#: `child_env` withholds them so the call always runs on the login (techne#1194).
+#: `child_env` withholds them so an exported key never bills instead of the plan (techne#1194).
 CREDENTIAL_OVERRIDES = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")
 
 

@@ -11,17 +11,19 @@ All notable changes to techne are documented here. Format loosely follows
   (#1189). A new top-level `model_engine` key chooses how every model call techne makes
   itself goes out: LLM thread detection and summaries, session-end reflection and the
   headless custodian rails. `litellm`, the default, is unchanged. `claude-code` runs
-  the user's own `claude -p` on the Claude Code login, so it needs no API key and no
-  `[llm]` extra, and calls count against the plan's usage limits. `ANTHROPIC_API_KEY`
-  and `ANTHROPIC_AUTH_TOKEN` are not passed to `claude -p` (#1194), so an exported key
-  never bills instead of the plan; settings files, and so `apiKeyHelper`, are ignored.
+  the user's own `claude -p`, normally on the Claude Code login, so it needs no API key
+  and no `[llm]` extra, and calls count against the plan's usage limits.
+  `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` are not passed to `claude -p` (#1194),
+  so an exported key never bills instead of the plan; settings files, and so
+  `apiKeyHelper`, are ignored. A Claude Code set up for Bedrock, Vertex or Foundry, a
+  `CLAUDE_CODE_OAUTH_TOKEN` or an `ANTHROPIC_PROFILE` is used as configured.
   The model keys still pick the model, as a Claude alias or id. The call is isolated so
   it can't feed techne (`--restricted`, hooks disabled, no MCP servers or tools, no
   session transcript, a temporary working directory). It's bounded by
   `custodian.timeout_seconds` on the custodian rails and at 300s elsewhere. techne
   never stores or logs Claude credentials. `model_engine` is operator-governed
   (`EGRESS_KEYS`), and `techne doctor` adds `model:engine`, which names an API key or
-  auth token set in its environment and says this engine ignores it. The resident
+  auth token set in its environment and says it is withheld. The resident
   emit/ingest path is unaffected.
 
 ## [0.18.1] — 2026-10-05
