@@ -10,9 +10,10 @@ import pytest
 def _get_dist_requires():
     """Return (requires_list, from_pyproject) where from_pyproject is True if we
     fell back to reading pyproject.toml directly (editable-install edge case)."""
-    import importlib.metadata
 
-    reqs = importlib.metadata.requires("techne")
+    import techne
+
+    reqs = techne._distribution().requires
     if reqs is not None:
         return reqs, False
 
@@ -189,11 +190,9 @@ def test_an_installed_build_still_trusts_dist_info(tmp_path, monkeypatch):
     (pkg.parent / "pyproject.toml").write_text('[project]\nversion = "9.9.9"\n')
     monkeypatch.setattr(techne, "__file__", str(pkg / "__init__.py"))
 
-    import importlib.metadata
-
     # POSITIVE, not `!= "9.9.9"`: the negative also passes if the dist-info lookup
     # broke entirely and returned "0.0.0+unknown", which would witness nothing.
-    assert techne._resolve_version() == importlib.metadata.version("techne")
+    assert techne._resolve_version() == techne._distribution().version
 
 
 @pytest.mark.parametrize(
@@ -250,11 +249,10 @@ def test_a_checkout_never_answers_from_the_dist_info(tmp_path, monkeypatch):
     the bad one — which is the same reason `test_installed_version_matches_pyproject`
     was green through #763 and #825.
     """
-    import importlib.metadata
 
     import techne
 
-    installed = importlib.metadata.version("techne")
+    installed = techne._distribution().version
 
     pkg = tmp_path / "techne"
     pkg.mkdir()  # a checkout with NO pyproject: the branch cannot read a version
@@ -284,12 +282,11 @@ def test_an_unusable_dunder_file_degrades_instead_of_raising(monkeypatch, bad_fi
     widened in the same commit that widened the inner one, against the same failure
     mode, and having missed that once is the reason both now catch `Exception`.
     """
-    import importlib.metadata
 
     import techne
 
     monkeypatch.setattr(techne, "__file__", bad_file)
-    assert techne._resolve_version() == importlib.metadata.version("techne")
+    assert techne._resolve_version() == techne._distribution().version
 
 
 def test_a_versionless_dist_info_degrades_instead_of_returning_none(tmp_path, monkeypatch):

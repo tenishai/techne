@@ -90,6 +90,39 @@ __all__ = [
 ]
 
 
+# The distribution names this package has shipped under, newest first. It became
+# tenish-techne in 0.18.2 (tenish names every released distribution
+# tenish-<project>); an editable install made before that keeps reporting the
+# old name until it is reinstalled, so lookups fall back to it.
+DIST_NAMES = ("tenish-techne", "techne")
+DIST_NAME = DIST_NAMES[0]
+# How to install techne with extras, for hints. PyPI's `techne` is an unrelated
+# package, so a hint must never be a bare `pip install techne[...]`.
+INSTALL_URL = "git+https://github.com/tenishai/techne.git"
+
+
+def install_spec(extras: str = "", ref: str = "") -> str:
+    """A pip requirement for this package from git, e.g. for an error hint."""
+    extra = f"[{extras}]" if extras else ""
+    at = f"@{ref}" if ref else ""
+    return f"{DIST_NAME}{extra} @ {INSTALL_URL}{at}"
+
+
+def _distribution():
+    """This package's installed distribution, under its current or former name.
+
+    Calls `importlib.metadata.distribution` at lookup time (tests fake it there)."""
+    import importlib.metadata as md
+
+    error = None
+    for name in DIST_NAMES:
+        try:
+            return md.distribution(name)
+        except md.PackageNotFoundError as exc:
+            error = exc
+    raise error
+
+
 def _is_installed_path(package_dir) -> bool:
     """THE build rule: is this RESOLVED package directory an installed build?
 
@@ -219,12 +252,17 @@ def _resolve_version() -> str:
     # `serverInfo` string, and on the Python that makes good on that warning it
     # raises KeyError — not PackageNotFoundError, so it would escape a narrow
     # guard entirely. The RETURN is therefore validated as well as the call.
-    from importlib.metadata import version
+    import importlib.metadata as md
 
-    try:
-        installed = version("techne")
-    except Exception:
-        installed = None
+    installed = None
+    for name in DIST_NAMES:  # current name first, then the pre-0.18.2 one
+        try:
+            installed = md.version(name)
+            break
+        except md.PackageNotFoundError:
+            continue
+        except Exception:
+            break
     if isinstance(installed, str) and installed.strip():
         # COLLAPSE WHITESPACE, do not merely strip it. A FOLDED `Version:` header
         # is a non-empty str containing an embedded newline, which would otherwise

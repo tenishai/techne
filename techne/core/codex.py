@@ -5,7 +5,7 @@ codebase is files → symbols → call/import/def-use edges. Stored RELATIONALLY
 SQLite substrate (NOT a graph DB — that breaks the single-file/portable substrate).
 Graph queries (reachability / blast-radius) are hand-rolled recursive CTEs in v1
 (dep-free); graphqlite (Cypher + PageRank/Louvain as a SQLite UDF) is an optional
-`techne[codex]` upgrade later, not core.
+`tenish-techne[codex]` upgrade later, not core.
 
 Scope here is the persona-agnostic STORAGE substrate — schema + the graph data layer.
 The Tree-sitter SourceAdapter that parses real repos lives in techne/codex/source.py.
@@ -208,7 +208,7 @@ def _codex_v1_to_v2(conn) -> None:
 
 #: Directory names whose CONTENTS `_walk_repo` refuses to index, frozen at v3.
 #: Held here rather than imported from `techne.codex.source._SKIP_DIRS` on purpose:
-#: this migration must run WITHOUT the optional `techne[codex]` extra, and it must
+#: this migration must run WITHOUT the optional `tenish-techne[codex]` extra, and it must
 #: encode what the skip list meant AT v3 — a migration whose meaning changes when
 #: someone edits a constant is not a migration.
 _V3_PURGE_SEGMENTS = ("site-packages", "dist-packages")

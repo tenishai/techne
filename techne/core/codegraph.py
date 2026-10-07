@@ -725,7 +725,7 @@ def _unindexed_count(indexed_rows, repo_root) -> tuple[int | None, str]:
     than a local notion of "source file". A second definition of which files
     belong in the graph would drift from the one that populates it, and this
     function exists precisely to catch drift. That module's grammar imports are
-    lazy, so this works without the optional `techne[codex]` extra — verified by
+    lazy, so this works without the optional `tenish-techne[codex]` extra — verified by
     importing it with `tree_sitter` blocked.
 
     ``coverage`` is the honest part:

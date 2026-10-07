@@ -306,8 +306,10 @@ def _select_backend(config: "Config | None") -> tuple[str, str]:
     # would have hit the second branch. So reaching here with model2vec_ok=True
     # is impossible; both `if`s above are exhaustive for any True flag. Only
     # the neither-importable case falls through.
+    from techne import install_spec
+
     raise ImportError(
-        "no embedding backend available — install techne[vectors] "
+        f"no embedding backend available — run `pip install '{install_spec('vectors')}'` "
         "(model2vec on py3.14+, fastembed on <3.14)"
     )
 

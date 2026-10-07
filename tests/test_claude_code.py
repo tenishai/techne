@@ -663,6 +663,21 @@ class TestHealCommand:
         )
         assert hooks_mod._heal_command() == 'pipx reinstall --python "$(command -v python3)" techne'
 
+    def test_pipx_install_names_the_venv_it_lives_in(self, monkeypatch):
+        # 0.18.2 renamed the distribution, so pipx's environment is tenish-techne for a
+        # new install and techne for an old one; the heal names the one it is in.
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        monkeypatch.setattr(
+            hooks_mod,
+            "_interpreter",
+            lambda: Path("/home/user/.local/pipx/venvs/tenish-techne/bin/python"),
+        )
+        assert (
+            hooks_mod._heal_command()
+            == 'pipx reinstall --python "$(command -v python3)" tenish-techne'
+        )
+
     def test_system_non_venv(self, monkeypatch):
         # system install (prefix == base_prefix): pip reinstall with
         # --break-system-packages (same flag logic as preflight_guard), then PY

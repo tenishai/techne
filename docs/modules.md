@@ -13,7 +13,7 @@ A guiding principle worth stating up front: **techne's "thinking" features use t
 The substrate. Install it and run `techne init`, and an agent has durable memory across sessions — in **one local SQLite file**, no server, no cloud:
 
 ```bash
-pipx install "techne @ git+https://github.com/tenishai/techne.git@v0.18.1"
+pipx install "tenish-techne @ git+https://github.com/tenishai/techne.git@v0.18.2"
 pipx ensurepath
 ```
 
@@ -43,7 +43,7 @@ Two retrieval shapes:
 **Why it's different:** git-anchored memories carry a **freshness grade** — a fact tied to a file that has since changed/moved/been deleted is flagged `modified/moved/deleted/unknown` (and `diverged` when the file is intact but the commit it was pinned at left HEAD's history), so the agent spends verification effort only where the ground actually shifted. Memories whose basis was superseded are surfaced as **uncertain** and down-ranked instead of asserted as fact.
 
 ```bash
-pipx install --force "techne[vectors] @ git+https://github.com/tenishai/techne.git@v0.18.1"   # semantic recall (FTS works without it)
+pipx install --force "tenish-techne[vectors] @ git+https://github.com/tenishai/techne.git@v0.18.2"   # semantic recall (FTS works without it)
 techne init                              # downloads the model once and embeds what is stored
 ```
 
@@ -72,7 +72,7 @@ The part most memory systems skip. techne keeps memory *honest and lean* through
 **Why it's different:** memory that *curates itself using the model already running*, and proposes rather than overwrites. For headless/background runs with no agent in the loop, an optional **operator-model** path (`techne[llm]`) can drive the same passes autonomously — but it's strictly opt-in; the default is the agent's own model.
 
 ```bash
-pipx install --force "techne[llm] @ git+https://github.com/tenishai/techne.git@v0.18.1"   # OPTIONAL: autonomous/headless model passes
+pipx install --force "tenish-techne[llm] @ git+https://github.com/tenishai/techne.git@v0.18.2"   # OPTIONAL: autonomous/headless model passes
 ```
 
 ---
@@ -118,7 +118,7 @@ Point it at a repo (`techne codex index`) and it extracts a **symbol + call/impo
 > **When to reach for it (and when not):** see [`codex-usage.md`](./codex-usage.md) — Codex is a *relationship-mapping engine* (code is adapter #1), best for graphs too big to eyeball or needing transitive queries; for ad-hoc "where is X" and small graphs, grep/memory win. What decides whether such a graph lives or rots isn't persistence — it's having an automatic, high-value consumer.
 
 ```bash
-pipx install --force "techne[codex] @ git+https://github.com/tenishai/techne.git@v0.18.1"
+pipx install --force "tenish-techne[codex] @ git+https://github.com/tenishai/techne.git@v0.18.2"
 techne codex index .
 ```
 
@@ -151,7 +151,7 @@ Because domains live in separate files, cross-db invariants are maintained by re
 **Why it's different:** the audit **fails open** — absent the auditor, the anti-chaining gate still holds; the CVE check only ever *sharpens* it, never blocks the basics.
 
 ```bash
-pipx install --force "techne[security] @ git+https://github.com/tenishai/techne.git@v0.18.1"   # adds the CVE pre-install audit
+pipx install --force "tenish-techne[security] @ git+https://github.com/tenishai/techne.git@v0.18.2"   # adds the CVE pre-install audit
 ```
 
 ---
@@ -169,13 +169,13 @@ techne is delivered as an **MCP server**, so its tools (`store`, `recall`, `sear
 | You want… | Install | Adds |
 |---|---|---|
 | Just agent memory (capture, FTS recall, threads, knowledge) | `techne` | core (lightweight) |
-| Semantic recall | `techne[vectors]` | `fastembed` (Python <3.14) or `model2vec` (3.14+), plus `sqlite-vec` |
-| Autonomous/headless model passes | `techne[llm]` | operator-model gateway |
-| Code-graph | `techne[codex]` | tree-sitter + grammars |
-| CVE pre-install audit | `techne[security]` | `pip-audit` |
-| Continuous filesystem ingest | `techne[watch]` | `watchdog` |
+| Semantic recall | `tenish-techne[vectors]` | `fastembed` (Python <3.14) or `model2vec` (3.14+), plus `sqlite-vec` |
+| Autonomous/headless model passes | `tenish-techne[llm]` | operator-model gateway |
+| Code-graph | `tenish-techne[codex]` | tree-sitter + grammars |
+| CVE pre-install audit | `tenish-techne[security]` | `pip-audit` |
+| Continuous filesystem ingest | `tenish-techne[watch]` | `watchdog` |
 
-Install any row from git: `pipx install "techne[<extras>] @ git+https://github.com/tenishai/techne.git@v0.18.1"`. **The PyPI package named
+Install any row from git: `pipx install "tenish-techne[<extras>] @ git+https://github.com/tenishai/techne.git@v0.18.2"`. **The PyPI package named
 `techne` is a different project** — `pip install techne` does not install this one.
 
 *The memory-hygiene passes (reflect/consolidate/dream/evidence/claims) need **no** extra — they run on the agent's own model.*

@@ -62,7 +62,7 @@ techne init
 > On Debian/Ubuntu, `pipx` isn't preinstalled: `sudo apt update && sudo apt install pipx` (macOS: `brew install pipx`).
 >
 > ```bash
-> pipx install "techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.18.1"
+> pipx install "tenish-techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.18.2"
 > pipx ensurepath
 > ```
 >
@@ -84,8 +84,14 @@ techne init
 > Drop it for a **core-only** install, or swap in any other set — see the
 > [extras matrix](#extras--what-to-install) for the full possibility space.
 >
-> Upgrade later with `pipx install --force "techne[recommended] @ git+https://github.com/tenishai/techne.git@<newer-tag>"`
+> Upgrade later with `pipx install --force "tenish-techne[recommended] @ git+https://github.com/tenishai/techne.git@<newer-tag>"`
 > (a plain `pipx install` on an already-installed techne refuses without `--force`).
+>
+> **Upgrading from 0.18.1 or earlier:** the distribution was renamed from `techne` to
+> `tenish-techne` in 0.18.2 (the `techne` command and import are unchanged). pipx keeps
+> the old `techne` environment and its `techne` command, so remove it first, then
+> install, then re-run `techne init` so the hooks point at the new interpreter:
+> `pipx uninstall techne`, the install line above, `techne init`.
 >
 > **An upgrade replaces the code and nothing else. Run these afterwards:**
 >
@@ -216,7 +222,7 @@ gracefully** when absent (vector search returns empty, the CVE gate fails open, 
 
 Combine freely — extras compose: `pip install -e ".[vectors,watch,llm]"`. For the
 non-editable pinned install, use the direct-reference form:
-`pipx install "techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.18.1"`.
+`pipx install "tenish-techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.18.2"`.
 
 **Python 3.14 note:** `fastembed` pulls in `onnxruntime` which has no 3.14 wheel yet. `techne` auto-selects `model2vec` (a numpy-only static embedding backend, no onnxruntime/torch) as the vector backend on 3.14+ instead. FTS5 search works fully on every supported Python (3.11+); vector search works via whichever backend is available.
 

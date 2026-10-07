@@ -33,8 +33,8 @@ trap 'rm -rf "$WORKDIR"' EXIT
 BUILD_DIR="$WORKDIR/dist"
 step "Build wheel from $REPO_ROOT"
 uv build --wheel --out-dir "$BUILD_DIR" "$REPO_ROOT"
-WHEEL="$(ls "$BUILD_DIR"/techne-*.whl 2>/dev/null || true)"
-[ -n "$WHEEL" ] && [ -f "$WHEEL" ] || fail "no techne-*.whl produced in $BUILD_DIR"
+WHEEL="$(ls "$BUILD_DIR"/tenish_techne-*.whl 2>/dev/null || true)"
+[ -n "$WHEEL" ] && [ -f "$WHEEL" ] || fail "no tenish_techne-*.whl produced in $BUILD_DIR"
 echo "wheel: $WHEEL"
 
 # Read the version FRESH from pyproject.toml every run — deliberately not
@@ -74,9 +74,9 @@ run_pass() {
     echo "    -> $out"
 
     echo "  + installed package version matches pyproject"
-    got_version="$("$venv/bin/python" -c "import importlib.metadata as m; print(m.version('techne'))")"
+    got_version="$("$venv/bin/python" -c "import importlib.metadata as m; print(m.version('tenish-techne'))")"
     [ "$got_version" = "$EXPECTED_VERSION" ] \
-      || fail "$label: importlib.metadata reports techne==$got_version, pyproject declares $EXPECTED_VERSION"
+      || fail "$label: importlib.metadata reports tenish-techne==$got_version, pyproject declares $EXPECTED_VERSION"
 
     echo "  + entry points (console_scripts, techne.sync_adapters)"
     "$venv/bin/python" "$REPO_ROOT/tests/test_entry_points.py"
