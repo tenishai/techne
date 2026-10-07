@@ -183,9 +183,9 @@ def end_session(
     conn = connect(db_path)
     try:
         llm_src = summary_llm_source if source == "llm" else None
-        # "Now" and "clean" are right for the Stop hook, which fires as the session
-        # ends. They are wrong for a replay of a session that went quiet long ago
-        # (issue #986): `techne session-end` on a session dead for 30 days recorded a
+        # "Now" and "clean" are right for the SessionEnd hook, which fires as the
+        # session ends (Stop passes mark_ended=False, above). They are wrong for a
+        # replay of a session that went quiet long ago (issue #986): `techne session-end` on a session dead for 30 days recorded a
         # clean exit 30 days late. A caller that can be replaying passes
         # `derive_if_idle_hours`; past that silence the end is DERIVED from last
         # activity, the same value and stamp `close_abandoned_sessions` writes.

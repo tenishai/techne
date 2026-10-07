@@ -562,8 +562,8 @@ def run_session_end(
     Returns a dict: {threads, linked, aged_completed, aged_stale, queued}.
 
     `derive_if_idle_hours` is for callers that may be REPLAYING a session rather
-    than ending it now (the `session-end` CLI); see `end_session`. The Stop hook
-    leaves it None, because it only ever fires as the session ends.
+    than ending it now (the `session-end` CLI); see `end_session`. The SessionEnd
+    hook leaves it None, because it fires as the session ends. (Stop stamps no end.)
 
     Note: sessions with fewer than MIN_NEW_OBSERVATIONS observations are still
     processed — the minimum-observation guard lives in the hook, not here.

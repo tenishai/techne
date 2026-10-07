@@ -76,11 +76,12 @@ export TECHNE_BIN="/ABS/PATH/techne/.venv/bin/techne"
   opencode tool, content = title + output, capped at 4000 chars).
 - **`chat.message`** → a `UserPrompt` observation per user prompt (so memory
   records what was asked, not just what tools ran).
-- **`session.idle`** (turn complete) → runs `techne session-end`, the analogue
-  of Claude Code's Stop hook: detects threads + summaries + resume points for
-  the opencode session, so it surfaces in `techne_resume` / `techne_threads` /
-  the login banner. Idempotent (content-addressed thread IDs), so firing per
-  turn is safe.
+- **`session.idle`** (turn complete) → runs `techne session-end`, which is the
+  final pass (Claude Code runs it on SessionEnd): detects threads + summaries +
+  resume points for the opencode session, so it surfaces in `techne_resume` /
+  `techne_threads` / the login banner. Firing per turn is safe
+  (content-addressed thread IDs), but each turn with new work records the
+  session as ended and, with a sync adapter, sends its threads again.
 - The first observation for a session creates the session row stamped
   `platform: opencode`.
 

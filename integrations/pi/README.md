@@ -82,10 +82,12 @@ export TECHNE_BIN="/ABS/PATH/techne/.venv/bin/techne"
 - **`message_end`** (user role) → a `UserPrompt` observation per user prompt (so
   memory records what was asked, not just what tools ran).
 - **`agent_settled`** (run fully done — no retry/compaction/follow-up left) →
-  runs `techne session-end`, the analogue of Claude Code's Stop hook: detects
-  threads + summaries + resume points for the pi session, so it surfaces in
-  `techne_resume` / `techne_threads` / the login banner. Idempotent
-  (content-addressed thread IDs), so firing per settled run is safe.
+  runs `techne session-end`, which is the final pass (Claude Code runs it on
+  SessionEnd): detects threads + summaries + resume points for the pi session,
+  so it surfaces in `techne_resume` / `techne_threads` / the login banner.
+  Firing per settled run is safe (content-addressed thread IDs), but each run
+  with new work records the session as ended and, with a sync adapter, sends
+  its threads again.
 - The first observation for a session creates the session row stamped
   `platform: pi`.
 
