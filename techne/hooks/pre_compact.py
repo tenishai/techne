@@ -41,7 +41,7 @@ def main():
             record_hook_run(db, HOOK_NAME, outcome="noop:no-session-id")
         sys.exit(0)
 
-    from techne.hooks._timeout import bounded_hook
+    from techne.hooks._timeout import HookTimeout, bounded_hook
 
     # Config.load() can raise (corrupt/unreadable config). A hook that throws here
     # would break the host's compaction; degrade to a no-op. (techne#166)
@@ -81,6 +81,23 @@ def main():
 
             save_checkpoint(config.db_path, session_id, trigger, checkpoint)
             print(f"techne: checkpoint saved ({trigger})", file=sys.stderr)
+
+            # Thread-summary checkpoint (techne#1187): compaction is where a long
+            # session most often dies, so send every thread with new work now.
+            # Its own try: a sync failure must not mark the checkpoint failed.
+            try:
+                from techne.core.state import observation_count
+                from techne.hooks.session_end import MIN_NEW_OBSERVATIONS
+                from techne.lifecycle import MODE_COMPACT, _has_live_consumer, run_session_end
+
+                if _has_live_consumer(config) and (
+                    observation_count(config.db_path, session_id) >= MIN_NEW_OBSERVATIONS
+                ):
+                    run_session_end(config, session_id, mode=MODE_COMPACT)
+            except HookTimeout:
+                raise  # out of budget: let the outer handler record it
+            except Exception as e:  # noqa: BLE001 — never fail the checkpoint over sync
+                print(f"techne: thread-summary checkpoint deferred: {e}", file=sys.stderr)
         record_hook_run(config.db_path, HOOK_NAME, outcome="ok", detail=f"trigger={trigger}")
     except Exception as e:
         # INSIDE the bounded_hook's except, so this also catches HookTimeout —

@@ -260,6 +260,12 @@ class ThreadConfig:
     # added to DEFAULT_ENTITY_PATTERNS.
     tool_families: dict[str, str] = field(default_factory=dict)
     entity_patterns: list[str] = field(default_factory=list)
+    # Thread-summary sync checkpoints (techne#1187). Claude Code's Stop fires every
+    # turn; a thread is re-sent on Stop only once it has grown by this many
+    # observations since it was last enqueued AND this many minutes have passed.
+    # SessionEnd and PreCompact send every thread with new work regardless.
+    checkpoint_min_new_observations: int = 10
+    checkpoint_min_interval_minutes: int = 5
 
 
 @dataclass
@@ -1301,6 +1307,18 @@ class Config:
                 summarizer=summarizer,
                 tool_families={str(k): str(v) for k, v in tool_families.items()},
                 entity_patterns=[str(p) for p in entity_patterns],
+                checkpoint_min_new_observations=int(
+                    t.get(
+                        "checkpoint_min_new_observations",
+                        _td.checkpoint_min_new_observations,
+                    )
+                ),
+                checkpoint_min_interval_minutes=int(
+                    t.get(
+                        "checkpoint_min_interval_minutes",
+                        _td.checkpoint_min_interval_minutes,
+                    )
+                ),
             )
 
         if "hooks" in raw and isinstance(raw["hooks"], dict):
@@ -1624,6 +1642,8 @@ class Config:
                 "complete_after_hours": self.threads.complete_after_hours,
                 "detector": self.threads.detector,
                 "summarizer": self.threads.summarizer,
+                "checkpoint_min_new_observations": self.threads.checkpoint_min_new_observations,
+                "checkpoint_min_interval_minutes": self.threads.checkpoint_min_interval_minutes,
             },
             "hooks": {
                 "post_tool_use": self.hooks.post_tool_use,

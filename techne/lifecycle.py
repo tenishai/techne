@@ -7,6 +7,7 @@ custom agent process or notebook).
 
 import logging
 import sys
+import time
 
 from techne.config import Config
 
@@ -384,14 +385,179 @@ def persist_detection(
         conn.close()
 
 
+MODE_FINAL = "final"
+MODE_CHECKPOINT = "checkpoint"
+MODE_COMPACT = "compact"
+_MODES = frozenset({MODE_FINAL, MODE_CHECKPOINT, MODE_COMPACT})
+
+#: Per-session sync state (techne#1187): for each thread, the observation count and
+#: time it was last enqueued; whether some thread has unsent work (`owed`); and
+#: whether a final pass has run (`finalized`).
+_SYNC_STATE_PREFIX = "thread_sync."
+
+
+def _load_sync_state(config, session_id: str) -> dict:
+    from techne.core.database import connect
+    from techne.core.extension_state import get_state
+
+    conn = connect(config.db_path)
+    try:
+        state = get_state(conn, _SYNC_STATE_PREFIX + session_id) or {}
+    finally:
+        conn.close()
+    state.setdefault("threads", {})
+    return state
+
+
+def _save_sync_state(config, session_id: str, state: dict) -> None:
+    from techne.core.database import connect
+    from techne.core.extension_state import prune_stale, set_state
+
+    conn = connect(config.db_path)
+    try:
+        set_state(conn, _SYNC_STATE_PREFIX + session_id, state)
+        try:
+            prune_stale(conn, _SYNC_STATE_PREFIX)
+        except Exception as e:  # noqa: BLE001 — never fail teardown over a prune
+            print(f"techne: thread_sync prune skipped: {e}", file=sys.stderr)
+    finally:
+        conn.close()
+
+
+def _sync_owed(config, session_id: str) -> bool:
+    """True when a checkpoint left some thread's new work unsent."""
+    if not _has_live_consumer(config):
+        return False
+    return bool(_load_sync_state(config, session_id).get("owed"))
+
+
+def _threads_due(config, session_id: str, threads, mode: str) -> list:
+    """The threads to enqueue on this pass (techne#1187).
+
+    A thread is never re-sent unchanged. On a checkpoint it must also have grown by
+    `checkpoint_min_new_observations` since it was last enqueued, with at least
+    `checkpoint_min_interval_minutes` elapsed; a thread never sent before needs
+    only the growth.
+    """
+    from datetime import datetime, timezone
+
+    from techne.core.thread_orchestrator import thread_row_id
+
+    sent = _load_sync_state(config, session_id)["threads"]
+    now = datetime.now(timezone.utc)
+    min_new = config.threads.checkpoint_min_new_observations
+    min_gap_s = config.threads.checkpoint_min_interval_minutes * 60
+    due = []
+    for t in threads:
+        n = len(t.observation_indices)
+        prev = sent.get(thread_row_id(session_id, t))
+        prev_n = prev["obs"] if prev else 0
+        if n == prev_n:
+            continue
+        if mode == MODE_CHECKPOINT:
+            if n - prev_n < min_new:
+                continue
+            if prev and (now - datetime.fromisoformat(prev["at"])).total_seconds() < min_gap_s:
+                continue
+        due.append(t)
+    return due
+
+
+def _record_enqueued(config, session_id: str, threads, due, mode: str) -> None:
+    from datetime import datetime, timezone
+
+    from techne.core.thread_orchestrator import thread_row_id
+
+    state = _load_sync_state(config, session_id)
+    now = datetime.now(timezone.utc).isoformat()
+    for t in due:
+        state["threads"][thread_row_id(session_id, t)] = {
+            "obs": len(t.observation_indices),
+            "at": now,
+        }
+    sent = state["threads"]
+    state["owed"] = any(
+        sent.get(thread_row_id(session_id, t), {}).get("obs") != len(t.observation_indices)
+        for t in threads
+    )
+    _save_sync_state(config, session_id, state)
+
+
+def _mark_finalized(config, session_id: str) -> None:
+    if not _has_live_consumer(config):
+        return
+    state = _load_sync_state(config, session_id)
+    state["finalized"] = True
+    state["owed"] = False
+    _save_sync_state(config, session_id, state)
+
+
+def finalize_quiet_sessions(
+    config, *, exclude_session_id: str = "", limit: int = 1
+) -> list[str]:
+    """Run the final pass for sessions that ended without one (techne#1187).
+
+    A session killed or crashed never fires SessionEnd, so its last checkpoint may
+    have left work unsent. This finds sessions whose sync state is still owed, not
+    finalized, and silent for `ABANDONED_SESSION_IDLE_HOURS` — the same idle window
+    `close_abandoned_sessions` uses, which is what keeps it from finalizing a live
+    peer — and finalizes up to `limit` of them. Returns the ids it finalized.
+    """
+    if not _has_live_consumer(config):
+        return []
+    from techne.core.database import connect
+    from techne.core.state import ABANDONED_SESSION_IDLE_HOURS
+
+    conn = connect(config.db_path)
+    try:
+        rows = conn.execute(
+            """SELECT substr(e.name, ?) AS sid
+                 FROM extension_state e
+                WHERE substr(e.name, 1, ?) = ?
+                  AND json_extract(e.payload_json, '$.owed') = 1
+                  AND coalesce(json_extract(e.payload_json, '$.finalized'), 0) = 0
+                  AND e.updated_at < ?
+                ORDER BY e.updated_at""",
+            (
+                len(_SYNC_STATE_PREFIX) + 1,
+                len(_SYNC_STATE_PREFIX),
+                _SYNC_STATE_PREFIX,
+                int(time.time()) - ABANDONED_SESSION_IDLE_HOURS * 3600,
+            ),
+        ).fetchall()
+    finally:
+        conn.close()
+    done = []
+    for row in rows:
+        sid = row["sid"]
+        if sid == exclude_session_id or len(done) >= limit:
+            continue
+        run_session_end(
+            config, sid, derive_if_idle_hours=ABANDONED_SESSION_IDLE_HOURS, mode=MODE_FINAL
+        )
+        done.append(sid)
+    return done
+
+
 def run_session_end(
     config: Config,
     session_id: str,
     summary: str | None = None,
     *,
     derive_if_idle_hours: int | None = None,
+    mode: str = MODE_FINAL,
 ) -> dict:
     """End a session: detect threads, link, save, age, enqueue outbox sync.
+
+    `mode` (techne#1187) says what kind of end this is:
+    - ``"final"`` (default): the session is over. Every thread with new work is
+      enqueued, and `ended_at` is stamped. SessionEnd, the CLI and the quiet-session
+      sweep use it.
+    - ``"checkpoint"``: the Stop hook, which fires every TURN. A thread is enqueued
+      only once it passes the checkpoint gate (`threads.checkpoint_*`), and
+      `ended_at` is left alone.
+    - ``"compact"``: PreCompact. Every thread with new work is enqueued, as in
+      final, but the session is not ended.
 
     Returns a dict: {threads, linked, aged_completed, aged_stale, queued}.
 
@@ -403,6 +569,9 @@ def run_session_end(
     processed — the minimum-observation guard lives in the hook, not here.
     """
     import os
+
+    if mode not in _MODES:
+        raise ValueError(f"mode must be one of {sorted(_MODES)}, got {mode!r}")
 
     from techne.core.database import connect
     from techne.core.extension_state import get_state, prune_stale, set_state
@@ -437,7 +606,11 @@ def run_session_end(
             prev = get_state(gate_conn, ext_key)
         finally:
             gate_conn.close()
-        if prev is not None and prev.get("last_obs_count") == len(observations):
+        if (
+            prev is not None
+            and prev.get("last_obs_count") == len(observations)
+            and not (mode != MODE_CHECKPOINT and _sync_owed(config, session_id))
+        ):
             # Detection is skipped, but a caller-supplied summary must STILL be
             # persisted (and ended_at stamped): the CLI/plugin session-end path
             # (`techne session-end --summary`, opencode session.idle) passes one
@@ -445,14 +618,19 @@ def run_session_end(
             # write always ran. Dropping it here would be a silent data loss
             # (Prudence, #356). The heuristic-summary branch is intentionally NOT
             # re-run — that's the recompute the gate exists to avoid.
-            if summary:
+            if summary or mode == MODE_FINAL:
+                # A final pass records the end even when there is nothing new to
+                # detect: the last Stop already detected, and only SessionEnd ends.
                 end_session(
                     config.db_path,
                     session_id,
-                    summary=summary,
+                    summary=summary or None,
                     source="manual",
                     derive_if_idle_hours=derive_if_idle_hours,
+                    mark_ended=mode == MODE_FINAL,
                 )
+                if mode == MODE_FINAL:
+                    _mark_finalized(config, session_id)
             aged = age_threads(config.db_path, config)
             return {
                 "threads": 0,
@@ -540,7 +718,8 @@ def run_session_end(
     ensure_sinks_registered(config)
     if _has_live_consumer(config):
         target = _thread_summary_target(config)
-        for t in threads:
+        due = _threads_due(config, session_id, threads, mode)
+        for t in due:
             enqueue(
                 config.db_path,
                 target,
@@ -554,8 +733,10 @@ def run_session_end(
                     "resume_points": t.resume_points,
                     "agent_identity": agent_identity,
                 },
+                supersede_key="thread_id",
             )
             queued += 1
+        _record_enqueued(config, session_id, threads, due, mode)
 
     # Reflection pass — opt-in, never blocks session teardown. Writes proposals
     # to knowledge_candidates for human review (config.reflect.write_to controls
@@ -583,6 +764,7 @@ def run_session_end(
             summary=summary,
             source="manual",
             derive_if_idle_hours=derive_if_idle_hours,
+            mark_ended=mode == MODE_FINAL,
         )
     else:
         end_session(
@@ -591,7 +773,10 @@ def run_session_end(
             summary=format_combined_summary(threads),
             source="heuristic",
             derive_if_idle_hours=derive_if_idle_hours,
+            mark_ended=mode == MODE_FINAL,
         )
+    if mode == MODE_FINAL:
+        _mark_finalized(config, session_id)
 
     # Team topology: egress live knowledge to the base Archivist AFTER reflection
     # (which may have promoted new live knowledge). No-op unless bound to a store; the

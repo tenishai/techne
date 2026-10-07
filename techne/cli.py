@@ -444,7 +444,7 @@ def _render_liveness(config) -> tuple[int, int]:
         # settings.json registration is CLAUDE-CODE's mechanism, and both sibling
         # surfaces already guard on it (`techne status` above; render_drift_block,
         # session_start.py). check_hook_drift does NOT self-guard —
-        # _expected_registrations returns SessionStart/PreCompact/PostCompact/Stop
+        # _expected_registrations returns SessionStart/PreCompact/PostCompact/Stop/SessionEnd
         # for any config at all. Without this guard, an operator on another
         # platform who merely HAS a ~/.claude/settings.json on the machine (the
         # ordinary case, not a corner one) gets a doctor that exits 1 on a
