@@ -5,6 +5,15 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Changed
+
+- **The DCO check's member exemption keys on write access, not `author_association`**
+  (#1182). CI asks GitHub's repository-permission API about the PR author and skips the
+  check for admin, maintain or write access. `author_association` reported private org
+  members inconsistently (`COLLABORATOR` here, `CONTRIBUTOR` for an org admin elsewhere),
+  and its `COLLABORATOR` value would also have exempted outside collaborators with read
+  access. If the lookup fails, the check runs. PRs from forks are always checked.
+
 ### Fixed
 
 - **`fastembed` is capped below 0.9** (`[vectors]` extra). fastembed 0.9.0 (released

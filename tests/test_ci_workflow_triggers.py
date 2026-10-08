@@ -1301,8 +1301,8 @@ def test_dco_check_runs_on_both_sides_of_the_trust_split():
     documented exemptions. PR #1135: `arch-cards` skips a commit authored
     exactly as dependabot[bot], `fork-pr` does not, because a fork PR can forge
     any commit author and dependabot[bot]'s is no exception. #1182: `arch-cards`
-    skips a PR whose author_association is OWNER, MEMBER or COLLABORATOR;
-    `fork-pr` has no such exemption."""
+    skips a PR whose author has write access (a repository-permission lookup);
+    `fork-pr` has no such exemption and no token to look with."""
     jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
     trusted, forked = (_dco_step(j) for j in DCO_JOBS)
 
@@ -1336,23 +1336,32 @@ def test_dco_check_runs_on_both_sides_of_the_trust_split():
     )
     hunks = [line for line in diff if not line.startswith(("--- ", "+++ "))]
     assert hunks == [
-        "@@ -1,0 +2,6 @@",
-        '+case "${PR_AUTHOR_ASSOCIATION:-}" in',
-        "+  OWNER|MEMBER|COLLABORATOR)",
-        '+    echo "DCO: skipped, the PR author has write access to this repo '
-        '($PR_AUTHOR_ASSOCIATION)"',
+        "@@ -1,0 +2,16 @@",
+        "+perm=$(curl -fsS --globoff --max-time 15 \\",
+        '+  -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \\',
+        '+  "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/collaborators/$PR_AUTHOR/permission" \\',
+        "+  | jq -r '.permission // empty') || perm=",
+        '+case "$perm" in',
+        "+  admin|maintain|write)",
+        '+    echo "DCO: skipped, $PR_AUTHOR has $perm access to this repo"',
         "+    exit 0",
         "+    ;;",
+        '+  "")',
+        '+    echo "DCO: the permission lookup for $PR_AUTHOR failed; running the full check"',
+        "+    ;;",
+        "+  *)",
+        '+    echo "DCO: checking, $PR_AUTHOR has $perm access"',
+        "+    ;;",
         "+esac",
-        "@@ -13,0 +20 @@",
+        "@@ -13,0 +30 @@",
         "+skipped=0",
-        "@@ -15,0 +23,5 @@",
+        "@@ -15,0 +33,5 @@",
         f'+  if [ "$author" = "{BOT_AUTHOR}" ]; then',
         '+    echo "DCO: skipping ${c:0:12} as a bot commit ($author)"',
         "+    skipped=$((skipped + 1))",
         "+    continue",
         "+  fi",
-        "@@ -26 +38 @@",
+        "@@ -26 +48 @@",
         '-echo "DCO: $(echo "$commits" | wc -l | tr -d \' \') commit(s) signed off by their authors"',
         '+echo "DCO: $(($(echo "$commits" | wc -l | tr -d \' \') - skipped)) commit(s) signed off '
         'by their authors$( [ "$skipped" -gt 0 ] && printf \' (%s skipped as bot commits)\' '
@@ -1367,9 +1376,10 @@ def test_dco_check_runs_on_both_sides_of_the_trust_split():
         "BASE_SHA": "${{ github.event.pull_request.base.sha }}",
         "HEAD_SHA": "${{ github.event.pull_request.head.sha }}",
     }
-    assert forked["env"] == shas, "fork-pr must not see author_association"
+    assert forked["env"] == shas, "fork-pr must get no token and no PR author"
     assert trusted["env"] == shas | {
-        "PR_AUTHOR_ASSOCIATION": "${{ github.event.pull_request.author_association }}"
+        "PR_AUTHOR": "${{ github.event.pull_request.user.login }}",
+        "GH_TOKEN": "${{ github.token }}",
     }
     for step in (trusted, forked):
         assert step["if"] == "${{ !cancelled() && github.event_name == 'pull_request' }}"
@@ -1411,13 +1421,20 @@ def _git(repo: Path, *args: str, env: dict, stdin: str | None = None) -> str:
 
 
 def _run_dco(
-    tmp_path: Path, build, tamper=None, job: str = "arch-cards", association: str = "CONTRIBUTOR"
+    tmp_path: Path,
+    build,
+    tamper=None,
+    job: str = "arch-cards",
+    permission: str | None = "read",
+    author: str = "ann",
 ) -> subprocess.CompletedProcess[str]:
     """Build a repo with `build(work, commit, env)`, shallow-clone it the way
     actions/checkout does, fetch origin/main at depth 1 like arch-cards, then run
     `job`'s own DCO script (default `arch-cards`; pass `job="fork-pr"` to run the
-    strict copy instead). `association` is the PR's author_association; the
-    default CONTRIBUTOR is an outside contributor, so the check runs."""
+    strict copy instead). A stub `curl` answers the permission lookup for PR
+    author `author` with `permission`, or fails like a 404 when it is None; the
+    default `read` is an outside contributor, so the check runs. The stub writes
+    its arguments to tmp_path/curl-args, one per line."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")} | {
         "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_CONFIG_NOSYSTEM": "1",
@@ -1466,11 +1483,31 @@ def _run_dco(
     _git(ci, "fetch", "-q", "--depth=1", "origin", main_ref, env=env)
     if tamper:
         tamper(ci, env | {"BASE_SHA": base, "HEAD_SHA": head})
+    stub = tmp_path / "bin"
+    stub.mkdir()
+    (stub / "curl").write_text(
+        "#!/bin/sh\n"
+        'printf \'%s\\n\' "$@" > "$STUB_CURL_ARGS"\n'
+        '[ -n "$STUB_PERMISSION" ] || { echo "curl: (22) error: 404" >&2; exit 22; }\n'
+        'printf \'{"permission":"%s"}\\n\' "$STUB_PERMISSION"\n'
+    )
+    (stub / "curl").chmod(0o755)
     script = _dco_step(job)["run"]
     return subprocess.run(
         ["bash", "-c", script],
         cwd=ci,
-        env=env | {"BASE_SHA": base, "HEAD_SHA": head, "PR_AUTHOR_ASSOCIATION": association},
+        env=env
+        | {
+            "BASE_SHA": base,
+            "HEAD_SHA": head,
+            "PATH": f"{stub}{os.pathsep}{env['PATH']}",
+            "STUB_CURL_ARGS": str(tmp_path / "curl-args"),
+            "STUB_PERMISSION": permission or "",
+            "GITHUB_API_URL": "https://api.github.invalid",
+            "GITHUB_REPOSITORY": "tenishai/techne",
+            "PR_AUTHOR": author,
+            "GH_TOKEN": "test-token",
+        },
         capture_output=True,
         text=True,
     )
@@ -1513,27 +1550,42 @@ def _unsigned(w, c, e):
     return _history(w, c, e, feature=[{"msg": "a", "signoff": None}])
 
 
-# COLLABORATOR: the pull_request event reported a private org member as
-# COLLABORATOR (PR #1183's run, while the REST API said MEMBER).
-@pytest.mark.parametrize("association", ["OWNER", "MEMBER", "COLLABORATOR"])
-def test_dco_check_skips_owner_member_and_collaborator_prs(tmp_path, association):
-    r = _run_dco(tmp_path, _unsigned, association=association)
+@pytest.mark.parametrize("permission", ["admin", "maintain", "write"])
+def test_dco_check_skips_prs_from_writers(tmp_path, permission):
+    r = _run_dco(tmp_path, _unsigned, permission=permission)
     assert r.returncode == 0, r.stdout + r.stderr
-    assert f"write access to this repo ({association})" in r.stdout
+    assert f"skipped, ann has {permission} access to this repo" in r.stdout
+    args = (tmp_path / "curl-args").read_text().splitlines()
+    assert "https://api.github.invalid/repos/tenishai/techne/collaborators/ann/permission" in args
+    assert "Authorization: Bearer test-token" in args
 
 
-@pytest.mark.parametrize(
-    "association", ["CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", "FIRST_TIMER", "NONE", "MANNEQUIN", ""]
-)
-def test_dco_check_still_runs_for_non_members(tmp_path, association):
-    r = _run_dco(tmp_path, _unsigned, association=association)
+@pytest.mark.parametrize("permission", ["read", "triage", "none"])
+def test_dco_check_still_runs_for_non_writers(tmp_path, permission):
+    r = _run_dco(tmp_path, _unsigned, permission=permission)
     assert r.returncode == 1, r.stdout + r.stderr
+    assert f"checking, ann has {permission} access" in r.stdout
 
 
-def test_fork_pr_ignores_a_member_association(tmp_path):
-    """fork-pr never reads author_association, even if the env somehow carries it."""
-    r = _run_dco(tmp_path, _unsigned, job="fork-pr", association="MEMBER")
+def test_dco_check_runs_when_the_permission_lookup_fails(tmp_path):
+    r = _run_dco(tmp_path, _unsigned, permission=None)
     assert r.returncode == 1, r.stdout + r.stderr
+    assert "permission lookup for ann failed; running the full check" in r.stdout
+
+
+def test_dco_lookup_turns_off_curl_globbing_for_bot_logins(tmp_path):
+    """Without --globoff, curl reads `[bot]` as a glob and the lookup fails."""
+    _run_dco(tmp_path, _unsigned, author="dependabot[bot]")
+    args = (tmp_path / "curl-args").read_text().splitlines()
+    assert "--globoff" in args
+    assert any(a.endswith("/collaborators/dependabot[bot]/permission") for a in args)
+
+
+def test_fork_pr_makes_no_permission_lookup(tmp_path):
+    """fork-pr is checked whoever opened it: it never calls the lookup."""
+    r = _run_dco(tmp_path, _unsigned, job="fork-pr", permission="admin")
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert not (tmp_path / "curl-args").exists()
 
 
 def test_dco_check_fails_a_signoff_that_does_not_match_the_author(tmp_path):
