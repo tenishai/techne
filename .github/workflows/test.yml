@@ -845,19 +845,22 @@ jobs:
       # a fork PR is not a trusted writer and can forge any commit author,
       # including this one, so a fork claiming to be dependabot still fails.
       #
-      # MEMBER EXEMPTION (#1182): a PR whose author_association is OWNER,
-      # MEMBER or COLLABORATOR skips the check. The sign-off rule is enforced on
-      # PRs from people outside the team. author_association comes from
-      # GitHub's event payload, not from anything in the PR. COLLABORATOR is
-      # there because the payload reported a private org member that way (PR
-      # #1183's run, while the REST API said MEMBER). It adds no one while every
-      # repo collaborator is an org member. Narrow it back to OWNER|MEMBER
-      # before any outside collaborator is added (tenishai/agora#20
-      # checklist). Same-repo PRs from other authors, such as Dependabot
-      # (NONE), are still checked. Per PR, not
-      # per commit: a member's PR carrying an outsider's commits skips too,
-      # which is the same trusted-writer argument as the dependabot exemption.
-      # `fork-pr` gets no member exemption.
+      # WRITE-ACCESS EXEMPTION (#1182): a PR opened by someone with write
+      # access to this repo (admin, maintain or write, from any source: repo,
+      # team or org) skips the check, so the rule is enforced on PRs from
+      # people outside the team. The step asks GitHub's repository-permission
+      # API about the PR author, a login GitHub sets and the PR cannot.
+      # author_association is not used: the event payload reported a private
+      # org member as COLLABORATOR here (PR #1183's run) and an org admin as
+      # CONTRIBUTOR in other tenishai repos, and COLLABORATOR would also cover
+      # an outside collaborator with read access. If the lookup fails, the full
+      # check runs. The self-hosted runner has no `gh`, so the lookup is curl
+      # and jq; `--globoff` because curl would read the brackets in a bot login
+      # such as `dependabot[bot]` as a URL glob. Same lookup as the dco.yml in
+      # kobo, ladon, argus, gojira, bab and ergon. Per PR, not per commit: a
+      # writer's PR carrying an outsider's commits skips too, which is the same
+      # trusted-writer argument as the dependabot exemption. `fork-pr` gets no
+      # write-access exemption.
       #
       # These two exemptions are the only places the two copies differ; see
       # tests/test_ci_workflow_triggers.py::
@@ -868,13 +871,24 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PR_AUTHOR_ASSOCIATION: ${{ github.event.pull_request.author_association }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          case "${PR_AUTHOR_ASSOCIATION:-}" in
-            OWNER|MEMBER|COLLABORATOR)
-              echo "DCO: skipped, the PR author has write access to this repo ($PR_AUTHOR_ASSOCIATION)"
+          perm=$(curl -fsS --globoff --max-time 15 \
+            -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/collaborators/$PR_AUTHOR/permission" \
+            | jq -r '.permission // empty') || perm=
+          case "$perm" in
+            admin|maintain|write)
+              echo "DCO: skipped, $PR_AUTHOR has $perm access to this repo"
               exit 0
+              ;;
+            "")
+              echo "DCO: the permission lookup for $PR_AUTHOR failed; running the full check"
+              ;;
+            *)
+              echo "DCO: checking, $PR_AUTHOR has $perm access"
               ;;
           esac
           export GIT_NO_REPLACE_OBJECTS=1
@@ -1112,9 +1126,9 @@ jobs:
       # author string already has write access and could forge a matching
       # Signed-off-by too. A fork PR is not a trusted writer and can forge any
       # commit author, including this one, so a fork claiming to be dependabot
-      # must still sign off — this check stays strict here. NO MEMBER
-      # EXEMPTION either (#1182): this step never reads author_association.
-      # The bot and member exemptions in `arch-cards` are the only places the
+      # must still sign off — this check stays strict here. NO
+      # WRITE-ACCESS EXEMPTION either (#1182): this step gets no token and
+      # makes no permission lookup. The bot and write-access exemptions in `arch-cards` are the only places the
       # two copies differ; see tests/test_ci_workflow_triggers.py::
       # test_dco_check_runs_on_both_sides_of_the_trust_split.
       - name: DCO sign-off check
