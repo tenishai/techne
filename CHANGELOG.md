@@ -5,6 +5,13 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **`fastembed` is capped below 0.9** (`[vectors]` extra). fastembed 0.9.0 (released
+  2026-10-07) makes the two strict `xfail` markers for #536 in `tests/test_embeddings.py`
+  pass unexpectedly, which turned the `test` jobs red. The cap holds until 0.9's output is
+  confirmed to meet the float32 contract and those markers are removed.
+
 ## [0.18.2] — 2026-10-07
 
 ### Added
