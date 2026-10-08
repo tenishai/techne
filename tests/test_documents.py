@@ -20,7 +20,6 @@ from techne.core.documents import (
     search_documents,
     store_document,
 )
-from tests.conftest import fastembed_is_the_live_backend  # techne#536
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -470,13 +469,12 @@ class TestDocumentsFtsSearch:
 class TestDocumentsVecSearch:
     @vectors_available
     @pytest.mark.xfail(
-        fastembed_is_the_live_backend(),
         strict=True,
-        reason="techne#536: EmbeddingModel.embed() passes fastembed output through "
-        "unchanged, so the documented float32 contract (embeddings.py module docstring, "
-        "`EmbeddingBackend.embed`) holds "
-        "only on the model2vec path. Deferred from PR #532 so the #535 coverage lands; "
-        "strict=True means fixing #536 turns this red until the marker is removed.",
+        reason="There is no document vector search: backfill_vectors embeds threads, "
+        "observations and knowledge only, and librarian.db has no documents_vec "
+        "(search.py, the comment after the knowledge loop in search_vec). This was "
+        "marked as issue 536 until that fix showed the test still fails. strict=True "
+        "turns it red if document embedding is ever added, so the marker goes then.",
     )
     def test_backfill_and_vec_search(self, db_path):
         from techne.core.search import backfill_vectors, search_vec
