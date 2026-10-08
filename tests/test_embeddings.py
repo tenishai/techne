@@ -14,7 +14,6 @@ from unittest.mock import patch
 
 import pytest
 
-
 # numpy ships only with the [vectors] extra; a base install (as CI runs on
 # <3.14) has none. Skip the whole module cleanly there instead of crashing
 # collection — the wrapper tests need a real backend (hence numpy) anyway, and
@@ -216,6 +215,21 @@ class TestFastembedBackend:
         vecs = list(model.embed(["hello world"]))
         assert len(vecs) == 1
         assert vecs[0].shape == (384,)
+
+    def test_fastembed_rows_are_cast_to_float32(self):
+        """Issue 536. fastembed 0.8.1 yields float64 rows and 0.9.0 float32, so
+        the real-model tests above only catch a missing cast on an old
+        fastembed. This stub pins the cast whatever version CI installs."""
+
+        class _Float64Impl:
+            def embed(self, texts):
+                for _ in texts:
+                    yield np.ones(4, dtype=np.float64)
+
+        backend = embeddings.EmbeddingBackend("fastembed", "stub", _Float64Impl(), 4)
+        vecs = list(backend.embed(["a", "b"]))
+        assert [v.dtype for v in vecs] == [np.float32, np.float32]
+        assert np.stack(vecs).shape == (2, 4)
 
 
 # ---------------------------------------------------------------------------
