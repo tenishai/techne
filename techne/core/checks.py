@@ -577,18 +577,18 @@ def check_hooks(config) -> list[CheckResult]:
         # The second-newest session is the newest one that HAS HAD ITS CHANCE to
         # write a marker, which is exactly the predicate wanted: did a session
         # that should have recorded fail to?
-        srow = conn.execute(
-            "SELECT started_at FROM sessions ORDER BY started_at DESC LIMIT 1 OFFSET 1"
-        ).fetchone()
-        last_settled_session = srow[0] if srow else None
-        # SESSION_END IS THE EXCEPTION (techne#1235). The three other session-scoped
-        # hooks fire early, so a running peer has had its chance. session_end fires
-        # at teardown, and with two sessions open the second-newest is a live peer
-        # that cannot have ended yet — read as settled, it turned the hook STALE on
-        # every overlap. Skip sessions still present on this host. The first
-        # absent one lies within len(present) + 1 rows, which bounds the scan.
+        #
+        # ONLY WHEN SESSIONS DO NOT OVERLAP (techne#1235). With two sessions open,
+        # the second-newest is a running peer: it cannot have fired session_end
+        # yet, and it fires post_tool_use / user_prompt_submit only once it takes
+        # a turn. Read as settled, it turned those hooks STALE on every overlap.
+        # So skip sessions still present on this host and take the newest one
+        # that is not. The first absent row lies within len(present) + 1 rows,
+        # which bounds the scan. A recycled pid can make a wound-down session
+        # read present; that hides only its own row, so a dead hook is caught
+        # one session later rather than never.
         present = coord.present_session_ids()
-        last_ended_session = next(
+        last_settled_session = next(
             (
                 started
                 for sid, started in conn.execute(
@@ -609,7 +609,6 @@ def check_hooks(config) -> list[CheckResult]:
             err = get_state(conn, f"hook:{hook}:last_error") or {}
             last = run.get("ts")
             outcome = run.get("outcome")
-            reference = last_ended_session if hook == "session_end" else last_settled_session
 
             gate = _HOOK_CONFIG_GATE.get(hook)
             if gate and not gate[1](config):
@@ -634,7 +633,7 @@ def check_hooks(config) -> list[CheckResult]:
             if err:
                 verdict = Verdict.BROKEN
                 detail = f"last run FAILED: {err.get('stage', '?')} — {err.get('msg', '')}"[:160]
-            elif hook in _SESSION_SCOPED and reference:
+            elif hook in _SESSION_SCOPED and last_settled_session:
                 # SESSION-SCOPED HOOKS ARE JUDGED AGAINST THE LAST SESSION, NOT
                 # THE CLOCK (#469 review, finding 5). For a hook that only fires
                 # when a session starts, "days since last fire" measures how
@@ -645,10 +644,10 @@ def check_hooks(config) -> list[CheckResult]:
                 # the other door.
                 #
                 # The real question is: did a session that HAS HAD ITS CHANCE to
-                # record fail to? `last_settled_session` is the second-newest
-                # session precisely so the in-flight one — whose marker is
-                # written three phases after this check runs — is excluded
-                # rather than absorbed by a slack window wide enough to hide it.
+                # record fail to? `last_settled_session` skips the in-flight
+                # session — whose marker is written three phases after this
+                # check runs — and any peer still running (techne#1235), rather
+                # than absorbing them in a slack window wide enough to hide it.
                 # No wall-clock term at all: an operator's absence must never
                 # read as a broken hook.
                 # KNOWN LIMIT, stated rather than implied (#469 review 4,
@@ -680,14 +679,14 @@ def check_hooks(config) -> list[CheckResult]:
                 # means the wrong-interpreter death this module's own docstring
                 # cites is caught by NEITHER check. It is a known, open gap.
                 marker = _parse_ts(last)
-                sess = _parse_ts(reference)
+                sess = _parse_ts(last_settled_session)
                 if marker is None:
                     verdict = Verdict.UNOBSERVABLE
                     detail = f"{note}; sessions exist but no marker was ever written"
                 elif sess is not None and marker < sess:
                     verdict = Verdict.STALE
                     detail = (
-                        f"{note}; a session started at {reference} and left no marker"
+                        f"{note}; a session started at {last_settled_session} and left no marker"
                     )
                 else:
                     verdict = Verdict.LIVE

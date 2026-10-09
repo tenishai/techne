@@ -3092,14 +3092,18 @@ class TestPendingCardBacklog:
         assert not result.ok, "the NAME says 'not green' — assert it, inherited gap"
 
 
-class TestSessionEndOverlap:
-    """techne#1235 — `session_end` must not be judged against a session that is
-    still running. With two sessions open, the second-newest row is a live peer
-    that has had no chance to end, and reading it as settled turned the hook
-    STALE on every overlap.
+_SCOPED_HOOKS = ("session_start", "session_end", "post_tool_use", "user_prompt_submit")
+
+
+class TestSessionOverlap:
+    """techne#1235 — a session-scoped hook must not be judged against a session
+    that is still running. With two sessions open, the second-newest row is a
+    live peer: it cannot have fired session_end, and it fires post_tool_use and
+    user_prompt_submit only once it takes a turn. Reading it as settled turned
+    those hooks STALE on every overlap.
     """
 
-    def _store(self, tmp_path):
+    def _store(self, tmp_path, rows, marker_age):
         from techne.core.database import connect
         from techne.hooks._liveness import record_hook_run
 
@@ -3108,40 +3112,68 @@ class TestSessionEndOverlap:
         conn = connect(db)
         try:
             conn.executemany(
-                "INSERT INTO sessions (id, started_at, ended_at) VALUES (?, ?, ?)",
-                [
-                    ("ended", _iso(timedelta(hours=2)), _iso(timedelta(minutes=30))),
-                    ("peer", _iso(timedelta(minutes=10)), None),
-                    ("self", _iso(timedelta(minutes=5)), None),
-                ],
+                "INSERT INTO sessions (id, started_at, ended_at) VALUES (?, ?, ?)", rows
             )
             conn.commit()
         finally:
             conn.close()
-        # The last session that ended wrote its marker; the two running ones
-        # have not ended, so they have not.
-        record_hook_run(db, "session_end", ts=_iso(timedelta(minutes=30)))
+        for hook in _SCOPED_HOOKS:
+            record_hook_run(db, hook, ts=_iso(marker_age))
         cfg = Config()
         cfg.db_path = db
         return cfg
 
-    def _session_end(self, cfg):
+    def _scoped(self, cfg):
         from techne.core.checks import check_hooks
 
-        return next(r for r in check_hooks(cfg) if r.name == "hook:session_end")
+        names = {f"hook:{h}" for h in _SCOPED_HOOKS}
+        got = {r.name: r for r in check_hooks(cfg) if r.name in names}
+        assert set(got) == names, sorted(got)
+        return got
+
+    # The last session that ended wrote its markers 30 minutes ago; a peer and
+    # the in-flight session started after that and have written nothing.
+    _OVERLAP = [
+        ("ended", _iso(timedelta(hours=2)), _iso(timedelta(minutes=30))),
+        ("peer", _iso(timedelta(minutes=10)), None),
+        ("self", _iso(timedelta(minutes=5)), None),
+    ]
 
     def test_running_peer_is_not_the_reference(self, tmp_path, monkeypatch):
         from techne.core import coord
 
         monkeypatch.setattr(coord, "present_session_ids", lambda *a, **k: {"peer", "self"})
-        r = self._session_end(self._store(tmp_path))
-        assert r.verdict is Verdict.LIVE, (r.verdict, r.detail)
+        got = self._scoped(self._store(tmp_path, self._OVERLAP, timedelta(minutes=30)))
+        assert all(r.verdict is Verdict.LIVE for r in got.values()), {
+            n: (r.verdict, r.detail) for n, r in got.items()
+        }
 
-    def test_ended_session_without_marker_is_still_stale(self, tmp_path, monkeypatch):
+    def test_ended_peer_without_marker_is_stale(self, tmp_path, monkeypatch):
         """The guard must not blind the check: once the peer is gone, it has had
         its chance, and a missing marker is a finding again."""
         from techne.core import coord
 
         monkeypatch.setattr(coord, "present_session_ids", lambda *a, **k: {"self"})
-        r = self._session_end(self._store(tmp_path))
-        assert r.verdict is Verdict.STALE, (r.verdict, r.detail)
+        got = self._scoped(self._store(tmp_path, self._OVERLAP, timedelta(minutes=30)))
+        assert all(r.verdict is Verdict.STALE for r in got.values()), {
+            n: (r.verdict, r.detail) for n, r in got.items()
+        }
+
+    def test_dead_hook_behind_a_running_peer_is_stale(self, tmp_path, monkeypatch):
+        """A session ended with no marker while a peer is still running. The scan
+        must look past the peer to that session, not stop at the peer and fall
+        back to the 3-day clock, which would read a 3-hour-old marker as LIVE.
+        Kills the mutant that bounds the scan to one row (Prudence, PR #1236 r1).
+        """
+        from techne.core import coord
+
+        rows = [
+            ("dead", _iso(timedelta(hours=2)), _iso(timedelta(hours=1))),
+            ("peer", _iso(timedelta(minutes=10)), None),
+            ("self", _iso(timedelta(minutes=5)), None),
+        ]
+        monkeypatch.setattr(coord, "present_session_ids", lambda *a, **k: {"peer", "self"})
+        got = self._scoped(self._store(tmp_path, rows, timedelta(hours=3)))
+        assert all(r.verdict is Verdict.STALE for r in got.values()), {
+            n: (r.verdict, r.detail) for n, r in got.items()
+        }
