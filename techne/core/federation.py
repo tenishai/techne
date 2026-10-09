@@ -333,8 +333,16 @@ def _cross_store_dedup(
     redundant and dropped.
     """
     from techne.core.knowledge import content_fingerprint
+    from techne.core.search import _ROW_CHAR_CAP
 
-    local_fps = {content_fingerprint(r.get("content") or "") for r in local_results}
+    local_fps = set()
+    for r in local_results:
+        content = r.get("content") or ""
+        local_fps.add(content_fingerprint(content))
+        # A local row opened past the cut with `row_chars` (#386) still matches its
+        # remote replica, which arrives cut at _ROW_CHAR_CAP.
+        if len(content) > _ROW_CHAR_CAP:
+            local_fps.add(content_fingerprint(content[:_ROW_CHAR_CAP]))
     return [
         r for r in remote_results if content_fingerprint(r.get("content") or "") not in local_fps
     ]
