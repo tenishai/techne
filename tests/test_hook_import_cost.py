@@ -60,3 +60,21 @@ def test_lazy_logger_is_the_real_logger_once_used(caplog):
     real = logging.getLogger("techne.test_lazylog_probe")
     assert log.handlers is real.handlers
     assert sum(isinstance(h, logging.NullHandler) for h in real.handlers) == 1
+
+
+def test_lazy_logger_forwards_attribute_assignment():
+    """`log.propagate = False` must reach the real logger, as it would with a plain
+    module logger. __slots__ alone makes it an AttributeError (Prudence, PR 1216)."""
+    import logging
+
+    from techne._lazylog import get_logger
+
+    name = "techne.test_lazylog_setattr_probe"
+    log = get_logger(name)
+    log.propagate = False
+    log.disabled = True
+    real = logging.getLogger(name)
+    try:
+        assert real.propagate is False and real.disabled is True
+    finally:
+        real.propagate, real.disabled = True, False
