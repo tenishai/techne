@@ -65,6 +65,7 @@ def pct(values: list[float], q: float) -> float:
 
 def fetch_runs(repo: str, workflow: str, n: int) -> list[dict]:
     kept: list[dict] = []
+    seen: set[int] = set()
     page = 1
     while len(kept) < n:
         data = gh(
@@ -74,7 +75,10 @@ def fetch_runs(repo: str, workflow: str, n: int) -> list[dict]:
         batch = data.get("workflow_runs", [])
         if not batch:
             break
-        kept += [r for r in batch if r.get("conclusion") in KEPT_CONCLUSIONS]
+        for r in batch:
+            if r.get("conclusion") in KEPT_CONCLUSIONS and r["id"] not in seen:
+                seen.add(r["id"])
+                kept.append(r)
         page += 1
     return kept[:n]
 

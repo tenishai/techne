@@ -120,6 +120,28 @@ def test_cross_run_share_counts_only_other_runs():
     assert cq.cross_run_share(own) == (50, 0)
 
 
+def test_cross_run_share_unions_overlapping_and_nested_spans():
+    q = cq.job_rows(_run(2), [_job("q", 10, 60, 70)])
+    two = cq.job_rows(_run(1), [_job("x", 0, 0, 35), _job("y", 0, 0, 35)])
+    assert cq.cross_run_share(two + q) == (50, 25)
+    nested = cq.job_rows(_run(1), [_job("x", 0, 0, 50), _job("y", 20, 20, 30)])
+    assert cq.cross_run_share(nested + q) == (50, 40)
+
+
+def test_fetch_runs_dedupes_a_run_shifted_between_pages(monkeypatch):
+    pages = {1: [_run(1), _run(2)], 2: [_run(2), _run(3)]}
+    monkeypatch.setattr(
+        cq, "gh", lambda path: {"workflow_runs": pages.get(int(path.rsplit("page=", 1)[1]), [])}
+    )
+    assert [r["id"] for r in cq.fetch_runs("o/r", "w.yml", 10)] == [1, 2, 3]
+
+
+def test_main_with_no_rows_exits_1_cleanly(monkeypatch, capsys):
+    monkeypatch.setattr(cq, "gh", lambda path: {"workflow_runs": []})
+    assert cq.main(["--runs", "1"]) == 1
+    assert "no completed success/failure runs" in capsys.readouterr().err
+
+
 def test_gh_nonzero_exit_raises_with_stderr(monkeypatch):
     monkeypatch.setattr(
         cq.subprocess, "run",
