@@ -158,3 +158,67 @@ def test_recall_path_does_not_import_numpy(tmp_path):
         "the per-turn recall path imported numpy or sqlite_vec again; "
         f"stderr: {out.stderr[-2000:]}"
     )
+
+
+#: The Stop hook's gate path (issue 1218): everything `session_end` imports
+#: before it learns there is nothing new to detect, plus `techne.core.threads`,
+#: which `run_session_end` imports first thing.
+SESSION_END_PATH_MODULES = (
+    "techne.hooks.session_end",
+    "techne.hooks._liveness",
+    "techne.hooks._timeout",
+    "techne.config",
+    "techne.lifecycle",
+    "techne.core.state",
+    "techne.core.threads",
+    "techne.core.extension_state",
+    "techne.platforms.claude_code.transcript_import",
+    "techne.sync.adapter",
+    "techne.sync.outbox",
+    "techne.sync.sinks",
+)
+
+
+@pytest.mark.parametrize("deferred", ["structlog", "asyncio"])
+def test_importing_the_session_end_path_does_not_load(deferred):
+    """structlog costs ~55 ms and drags in asyncio; the Stop hook paid it every
+    turn through techne.core.threads -> thread_orchestrator -> techne._log."""
+    probe = (
+        f"import sys\nimport {', '.join(SESSION_END_PATH_MODULES)}\n"
+        f"print({deferred!r} in sys.modules)"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, timeout=60
+    )
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "False", (
+        f"importing the session_end hook path loads {deferred!r} again. Use "
+        "techne._log.get_logger (lazy) and import it inside the function that needs it."
+    )
+
+
+def test_lazy_struct_logger_writes_to_stderr_not_stdout():
+    """First use configures structlog to stderr: stdout is the hook/MCP protocol."""
+    probe = (
+        "from techne._log import get_logger\n"
+        "log = get_logger('probe')\n"
+        "import sys\nassert 'structlog' not in sys.modules\n"
+        "log.warning('lazy_probe_event', k=1)\n"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, timeout=60
+    )
+    assert out.returncode == 0, out.stderr
+    assert out.stdout == ""
+    assert "lazy_probe_event" in out.stderr
+
+
+def test_lazy_struct_logger_is_seen_by_capture_logs():
+    from structlog.testing import capture_logs
+
+    from techne._log import get_logger
+
+    log = get_logger("techne.test_lazy_struct_probe")
+    with capture_logs() as logs:
+        log.error("probe_event", n=2)
+    assert any(e.get("event") == "probe_event" and e.get("n") == 2 for e in logs)

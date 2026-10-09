@@ -544,6 +544,58 @@ def finalize_quiet_sessions(
     return done
 
 
+#: When the last maintenance sweep ran (issue 1218). One key for the whole store:
+#: the sweeps look at every session, not this one.
+MAINTENANCE_SWEEP_KEY = "maintenance:last_sweep"
+
+
+def maybe_run_maintenance_sweeps(
+    config, session_id: str, mode: str, *, now: float | None = None
+) -> bool:
+    """Run `close_abandoned_sessions` + `finalize_quiet_sessions`, rate-limited on Stop.
+
+    Both only touch sessions silent for `ABANDONED_SESSION_IDLE_HOURS` (6 h), and
+    running them on every Stop, i.e. every turn, cost ~100 ms a turn. A checkpoint
+    runs them only when the last sweep is at least `hooks.sweep_interval_minutes`
+    old; any other mode (SessionEnd's final pass) always runs them. Returns True
+    when the sweeps ran.
+
+    The timestamp is written only after both succeed, so a sweep that raised is
+    retried on the next Stop. It is also NOT written while `finalize_quiet_sessions`
+    still finds work: that call finalizes one owed session per run, so stamping
+    after it would drain a backlog of N owed sessions at one per interval instead
+    of one per turn (Prudence, PR 1229 r1). `close_abandoned_sessions` closes every
+    eligible session per call, so throttling it only delays `ended_at`.
+    """
+    from techne.core.database import connect
+    from techne.core.extension_state import get_state, set_state
+    from techne.core.state import close_abandoned_sessions
+
+    now = time.time() if now is None else now
+    if mode == MODE_CHECKPOINT:
+        conn = connect(config.db_path)
+        try:
+            last = (get_state(conn, MAINTENANCE_SWEEP_KEY) or {}).get("at", 0)
+        finally:
+            conn.close()
+        # `0 <=`: a stored time in the future (the clock went back) must not
+        # suppress sweeps until the clock catches up.
+        if 0 <= now - last < config.hooks.sweep_interval_minutes * 60:
+            return False
+
+    close_abandoned_sessions(config.db_path)
+    if finalize_quiet_sessions(config, exclude_session_id=session_id):
+        # More may be owed: leave the stamp alone so the next Stop sweeps again.
+        return True
+
+    conn = connect(config.db_path)
+    try:
+        set_state(conn, MAINTENANCE_SWEEP_KEY, {"at": now})
+    finally:
+        conn.close()
+    return True
+
+
 def run_session_end(
     config: Config,
     session_id: str,

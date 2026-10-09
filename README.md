@@ -778,6 +778,8 @@ hooks:
   capture_read: false         # include Read tool calls. Stays opt-in — Read fires far more
                               #   often than Bash, so capturing it inflates the observation
                               #   ledger without a matching gain.
+  sweep_interval_minutes: 30  # min gap between the Stop hook's sweeps for abandoned and quiet
+                              #   sessions (#1218); SessionEnd always sweeps. 0 = every Stop.
   codex_grep_assist: true     # default on (#206, #1020): a PreToolUse hook that augments the
                               #   agent's own Grep with matching Codex symbols. No-op outside an
                               #   indexed repo. Re-run 'techne init' after changing it.
