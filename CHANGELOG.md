@@ -8,8 +8,8 @@ All notable changes to techne are documented here. Format loosely follows
 ### Added
 
 - **`est_tokens` on every `techne_search` and `techne_recall` row, and `row_chars` to open a cut one**
-  (#386). `est_tokens` prices the text delivered; a knowledge row cut at 500 characters also
-  carries `est_tokens_full`. Both tools take `row_chars` (500 to 20000) to read knowledge
+  (#386). `est_tokens` prices the text delivered; a knowledge row cut short of its full length
+  (500 characters by default) also carries `est_tokens_full`. Both tools take `row_chars` (500 to 20000) to read knowledge
   rows whole; before this, MCP callers had no way past the 500-character cut. The token
   helper moved to `techne.core.tokens`.
 
