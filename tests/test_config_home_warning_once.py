@@ -162,8 +162,12 @@ def test_the_null_handler_is_what_makes_the_print_unconditional():
     """
     import logging
 
-    import techne.config  # noqa: F401 — imported for its handler side effect
+    import techne.config
 
+    # The logger is created lazily (issue 1192) and gets its NullHandler on first
+    # use, which is always before the first record. Touch it the way a log call
+    # would, then check the real logger.
+    techne.config.log.isEnabledFor(logging.WARNING)
     handlers = logging.getLogger("techne.config").handlers
     assert any(isinstance(h, logging.NullHandler) for h in handlers), (
         "techne.config lost its NullHandler; lastResort can fire again and the "

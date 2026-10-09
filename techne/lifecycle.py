@@ -5,13 +5,13 @@ directly when embedding techne in a runtime that isn't Claude Code (e.g., a
 custom agent process or notebook).
 """
 
-import logging
 import sys
 import time
 
+from techne._lazylog import get_logger
 from techne.config import Config
 
-log = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 # Thread-summary outbox lanes. HISTORICALLY selected by topology (techne#224); since
 # techne#552 raw summaries always take the sync lane, because the Archivist federates

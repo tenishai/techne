@@ -17,7 +17,6 @@ load_prototypes(config) -> dict[str, list[str]]
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -27,7 +26,9 @@ import yaml
 if TYPE_CHECKING:
     from techne.config import Config
 
-log = logging.getLogger(__name__)
+from techne._lazylog import get_logger
+
+log = get_logger(__name__)
 
 _BUNDLED_PROTOTYPES = Path(__file__).parent.parent / "inference" / "prototypes.yaml"
 
