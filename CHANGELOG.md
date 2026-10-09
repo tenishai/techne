@@ -7,6 +7,14 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Changed
 
+- **Hook processes no longer import `logging` or `tempfile` unless they use them**
+  (#1192). Seven modules on the post_tool_use path created a logger or imported
+  `tempfile`/`shutil` at import time, which cost ~31 ms per hook on Python 3.14
+  (`logging` pulls in `traceback` and `_colorize`). Their loggers now come from
+  `techne._lazylog.get_logger`, which imports `logging` on first use, and `tempfile` and
+  `shutil` are imported in the functions that use them. The `techne.config` logger still
+  gets its NullHandler, at first use instead of at import.
+
 - **The DCO check's member exemption keys on write access, not `author_association`**
   (#1182). CI asks GitHub's repository-permission API about the PR author and skips the
   check for admin, maintain or write access. `author_association` reported private org

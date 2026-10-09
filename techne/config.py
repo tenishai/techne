@@ -1,10 +1,8 @@
 """Configuration management for techne."""
 
 import copy
-import logging
 import os
 import sys
-import tempfile
 from dataclasses import MISSING as _NO_FACTORY
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
@@ -12,6 +10,7 @@ from typing import Any, Literal, get_args
 
 import yaml
 
+from techne._lazylog import get_logger
 from techne.config_migration import (
     CONFIG_VERSION,
     MISSING,
@@ -27,7 +26,7 @@ from techne.config_migration import (
 from techne.security import config_trust
 from techne.security.config_trust import TrustVerdict
 
-log = logging.getLogger(__name__)
+log = get_logger(__name__, null_handler=True)
 
 # THE LIBRARY NULLHANDLER IDIOM, NARROWED (techne#964).
 # Without a handler anywhere on the chain, stdlib logging falls back to
@@ -56,7 +55,7 @@ log = logging.getLogger(__name__)
 # `techne/core/checks.py` reaches stderr through lastResort. Any future log call
 # here that an operator must see needs its own explicit print alongside it. The
 # failure mode is an ABSENCE of output, which nothing is asserting on.
-log.addHandler(logging.NullHandler())
+# Attached by get_logger(null_handler=True) above, on first use (issue 1192).
 
 Platform = Literal["claude-code", "codex", "standalone", "cabal", "opencode"]
 
@@ -142,9 +141,10 @@ def _warn_if_outside_home(key: str, value: Path, home: Path) -> None:
     # pre-#964 code, whose print was unconditional. For a message that exists to stop
     # silent writes to the wrong store, under-warning is the one failure that matters.
     #
-    # SO THE CONDITION IS GONE. The NullHandler installed at import (see above) means
-    # lastResort can never fire for this logger, which is what makes an unconditional
-    # print correct rather than duplicative: the logging stack no longer writes to
+    # SO THE CONDITION IS GONE. The NullHandler (see above) is attached when the
+    # logger is first used, which is the log.warning below, before its record is
+    # emitted. So lastResort can never fire for this logger, which is what makes an
+    # unconditional print correct rather than duplicative: the logging stack no longer writes to
     # stderr on our behalf in ANY configuration, so the print is the single copy.
     # An embedding app that installs its OWN stderr handler sees two lines -- that is
     # its logging choice, and over-warning there is the right side to err on.
@@ -1954,6 +1954,8 @@ class Config:
         # temp 0600, and os.replace preserves that mode on the final file, so the key
         # is never world-readable for any instant. Always 0600 (not just when a key
         # is present) so sync.auth and future secrets are covered too. (techne#167)
+        import tempfile
+
         fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
         try:
             with os.fdopen(fd, "w") as f:

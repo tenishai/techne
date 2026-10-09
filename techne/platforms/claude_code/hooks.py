@@ -4,10 +4,8 @@ import json
 import os
 import re
 import shlex
-import shutil
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 from techne import DIST_NAME, install_spec
@@ -268,6 +266,8 @@ def _can_import_techne(candidate: Path) -> bool:
         return _IMPORT_PROBE[key]
     ok = False
     try:
+        import tempfile
+
         with tempfile.TemporaryDirectory() as neutral:
             proc = subprocess.run(
                 # Probe EVERY module that gets baked in, not a representative one.
@@ -314,6 +314,8 @@ def _imports_only_via_pythonpath(candidate: Path) -> bool:
     plainly works in their shell. (Prudence measured the false-negative on PR #460.)
     """
     try:
+        import tempfile
+
         with tempfile.TemporaryDirectory() as neutral:
             proc = subprocess.run(
                 [str(candidate), "-c", "import " + ",".join(_BAKED_IN_MODULES)],
@@ -337,6 +339,8 @@ def _console_script_interpreter() -> Path | None:
     operator actually installed. Returns None when there's no console script or its
     shebang isn't parseable — callers treat that as "no candidate".
     """
+    import shutil
+
     script = shutil.which("techne")
     if not script:
         return None

@@ -6,7 +6,6 @@ mechanism.
 """
 
 import hashlib
-import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -25,7 +24,9 @@ from techne.sync.jsonl_records import (
 if TYPE_CHECKING:
     from techne.config import Config
 
-log = logging.getLogger(__name__)
+from techne._lazylog import get_logger
+
+log = get_logger(__name__)
 
 #: Skip reason for a transcript with no user/assistant records (techne#941). The CLI
 #: matches on it to treat the skip as benign, so change both together.
