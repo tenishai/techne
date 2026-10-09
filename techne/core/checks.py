@@ -55,6 +55,7 @@ from pathlib import Path
 from typing import Callable
 
 from techne.config import CLAUDE_CODE
+from techne.core import coord
 
 
 class Verdict(str, Enum):
@@ -576,10 +577,29 @@ def check_hooks(config) -> list[CheckResult]:
         # The second-newest session is the newest one that HAS HAD ITS CHANCE to
         # write a marker, which is exactly the predicate wanted: did a session
         # that should have recorded fail to?
-        srow = conn.execute(
-            "SELECT started_at FROM sessions ORDER BY started_at DESC LIMIT 1 OFFSET 1"
-        ).fetchone()
-        last_settled_session = srow[0] if srow else None
+        #
+        # ONLY WHEN SESSIONS DO NOT OVERLAP (techne#1235). With two sessions open,
+        # the second-newest is a running peer: it cannot have fired session_end
+        # yet, and it fires post_tool_use / user_prompt_submit only once it takes
+        # a turn. Read as settled, it turned those hooks STALE on every overlap.
+        # So skip sessions still present on this host and take the newest one
+        # that is not. The first absent row lies within len(present) + 1 rows,
+        # which bounds the scan. A recycled pid can make a wound-down session
+        # read present; that hides only its own row, so a dead hook is caught
+        # one session later rather than never.
+        present = coord.present_session_ids()
+        last_settled_session = next(
+            (
+                started
+                for sid, started in conn.execute(
+                    "SELECT id, started_at FROM sessions ORDER BY started_at DESC "
+                    "LIMIT ? OFFSET 1",
+                    (len(present) + 1,),
+                )
+                if sid not in present
+            ),
+            None,
+        )
         row = conn.execute("SELECT MIN(applied_at) FROM schema_version").fetchone()
         store_age = _age(row[0] if row else None)
         store_is_new = store_age is not None and store_age < _NEW_STORE_GRACE
@@ -624,10 +644,10 @@ def check_hooks(config) -> list[CheckResult]:
                 # the other door.
                 #
                 # The real question is: did a session that HAS HAD ITS CHANCE to
-                # record fail to? `last_settled_session` is the second-newest
-                # session precisely so the in-flight one — whose marker is
-                # written three phases after this check runs — is excluded
-                # rather than absorbed by a slack window wide enough to hide it.
+                # record fail to? `last_settled_session` skips the in-flight
+                # session — whose marker is written three phases after this
+                # check runs — and any peer still running (techne#1235), rather
+                # than absorbing them in a slack window wide enough to hide it.
                 # No wall-clock term at all: an operator's absence must never
                 # read as a broken hook.
                 # KNOWN LIMIT, stated rather than implied (#469 review 4,
