@@ -105,6 +105,27 @@ def test_failed_sweep_is_retried_on_the_next_checkpoint(swept, monkeypatch):
     assert maybe_run_maintenance_sweeps(cfg, "sid-live", MODE_CHECKPOINT, now=10_001)
 
 
+
+def test_owed_backlog_drains_one_per_stop_not_one_per_interval(swept, monkeypatch):
+    """finalize_quiet_sessions finalizes one owed session per call, so the stamp
+    must wait until it finds none: otherwise five owed sessions take five
+    intervals (2.5 h of turns at the default) instead of five Stops. Prudence,
+    PR 1229 r1, measured 1 of 5 drained over 20 Stops before this."""
+    cfg, calls = swept
+    owed = ["s1", "s2", "s3", "s4", "s5"]
+
+    def finalize(config, *, exclude_session_id="", limit=1):
+        calls["finalize"] += 1
+        return [owed.pop(0)] if owed else []
+
+    monkeypatch.setattr("techne.lifecycle.finalize_quiet_sessions", finalize)
+    for i in range(20):  # 30 s apart, all well inside the 30-minute interval
+        maybe_run_maintenance_sweeps(cfg, "sid-live", MODE_CHECKPOINT, now=10_000 + 30 * i)
+    assert owed == []
+    # Five Stops drained the backlog, the sixth found nothing and stamped, and
+    # the rest were throttled again.
+    assert calls["finalize"] == 6
+
 def test_clock_going_back_does_not_suppress_sweeps(swept):
     cfg, calls = swept
     maybe_run_maintenance_sweeps(cfg, "sid-live", MODE_CHECKPOINT, now=10_000)

@@ -42,7 +42,8 @@ All notable changes to techne are documented here. Format loosely follows
   live store with a 7.5 MB transcript, a Stop with nothing new to detect went from ~480 ms
   to ~238 ms (median). Three cuts: the sweeps for abandoned and quiet sessions, which only touch
   sessions silent for 6 hours, run on Stop at most once per `hooks.sweep_interval_minutes`
-  (default 30; SessionEnd always runs them); the backfill of uncaptured Bash/Read calls
+  (default 30; SessionEnd always runs them, and every Stop runs them while owed quiet
+  sessions remain to finalize); the backfill of uncaptured Bash/Read calls
   resumes from a byte offset stored per session (`backfill_cursor:<session>` in
   `extension_state`) instead of re-parsing the whole transcript, ~105 ms to ~3 ms; and
   `techne._log.get_logger` imports structlog on first use, so the gate path no longer

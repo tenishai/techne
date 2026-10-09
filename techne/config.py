@@ -284,8 +284,9 @@ class HookConfig:
     timeout_s: float = 5.0
     # Minimum minutes between the Stop hook's maintenance sweeps
     # (close_abandoned_sessions + finalize_quiet_sessions, issue 1218). Both only
-    # touch sessions silent for 6 hours, so running them every turn changed
-    # nothing but cost ~100 ms. SessionEnd always sweeps. 0 sweeps on every Stop.
+    # touch sessions silent for 6 hours; running them every turn cost ~100 ms.
+    # While finalize still finds owed sessions, every Stop sweeps until the
+    # backlog is drained. SessionEnd always sweeps. 0 sweeps on every Stop.
     sweep_interval_minutes: int = 30
     # Experimental (techne#206): graph-assist on the agent's own Grep/Glob.
     # When ON, a PreToolUse hook runs a Codex symbol search for the search pattern

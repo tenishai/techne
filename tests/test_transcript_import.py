@@ -1326,7 +1326,9 @@ def test_backfill_resets_cursor_on_truncation_and_on_head_change(db_path, tmp_pa
 
     # Truncation, same first line, same inode: only the size check can see it.
     # The file now holds a different second pair, shorter than the stored offset.
-    _write_jsonl(p, first_pair + [_bash_use("tu_3", "make c", _ts(5)), _tool_result("tu_3", "k", _ts(6))])
+    _write_jsonl(
+        p, first_pair + [_bash_use("tu_3", "make c", _ts(5)), _tool_result("tu_3", "k", _ts(6))]
+    )
     assert p.stat().st_ino == inode
     assert p.stat().st_size < _cursor(db_path)["offset"]
     out = backfill_uncaptured(_cfg(db_path), "sess-fixture", jsonl_path=p)
@@ -1444,13 +1446,26 @@ def test_backfill_cursor_equals_full_rescan(tmp_path):
         path = tmp_path / f"chunked{trial}" / "sess-fixture.jsonl"
         path.parent.mkdir()
         path.write_bytes(b"")
-        cuts = sorted(rng.sample(range(1, len(blob)), 12)) + [len(blob)]
+        # Random cuts almost never land at a line's end, so also cut at two
+        # newline positions: the file then ends in a complete, parseable line
+        # with no newline, which must be read but not passed (Prudence, PR 1229 r1).
+        # Passing it leaves the same ledger (the next read starts at its "\n"), so
+        # the offset check below is what pins it.
+        newlines = [i for i, b in enumerate(blob) if b == 0x0A]
+        cuts = sorted(set(rng.sample(range(1, len(blob)), 12) + rng.sample(newlines, 2)))
+        cuts.append(len(blob))
         prev = 0
         for cut in cuts:
             with path.open("ab") as f:
                 f.write(blob[prev:cut])
             prev = cut
             backfill_uncaptured(_cfg(db), "sess-fixture", jsonl_path=path)
+            cursor = _cursor(db)
+            if cursor is not None:  # no cursor until the first line arrives
+                off = cursor["offset"]
+                assert off == 0 or blob[off - 1] == 0x0A, (
+                    f"trial {trial}: cursor at {off} is past a line with no newline"
+                )
         assert _ledger(db) == expected, f"trial {trial}, cuts {cuts}"
 
 

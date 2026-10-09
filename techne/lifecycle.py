@@ -554,12 +554,18 @@ def maybe_run_maintenance_sweeps(
 ) -> bool:
     """Run `close_abandoned_sessions` + `finalize_quiet_sessions`, rate-limited on Stop.
 
-    Both only touch sessions silent for `ABANDONED_SESSION_IDLE_HOURS` (6 h), so
-    running them on every Stop, i.e. every turn, changed nothing but cost ~100 ms
-    a turn. A checkpoint runs them only when the last sweep is at least
-    `hooks.sweep_interval_minutes` old; any other mode (SessionEnd's final pass)
-    always runs them. The timestamp is written only after both succeed, so a sweep
-    that raised is retried on the next Stop. Returns True when the sweeps ran.
+    Both only touch sessions silent for `ABANDONED_SESSION_IDLE_HOURS` (6 h), and
+    running them on every Stop, i.e. every turn, cost ~100 ms a turn. A checkpoint
+    runs them only when the last sweep is at least `hooks.sweep_interval_minutes`
+    old; any other mode (SessionEnd's final pass) always runs them. Returns True
+    when the sweeps ran.
+
+    The timestamp is written only after both succeed, so a sweep that raised is
+    retried on the next Stop. It is also NOT written while `finalize_quiet_sessions`
+    still finds work: that call finalizes one owed session per run, so stamping
+    after it would drain a backlog of N owed sessions at one per interval instead
+    of one per turn (Prudence, PR 1229 r1). `close_abandoned_sessions` closes every
+    eligible session per call, so throttling it only delays `ended_at`.
     """
     from techne.core.database import connect
     from techne.core.extension_state import get_state, set_state
@@ -578,7 +584,9 @@ def maybe_run_maintenance_sweeps(
             return False
 
     close_abandoned_sessions(config.db_path)
-    finalize_quiet_sessions(config, exclude_session_id=session_id)
+    if finalize_quiet_sessions(config, exclude_session_id=session_id):
+        # More may be owed: leave the stamp alone so the next Stop sweeps again.
+        return True
 
     conn = connect(config.db_path)
     try:

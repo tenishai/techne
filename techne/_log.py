@@ -11,8 +11,8 @@ Why lazily: structlog drags in asyncio, ~80 ms cumulative on its own under
 ``python -X importtime`` (Python 3.14, dev04). Before this, the import ran when a
 logging module was imported, so the Stop hook paid it on every turn through
 ``techne.core.threads`` -> ``thread_orchestrator`` even on the gate path that
-never logs: importing ``techne.core.threads`` there went from ~55 ms to ~6 ms. Same shape as ``techne._lazylog`` (issue 1192), which
-does this for stdlib ``logging``.
+never logs: importing ``techne.core.threads`` there went from ~55 ms to ~6 ms.
+Same shape as ``techne._lazylog`` (issue 1192), which does this for stdlib ``logging``.
 
 Why this lives here and not in ``techne/__init__.py``: importing the top-level
 package must stay cheap (see the PEP 562 note there).
