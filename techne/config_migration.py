@@ -43,14 +43,15 @@ touched: every key in it is a choice somebody typed.
 
 from __future__ import annotations
 
-import logging
 import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-log = logging.getLogger(__name__)
+from techne._lazylog import get_logger
+
+log = get_logger(__name__)
 
 #: Written at the top of every sparse config.yaml. A file carrying it is never
 #: migrated. 1 was never written: the legacy full format simply had no key.

@@ -10,11 +10,12 @@ boundary; callers own the schema of each payload dict.
 """
 
 import json
-import logging
 import sqlite3
 import time
 
-log = logging.getLogger(__name__)
+from techne._lazylog import get_logger
+
+log = get_logger(__name__)
 
 
 def get_state(conn: sqlite3.Connection, name: str) -> dict | None:

@@ -1242,7 +1242,7 @@ class TestInterpreterValidation:
         script = tmp_path / "techne"
         script.write_text("#!/opt/venvs/techne/bin/python -E\n# console script\n")
         script.chmod(0o755)
-        monkeypatch.setattr(hooks_mod.shutil, "which", lambda _n: str(script))
+        monkeypatch.setattr("shutil.which", lambda _n: str(script))
 
         assert hooks_mod._console_script_interpreter() == Path("/opt/venvs/techne/bin/python")
 
@@ -1252,7 +1252,7 @@ class TestInterpreterValidation:
 
         binary = tmp_path / "techne.exe"
         binary.write_bytes(b"MZ\x90\x00\x03\x00\x00\x00")
-        monkeypatch.setattr(hooks_mod.shutil, "which", lambda _n: str(binary))
+        monkeypatch.setattr("shutil.which", lambda _n: str(binary))
 
         assert hooks_mod._console_script_interpreter() is None
 
