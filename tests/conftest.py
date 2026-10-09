@@ -336,35 +336,6 @@ def _isolate_install_root(tmp_path, monkeypatch):
     )
 
 
-def fastembed_is_the_live_backend() -> bool:
-    """True when the ACTIVE embedding backend is fastembed (techne#536).
-
-    Used to scope xfails for the float32-contract violation, which is
-    backend-specific: `EmbeddingModel.embed()` casts on the model2vec path
-    (`EmbeddingBackend.embed` in embeddings.py) and passes fastembed's output
-    through unchanged, so the documented float32 contract holds on py>=3.14 and
-    breaks below it.
-
-    CONDITIONED, NOT BLANKET, and that matters for `strict=True`: an unconditional
-    xfail would FAIL on the 3.14/model2vec leg, where these tests legitimately
-    pass. Scoping it to the failing backend keeps strict meaningful — the moment
-    #536 is fixed, the xfail turns into an unexpected PASS and the build goes red,
-    which is what stops a deferral from quietly becoming permanent.
-
-    Returns False when no backend is installed at all; the tests then skip on
-    their own `backend_available()` guard, and a skip beats an xfail.
-    """
-    try:
-        from techne.core import embeddings
-
-        if not embeddings.backend_available():
-            return False
-        backend, _ = embeddings._select_backend(None)
-        return backend == "fastembed"
-    except Exception:
-        return False
-
-
 @pytest.fixture(autouse=True)
 def _no_model_download_on_init(request, monkeypatch):
     """`techne init` downloads the embedding model (techne#1021). No test may do that
