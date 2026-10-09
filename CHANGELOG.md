@@ -16,8 +16,8 @@ All notable changes to techne are documented here. Format loosely follows
   path produces. sqlite-vec is loaded from its library file without importing the package
   (`core/vec_ext.py`). Anything the new path does not reproduce exactly (fastembed, a
   quantized or non-float32 table, an uncached model) falls back to the numpy path.
-  Measured on a copy of a 71,900-observation store, 9 runs each: hook median 345 ms ->
-  261 ms, and numpy is no longer imported. The median token length is cached in
+  Measured on a copy of a 71,900-observation store, 9 runs each: hook median
+  341-345 ms -> 259-264 ms, and numpy is no longer imported. The median token length is cached in
   `$TECHNE_HOME/.query_embed.json`.
 
 - **Hook liveness markers record how long each run took** (#1217). `hook:<name>:last_run`
