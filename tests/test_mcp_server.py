@@ -881,3 +881,25 @@ class TestNoInternalKeysInToolOutput:
             {k for r in rows for k in r if k.startswith("_") and k not in {"_store", "_role"}}
         )
         assert leaked == [], f"internal keys reached techne_recall output: {leaked}"
+
+
+#: Tripwire, not a target (techne#808). `json.dumps(TOOLS)` was 36,673 chars at e7dc959 and
+#: 37,689 on the open est_tokens branch. Claude Code defers these by default, so growth
+#: costs only non-deferring clients. Raise it with a reason; do not shorten descriptions
+#: to fit (precision over brevity).
+MCP_TOOL_SCHEMA_CEILING_CHARS = 42000
+
+#: Claude Code truncates a tool description beyond this many characters.
+MCP_DESCRIPTION_CAP_CHARS = 2048
+
+
+def test_tool_schema_payload_stays_under_the_tripwire():
+    from techne.mcp_server import TOOLS
+
+    assert len(json.dumps(TOOLS)) <= MCP_TOOL_SCHEMA_CEILING_CHARS
+
+
+def test_no_tool_description_exceeds_the_client_cap():
+    from techne.mcp_server import TOOLS
+
+    assert max(len(t["description"]) for t in TOOLS) <= MCP_DESCRIPTION_CAP_CHARS
