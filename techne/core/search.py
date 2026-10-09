@@ -1153,19 +1153,30 @@ def _index_backend_mismatch(conn: sqlite3.Connection) -> bool:
     signal) or rank in the wrong embedding space when two models share a width
     (techne#1049). No stamp (legacy store) or no live model (a caller passed
     ``query_vec``) skips the guard.
+
+    The live model is the built singleton, else the model the numpy-free query
+    path last embedded with (issue 1217): that path never builds the singleton,
+    and it is what every per-turn hook takes, so without this the guard would
+    skip exactly where recall runs.
     """
     global _VEC_CHANNEL_ERROR
     from techne.core.extension_state import get_state
 
     model = embeddings_mod._embedding_model
-    if model is None:
-        return False
+    if model is not None:
+        live = (model.name, model.dim)
+    else:
+        from techne.core.query_embed import served_identity
+
+        live = served_identity()
+        if live is None:
+            return False
     stamp = get_state(conn, "embedding_backend")
-    if not stamp or (stamp.get("name"), stamp.get("dim")) == (model.name, model.dim):
+    if not stamp or (stamp.get("name"), stamp.get("dim")) == live:
         return False
     _VEC_CHANNEL_ERROR = (
         f"vector index built by {stamp.get('name')}/{stamp.get('dim')}, "
-        f"query backend is {model.name}/{model.dim}; run techne vectors backfill"
+        f"query backend is {live[0]}/{live[1]}; run techne vectors backfill"
     )
     return True
 

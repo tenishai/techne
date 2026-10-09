@@ -18,7 +18,9 @@ All notable changes to techne are documented here. Format loosely follows
   quantized or non-float32 table, an uncached model) falls back to the numpy path.
   Measured on a copy of a 71,900-observation store, 9 runs each: hook median
   341-345 ms -> 259-264 ms, and numpy is no longer imported. The median token length is cached in
-  `$TECHNE_HOME/.query_embed.json`.
+  `$TECHNE_HOME/.query_embed.json`. The backend-stamp guard from #1049 checks the index
+  against the model the fast path embedded with, since that path never builds the
+  embeddings singleton the guard otherwise reads.
 
 - **Hook liveness markers record how long each run took** (#1217). `hook:<name>:last_run`
   now carries `ms`, wall time from the `techne.hooks` package import to the marker write

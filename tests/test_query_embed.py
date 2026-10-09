@@ -284,6 +284,72 @@ class TestSearchParity:
         assert fast == slow
 
 
+class TestIndexGuardOnFastPath:
+    """The #1223 backend-stamp guard must see the model the fast path embedded with.
+
+    The fast path never builds the embeddings singleton, and the guard used to read
+    only the singleton, so on every hook call it would have skipped.
+    """
+
+    @pytest.fixture
+    def store_db(self, tmp_path, monkeypatch):
+        pytest.importorskip("sqlite_vec")
+        from techne.core import search as search_mod
+        from techne.core.database import init_db
+        from techne.core.knowledge import store
+
+        folder = str(write_model(tmp_path / "m", dim=16, seed=3))
+        impl = static_direct.load(folder)
+        embeddings._embedding_model = embeddings.EmbeddingBackend("model2vec", folder, impl, 16)
+        db = tmp_path / "t.db"
+        init_db(db).close()
+        for i, text in enumerate(["alpha beta", "hook recall", "vector model", "gamma delta"]):
+            store(db, f"{text} row{i}", type="fact")
+        search_mod.backfill_vectors(db)
+        embeddings._reset_embedding_model()
+        monkeypatch.setattr(embeddings, "_select_backend", lambda config=None: ("model2vec", folder))
+        search_mod.take_vec_channel_error()
+        return db, folder
+
+    def _set_stamp(self, db, name, dim):
+        from techne.core.database import connect
+        from techne.core.extension_state import set_state
+
+        conn = connect(db)
+        set_state(conn, "embedding_backend", {"name": name, "dim": dim})
+        conn.close()
+
+    def test_matching_stamp_answers_without_building_the_singleton(self, store_db):
+        from techne.core import search as search_mod
+
+        db, folder = store_db
+        rows = search_mod.search_vec(db, "alpha beta", table="knowledge", limit=4)
+        assert rows and search_mod.take_vec_channel_error() is None
+        assert embeddings._embedding_model is None, "the fast path must have answered"
+        assert query_embed.served_identity() == (f"model2vec:{folder}", 16)
+
+    @pytest.mark.parametrize("dim", [16, 32], ids=["same-dim", "dim-change"])
+    def test_mismatched_stamp_refuses_on_the_fast_path(self, store_db, dim):
+        from techne.core import search as search_mod
+
+        db, folder = store_db
+        self._set_stamp(db, "model2vec:other", dim)
+        rows = search_mod.search_vec(db, "alpha beta", table="knowledge", limit=4)
+        assert rows == []
+        assert embeddings._embedding_model is None, "the fast path must have answered"
+        err = search_mod.take_vec_channel_error()
+        assert err and f"model2vec:other/{dim}" in err and f"model2vec:{folder}/16" in err
+
+    def test_reset_forgets_the_served_model(self, store_db):
+        from techne.core import search as search_mod
+
+        db, _folder = store_db
+        search_mod.search_vec(db, "alpha", table="knowledge", limit=1)
+        assert query_embed.served_identity() is not None
+        embeddings._reset_embedding_model()
+        assert query_embed.served_identity() is None
+
+
 class TestSidecar:
     def test_median_sidecar_roundtrip_and_invalidation(self, tmp_path, monkeypatch):
         folder = write_model(tmp_path / "m", dim=8)

@@ -536,6 +536,13 @@ def _get_embedding_model(
 
 
 def _reset_embedding_model() -> None:
-    """Test-only: clear the process singleton so the next call rebuilds it."""
+    """Test-only: clear the process singleton so the next call rebuilds it.
+
+    Also forgets which model the numpy-free query path last served (issue 1217),
+    since the vec-index guard treats that as the live model when no singleton exists.
+    """
     global _embedding_model
     _embedding_model = None
+    query_embed = sys.modules.get("techne.core.query_embed")
+    if query_embed is not None:
+        query_embed._SERVED = None

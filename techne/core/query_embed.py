@@ -66,6 +66,17 @@ _F32 = struct.Struct("<f")
 #: queries; the hook embeds one.
 _MODELS: dict[str, "_QueryModel"] = {}
 
+#: ``(backend name, dim)`` of the model the last fast-path embed used, in the form
+#: ``EmbeddingBackend.name`` takes ("model2vec:<model>"). The fast path never builds
+#: the embeddings singleton, so ``search._index_backend_mismatch`` reads this to
+#: check the index stamp against the model that actually embedded the query.
+_SERVED: tuple[str, int] | None = None
+
+
+def served_identity() -> tuple[str, int] | None:
+    """``(name, dim)`` of the model the last successful ``embed_query_bytes`` used, or None."""
+    return _SERVED
+
 
 class Unsupported(Exception):
     """A model or file layout this module does not reproduce exactly."""
@@ -287,7 +298,10 @@ def embed_query_bytes(text: str, config=None) -> bytes | None:
         model = _MODELS.get(str(folder))
         if model is None:
             model = _MODELS[str(folder)] = _QueryModel(folder)
-        return model.embed(text)
+        out = model.embed(text)
+        global _SERVED
+        _SERVED = (f"model2vec:{name}", model.dim)
+        return out
     except Exception as exc:  # noqa: BLE001 — any failure means "use the numpy path"
         log.debug("query_embed: using the numpy path: %r", exc)
         return None
