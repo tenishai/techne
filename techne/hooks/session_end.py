@@ -120,7 +120,8 @@ def main():
             # still gets its numbers. SessionEnd only: it re-reads every transcript of
             # the session whole, which on Stop (every turn) would undo issue 1218's
             # cut. A session that dies without SessionEnd is left NULL until
-            # `techne usage-backfill`. Idempotent (SET, not add) and never raises.
+            # `techne usage-backfill`. Idempotent (SET, not add). Errors come back as a
+            # reason; only HookTimeout propagates, to the handler below.
             if data.get("hook_event_name") == "SessionEnd":
                 from techne.platforms.claude_code.usage import record_session_usage
 

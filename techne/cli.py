@@ -3560,7 +3560,8 @@ def usage_backfill(ctx, force):
     sessions that died without SessionEnd (#689). By default only rows whose
     `tokens_out` is NULL are read; `--force` re-reads all of them. Idempotent:
     values are recomputed and set, never added. A session whose transcript is
-    gone stays NULL (unknown).
+    gone is left as it is: NULL (unknown) if never recorded, its last recorded
+    values if it was.
     """
     config = ctx.obj["config"]
     from techne.core.database import connect
