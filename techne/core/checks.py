@@ -55,6 +55,7 @@ from pathlib import Path
 from typing import Callable
 
 from techne.config import CLAUDE_CODE
+from techne.core import coord
 
 
 class Verdict(str, Enum):
@@ -580,6 +581,25 @@ def check_hooks(config) -> list[CheckResult]:
             "SELECT started_at FROM sessions ORDER BY started_at DESC LIMIT 1 OFFSET 1"
         ).fetchone()
         last_settled_session = srow[0] if srow else None
+        # SESSION_END IS THE EXCEPTION (techne#1235). The three other session-scoped
+        # hooks fire early, so a running peer has had its chance. session_end fires
+        # at teardown, and with two sessions open the second-newest is a live peer
+        # that cannot have ended yet — read as settled, it turned the hook STALE on
+        # every overlap. Skip sessions still present on this host. The first
+        # absent one lies within len(present) + 1 rows, which bounds the scan.
+        present = coord.present_session_ids()
+        last_ended_session = next(
+            (
+                started
+                for sid, started in conn.execute(
+                    "SELECT id, started_at FROM sessions ORDER BY started_at DESC "
+                    "LIMIT ? OFFSET 1",
+                    (len(present) + 1,),
+                )
+                if sid not in present
+            ),
+            None,
+        )
         row = conn.execute("SELECT MIN(applied_at) FROM schema_version").fetchone()
         store_age = _age(row[0] if row else None)
         store_is_new = store_age is not None and store_age < _NEW_STORE_GRACE
@@ -589,6 +609,7 @@ def check_hooks(config) -> list[CheckResult]:
             err = get_state(conn, f"hook:{hook}:last_error") or {}
             last = run.get("ts")
             outcome = run.get("outcome")
+            reference = last_ended_session if hook == "session_end" else last_settled_session
 
             gate = _HOOK_CONFIG_GATE.get(hook)
             if gate and not gate[1](config):
@@ -613,7 +634,7 @@ def check_hooks(config) -> list[CheckResult]:
             if err:
                 verdict = Verdict.BROKEN
                 detail = f"last run FAILED: {err.get('stage', '?')} — {err.get('msg', '')}"[:160]
-            elif hook in _SESSION_SCOPED and last_settled_session:
+            elif hook in _SESSION_SCOPED and reference:
                 # SESSION-SCOPED HOOKS ARE JUDGED AGAINST THE LAST SESSION, NOT
                 # THE CLOCK (#469 review, finding 5). For a hook that only fires
                 # when a session starts, "days since last fire" measures how
@@ -659,14 +680,14 @@ def check_hooks(config) -> list[CheckResult]:
                 # means the wrong-interpreter death this module's own docstring
                 # cites is caught by NEITHER check. It is a known, open gap.
                 marker = _parse_ts(last)
-                sess = _parse_ts(last_settled_session)
+                sess = _parse_ts(reference)
                 if marker is None:
                     verdict = Verdict.UNOBSERVABLE
                     detail = f"{note}; sessions exist but no marker was ever written"
                 elif sess is not None and marker < sess:
                     verdict = Verdict.STALE
                     detail = (
-                        f"{note}; a session started at {last_settled_session} and left no marker"
+                        f"{note}; a session started at {reference} and left no marker"
                     )
                 else:
                     verdict = Verdict.LIVE

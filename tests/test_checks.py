@@ -3090,3 +3090,58 @@ class TestPendingCardBacklog:
         result = check_pending_cards(config)
         assert result.verdict is Verdict.UNKNOWN
         assert not result.ok, "the NAME says 'not green' — assert it, inherited gap"
+
+
+class TestSessionEndOverlap:
+    """techne#1235 — `session_end` must not be judged against a session that is
+    still running. With two sessions open, the second-newest row is a live peer
+    that has had no chance to end, and reading it as settled turned the hook
+    STALE on every overlap.
+    """
+
+    def _store(self, tmp_path):
+        from techne.core.database import connect
+        from techne.hooks._liveness import record_hook_run
+
+        db = tmp_path / "techne.db"
+        init_db(db).close()
+        conn = connect(db)
+        try:
+            conn.executemany(
+                "INSERT INTO sessions (id, started_at, ended_at) VALUES (?, ?, ?)",
+                [
+                    ("ended", _iso(timedelta(hours=2)), _iso(timedelta(minutes=30))),
+                    ("peer", _iso(timedelta(minutes=10)), None),
+                    ("self", _iso(timedelta(minutes=5)), None),
+                ],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        # The last session that ended wrote its marker; the two running ones
+        # have not ended, so they have not.
+        record_hook_run(db, "session_end", ts=_iso(timedelta(minutes=30)))
+        cfg = Config()
+        cfg.db_path = db
+        return cfg
+
+    def _session_end(self, cfg):
+        from techne.core.checks import check_hooks
+
+        return next(r for r in check_hooks(cfg) if r.name == "hook:session_end")
+
+    def test_running_peer_is_not_the_reference(self, tmp_path, monkeypatch):
+        from techne.core import coord
+
+        monkeypatch.setattr(coord, "present_session_ids", lambda *a, **k: {"peer", "self"})
+        r = self._session_end(self._store(tmp_path))
+        assert r.verdict is Verdict.LIVE, (r.verdict, r.detail)
+
+    def test_ended_session_without_marker_is_still_stale(self, tmp_path, monkeypatch):
+        """The guard must not blind the check: once the peer is gone, it has had
+        its chance, and a missing marker is a finding again."""
+        from techne.core import coord
+
+        monkeypatch.setattr(coord, "present_session_ids", lambda *a, **k: {"self"})
+        r = self._session_end(self._store(tmp_path))
+        assert r.verdict is Verdict.STALE, (r.verdict, r.detail)
