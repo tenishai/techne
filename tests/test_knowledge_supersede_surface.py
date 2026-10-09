@@ -559,3 +559,65 @@ def test_doctor_check_line_quotes_an_inherited_continuation_as_written(cfg):
     assert f"CHECK: entry {d} says it replaces techne#{tb} —" in res.output, res.output
     assert f"CHECK: entry {d} says it replaces #{tc} (listed after techne#{tb}) —" in res.output
     assert f"replaces techne#{tc}" not in res.output
+
+
+# ------------------------------- techne#1202: a partial correction is not a retirement
+
+
+def test_correction_with_back_pointer_is_not_reported(cfg):
+    """Knowledge 3654/3659 vs 4045: the correction fixed one claim, and each target
+    was edited to point back at it. Doctor must not suggest retiring them."""
+    db = cfg.db_path
+    t1 = store(db, "LESSON: check ranking on real queries. litestream: FTS itself misses.")
+    t2 = store(db, "MERGED PR #1088. litestream: FTS itself misses.")
+    d = store(db, f"CORRECTION to \N{BRAIN}{t1} and \N{BRAIN}{t2}: vec-first fusion drops it")
+    conn = connect(db)
+    for t in (t1, t2):
+        conn.execute(
+            "UPDATE knowledge SET content = content || ? WHERE id = ?",
+            (f" CORRECTED by knowledge {d}: not FTS. The rest of this entry stands.", t),
+        )
+    conn.commit()
+    conn.close()
+    assert find_declared_supersessions(db) == []
+
+
+def test_correction_without_back_pointer_is_still_reported(cfg):
+    db = cfg.db_path
+    t = store(db, "runner is host-a")
+    other = store(db, "unrelated")
+    # A pointer at some OTHER entry, or a GitHub issue ref, is not a back-pointer.
+    conn = connect(db)
+    conn.execute(
+        "UPDATE knowledge SET content = ? WHERE id = ?",
+        (f"runner is host-a. CORRECTED by knowledge {other}. corrected by techne#3", t),
+    )
+    conn.commit()
+    conn.close()
+    d = store(db, f"corrects knowledge #{t}: runner is host-c")
+    assert [(p["target"], p["declarer"]) for p in find_declared_supersessions(db)] == [(t, d)]
+
+
+def test_supersedes_is_reported_despite_back_pointer(cfg):
+    db = cfg.db_path
+    t = store(db, "v1")
+    d = store(db, f"SUPERSEDES knowledge #{t}: v2")
+    conn = connect(db)
+    conn.execute(
+        "UPDATE knowledge SET content = ? WHERE id = ?", (f"v1. CORRECTED by knowledge {d}", t)
+    )
+    conn.commit()
+    conn.close()
+    assert [(p["target"], p["declarer"]) for p in find_declared_supersessions(db)] == [(t, d)]
+
+
+def test_supersedes_anywhere_in_declarer_wins_over_correction(cfg):
+    """One declarer that both corrects and supersedes the same id is a replacement."""
+    db = cfg.db_path
+    t = store(db, "v1")
+    d = store(db, f"correction to knowledge #{t}; SUPERSEDES knowledge #{t}")
+    conn = connect(db)
+    conn.execute("UPDATE knowledge SET content = ? WHERE id = ?", (f"v1. corrected by #{d}", t))
+    conn.commit()
+    conn.close()
+    assert [(p["target"], p["declarer"]) for p in find_declared_supersessions(db)] == [(t, d)]
