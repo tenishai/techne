@@ -191,7 +191,8 @@ def _with_public_provenance(rows: list[dict]) -> list[dict]:
 
 
 #: Ceiling and floor for a caller's `row_chars` (#386). 20000 chars is about 5k
-#: tokens per row; the longest live knowledge row was 13598 chars when this was set.
+#: tokens per row; the longest knowledge row in a copy of the live store was 13598
+#: chars (2026-10-08).
 _ROW_CHARS_MIN = 500
 _ROW_CHARS_MAX = 20000
 
@@ -1153,7 +1154,7 @@ TOOLS = [
                     "maximum": 20000,
                     "description": (
                         "Cap per KNOWLEDGE row in characters (default 500). Rows with "
-                        "est_tokens_full > est_tokens were cut; re-call with row_chars >= "
+                        "est_tokens_full were cut; re-call with row_chars >= "
                         "content_chars_total to read the whole row. Observations and threads "
                         "are not affected, and rows from federated remotes are not either."
                     ),
@@ -1443,7 +1444,7 @@ TOOLS = [
                     "maximum": 20000,
                     "description": (
                         "Cap per KNOWLEDGE row in characters (default 500). Rows with "
-                        "est_tokens_full > est_tokens were cut; re-call with row_chars >= "
+                        "est_tokens_full were cut; re-call with row_chars >= "
                         "content_chars_total to read the whole row. Observations and threads "
                         "are not affected, and rows from federated remotes are not either."
                     ),
