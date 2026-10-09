@@ -8,11 +8,26 @@ least `hooks.sweep_interval_minutes` old; the final pass always runs them.
 
 from __future__ import annotations
 
+import importlib
+
 import pytest
 
 from techne.config import Config
 from techne.core.database import init_db
 from techne.lifecycle import MODE_CHECKPOINT, MODE_FINAL, maybe_run_maintenance_sweeps
+
+
+def _state_module():
+    """The `techne.core.state` that `maybe_run_maintenance_sweeps` will import.
+
+    Its `from techne.core.state import ...` reads `sys.modules`. A dotted-string
+    `monkeypatch.setattr` walks package attributes instead, and those can point at a
+    different module object: tests/test_platform_decoupling.py re-imports
+    `techne.core.state` and then restores the old `sys.modules` entry, leaving
+    `techne.core.state` (the attribute) on the new copy. Under xdist that split
+    made every sweep test here fail on whichever worker ran both.
+    """
+    return importlib.import_module("techne.core.state")
 
 
 @pytest.fixture
@@ -31,7 +46,7 @@ def swept(tmp_path, monkeypatch):
         assert exclude_session_id == "sid-live"
         return []
 
-    monkeypatch.setattr("techne.core.state.close_abandoned_sessions", close)
+    monkeypatch.setattr(_state_module(), "close_abandoned_sessions", close)
     monkeypatch.setattr("techne.lifecycle.finalize_quiet_sessions", finalize)
     return cfg, calls
 
@@ -79,11 +94,12 @@ def test_failed_sweep_is_retried_on_the_next_checkpoint(swept, monkeypatch):
     def boom(db_path):
         raise RuntimeError("database is locked")
 
-    monkeypatch.setattr("techne.core.state.close_abandoned_sessions", boom)
+    monkeypatch.setattr(_state_module(), "close_abandoned_sessions", boom)
     with pytest.raises(RuntimeError):
         maybe_run_maintenance_sweeps(cfg, "sid-live", MODE_CHECKPOINT, now=10_000)
     monkeypatch.setattr(
-        "techne.core.state.close_abandoned_sessions",
+        _state_module(),
+        "close_abandoned_sessions",
         lambda db_path: calls.__setitem__("close", calls["close"] + 1),
     )
     assert maybe_run_maintenance_sweeps(cfg, "sid-live", MODE_CHECKPOINT, now=10_001)
