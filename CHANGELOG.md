@@ -7,6 +7,13 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Changed
 
+- **Hook liveness markers record how long each run took** (#1217). `hook:<name>:last_run`
+  now carries `ms`, wall time from the `techne.hooks` package import to the marker write
+  (interpreter boot excluded), and `cpu_ms`, the process's CPU time including boot. The
+  last 50 `ms` values are kept in `hook:<name>:ms_recent`, so a per-hook p50 can be read
+  from the store instead of reconstructed from transcripts. The marker writes now share
+  one transaction.
+
 - **Hook processes no longer import `logging` or `tempfile` unless they use them**
   (#1192). Seven modules on the post_tool_use path created a logger or imported
   `tempfile`/`shutil` at import time, which cost ~31 ms per hook on Python 3.14

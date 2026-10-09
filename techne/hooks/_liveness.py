@@ -13,9 +13,18 @@ so their liveness was not merely unknown, it was **undecidable**.
 
 WHAT THIS RECORDS, per hook, in ``extension_state``:
 
-* ``hook:<name>:last_run``   — ``{"ts": ..., "outcome": ..., "detail": ...}``
+* ``hook:<name>:last_run``   — ``{"ts": ..., "outcome": ..., "detail": ...,
+  "ms": ..., "cpu_ms": ...}``
+* ``hook:<name>:ms_recent``  — ``{"ms": [...]}``, the last ``MS_RECENT_CAP``
+  ``ms`` values, oldest first (issue 1217). ``last_run`` is overwritten on
+  every run, so a p50 has to come from here.
 * ``hook:<name>:last_error`` — ``{"ts": ..., "stage": ..., "msg": ...}``, cleared
   on the next clean run so a fixed hook stops nagging.
+
+``ms`` is wall time from the ``techne.hooks`` package import to this call
+(see ``techne/hooks/__init__.py``); it leaves out interpreter boot. ``cpu_ms``
+is the process's CPU time so far, boot included. Neither is a full wall-clock
+duration; Claude Code's transcript ``durationMs`` is the cross-check.
 
 ``outcome`` is the part that answers the operator's actual question — "when I
 run something I want to know it works, or it doesn't." A bare timestamp says the
@@ -34,13 +43,15 @@ DESIGN CONSTRAINTS:
   observational (techne#468 rule 2): they report, they do not self-heal.
   Auto-repair is how the interpreter got poisoned three times (techne#458).
 * **Cheap.** These run in hot paths (``pre_tool_use`` fires on every matching
-  tool call), so this is one short-lived connection and two key writes, with no
-  queries beyond the stale-error check.
+  tool call), so this is one short-lived connection and one transaction: the
+  ``last_run`` and ``ms_recent`` writes, with no queries beyond the ring read
+  and the stale-error check.
 """
 
 from __future__ import annotations
 
 import sys
+import time
 from datetime import datetime, timezone
 
 # Outcome vocabulary. Not an enum on purpose: hooks add their own specific
@@ -54,6 +65,9 @@ OUTCOME_NOOP = "noop"
 #: work queues under WAL, and bookkeeping must not inherit it — a marker is not
 #: worth adding seconds to a tool call.
 LOCK_WAIT_MS = 200
+
+#: How many recent ``ms`` samples ``hook:<name>:ms_recent`` keeps (issue 1217).
+MS_RECENT_CAP = 50
 
 
 def now_iso() -> str:
@@ -90,6 +104,12 @@ def record_hook_run(
     from techne.hooks._timeout import HookTimeout
 
     stamp = ts or now_iso()
+    # Timed BEFORE the connection opens, so the bookkeeping's own cost is not
+    # billed to the hook.
+    from techne.hooks import _T0
+
+    ms = round((time.monotonic() - _T0) * 1000)
+    cpu_ms = round(time.process_time() * 1000)
     try:
         from techne.core.database import connect
         from techne.core.extension_state import get_state, set_state
@@ -107,18 +127,33 @@ def record_hook_run(
             payload: dict = {"ts": stamp, "outcome": outcome}
             if detail:
                 payload["detail"] = detail
-            set_state(conn, f"hook:{hook}:last_run", payload)
+            payload["ms"] = ms
+            payload["cpu_ms"] = cpu_ms
+            set_state(conn, f"hook:{hook}:last_run", payload, commit=False)
+
+            # Read-modify-write, but not racy: the last_run INSERT above opened
+            # the transaction and holds the write lock, so two hooks finishing
+            # together append in turn rather than one dropping the other's sample.
+            ring_key = f"hook:{hook}:ms_recent"
+            recent = (get_state(conn, ring_key) or {}).get("ms")
+            if not isinstance(recent, list):
+                recent = []
+            recent.append(ms)
+            set_state(conn, ring_key, {"ms": recent[-MS_RECENT_CAP:]}, commit=False)
 
             error_key = f"hook:{hook}:last_error"
             if error is not None:
                 stamped = dict(error)
                 stamped.setdefault("ts", stamp)
-                set_state(conn, error_key, stamped)
+                set_state(conn, error_key, stamped, commit=False)
             elif get_state(conn, error_key):
                 # Clear a stale error so a hook that has been fixed stops
                 # reporting a failure it no longer has. Guarded by a read so the
                 # common (never-failed) case does not write on every run.
-                set_state(conn, error_key, {})
+                set_state(conn, error_key, {}, commit=False)
+            # One transaction for all of it: one commit, and no reader ever sees
+            # a last_run whose ms is missing from the ring.
+            conn.commit()
         finally:
             conn.close()
     except HookTimeout:
