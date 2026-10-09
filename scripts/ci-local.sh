@@ -40,7 +40,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-MATRIX=(3.12 3.13)   # keep in sync with test.yml's strategy.matrix.python-version
+MATRIX=(3.12 3.13)   # keep in sync with test.yml's main-branch matrix (PRs run 3.12 only)
 RUN_VEC=0
 FRESH=0
 ARGS=()

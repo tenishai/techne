@@ -7,15 +7,22 @@ git clone https://github.com/tenishai/techne.git
 cd techne
 python3 -m venv .venv && source .venv/bin/activate   # Debian/Ubuntu: sudo apt update && sudo apt install python3-venv first
 pip install -e ".[dev]"
-pytest -q                  # the full suite; -n auto if you want it parallel
+pytest -q tests/test_x.py  # the tests for what you changed; CI runs the full suite
 ruff check techne tests    # ADVISORY — see below
 ```
 
 Then: branch, commit with `git commit -s` (see [Developer Certificate of
-Origin](#developer-certificate-of-origin)), open a PR. Keep the suite green — CI
-runs pytest on 3.12 and 3.13 on every push. CI's `acceptance` job also builds the wheel and tests the
+Origin](#developer-certificate-of-origin)), open a PR. Before pushing, run the tests
+that cover what you changed, and show any new test fails without your fix. CI is the
+full gate: it runs the whole suite on 3.12 for every PR push, and on 3.12 and 3.13
+for every push to main, so a 3.13-only break shows up on main after merge. To run
+3.13 on a PR branch, use `gh workflow run test.yml --ref <branch>`. Run the full suite
+locally only when CI can't, for example when you are changing CI itself.
+CI's `acceptance` job also builds the wheel and tests the
 installed copy, which catches a module or package-data file missing from the package;
 run `bash scripts/acceptance.sh` locally when you add either.
+
+To see how long CI jobs queue for the self-hosted runners, run `python3 scripts/ci_queue_wait.py` (read-only, needs an authenticated `gh`; see its docstring).
 
 Everyone taking part in this project is expected to follow the
 [Code of Conduct](CODE_OF_CONDUCT.md). Report security problems privately, as

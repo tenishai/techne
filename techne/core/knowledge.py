@@ -512,13 +512,34 @@ def retire(db_path: Path, old_id: int, survivor_id: int) -> int:
 # before it — see `_ref_is_ambiguous` and the PR body for the incidents this fixes.
 _REF = r"(?:(?P<ref_word>techne|knowledge)\s*#|(?P<ref_brain>\N{BRAIN})|#)\s*(?P<ref_id>\d{1,9})\b"
 _DECLARATION = re.compile(
-    r"\b(?:supersedes?|corrects|correction\s+(?:to|of))\s*:?\s+" + _REF,
+    r"\b(?P<verb>supersedes?|corrects|correction\s+(?:to|of))\s*:?\s+" + _REF,
     re.IGNORECASE,
 )
 # "SUPERSEDES techne#882 (old runner), #887 (its hardening) and #995": the
 # list form knowledge #1155 used. A continuation must be marked too.
 _DECLARATION_MORE = re.compile(r"\s*(?:\([^)]*\)\s*)?(?:,|\band\b|&)\s*" + _REF, re.IGNORECASE)
 DECLARATION_WINDOW = 400
+
+# The back-pointer a partially corrected entry carries (techne#1202). "corrects" /
+# "correction to" may fix ONE claim in an older entry whose other claims still
+# stand; the store's procedure is to keep that entry live and edit it to point at
+# the correction ("CORRECTED by knowledge 4045 (2026-09-30): ... The rest of this
+# entry stands."). Once the target carries that pointer the correction is recorded,
+# so doctor must not suggest retiring the target. Searched over the WHOLE target,
+# since the pointer is appended at the end. A literal `techne#N` does not count:
+# it names a GitHub issue (REF_CONVENTION_DATE).
+_CORRECTED_BY = re.compile(
+    r"\bcorrected\s+by\s*:?\s+(?:knowledge\s*#?|\N{BRAIN}|#)\s*(?P<ref_id>\d{1,9})\b",
+    re.IGNORECASE,
+)
+
+
+def _points_at_correction(target_content: str, declarer: int) -> bool:
+    """True iff *target_content* says it was corrected by entry *declarer*."""
+    return any(
+        int(m.group("ref_id")) == declarer for m in _CORRECTED_BY.finditer(target_content or "")
+    )
+
 
 # Since this date the convention is: knowledge refs use "knowledge #N" or the brain
 # sigil, and "techne#N" names a GitHub issue (techne#1065). A declarer written on or
@@ -552,8 +573,9 @@ def _ref_is_ambiguous(match: re.Match, *, opener_ambiguous: bool) -> bool:
     return (match.group("ref_word") or "").lower() == "techne"
 
 
-def _declared_refs(content: str) -> list[tuple[int, int | None]]:
-    """Per declared id, the `techne#N` id that makes it ambiguous, or None.
+def _declared_refs(content: str) -> list[tuple[int, int | None, bool]]:
+    """Per declared id: the `techne#N` id that makes it ambiguous (or None), and
+    whether the declaring verb is `supersede(s)` rather than a correction.
 
     The second element is the id itself when the reference is a literal
     `techne#N`, the id of the nearest preceding `techne#N` in the list when it is
@@ -562,36 +584,39 @@ def _declared_refs(content: str) -> list[tuple[int, int | None]]:
     id is unambiguous (its own `knowledge #` or brain sigil), it is reported
     unambiguous — a later, confident restatement should not be shadowed by an
     earlier, ambiguous one (techne#1065 review nit; e.g. "SUPERSEDES techne#5 and
-    knowledge #5").
+    knowledge #5"). Likewise, an id is a replacement if ANY occurrence uses
+    `supersede(s)`; list continuations take the verb of their opener (techne#1202).
     """
     head = (content or "")[:DECLARATION_WINDOW]
-    refs: list[tuple[int, int | None]] = []
+    refs: list[tuple[int, int | None, bool]] = []
     for m in _DECLARATION.finditer(head):
+        replaces = m.group("verb").lower().startswith("supersede")
         opener_ambiguous = _ref_is_ambiguous(m, opener_ambiguous=False)
         ref_id = int(m.group("ref_id"))
         via = ref_id if opener_ambiguous else None
-        refs.append((ref_id, via))
+        refs.append((ref_id, via, replaces))
         pos = m.end()
         while more := _DECLARATION_MORE.match(head, pos):
             ref_id = int(more.group("ref_id"))
             opener_ambiguous = _ref_is_ambiguous(more, opener_ambiguous=opener_ambiguous)
             if _ref_is_marked(more):
                 via = ref_id if opener_ambiguous else None
-            refs.append((ref_id, via))
+            refs.append((ref_id, via, replaces))
             pos = more.end()
-    seen: dict[int, int | None] = {}
-    for target_id, via in refs:
+    seen: dict[int, tuple[int | None, bool]] = {}
+    for target_id, via, replaces in refs:
         if target_id not in seen:
-            seen[target_id] = via
-        elif via is None:
-            seen[target_id] = None
-    return list(seen.items())
+            seen[target_id] = (via, replaces)
+        else:
+            prev_via, prev_replaces = seen[target_id]
+            seen[target_id] = (None if via is None else prev_via, prev_replaces or replaces)
+    return [(target_id, via, replaces) for target_id, (via, replaces) in seen.items()]
 
 
 def _declared_targets_with_ambiguity(content: str) -> list[tuple[int, bool]]:
     """Like `declared_targets`, but keeps, per id, whether the match is ambiguous
     (see `_declared_refs` for the rules)."""
-    return [(target_id, via is not None) for target_id, via in _declared_refs(content)]
+    return [(target_id, via is not None) for target_id, via, _ in _declared_refs(content)]
 
 
 def declared_targets(content: str) -> list[int]:
@@ -631,13 +656,17 @@ def find_declared_supersessions(db_path: Path) -> list[dict]:
     ambiguous pair as a ready-to-run command — it is a check item, not a verdict
     (techne#1065; two production pairs the day this was found would have retired
     live, unrelated knowledge if pasted as printed).
+
+    A correction ("corrects" / "correction to") is skipped once the target already
+    points back at the declarer ("corrected by knowledge N"): that is a partial
+    correction, recorded the way the store's procedure says, and the target's other
+    claims still stand (techne#1202). A `supersede(s)` declaration is reported
+    whatever the target says.
     """
     conn = connect(db_path)
     try:
         rows = conn.execute(
-            "SELECT id, substr(content, 1, ?) AS head, superseded_by, status, created_at "
-            "FROM knowledge",
-            (DECLARATION_WINDOW,),
+            "SELECT id, content, superseded_by, status, created_at FROM knowledge"
         ).fetchall()
     finally:
         conn.close()
@@ -645,12 +674,14 @@ def find_declared_supersessions(db_path: Path) -> list[dict]:
     best: dict[int, dict] = {}
     for declarer, row in live.items():
         declarer_is_post_convention = (row["created_at"] or "") >= REF_CONVENTION_DATE
-        for target, via in _declared_refs(row["head"]):
+        for target, via, replaces in _declared_refs(row["content"]):
             ambiguous = via is not None
             if ambiguous and declarer_is_post_convention:
                 # Post-convention, "techne#N" never means a knowledge row.
                 continue
             if target >= declarer or target not in live:
+                continue
+            if not replaces and _points_at_correction(live[target]["content"], declarer):
                 continue
             if target not in best or declarer > best[target]["declarer"]:
                 best[target] = {"declarer": declarer, "ambiguous": ambiguous, "via": via}
@@ -660,7 +691,7 @@ def find_declared_supersessions(db_path: Path) -> list[dict]:
             "declarer": info["declarer"],
             "ambiguous": info["ambiguous"],
             "ambiguous_via": info["via"],
-            "target_preview": (live[t]["head"] or "")[:80].replace("\n", " "),
+            "target_preview": (live[t]["content"] or "")[:80].replace("\n", " "),
         }
         for t, info in sorted(best.items())
     ]

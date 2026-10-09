@@ -60,6 +60,10 @@ class VectorChannelStatus(TypedDict):
     # Rows `techne vectors backfill` would embed, per vec table (techne#948).
     unembedded: dict[str, int]
     backfill_needed: bool
+    # The `vec_reembed` marker `_ensure_vec_backend_identity` leaves when it drops the
+    # vec tables after a backend swap, or None (techne#1049).
+    reembed_marker: dict | None
+    reembed_in_progress: bool
 
 
 #: vec table -> (base table, id column, extra predicate). MIRRORS the population
@@ -71,6 +75,17 @@ _BACKFILL_POPULATION = {
     "observations_vec": ("observations", "id", ""),
     "knowledge_vec": ("knowledge", "id", "superseded_by IS NULL"),
 }
+
+
+def population_count(conn: sqlite3.Connection, vec_table: str) -> int:
+    """Rows eligible for one vec table: what a full re-embed would have to cover.
+
+    Same population as `_unembedded_count` and `search.backfill_vectors`, minus the
+    "already embedded" test (techne#1049).
+    """
+    base, _id_col, live = _BACKFILL_POPULATION[vec_table]
+    clause = f" WHERE {live}" if live else ""
+    return conn.execute(f"SELECT COUNT(*) FROM {base}{clause}").fetchone()[0]
 
 
 def _unembedded_count(conn: sqlite3.Connection, vec_table: str) -> int:
@@ -252,7 +267,10 @@ def vector_channel_status(
         unembedded = {name: _unembedded_count(conn, name) for name in _VEC_TABLE_NAMES}
         log.debug("vector_channel_status: unembedded=%s", unembedded)
 
+        marker = get_state(conn, "vec_reembed")
         return {
+            "reembed_marker": marker,
+            "reembed_in_progress": marker is not None,
             "active_backend": active_backend,
             "stamp": stamp,
             "tables": tables,

@@ -17,6 +17,11 @@ from techne.core.knowledge import decay_score
 
 logger = logging.getLogger(__name__)
 
+#: The resolver this module was imported with. `_query_embedding` takes the
+#: numpy-free query path only while `_get_embedding_model` is still this object
+#: (issue 1217): that path computes what this resolver's model2vec backend would.
+_STOCK_EMBEDDING_RESOLVER = _get_embedding_model
+
 
 #: THE RESULT-ROW CONTRACT (techne#579), and why `type` is deliberately ABSENT.
 #:
@@ -968,15 +973,30 @@ def _query_embedding(query: str):
     download. ``search()`` calls this ONCE per call and hands the vector to every
     ``search_vec`` it makes (techne#1094); ``search_vec`` calls it itself when no
     vector is passed. An exception from ``model.embed`` propagates, as it always has.
+
+    The vector is float32 ``bytes`` from ``query_embed.embed_query_bytes`` when
+    that can produce it (a cached plain potion model: no numpy, no full-table
+    read, same bytes; issue 1217), else a numpy array from the backend.
     """
-    try:
-        import sqlite_vec  # noqa: F401
-    except ImportError:
+    from techne.core import vec_ext
+
+    # find_spec, not `import sqlite_vec`: the package's __init__ imports numpy.
+    if not vec_ext.available():
         return None
     if not embeddings_mod.backend_available():
         # Neither model2vec nor fastembed importable — degrade to FTS-only,
         # same as the pre-#601 fastembed-only probe (techne#601/#602).
         return None
+
+    # Only in front of the STOCK resolver. The fast path reproduces what
+    # `_get_embedding_model`'s model2vec backend computes; a caller (or test) that
+    # replaced the resolver has chosen its own embedder, and that choice wins.
+    if _get_embedding_model is _STOCK_EMBEDDING_RESOLVER:
+        from techne.core.query_embed import embed_query_bytes
+
+        q_bytes = embed_query_bytes(query)
+        if q_bytes is not None:
+            return q_bytes
 
     import numpy as np
 
@@ -1026,13 +1046,16 @@ def _query_embedding(query: str):
     return np.stack(list(model.embed([query])))[0]
 
 
-def _ensure_sqlite_vec(conn: sqlite3.Connection, sqlite_vec) -> bool:
+def _ensure_sqlite_vec(conn: sqlite3.Connection) -> bool:
     """Load sqlite-vec into ``conn`` unless it is already there. False when it cannot load.
 
     The probe is what makes the load happen once per connection (techne#1094):
     ``search()`` shares one connection between its main vector query and the #946
-    curated pool, and each goes through ``search_vec``.
+    curated pool, and each goes through ``search_vec``. The load goes through
+    ``vec_ext``, which does not import the ``sqlite_vec`` package (issue 1217).
     """
+    from techne.core import vec_ext
+
     try:
         conn.execute("SELECT vec_version()").fetchone()
         return True
@@ -1040,10 +1063,11 @@ def _ensure_sqlite_vec(conn: sqlite3.Connection, sqlite_vec) -> bool:
         pass  # not loaded on this connection yet
     try:
         conn.enable_load_extension(True)
-        sqlite_vec.load(conn)
+        vec_ext.load(conn)
         conn.enable_load_extension(False)
-    except (AttributeError, sqlite3.OperationalError, sqlite3.NotSupportedError):
-        # Interpreter built without loadable-extension support — degrade to FTS.
+    except (AttributeError, sqlite3.OperationalError, sqlite3.NotSupportedError, ImportError):
+        # Interpreter built without loadable-extension support, or the package
+        # vanished between the probe and the load — degrade to FTS.
         return False
     return True
 
@@ -1081,26 +1105,32 @@ def search_vec(
     connection and one query embedding across its vector calls. With ``conn``,
     sqlite-vec is loaded into it if it is not already, and the connection is left
     open. ``query_vec`` is the query's embedding (``_query_embedding``); without
-    it the query is embedded here.
+    it the query is embedded here. It may be float32 ``bytes`` (the numpy-free
+    query path, issue 1217) or anything ``np.asarray`` takes.
     """
-    try:
-        import sqlite_vec
-    except ImportError:
+    from techne.core import vec_ext
+
+    if not vec_ext.available():
         return []
     if query_vec is None:
         query_vec = _query_embedding(query)
         if query_vec is None:
             return []
 
-    import numpy as np
+    if isinstance(query_vec, bytes):
+        q_bytes = query_vec
+    else:
+        import numpy as np
 
-    q_bytes = np.asarray(query_vec, dtype="float32").tobytes()
+        q_bytes = np.asarray(query_vec, dtype="float32").tobytes()
 
     own_conn = conn is None
     if own_conn:
         conn = connect(db_path)
     try:
-        if not _ensure_sqlite_vec(conn, sqlite_vec):
+        if not _ensure_sqlite_vec(conn):
+            return []
+        if _index_backend_mismatch(conn):
             return []
         return _vec_channel_rows(
             conn,
@@ -1114,6 +1144,41 @@ def search_vec(
     finally:
         if own_conn:
             conn.close()
+
+
+def _index_backend_mismatch(conn: sqlite3.Connection) -> bool:
+    """True, with `_VEC_CHANNEL_ERROR` set, when the index was built by another backend.
+
+    Querying it would raise on a width change (swallowed into an empty result with no
+    signal) or rank in the wrong embedding space when two models share a width
+    (techne#1049). No stamp (legacy store) or no live model (a caller passed
+    ``query_vec``) skips the guard.
+
+    The live model is the built singleton, else the model the numpy-free query
+    path last embedded with (issue 1217): that path never builds the singleton,
+    and it is what every per-turn hook takes, so without this the guard would
+    skip exactly where recall runs.
+    """
+    global _VEC_CHANNEL_ERROR
+    from techne.core.extension_state import get_state
+
+    model = embeddings_mod._embedding_model
+    if model is not None:
+        live = (model.name, model.dim)
+    else:
+        from techne.core.query_embed import served_identity
+
+        live = served_identity()
+        if live is None:
+            return False
+    stamp = get_state(conn, "embedding_backend")
+    if not stamp or (stamp.get("name"), stamp.get("dim")) == live:
+        return False
+    _VEC_CHANNEL_ERROR = (
+        f"vector index built by {stamp.get('name')}/{stamp.get('dim')}, "
+        f"query backend is {live[0]}/{live[1]}; run techne vectors backfill"
+    )
+    return True
 
 
 def _vec_channel_rows(
@@ -2830,7 +2895,12 @@ def backfill_vectors(
         # per-table loop below recreates them at the new dim and the
         # "NOT IN (SELECT rowid FROM vec_tbl)" backfill query naturally re-embeds
         # every row against an empty table. See _ensure_vec_backend_identity.
-        _ensure_vec_backend_identity(conn, model)
+        # Create all three tables up front: a run cut short before the knowledge
+        # table's turn would otherwise leave knowledge_vec absent, and
+        # vectors:coverage reads that as "not initialised", not as a swap (#1049).
+        if _ensure_vec_backend_identity(conn, model):
+            for _vec_tbl in sorted(_VEC_TABLE_NAMES):
+                _ensure_vec_table(conn, _vec_tbl, model.dim)
 
         for tbl, content_col, vec_tbl in [
             ("threads", "summary", "threads_vec"),
@@ -2915,6 +2985,14 @@ def backfill_vectors(
                     )
                 conn.commit()
                 counts[tbl] += len(rows)
+
+        from techne.core.extension_state import clear_state, get_state
+        from techne.core.vector_status import _unembedded_count
+
+        if get_state(conn, _VEC_REEMBED_STATE_NAME) is not None and not any(
+            _unembedded_count(conn, name) for name in _VEC_TABLE_NAMES
+        ):
+            clear_state(conn, _VEC_REEMBED_STATE_NAME)
 
     finally:
         conn.close()
@@ -3018,6 +3096,10 @@ def _ensure_vec_table(conn: sqlite3.Connection, name: str, dim: int):
         conn.execute(f"CREATE VIRTUAL TABLE {name} USING vec0(embedding float[{dim}])")
 
 
+#: extension_state row marking a backend-swap re-embed in progress (techne#1049).
+_VEC_REEMBED_STATE_NAME = "vec_reembed"
+
+
 def _ensure_vec_backend_identity(conn: sqlite3.Connection, backend) -> bool:
     """Detect an embedding-backend swap and drop+restamp the vec tables if so.
 
@@ -3088,6 +3170,23 @@ def _ensure_vec_backend_identity(conn: sqlite3.Connection, backend) -> bool:
     # semantically-incomparable embeddings can never be queried against the
     # new backend, then restamp. Tables are recreated lazily by the
     # _ensure_vec_table call that follows in backfill_vectors.
+    # The marker is written in the same transaction as the DROP, so a read-only
+    # check can name the cause of an empty index without building the model
+    # (techne#1049). backfill_vectors clears it once every row is embedded.
+    from techne.core.vector_status import population_count
+
+    totals = {name: population_count(conn, name) for name in sorted(_VEC_TABLE_NAMES)}
+    set_state(
+        conn,
+        _VEC_REEMBED_STATE_NAME,
+        {
+            "from": {"name": state.get("name"), "dim": state.get("dim")},
+            "to": {"name": backend.name, "dim": backend.dim},
+            "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "totals": totals,
+        },
+        commit=False,
+    )
     for name in sorted(_VEC_TABLE_NAMES):
         conn.execute(f"DROP TABLE IF EXISTS {name}")
     set_state(conn, _VEC_BACKEND_STATE_NAME, {"name": backend.name, "dim": backend.dim})
