@@ -960,3 +960,86 @@ class TestEnvPrefixIsNotNoise:
         assert _command_runs_tests("env pytest -q") is True
         assert _command_runs_tests("env -u CC pytest -q") is True
         assert _command_runs_tests("/usr/bin/env pytest -q") is True
+
+
+class TestHookDurationRecording:
+    """Issue 1217 step 0: every liveness marker carries how long the run took."""
+
+    def test_record_hook_run_writes_ms_and_ring_capped_at_50(self, tmp_path, monkeypatch):
+        import techne.hooks
+        from techne.core.database import connect, init_db
+        from techne.core.extension_state import get_state
+        from techne.hooks import _liveness
+
+        db = tmp_path / "t.db"
+        init_db(db).close()
+        clock = iter(range(1000, 2000))
+        # Pin the clock: _T0 = 10.0 s, each call reads 10.0 s + n ms.
+        monkeypatch.setattr(techne.hooks, "_T0", 10.0)
+        monkeypatch.setattr(_liveness.time, "monotonic", lambda: 10.0 + next(clock) / 1000)
+
+        for _ in range(_liveness.MS_RECENT_CAP + 7):
+            _liveness.record_hook_run(db, "user_prompt_submit", outcome="ok")
+
+        conn = connect(db)
+        try:
+            last = get_state(conn, "hook:user_prompt_submit:last_run")
+            ring = get_state(conn, "hook:user_prompt_submit:ms_recent")
+        finally:
+            conn.close()
+        n = _liveness.MS_RECENT_CAP + 7
+        assert last["ms"] == 1000 + n - 1
+        assert isinstance(last["cpu_ms"], int) and last["cpu_ms"] > 0
+        assert last["outcome"] == "ok"
+        # Capped, oldest dropped, order kept.
+        assert ring["ms"] == list(range(1000 + n - _liveness.MS_RECENT_CAP, 1000 + n))
+
+    def test_ring_recovers_from_a_malformed_payload(self, tmp_path):
+        from techne.core.database import connect, init_db
+        from techne.core.extension_state import get_state, set_state
+        from techne.hooks import _liveness
+
+        db = tmp_path / "t.db"
+        init_db(db).close()
+        conn = connect(db)
+        set_state(conn, "hook:stop:ms_recent", {"ms": "not a list"})
+        conn.close()
+
+        _liveness.record_hook_run(db, "stop", outcome="ok")
+
+        conn = connect(db)
+        try:
+            ring = get_state(conn, "hook:stop:ms_recent")
+        finally:
+            conn.close()
+        assert isinstance(ring["ms"], list) and len(ring["ms"]) == 1
+
+    def test_hook_subprocess_records_its_duration(self, tmp_path):
+        """End to end: a real hook process stamps ms from techne.hooks' import."""
+        from techne.core.database import connect, init_db
+        from techne.core.extension_state import get_state
+
+        home = tmp_path / "home"
+        home.mkdir()
+        init_db(home / "techne.db").close()
+        env = {**os.environ, "TECHNE_HOME": str(home)}
+        payload = json.dumps({"session_id": "s1", "prompt": "hi", "cwd": str(tmp_path)})
+        proc = subprocess.run(
+            [sys.executable, "-m", "techne.hooks.user_prompt_submit"],
+            input=payload,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=60,
+        )
+        assert proc.returncode == 0, proc.stderr
+        conn = connect(home / "techne.db")
+        try:
+            last = get_state(conn, "hook:user_prompt_submit:last_run")
+            ring = get_state(conn, "hook:user_prompt_submit:ms_recent")
+        finally:
+            conn.close()
+        assert last is not None, proc.stderr
+        assert 0 <= last["ms"] < 60_000
+        assert last["cpu_ms"] >= 0
+        assert ring["ms"] == [last["ms"]]
