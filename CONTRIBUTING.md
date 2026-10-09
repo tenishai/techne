@@ -17,6 +17,8 @@ runs pytest on 3.12 and 3.13 on every push. CI's `acceptance` job also builds th
 installed copy, which catches a module or package-data file missing from the package;
 run `bash scripts/acceptance.sh` locally when you add either.
 
+To see how long CI jobs queue for the self-hosted runners, run `python3 scripts/ci_queue_wait.py` (read-only, needs an authenticated `gh`; see its docstring).
+
 Everyone taking part in this project is expected to follow the
 [Code of Conduct](CODE_OF_CONDUCT.md). Report security problems privately, as
 [SECURITY.md](SECURITY.md) describes, not in a public issue.
