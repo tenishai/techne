@@ -177,8 +177,8 @@ def _matrix_versions(job: str) -> str | list:
 
 
 def test_pr_runs_test_on_312_only_and_main_runs_both():
-    """Every PR push ran the full suite three times on the shared self-hosted pool
-    (3.12, 3.13, eval-vec). PRs now run 3.12; main pushes and workflow_dispatch
+    """Every PR push ran the full suite twice on the shared self-hosted pool
+    (3.12, 3.13), plus eval-vec's vector gate. PRs now run 3.12; main pushes and workflow_dispatch
     keep 3.13, so a 3.13-only break is caught on main after merge (issue 1233).
     """
     m = _MATRIX_TERNARY.match(str(_matrix_versions("test")))

@@ -9,8 +9,8 @@ All notable changes to techne are documented here. Format loosely follows
 
 - **PR pushes run the `test` job on Python 3.12 only** (#1233). Main pushes and
   `workflow_dispatch` still run 3.12 and 3.13, so a 3.13-only break now shows up on
-  main after merge rather than on the PR. Every PR push had run the full suite three
-  times (3.12, 3.13, eval-vec) on a CPU-bound self-hosted pool. `fork-pr` keeps both
+  main after merge rather than on the PR. Every PR push had run the full suite twice
+  (3.12, 3.13), plus eval-vec's vector gate, on a CPU-bound self-hosted pool. `fork-pr` keeps both
   versions. CONTRIBUTING.md now asks for the tests covering a change before pushing,
   with CI as the full gate (#1232).
 
