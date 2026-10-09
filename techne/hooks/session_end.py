@@ -116,6 +116,19 @@ def main():
             except Exception as e:
                 print(f"techne: backfill deferred: {e}", file=sys.stderr)
 
+            # Token usage (#689), before the below-threshold exit so a short session
+            # still gets its numbers. SessionEnd only: it re-reads every transcript of
+            # the session whole, which on Stop (every turn) would undo issue 1218's
+            # cut. A session that dies without SessionEnd is left NULL until
+            # `techne usage-backfill`. Idempotent (SET, not add). Errors come back as a
+            # reason; only HookTimeout propagates, to the handler below.
+            if data.get("hook_event_name") == "SessionEnd":
+                from techne.platforms.claude_code.usage import record_session_usage
+
+                usage = record_session_usage(config, session_id, jsonl_path=_transcript_path(data))
+                if not usage.get("recorded"):
+                    print(f"techne: usage not recorded: {usage.get('reason')}", file=sys.stderr)
+
             obs_count = observation_count(config.db_path, session_id)
 
             if obs_count < MIN_NEW_OBSERVATIONS:

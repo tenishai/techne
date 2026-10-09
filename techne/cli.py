@@ -3548,6 +3548,46 @@ def session_end(ctx, session_id, summary):
     )
 
 
+@main.command("usage-backfill")
+@click.option(
+    "--force", is_flag=True, help="Recompute every session, not only those with no usage yet"
+)
+@click.pass_context
+def usage_backfill(ctx, force):
+    """Fill per-session token usage (sessions.tokens_*) from Claude Code transcripts.
+
+    SessionEnd records usage for the session that ended; this covers history and
+    sessions that died without SessionEnd (#689). By default only rows whose
+    `tokens_out` is NULL are read; `--force` re-reads all of them. Idempotent:
+    values are recomputed and set, never added. A session whose transcript is
+    gone is left as it is: NULL (unknown) if never recorded, its last recorded
+    values if it was.
+    """
+    config = ctx.obj["config"]
+    from techne.core.database import connect
+    from techne.platforms.claude_code.usage import record_session_usage
+
+    conn = connect(config.db_path)
+    try:
+        where = "" if force else " WHERE tokens_out IS NULL"
+        ids = [r[0] for r in conn.execute(f"SELECT id FROM sessions{where} ORDER BY started_at")]
+    finally:
+        conn.close()
+    reasons: dict[str, int] = {}
+    recorded = 0
+    for sid in ids:
+        out = record_session_usage(config, sid)
+        if out.get("recorded"):
+            recorded += 1
+        else:
+            reasons[out.get("reason", "?")] = reasons.get(out.get("reason", "?"), 0) + 1
+    skipped = ", ".join(f"{n} {r}" for r, n in sorted(reasons.items(), key=lambda kv: -kv[1]))
+    click.echo(
+        f"usage-backfill: {recorded} of {len(ids)} sessions recorded"
+        + (f"; not recorded: {skipped}" if skipped else "")
+    )
+
+
 @main.command("context")
 @click.option("--project-path", default="", help="Scope active threads to this project")
 @click.option("--limit", default=5, help="Max threads/facts to include")

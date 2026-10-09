@@ -6,7 +6,7 @@ from pathlib import Path
 
 from techne.core import migrator
 
-SCHEMA_VERSION = 29
+SCHEMA_VERSION = 30
 
 # THE ONE ON-DISK TIMESTAMP SHAPE (#515). Every TEXT timestamp column is compared
 # LEXICALLY by SQLite, so the storage format IS the ordering primitive — a second
@@ -228,7 +228,16 @@ CREATE TABLE IF NOT EXISTS sessions (
     -- depends on the distinction: those lanes are fed AT SESSION END, so only a
     -- session that actually ENDED is evidence the producer is dead. A crashed
     -- session never had the opportunity to feed one.
-    ended_at_source TEXT
+    ended_at_source TEXT,
+    -- API token usage (#689), summed from the Claude Code transcript's
+    -- message.usage, main transcript plus its subagent transcripts, deduped on
+    -- message.id. NULL = unknown (no transcript read yet), 0 = measured zero.
+    -- Written at SessionEnd and by `techne usage-backfill`; never dollars.
+    tokens_in INTEGER,
+    tokens_out INTEGER,
+    tokens_cache_write INTEGER,
+    tokens_cache_read INTEGER,
+    usage_updated_at TIMESTAMP
 );
 
 -- Threads (the unit of continuity)
@@ -1717,4 +1726,24 @@ END;
             CREATE INDEX IF NOT EXISTS idx_lesson_meta_agent ON lesson_meta(agent_id, tier);
         """)
         conn.execute("INSERT INTO schema_version (version) VALUES (29)")
+    if from_version < 30 and to_version >= 30:
+        # #689: per-session token usage. Additive and nullable, no backfill here:
+        # filling them means reading every transcript (gigabytes), which belongs in
+        # `techne usage-backfill`, not in connect(). A numbered step for the same
+        # reason as v28: an already-reconciled store skips the reconciler.
+        has_sessions = bool(
+            conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'"
+            ).fetchone()
+        )
+        if has_sessions:
+            for col, decl in (
+                ("tokens_in", "INTEGER"),
+                ("tokens_out", "INTEGER"),
+                ("tokens_cache_write", "INTEGER"),
+                ("tokens_cache_read", "INTEGER"),
+                ("usage_updated_at", "TIMESTAMP"),
+            ):
+                _add_column_if_missing(conn, "sessions", col, decl)
+        conn.execute("INSERT INTO schema_version (version) VALUES (30)")
     conn.commit()
