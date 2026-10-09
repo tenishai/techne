@@ -39,8 +39,8 @@ All notable changes to techne are documented here. Format loosely follows
   one transaction.
 
 - **The Stop hook does less session-end work on every turn** (#1218). On a copy of the
-  live store with a 7.5 MB transcript, a Stop with nothing new to detect went from ~500 ms
-  to ~245 ms. Three cuts: the sweeps for abandoned and quiet sessions, which only touch
+  live store with a 7.5 MB transcript, a Stop with nothing new to detect went from ~480 ms
+  to ~238 ms (median). Three cuts: the sweeps for abandoned and quiet sessions, which only touch
   sessions silent for 6 hours, run on Stop at most once per `hooks.sweep_interval_minutes`
   (default 30; SessionEnd always runs them); the backfill of uncaptured Bash/Read calls
   resumes from a byte offset stored per session (`backfill_cursor:<session>` in
