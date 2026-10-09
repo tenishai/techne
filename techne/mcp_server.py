@@ -27,7 +27,7 @@ SERVER_INSTRUCTIONS = (
     "3. SEARCH for breadth: techne_search spans sessions, threads, knowledge.\n"
     "4. COORDINATE: announce on techne_send(body, to='coord') when you claim a branch/worktree "
     "or are about to commit/push in a shared repo; reply when a peer messages you "
-    "(techne_inbox, techne_mark_read).\n"
+    "(techne_inbox, techne_mark_read); settle collisions between yourselves, not via the human.\n"
     "5. DOMAINS, asked by name: archivist_search (team knowledge), librarian_search (written "
     "docs), architect_search (patterns worth borrowing), codex_search/codex_blast_radius "
     "(the code). Each answer names its `binding`; say what it was. Zero rows may mean "
