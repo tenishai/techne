@@ -799,6 +799,20 @@ def _cfg(db_path, *, capture_bash=False, capture_read=False):
     return cfg
 
 
+def _drop_backfill_cursor(db_path, session_id):
+    """Delete backfill_uncaptured's resume cursor, forcing the next run to rescan."""
+    from techne.platforms.claude_code.transcript_import import BACKFILL_CURSOR_PREFIX
+
+    conn = connect(db_path)
+    try:
+        conn.execute(
+            "DELETE FROM extension_state WHERE name = ?", (BACKFILL_CURSOR_PREFIX + session_id,)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _tool_use(tool_id, name, tool_input, ts):
     return {
         "type": "assistant",
@@ -875,7 +889,13 @@ def test_backfill_is_idempotent(db_path, tmp_path):
     second = backfill_uncaptured(_cfg(db_path), "sess-fixture", jsonl_path=p)
     assert first["backfilled"] == 1
     assert second["backfilled"] == 0
-    assert second["skipped_existing"] == 1
+    # The second run resumes past the row from the cursor (issue 1218), so it never
+    # sees it. A run without the cursor (any reset) must dedup instead.
+    assert second["skipped_existing"] == 0
+    _drop_backfill_cursor(db_path, "sess-fixture")
+    third = backfill_uncaptured(_cfg(db_path), "sess-fixture", jsonl_path=p)
+    assert third["backfilled"] == 0
+    assert third["skipped_existing"] == 1
 
     conn = connect(db_path)
     try:
@@ -1179,4 +1199,271 @@ def test_backfill_is_idempotent_across_reruns(tmp_path, monkeypatch):
 
     assert first["backfilled"] >= 1
     assert second["backfilled"] == 0, "a re-run double-inserted"
-    assert second["skipped_existing"] >= 1
+    # Resumed from the cursor (issue 1218); without it the rescan must dedup.
+    _drop_backfill_cursor(cfg.db_path, session_id)
+    third = ti.backfill_uncaptured(cfg, session_id)
+    assert third["backfilled"] == 0, "a rescan without the cursor double-inserted"
+    assert third["skipped_existing"] >= 1
+
+
+# ---------------------------------------------------------------------------
+# backfill_uncaptured resume cursor (issue 1218)
+# ---------------------------------------------------------------------------
+
+
+def _ledger(db_path, session_id="sess-fixture"):
+    conn = connect(db_path)
+    try:
+        return sorted(
+            tuple(r)
+            for r in conn.execute(
+                "SELECT tool_name, content, event_at FROM observations WHERE session_id = ?",
+                (session_id,),
+            )
+        )
+    finally:
+        conn.close()
+
+
+def _cursor(db_path, session_id="sess-fixture"):
+    from techne.core.extension_state import get_state
+    from techne.platforms.claude_code.transcript_import import BACKFILL_CURSOR_PREFIX
+
+    conn = connect(db_path)
+    try:
+        return get_state(conn, BACKFILL_CURSOR_PREFIX + session_id)
+    finally:
+        conn.close()
+
+
+def _append_jsonl(path: Path, records: list[dict]) -> None:
+    with path.open("a") as f:
+        for r in records:
+            f.write(json.dumps(r) + "\n")
+
+
+def _ts(i: int) -> str:
+    return f"2026-06-01T10:{i // 60:02d}:{i % 60:02d}.000Z"
+
+
+def test_backfill_resumes_from_cursor_and_inserts_only_new_rows(db_path, tmp_path):
+    from techne.platforms.claude_code.transcript_import import backfill_uncaptured
+
+    p = tmp_path / "sess-fixture.jsonl"
+    _write_jsonl(
+        p,
+        [
+            _bash_use("tu_1", "pytest -q", _ts(1)),
+            _tool_result("tu_1", "2 passed", _ts(2)),
+            _bash_use("tu_2", "git commit -m a", _ts(3)),
+            _tool_result("tu_2", "1 file changed", _ts(4)),
+        ],
+    )
+    first = backfill_uncaptured(_cfg(db_path), "sess-fixture", jsonl_path=p)
+    assert first["backfilled"] == 2
+    assert _cursor(db_path)["offset"] == p.stat().st_size
+
+    _append_jsonl(
+        p,
+        [_bash_use("tu_3", "make build", _ts(5)), _tool_result("tu_3", "ok", _ts(6))],
+    )
+    second = backfill_uncaptured(_cfg(db_path), "sess-fixture", jsonl_path=p)
+    # Only the appended pair was read: the first two rows would otherwise be
+    # counted as skipped_existing.
+    assert second["backfilled"] == 1
+    assert second["skipped_existing"] == 0
+    assert _cursor(db_path)["offset"] == p.stat().st_size
+    assert len(_ledger(db_path)) == 3
+
+
+def test_backfill_pending_tool_use_spanning_cursor_boundary_is_paired(db_path, tmp_path):
+    """A tool_use read on one run and its tool_result on the next still pair up:
+    the unresolved tool_use rides in the cursor."""
+    from techne.platforms.claude_code.transcript_import import backfill_uncaptured
+
+    p = tmp_path / "sess-fixture.jsonl"
+    _write_jsonl(p, [_bash_use("tu_1", "pytest -q", _ts(1))])
+    assert backfill_uncaptured(_cfg(db_path), "sess-fixture", jsonl_path=p)["backfilled"] == 0
+    assert "tu_1" in _cursor(db_path)["pending"]
+
+    _append_jsonl(p, [_tool_result("tu_1", "2 passed", _ts(2))])
+    assert backfill_uncaptured(_cfg(db_path), "sess-fixture", jsonl_path=p)["backfilled"] == 1
+    assert _cursor(db_path)["pending"] == {}
+    from techne.core.database import normalize_timestamp
+
+    assert _ledger(db_path)[0][2] == normalize_timestamp(_ts(1))  # the tool_use's time
+
+
+def test_backfill_cursor_keeps_only_gap_tool_pending(db_path, tmp_path):
+    """The cursor persists pending tool_uses; a Write's full content must not ride
+    along when Write is not a gap tool."""
+    from techne.platforms.claude_code.transcript_import import backfill_uncaptured
+
+    p = tmp_path / "sess-fixture.jsonl"
+    _write_jsonl(
+        p,
+        [
+            _tool_use("tu_w", "Write", {"file_path": "a.py", "content": "x" * 5000}, _ts(1)),
+            _bash_use("tu_b", "pytest -q", _ts(2)),
+        ],
+    )
+    backfill_uncaptured(_cfg(db_path), "sess-fixture", jsonl_path=p)
+    assert set(_cursor(db_path)["pending"]) == {"tu_b"}
+
+
+def test_backfill_resets_cursor_on_truncation_and_on_head_change(db_path, tmp_path):
+    from techne.platforms.claude_code.transcript_import import backfill_uncaptured
+
+    p = tmp_path / "sess-fixture.jsonl"
+    first_pair = [_bash_use("tu_1", "pytest -q", _ts(1)), _tool_result("tu_1", "ok", _ts(2))]
+    _write_jsonl(
+        p,
+        first_pair
+        + [_bash_use("tu_2", "make a", _ts(3)), _tool_result("tu_2", "ok", _ts(4))],
+    )
+    backfill_uncaptured(_cfg(db_path), "sess-fixture", jsonl_path=p)
+    inode = p.stat().st_ino
+
+    # Truncation, same first line, same inode: only the size check can see it.
+    # The file now holds a different second pair, shorter than the stored offset.
+    _write_jsonl(p, first_pair + [_bash_use("tu_3", "make c", _ts(5)), _tool_result("tu_3", "k", _ts(6))])
+    assert p.stat().st_ino == inode
+    assert p.stat().st_size < _cursor(db_path)["offset"]
+    out = backfill_uncaptured(_cfg(db_path), "sess-fixture", jsonl_path=p)
+    assert out["backfilled"] == 1  # make c, read from byte 0
+    assert out["skipped_existing"] == 1  # pytest -q, deduped on the rescan
+
+    # Head change, same inode, file not shorter: only the head hash can see it.
+    offset = _cursor(db_path)["offset"]
+    _write_jsonl(
+        p,
+        [
+            _bash_use("tu_h", "make head " + "y" * offset, _ts(20)),
+            _tool_result("tu_h", "ok", _ts(21)),
+        ],
+    )
+    assert p.stat().st_ino == inode and p.stat().st_size > offset
+    out = backfill_uncaptured(_cfg(db_path), "sess-fixture", jsonl_path=p)
+    assert out["backfilled"] == 1
+
+
+def test_backfill_resets_cursor_when_gap_tools_change(db_path, tmp_path):
+    """Turning capture_read off widens the gap; Reads already passed by the cursor
+    must still be backfilled."""
+    from techne.platforms.claude_code.transcript_import import backfill_uncaptured
+
+    p = tmp_path / "sess-fixture.jsonl"
+    _write_jsonl(
+        p,
+        [
+            _tool_use("tu_r", "Read", {"file_path": "a.py"}, _ts(1)),
+            _tool_result("tu_r", "body", _ts(2)),
+        ],
+    )
+    out = backfill_uncaptured(_cfg(db_path, capture_read=True), "sess-fixture", jsonl_path=p)
+    assert out["backfilled"] == 0
+    out = backfill_uncaptured(_cfg(db_path), "sess-fixture", jsonl_path=p)
+    assert out["backfilled"] == 1
+
+
+def test_backfill_partial_last_line_not_consumed(db_path, tmp_path):
+    from techne.platforms.claude_code.transcript_import import backfill_uncaptured
+
+    p = tmp_path / "sess-fixture.jsonl"
+    _write_jsonl(p, [_bash_use("tu_1", "pytest -q", _ts(1))])
+    complete = p.stat().st_size
+    tail = json.dumps(_tool_result("tu_1", "2 passed", _ts(2))) + "\n"
+    with p.open("a") as f:
+        f.write(tail[:20])  # the writer is mid-line
+
+    assert backfill_uncaptured(_cfg(db_path), "sess-fixture", jsonl_path=p)["backfilled"] == 0
+    assert _cursor(db_path)["offset"] == complete
+
+    with p.open("a") as f:
+        f.write(tail[20:])
+    assert backfill_uncaptured(_cfg(db_path), "sess-fixture", jsonl_path=p)["backfilled"] == 1
+    assert _cursor(db_path)["offset"] == p.stat().st_size
+
+
+def test_backfill_unterminated_complete_last_line_is_read_but_not_passed(db_path, tmp_path):
+    """A last line that parses but has no newline yet is backfilled (as the
+    whole-file reader did), and the cursor stays before it so the next run sees
+    it again; the dedup keeps that from double-inserting."""
+    from techne.platforms.claude_code.transcript_import import backfill_uncaptured
+
+    p = tmp_path / "sess-fixture.jsonl"
+    _write_jsonl(p, [_bash_use("tu_1", "pytest -q", _ts(1))])
+    complete = p.stat().st_size
+    with p.open("a") as f:
+        f.write(json.dumps(_tool_result("tu_1", "2 passed", _ts(2))))
+
+    assert backfill_uncaptured(_cfg(db_path), "sess-fixture", jsonl_path=p)["backfilled"] == 1
+    assert _cursor(db_path)["offset"] == complete
+    with p.open("a") as f:
+        f.write("\n")
+    assert backfill_uncaptured(_cfg(db_path), "sess-fixture", jsonl_path=p)["backfilled"] == 0
+    assert len(_ledger(db_path)) == 1
+    assert _cursor(db_path)["offset"] == p.stat().st_size
+
+
+def test_backfill_cursor_equals_full_rescan(tmp_path):
+    """Property: growing a transcript in arbitrary byte chunks (mid-line splits
+    included) and backfilling after each leaves the same ledger as one full pass."""
+    import random
+
+    from techne.platforms.claude_code.transcript_import import backfill_uncaptured
+
+    rng = random.Random(1218)
+    records = []
+    for i in range(40):
+        tid = f"tu_{i}"
+        kind = rng.choice(["Bash", "Bash", "Read", "Edit"])
+        inp = (
+            {"command": f"make target{i}"}
+            if kind == "Bash"
+            else {"file_path": f"f{i}.py"}
+        )
+        records.append(_tool_use(tid, kind, inp, _ts(2 * i)))
+        if rng.random() < 0.5:  # interleave another call before this one's result
+            records.append(_user_text(f"prompt {i}", _ts(2 * i)))
+        records.append(_tool_result(tid, f"out {i}", _ts(2 * i + 1)))
+    blob = "".join(json.dumps(r) + "\n" for r in records).encode()
+
+    full_db = tmp_path / "full.db"
+    init_db(full_db).close()
+    full_path = tmp_path / "full" / "sess-fixture.jsonl"
+    full_path.parent.mkdir()
+    full_path.write_bytes(blob)
+    backfill_uncaptured(_cfg(full_db), "sess-fixture", jsonl_path=full_path)
+    expected = _ledger(full_db)
+    assert len(expected) > 10
+
+    for trial in range(5):
+        db = tmp_path / f"chunked{trial}.db"
+        init_db(db).close()
+        path = tmp_path / f"chunked{trial}" / "sess-fixture.jsonl"
+        path.parent.mkdir()
+        path.write_bytes(b"")
+        cuts = sorted(rng.sample(range(1, len(blob)), 12)) + [len(blob)]
+        prev = 0
+        for cut in cuts:
+            with path.open("ab") as f:
+                f.write(blob[prev:cut])
+            prev = cut
+            backfill_uncaptured(_cfg(db), "sess-fixture", jsonl_path=path)
+        assert _ledger(db) == expected, f"trial {trial}, cuts {cuts}"
+
+
+def test_session_end_passes_payload_transcript_path_to_backfill(tmp_path, monkeypatch):
+    """The Stop/SessionEnd payload names the transcript; using it skips the glob
+    over every project dir. A missing or malformed one falls back to the glob."""
+    from techne.hooks.session_end import _transcript_path
+
+    p = tmp_path / "s.jsonl"
+    p.write_text("{}\n")
+    assert _transcript_path({"transcript_path": str(p)}) == p
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert _transcript_path({"transcript_path": "~/s.jsonl"}) == p
+    assert _transcript_path({"transcript_path": str(tmp_path / "gone.jsonl")}) is None
+    assert _transcript_path({"transcript_path": 7}) is None
+    assert _transcript_path({}) is None

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from techne.core.database import connect, normalize_timestamp
+from techne.core.extension_state import get_state, prune_stale, set_state
 from techne.core.redaction import redact_credentials
 from techne.hooks.post_tool_use import summarize
 from techne.platforms.claude_code.paths import claude_projects_dir, project_slug
@@ -17,6 +18,7 @@ from techne.sync.jsonl_records import (
     content_blocks,
     extract_text,
     iter_jsonl_records,
+    iter_jsonl_records_from,
     should_import,
     tool_result_text,
 )
@@ -407,6 +409,23 @@ def import_directory(
     return results
 
 
+#: Per-session resume cursor for `backfill_uncaptured` (issue 1218):
+#: ``{path, inode, head, gap_tools, offset, pending}`` in extension_state.
+BACKFILL_CURSOR_PREFIX = "backfill_cursor:"
+
+
+def _head_signature(path: Path, nbytes: int = 256) -> str:
+    """Hash of the file's first line (capped at *nbytes*), to notice a transcript
+    replaced in place even when the inode is reused. Same check as
+    ``sync.jsonl_transcript._head_signature``, which this does not import because
+    that module pulls in ``logging`` and ``threading``. "" if unreadable."""
+    try:
+        with path.open("rb") as fh:
+            return hashlib.sha1(fh.readline(nbytes)).hexdigest()
+    except OSError:
+        return ""
+
+
 def _session_jsonl(session_id: str) -> Path | None:
     """Locate a session's transcript across all Claude Code project dirs.
 
@@ -471,34 +490,66 @@ def backfill_uncaptured(
     if not path or not path.exists():
         return {**base, "reason": "transcript not found"}
 
+    # Resume from where the last run stopped (issue 1218). The transcript is
+    # append-only, and this runs on every Stop, so re-parsing the whole file each
+    # turn cost ~105 ms on a 7.5 MB transcript and grew with the session. The cursor
+    # names the file it describes (path, inode, first-line hash) and the gap set it
+    # was built for; any mismatch, or a file shorter than the offset, restarts from
+    # byte 0, which is always safe because `existing` dedups a rescan. `.gz`
+    # transcripts are archived, not appended to, and byte offsets mean nothing
+    # inside them, so they are always read whole and never get a cursor.
+    resumable = path.suffix != ".gz"
+    cursor_key = BACKFILL_CURSOR_PREFIX + session_id
     conn = connect(config.db_path)
     try:
-        # Ensure the parent session row exists (observations FK to sessions). It
-        # normally does — live capture created it — but a pure-shell session may
-        # have none, so make backfill self-sufficient rather than FK-failing.
-        conn.execute(
-            "INSERT OR IGNORE INTO sessions (id, platform) VALUES (?, 'claude-code')",
-            (session_id,),
-        )
-        # Dedup key already present for this session (idempotency across re-runs).
-        existing = {
-            (r[0], r[1], r[2])
-            for r in conn.execute(
-                "SELECT tool_name, content, event_at FROM observations WHERE session_id = ?",
-                (session_id,),
-            )
-        }
+        start = 0
         pending: dict[str, dict] = {}
+        ident: dict = {}
+        prior = None
+        if resumable:
+            st = path.stat()
+            ident = {
+                "path": str(path),
+                "inode": st.st_ino,
+                "head": _head_signature(path),
+                "gap_tools": sorted(gap_tools),
+            }
+            prior = get_state(conn, cursor_key)
+            if (
+                prior
+                and all(prior.get(k) == v for k, v in ident.items())
+                and 0 <= prior.get("offset", 0) <= st.st_size
+            ):
+                start = prior["offset"]
+                pending = dict(prior.get("pending") or {})
+        records = (
+            iter_jsonl_records_from(path, start)
+            if resumable
+            else ((rec, 0) for rec in iter_jsonl_records(path))
+        )
+
+        # Dedup key already present for this session (idempotency across re-runs).
+        # Loaded on the first candidate row, so a turn with no new gap-tool result
+        # never reads the session's observations.
+        existing: set | None = None
+        offset = start
         backfilled = 0
         skipped_existing = 0
-        for rec in iter_jsonl_records(path):
+        for rec, offset in records:
             rtype = rec.get("type")
             ts = normalize_timestamp(rec.get("timestamp"))
             blocks = content_blocks(rec)
 
             if rtype == "assistant":
                 for b in blocks:
-                    if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("id"):
+                    if (
+                        isinstance(b, dict)
+                        and b.get("type") == "tool_use"
+                        and b.get("id")
+                        and b.get("name", "") in gap_tools
+                    ):
+                        # Only gap tools are tracked: a result for any other tool
+                        # is skipped anyway, and this dict is persisted in the cursor.
                         pending[b["id"]] = {
                             "name": b.get("name", ""),
                             "input": b.get("input") or {},
@@ -512,8 +563,6 @@ def backfill_uncaptured(
                     if not tu:
                         continue
                     tool_name = tu["name"]
-                    if tool_name not in gap_tools:
-                        continue
                     if not should_import(tool_name, tu["input"]):
                         continue
                     output = tool_result_text(b.get("content"))
@@ -522,6 +571,24 @@ def backfill_uncaptured(
                     # Compute hash BEFORE redaction (techne#270 invariant).
                     redacted_content = redact_credentials(content)
                     key = (tool_name, redacted_content, event_ts)
+                    if existing is None:
+                        # Ensure the parent session row exists (observations FK to
+                        # sessions). It normally does — live capture created it — but
+                        # a pure-shell session may have none, so make backfill
+                        # self-sufficient rather than FK-failing.
+                        conn.execute(
+                            "INSERT OR IGNORE INTO sessions (id, platform)"
+                            " VALUES (?, 'claude-code')",
+                            (session_id,),
+                        )
+                        existing = {
+                            (r[0], r[1], r[2])
+                            for r in conn.execute(
+                                "SELECT tool_name, content, event_at FROM observations"
+                                " WHERE session_id = ?",
+                                (session_id,),
+                            )
+                        }
                     if key in existing:
                         skipped_existing += 1
                         continue
@@ -538,6 +605,16 @@ def backfill_uncaptured(
                     )
                     existing.add(key)  # also dedup within this same run
                     backfilled += 1
+        if resumable:
+            cursor = {**ident, "offset": offset, "pending": pending}
+            if cursor != prior:
+                # In the SAME transaction as the inserts (as jsonl_transcript does,
+                # techne#170): a crash between them would otherwise leave rows
+                # committed behind a stale cursor, or a cursor past uncommitted rows.
+                set_state(conn, cursor_key, cursor, commit=False)
+                if prior is None:
+                    # One key per session; nothing else removes them (techne#1073).
+                    prune_stale(conn, BACKFILL_CURSOR_PREFIX, commit=False)
         conn.commit()
         return {
             **base,

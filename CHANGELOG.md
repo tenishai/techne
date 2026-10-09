@@ -38,6 +38,16 @@ All notable changes to techne are documented here. Format loosely follows
   from the store instead of reconstructed from transcripts. The marker writes now share
   one transaction.
 
+- **The Stop hook does less session-end work on every turn** (#1218). On a copy of the
+  live store with a 7.5 MB transcript, a Stop with nothing new to detect went from ~500 ms
+  to ~245 ms. Three cuts: the sweeps for abandoned and quiet sessions, which only touch
+  sessions silent for 6 hours, run on Stop at most once per `hooks.sweep_interval_minutes`
+  (default 30; SessionEnd always runs them); the backfill of uncaptured Bash/Read calls
+  resumes from a byte offset stored per session (`backfill_cursor:<session>` in
+  `extension_state`) instead of re-parsing the whole transcript, ~105 ms to ~3 ms; and
+  `techne._log.get_logger` imports structlog on first use, so the gate path no longer
+  loads it or asyncio. The hook also uses the payload's `transcript_path` when present.
+
 - **Hook processes no longer import `logging` or `tempfile` unless they use them**
   (#1192). Seven modules on the post_tool_use path created a logger or imported
   `tempfile`/`shutil` at import time, which cost ~31 ms per hook on Python 3.14

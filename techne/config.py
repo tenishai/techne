@@ -282,6 +282,11 @@ class HookConfig:
     # SIGALRM fires and the hook exits 0 silently.  Overrides the
     # TECHNE_HOOK_TIMEOUT env-var default (5.0 s) when set explicitly.
     timeout_s: float = 5.0
+    # Minimum minutes between the Stop hook's maintenance sweeps
+    # (close_abandoned_sessions + finalize_quiet_sessions, issue 1218). Both only
+    # touch sessions silent for 6 hours, so running them every turn changed
+    # nothing but cost ~100 ms. SessionEnd always sweeps. 0 sweeps on every Stop.
+    sweep_interval_minutes: int = 30
     # Experimental (techne#206): graph-assist on the agent's own Grep/Glob.
     # When ON, a PreToolUse hook runs a Codex symbol search for the search pattern
     # and injects matching symbols into the model's context via additionalContext.
@@ -1338,6 +1343,7 @@ class Config:
                 capture_bash=_g("capture_bash"),
                 capture_read=_g("capture_read"),
                 timeout_s=float(_g("timeout_s")),
+                sweep_interval_minutes=int(_g("sweep_interval_minutes")),
                 codex_grep_assist=_g("codex_grep_assist"),
                 codex_grep_assist_limit=int(_g("codex_grep_assist_limit")),
                 codex_reindex_on_edit=_g("codex_reindex_on_edit"),
@@ -1650,6 +1656,7 @@ class Config:
                 "capture_bash": self.hooks.capture_bash,
                 "capture_read": self.hooks.capture_read,
                 "timeout_s": self.hooks.timeout_s,
+                "sweep_interval_minutes": self.hooks.sweep_interval_minutes,
                 "codex_grep_assist": self.hooks.codex_grep_assist,
                 "codex_grep_assist_limit": self.hooks.codex_grep_assist_limit,
                 "codex_reindex_on_edit": self.hooks.codex_reindex_on_edit,

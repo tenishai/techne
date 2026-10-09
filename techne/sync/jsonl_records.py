@@ -59,6 +59,40 @@ def iter_jsonl_records(jsonl_path: Path):
                 continue
 
 
+def iter_jsonl_records_from(jsonl_path: Path, offset: int = 0):
+    """Yield ``(record, resume_offset)`` for each JSON object at or after byte
+    *offset* of an uncompressed .jsonl file (issue 1218).
+
+    *resume_offset* is where a later read should start so as not to see this
+    record again: the byte just past its ``\n``. A last line with no ``\n`` yet
+    may be a record the writer is still appending, so it never advances the offset:
+    if it already parses it is yielded with the offset of its own start, and the
+    next read sees it again. Blank and unparseable lines are skipped, as
+    ``iter_jsonl_records`` skips them; so is JSON that is not an object, which
+    ``iter_jsonl_records`` yields as-is.
+
+    Byte offsets mean nothing inside a compressed file, so ``.gz`` is not
+    accepted here; read those whole with ``iter_jsonl_records``.
+    """
+    if jsonl_path.suffix == ".gz":
+        raise ValueError(f"cannot resume a compressed transcript by offset: {jsonl_path}")
+    with jsonl_path.open("rb") as f:
+        f.seek(offset)
+        pos = offset
+        for line in f:
+            if line.endswith(b"\n"):
+                pos += len(line)
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:  # JSONDecodeError and UnicodeDecodeError
+                continue
+            if isinstance(rec, dict):
+                yield rec, pos
+
+
 def content_blocks(rec: dict) -> list:
     """Return the content blocks of an Anthropic-shaped message record.
 

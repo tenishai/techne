@@ -29,10 +29,10 @@ if TYPE_CHECKING:
 # and importlib.metadata added ~120ms to every hook process for work most of
 # them never touch. Each public name is resolved on first access instead
 # (and then cached in the module dict, so __getattr__ runs at most once per
-# name). structlog→stderr routing now lives in `techne._log`, imported for its
-# side effect by exactly the modules that log — so structlog configures the
-# instant it enters a process without being dragged onto structlog-free hot
-# paths (e.g. the post_tool_use capture path).
+# name). structlog→stderr routing now lives in `techne._log`, whose loggers
+# import and configure structlog on first use (issue 1218) — so structlog is
+# configured before anything is emitted, without being dragged onto paths that
+# never log (the post_tool_use capture path, the Stop hook's gate path).
 
 # name -> (module, attr). attr=None exposes the module itself as a namespace.
 _LAZY: dict[str, tuple[str, str | None]] = {

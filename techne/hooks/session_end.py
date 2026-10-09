@@ -32,6 +32,19 @@ MIN_NEW_OBSERVATIONS = 10
 HOOK_NAME = "session_end"
 
 
+def _transcript_path(data: dict):
+    """The hook payload's `transcript_path`, if it names an existing file (issue
+    1218). Saves backfill a glob over every Claude Code project dir; None makes
+    backfill fall back to that glob."""
+    raw = data.get("transcript_path")
+    if not raw or not isinstance(raw, str):
+        return None
+    from pathlib import Path
+
+    path = Path(raw).expanduser()
+    return path if path.is_file() else None
+
+
 def main():
     try:
         data = json.load(sys.stdin)
@@ -91,7 +104,7 @@ def main():
             # toward the minimum and participates in thread detection. Best-effort:
             # never let backfill block session teardown.
             try:
-                bf = backfill_uncaptured(config, session_id)
+                bf = backfill_uncaptured(config, session_id, jsonl_path=_transcript_path(data))
                 if bf.get("backfilled"):
                     print(
                         f"techne: backfilled {bf['backfilled']} uncaptured obs"
@@ -115,7 +128,7 @@ def main():
                 )
                 sys.exit(0)
 
-            from techne.lifecycle import MODE_CHECKPOINT, MODE_FINAL, finalize_quiet_sessions
+            from techne.lifecycle import MODE_CHECKPOINT, MODE_FINAL, maybe_run_maintenance_sweeps
 
             mode = MODE_FINAL if data.get("hook_event_name") == "SessionEnd" else MODE_CHECKPOINT
             try:
@@ -138,11 +151,9 @@ def main():
             # only the final pass does, and this sweep is what gives it one. It only
             # touches sessions silent for ABANDONED_SESSION_IDLE_HOURS, so a live peer
             # is never closed. Then their owed sync: one per run, never this session.
+            # Rate-limited on Stop (issue 1218): see maybe_run_maintenance_sweeps.
             try:
-                from techne.core.state import close_abandoned_sessions
-
-                close_abandoned_sessions(config.db_path)
-                finalize_quiet_sessions(config, exclude_session_id=session_id)
+                maybe_run_maintenance_sweeps(config, session_id, mode)
             except HookTimeout:
                 raise
             except Exception as e:
