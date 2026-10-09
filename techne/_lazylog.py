@@ -8,7 +8,8 @@ that never log. `get_logger(__name__)` returns a stand-in that resolves the real
 that never logs never imports `logging`.
 
 It resolves to the same `Logger` object `logging.getLogger(name)` returns, so
-handlers, filters, levels and caplog behave as before. The one difference:
+handlers, filters, levels and caplog behave as before, and attribute assignment
+(`log.propagate = False`) is forwarded to that logger. The one difference:
 `null_handler=True` attaches the NullHandler at that first use rather than at
 import, which is still before any record is emitted.
 
@@ -41,6 +42,15 @@ class LazyLogger:
 
     def __getattr__(self, attr: str):
         return getattr(self._resolve(), attr)
+
+    def __setattr__(self, attr: str, value) -> None:
+        # Own slots are set in __init__; anything else (`log.propagate = False`,
+        # `log.disabled = True`) belongs to the real logger, as it would with a
+        # plain module logger. Without this, __slots__ makes it an AttributeError.
+        if attr in LazyLogger.__slots__:
+            object.__setattr__(self, attr, value)
+        else:
+            setattr(self._resolve(), attr, value)
 
 
 def get_logger(name: str, *, null_handler: bool = False) -> LazyLogger:
