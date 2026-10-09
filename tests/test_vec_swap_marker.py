@@ -99,6 +99,21 @@ def test_interrupted_swap_keeps_marker_and_coverage_names_it(env):
     assert "re-embedding" not in check_vector_coverage(cfg).detail
 
 
+def test_marker_forces_stale_even_when_unembedded_rows_are_within_grace(env):
+    db, cfg, use = env
+    use(FakeBackend("A", 4))
+    search_mod.backfill_vectors(db, batch_size=2)
+    conn = connect(db)
+    conn.execute("UPDATE observations SET timestamp = datetime('now')")
+    conn.commit()
+    conn.close()
+    use(FakeBackend("B", 6, fail_after=1))
+    with pytest.raises(RuntimeError):
+        search_mod.backfill_vectors(db, batch_size=2)
+    res = check_vector_coverage(cfg)
+    assert res.verdict.name == "STALE" and res.remedy == "techne vectors backfill"
+
+
 @pytest.mark.parametrize("new", [("B", 4), ("B", 6)], ids=["same-dim", "dim-change"])
 def test_query_refuses_index_from_another_backend(env, new):
     db, _cfg, use = env

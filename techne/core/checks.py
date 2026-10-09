@@ -3183,7 +3183,9 @@ def check_vector_coverage(config) -> CheckResult:
             f"{done} of {total_rows} rows embedded; vector recall is FTS-only until done. "
         ) + detail
 
-    healthy = missing == 0 and stale == 0 and orphans == 0 and not sibling_gaps
+    # A live marker means the index is mid-swap even when every unembedded row is still
+    # inside the grace window; backfill (the remedy) clears it (techne#1049).
+    healthy = missing == 0 and stale == 0 and orphans == 0 and not sibling_gaps and not reembed
     return CheckResult(
         name="vectors:coverage",
         subsystem="search",
