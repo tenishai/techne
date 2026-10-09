@@ -883,8 +883,8 @@ class TestNoInternalKeysInToolOutput:
         assert leaked == [], f"internal keys reached techne_recall output: {leaked}"
 
 
-#: Tripwire, not a target (techne#808). `json.dumps(TOOLS)` was 36,673 chars at e7dc959 and
-#: 37,689 on the open est_tokens branch. Claude Code defers these by default, so growth
+#: Tripwire, not a target (techne#808). `json.dumps(TOOLS)` was 36,673 chars at 25f45f2 and
+#: 37,689 on the est_tokens branch (PR #1224). Claude Code defers these by default, so growth
 #: costs only non-deferring clients. Raise it with a reason; do not shorten descriptions
 #: to fit (precision over brevity).
 MCP_TOOL_SCHEMA_CEILING_CHARS = 42000
