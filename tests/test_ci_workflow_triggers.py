@@ -13,7 +13,9 @@ so it gets a guard that runs in the suite the trigger would have run.
 from __future__ import annotations
 
 import difflib
+import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -156,6 +158,43 @@ def test_push_filter_is_still_scoped_to_main():
     push fires only on main.
     """
     assert _triggers()["push"] == {"branches": ["main"]}
+
+
+# --- the test matrix: 3.12 on PRs, 3.12 and 3.13 on main (issue 1233) -------
+
+# GitHub's ternary idiom, `cond && a || b`. tests/gha_expr.py models `&&`/`||` as
+# booleans, not GitHub's value-returning form, so this reads the one shape the
+# workflow uses instead of extending the measured evaluator. Any other shape
+# fails the match, which is the point: a reworded matrix gets re-checked here.
+_MATRIX_TERNARY = re.compile(
+    r"^\$\{\{\s*fromJSON\(github\.event_name == 'pull_request' && '(?P<pr>[^']*)' "
+    r"\|\| '(?P<other>[^']*)'\)\s*\}\}$"
+)
+
+
+def _matrix_versions(job: str) -> str | list:
+    return yaml.safe_load(WORKFLOW.read_text())["jobs"][job]["strategy"]["matrix"]["python-version"]
+
+
+def test_pr_runs_test_on_312_only_and_main_runs_both():
+    """Every PR push ran the full suite three times on the shared self-hosted pool
+    (3.12, 3.13, eval-vec). PRs now run 3.12; main pushes and workflow_dispatch
+    keep 3.13, so a 3.13-only break is caught on main after merge (issue 1233).
+    """
+    m = _MATRIX_TERNARY.match(str(_matrix_versions("test")))
+    assert m, (
+        "the test job's python-version matrix is no longer the "
+        "`fromJSON(github.event_name == 'pull_request' && '[...]' || '[...]')` form "
+        f"this test reads: {_matrix_versions('test')!r}"
+    )
+    assert json.loads(m["pr"]) == ["3.12"]
+    assert json.loads(m["other"]) == ["3.12", "3.13"]
+
+
+def test_fork_prs_keep_both_versions():
+    """fork-pr runs on GitHub-hosted runners, so trimming it saves nothing on
+    our runners and would drop 3.13 coverage for outside contributions entirely."""
+    assert _matrix_versions("fork-pr") == ["3.12", "3.13"]
 
 
 # --- vector coverage in the test leg (techne#535) --------------------------
