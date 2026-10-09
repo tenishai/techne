@@ -14,6 +14,25 @@ All notable changes to techne are documented here. Format loosely follows
   and its `COLLABORATOR` value would also have exempted outside collaborators with read
   access. If the lookup fails, the check runs. PRs from forks are always checked.
 
+- **The post_tool_use hook no longer tags observations; `techne vectors backfill` does**
+  (#1192). Tagging a captured tool call meant importing numpy, loading the embedding
+  model and embedding the text in a fresh process on every tool call: about 195 ms of a
+  360 ms hook on dev04. The hook now stores the row with `tags` and `kind` NULL, and
+  every `vectors backfill` run, including the one in the SessionStart chain, tags those
+  pending rows (`backfill_tags(pending_only=True)`), once each. Measured on a copy of a
+  71k-observation store: the hook went from ~363 ms to ~180 ms, and the first backfill
+  tagged 3,059 pending rows in about 5 s. Tag and kind words become searchable at the
+  next session start instead of at once. Reflect, on both its emit path and its headless
+  session-end pass, tags a session's pending rows itself before rendering them, because
+  it shows each row's kind to the model.
+  Transcript-imported rows, which were never tagged, are now tagged too, and live
+  captures now use the configured prototypes and
+  `tag_threshold`, which the hook path never passed. `capture_tool_use()` and
+  `add_observation()` keep write-time tagging by default for other platforms, which
+  have no backfill step. `vectors backfill` now reports the tag counts under a `tags`
+  key in its single JSON output, including with `--tags`, which used to print a second
+  JSON document.
+
 ### Fixed
 
 - **The fastembed embedding path returns float32 rows, as documented** (#536).

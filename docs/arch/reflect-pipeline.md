@@ -1,9 +1,9 @@
 ---
 card: arch-card:techne-reflect-pipeline
-updated: 2026-10-07
-anchor: techne/core/reflect.py sha=391e047f09348d7a26f0c0ce1a554425d4dca40f
+updated: 2026-10-08
+anchor: techne/core/reflect.py sha=f5b5afdd8a7e8eba730eeed038671fed71b0a730
 anchor: techne/core/sleepdream.py sha=aa3bd99733d9b1fe94bf22c138d1c0d973841ba6
-anchor: techne/lifecycle.py sha=4e8bd8eb890bb6c586b3626d15ddce3bf71d90e5
+anchor: techne/lifecycle.py sha=17094a30175b6c3a2e7c1db5605a15d4f120b5e1
 ---
 # reflect / consolidate / dream — self-maintenance
 
@@ -13,6 +13,7 @@ SEAM: resident-model emit/ingest (techne#19) — self-maintenance runs on the AG
 TRIGGER (techne#514): reflection debt is DURABLY QUEUED, not re-derived from recency. session_end enqueues one reflection_queue row per thread (THREAD IDS, re-rendered at drain time — a stored prompt would embed a snapshot that drifts from the ledger it renders from). Before #514 session_end COUNTED the debt and enqueued nothing, so reflection survived only the polite exit path; every crash/timeout dropped it silently. The queue DECOUPLES producer from reflector: any session can drain another's threads, because answering a rendered prompt needs the thread's observations, not the original session's context.
 PIECES:
 - reflect.py: per fresh thread → proposes durable facts/decisions/procedures/identity claims (candidates, human-reviewed).
+- REFLECT TAGS THE SESSION'S PENDING OBSERVATIONS FIRST (#1192), via `_tag_pending_observations`: the post_tool_use hook stores rows with kind NULL and leaves tagging to the SessionStart `vectors backfill`, but reflect usually runs on the session that just ended, before that backfill. `_render_observations` shows each row's kind to the model (how it picks decision-/fact-shaped rows). BOTH ENTRY POINTS call it: `load_session_for_reflection` (emit/ingest) and `reflect_on_session` (headless, from `run_session_end` in the SessionEnd and PreCompact hooks, after its `reflect.model` gate so a hook without a reflect model never loads the embedding model; it also refreshes the caller's already-fetched observation dicts). Best-effort: a failure renders rows without kind, as before.
 - reflect.py queue quartet (#514): emittable_thread_ids (THE predicate for "is this thread owed reflection" — enqueue and emit MUST both come here; the threads table has no observation linkage so it cannot be expressed in SQL) / enqueue_reflection_debt (session_end and redetect, INSERT OR IGNORE on the UNIQUE thread_id — idempotent by schema) / pending_reflection_queue (SessionStart nudge reads it) / drain_reflection_queue (called from ingest_one_and_drain — the SHARED path, not one caller — STAMPS drained_at, never deletes).
 - Drain fires ONLY on a pass that happened: gated on `not parse_failures and not errors`. The parse-failure branch is the one whose comment reads "THE PASS DID NOT HAPPEN"; draining there stamps a DISCARDED reflection as paid, permanently, since drain is guarded on `drained_at IS NULL`.
 - PER-SESSION STATE: ONE PRUNED, ONE KEPT (#1073). `heuristic_threads.<session>` (lifecycle's skip-unchanged-detection cursor) is pruned after 7 days by `extension_state.prune_stale` at the write; losing an old cursor costs one redundant detection. `reflect:emitted:<session>` is NOT pruned, on purpose: it is the emit cursor and the decline record, and `_marker_has_unemitted_threads` reads an ABSENT marker as "never emitted, pending". An age prune would re-open every old session for emit and forget its declines. It grows one row per reflected session, the same order as `sessions` itself.

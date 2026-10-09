@@ -5691,10 +5691,12 @@ def vectors_backfill(ctx, do_tags, all_tags, no_download):
     NOT reimplemented here, only invoked. See search.py's
     _ensure_vec_backend_identity for the migration itself.
 
-    With --tags, also re-runs tag/kind inference over stored observations
-    (inference.backfill_tags) — the same embedding backend, so it needs no
-    extra deps beyond [vectors]. Rows stored while the backend was missing
-    carry tags=NULL; this fills them.
+    Every run also tags PENDING observations (kind NULL): the post_tool_use
+    hook stores rows untagged so a tool call doesn't pay for inference, and
+    transcript import never tags. With --tags, it instead re-runs tag/kind
+    inference over every untagged observation (inference.backfill_tags) — the
+    same embedding backend, so it needs no extra deps beyond [vectors]. Rows
+    stored while the backend was missing carry tags=NULL; this fills them.
     """
     config = ctx.obj["config"]
     if not config.db_path.exists():
@@ -5761,13 +5763,15 @@ def vectors_backfill(ctx, do_tags, all_tags, no_download):
             click.echo(f"index hygiene: {counts['orphans_swept']} orphaned embedding(s) swept.")
         ctx.exit(0)
 
-    click.echo(json.dumps(counts, indent=2))
+    from techne.core.inference import backfill_tags
 
+    # One JSON document: callers parse this output whole (the SessionStart chain
+    # discards it, scripts and tests do not).
     if do_tags:
-        from techne.core.inference import backfill_tags
-
-        tag_counts = backfill_tags(config.db_path, config, only_missing=not all_tags)
-        click.echo(json.dumps({"tags": tag_counts}, indent=2))
+        counts["tags"] = backfill_tags(config.db_path, config, only_missing=not all_tags)
+    else:
+        counts["tags"] = backfill_tags(config.db_path, config, pending_only=True)
+    click.echo(json.dumps(counts, indent=2))
 
 
 @vectors.command("status")
