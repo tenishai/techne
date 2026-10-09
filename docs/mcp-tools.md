@@ -274,9 +274,10 @@ cut. These fields say what was cut:
   missing.
 - `est_tokens`: estimated tokens (about 4 characters each) of the text in the row as delivered.
   Thread rows count their label, summary and resume points.
-- `est_tokens_full`: set only on a knowledge row cut below `content_chars_total`. It is the
-  estimated cost of the whole row. Re-call with `row_chars` of at least `content_chars_total`
-  (maximum 20000) to read it; observations and threads cannot be opened this way.
+- `est_tokens_full`: set only on a local knowledge row cut below `content_chars_total`. It is
+  the estimated cost of the whole row. Re-call with `row_chars` of at least
+  `content_chars_total` (maximum 20000) to read it; observations, threads and rows from
+  federated remotes cannot be opened this way.
 - `content_head`, `content_window`, `content_span`: set only on an observation row that a
   lexical match put on the page for text past the normal cut, in explicit search
   (`techne_search`, `techne_recall`, `techne search`). Its `content` is then the

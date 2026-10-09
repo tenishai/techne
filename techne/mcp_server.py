@@ -209,9 +209,10 @@ def _with_token_estimates(rows: list[dict]) -> list[dict]:
     """Add `est_tokens` (and `est_tokens_full` on cut knowledge rows) to each row (#386).
 
     `est_tokens` prices the text in the row as delivered. `est_tokens_full` appears
-    only on a knowledge row cut below `content_chars_total`, and prices re-fetching it
-    whole with `row_chars`. Observations and threads are capped whatever `row_chars`
-    says, so a "full" figure for them could not be acted on. Applied at the tool
+    only on a LOCAL knowledge row cut below `content_chars_total`, and prices
+    re-fetching it whole with `row_chars`. Observations, threads and rows from
+    federated remotes are capped whatever `row_chars` says, so a "full" figure for
+    them could not be acted on. Applied at the tool
     boundary, never inside `search()`: the per-turn rail and the federation merge
     reuse those rows. Mutates and returns ``rows``; call it on the copies
     `_public_rows` returns.
@@ -225,7 +226,9 @@ def _with_token_estimates(rows: list[dict]) -> list[dict]:
             text = "".join(str(r.get(k) or "") for k in ("label", "summary", "resume_points"))
         r["est_tokens"] = approx_tokens(text)
         total = r.get("content_chars_total")
-        if r.get("source_table") == "knowledge" and total and total > len(r.get("content") or ""):
+        local = r.get("store") in (None, "local")
+        cut = bool(total) and total > len(r.get("content") or "")
+        if local and cut and r.get("source_table") == "knowledge":
             r["est_tokens_full"] = (total + 3) // 4
     return rows
 

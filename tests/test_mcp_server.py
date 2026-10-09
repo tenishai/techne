@@ -970,7 +970,9 @@ def test_recall_all_three_paths_carry_the_field(config, monkeypatch, path):
     _knowledge(config, "zebrafish " + "a" * 1990)
     if path == "federated":
         monkeypatch.setattr(
-            fed, "fan_out_search", lambda db, conns, topic, limit=10, local_results=None, **kw: (local_results, [])
+            fed,
+            "fan_out_search",
+            lambda db, conns, topic, limit=10, local_results=None, **kw: (local_results, []),
         )
         monkeypatch.setattr(srv, "_effective_connections", lambda c: {"peer": object()})
     elif path == "ordered":
@@ -1012,9 +1014,67 @@ def test_est_tokens_round_up_and_full_is_knowledge_only():
     k, o = _with_token_estimates(
         [
             {"source_table": "knowledge", "content": "a" * 5, "content_chars_total": 2001},
-            # a windowed observation also carries content_chars_total; it must not get a "full" price
-            {"source_table": "observations", "content": "a" * 5, "content_chars_total": 2001},
+            # a windowed observation also carries content_chars_total; no "full" price
+            {"source_table": "observation", "content": "a" * 5, "content_chars_total": 2001},
         ]
     )
     assert k["est_tokens"] == 2 and k["est_tokens_full"] == 501
     assert o["est_tokens"] == 2 and "est_tokens_full" not in o
+
+
+def test_a_remote_knowledge_row_gets_no_full_price():
+    """Prudence, PR #1224 r1: remotes ignore `row_chars`, so a "full" price on their
+    rows could not be acted on."""
+    from techne.mcp_server import _with_token_estimates
+
+    cut = {"source_table": "knowledge", "content": "a" * 500, "content_chars_total": 1175}
+    local, remote = _with_token_estimates([dict(cut, store="local"), dict(cut, store="peer")])
+    assert local["est_tokens_full"] == 294
+    assert remote["est_tokens"] == 125 and "est_tokens_full" not in remote
+
+
+@pytest.mark.parametrize("path", ["federated", "ordered"])
+def test_an_opened_row_still_dedups_against_its_cut_replica(config, monkeypatch, path):
+    """Prudence, PR #1224 r1: with `row_chars` the local row arrives whole while its
+    team replica arrives cut at 500, and the replica came back as a duplicate row
+    and a federation conflict against itself."""
+    import techne.core.federation as fed
+    import techne.core.recall_sources as rs
+    import techne.mcp_server as srv
+
+    text = "zebrafish " + "deploy notes for the kafka cluster. " * 32
+    kid = _knowledge(config, text)
+    replica = {
+        "source_table": "knowledge",
+        "id": 9001,
+        "content": text[:500],
+        "content_chars_total": len(text),
+        "_store": "peer",
+        "_role": "team",
+    }
+    monkeypatch.setattr(
+        fed,
+        "fan_out_search",
+        lambda db, conns, topic, limit=10, local_results=None, **kw: (
+            local_results,
+            [dict(replica)],
+        ),
+    )
+    monkeypatch.setattr(srv, "_effective_connections", lambda c: {"peer": object()})
+    if path == "ordered":
+        from techne.config import RecallOrderEntry
+
+        monkeypatch.setattr(rs, "entry_points", lambda group: [])
+        config.recall.order = [RecallOrderEntry("memory"), RecallOrderEntry("archivist:remote")]
+
+    out = _call(
+        config,
+        "techne_recall",
+        topic="zebrafish",
+        row_chars=2000,
+        include_federation_conflicts=True,
+    )
+
+    kn = [r for r in out["search_results"] if r.get("source_table") == "knowledge"]
+    assert [(r["id"], len(r["content"])) for r in kn] == [(kid, len(text))]
+    assert not out.get("federation_conflicts")
