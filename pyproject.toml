@@ -33,10 +33,7 @@ vectors = [
     # Gate the dep so installing `tenish-techne[vectors]` succeeds on 3.14 (FTS-only;
     # vector search degrades to empty via the import guard in core/search.py).
     # Drop the marker when onnxruntime ships 3.14 wheels.
-    # Capped below 0.9: under fastembed 0.9.0 (2026-10-07) the strict xfail
-    # markers for techne#536 in tests/test_embeddings.py XPASS and fail CI.
-    # Lift the cap once 0.9's output is confirmed float32 and those markers go.
-    "fastembed>=0.4.0,<0.9; python_version < '3.14'",
+    "fastembed>=0.4.0; python_version < '3.14'",
     # model2vec/potion is the py3.14 embedding backend (techne#601/#602): numpy-only
     # static embeddings, no onnxruntime/torch dependency, so it installs where
     # fastembed can't. core/embeddings.py auto-selects between the two backends

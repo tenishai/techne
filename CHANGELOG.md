@@ -16,10 +16,14 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
-- **`fastembed` is capped below 0.9** (`[vectors]` extra). fastembed 0.9.0 (released
-  2026-10-07) makes the two strict `xfail` markers for #536 in `tests/test_embeddings.py`
-  pass unexpectedly, which turned the `test` jobs red. The cap holds until 0.9's output is
-  confirmed to meet the float32 contract and those markers are removed.
+- **The fastembed embedding path returns float32 rows, as documented** (#536).
+  `EmbeddingBackend.embed()` passed fastembed's output through unchanged, so the float32
+  contract held only on the model2vec path. It now casts each row (a no-op when it is
+  already float32). The two embeddings tests marked as expected failures for #536 now run
+  and pass. The cap on `fastembed` added on 2026-10-08 is lifted, so 0.9 is allowed again.
+  The documents vector-search test was also marked as #536, but it fails for another
+  reason: there is no document vector search. It keeps a strict expected-failure marker
+  with that reason.
 
 ## [0.18.2] — 2026-10-07
 

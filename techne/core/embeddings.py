@@ -179,7 +179,9 @@ class EmbeddingBackend:
         """Yield one 1-D float32 embedding per input text, same order as input.
 
         fastembed's `TextEmbedding.embed()` already returns an iterable of 1-D
-        arrays, normalized by default — passed through unchanged.
+        arrays, normalized by default. Each row is cast to float32 (a no-op
+        when it already is): fastembed below 0.9 yields float64 rows here,
+        which broke this contract (issue 536).
 
         model2vec's `StaticModel.encode()` returns a single 2-D (N, dim) array
         and does NOT guarantee normalization for every model/config combo (see
@@ -187,7 +189,8 @@ class EmbeddingBackend:
         being yielded so distance semantics match the fastembed path.
         """
         if self._backend == "fastembed":
-            yield from self._impl.embed(texts)
+            for vec in self._impl.embed(texts):
+                yield vec.astype("float32", copy=False)
             return
 
         # model2vec path.
