@@ -577,6 +577,18 @@ jobs:
             echo "::error::tests/test_static_direct.py skipped a test on the model2vec leg"; exit 1
           fi
 
+      # Issue 1217 — the numpy-free query embed must match the numpy path byte for
+      # byte, on THIS runner's numpy build and CPU, at the real 256-dim table. Same
+      # reason as above: only this job has the cached model, so a skip fails the step.
+      - name: query_embed byte equality vs the numpy path (#1217)
+        working-directory: techne
+        run: |
+          set -euo pipefail
+          .venv-ci/bin/python -m pytest tests/test_query_embed.py -q -rs | tee "$RUNNER_TEMP/query-embed.log"
+          if grep -q SKIPPED "$RUNNER_TEMP/query-embed.log"; then
+            echo "::error::tests/test_query_embed.py skipped a test on the model2vec leg"; exit 1
+          fi
+
       - name: eval_vec gate (#399/#401 — vector/hybrid retrieval + ablation)
         working-directory: techne
         env:

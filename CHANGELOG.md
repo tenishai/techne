@@ -7,6 +7,19 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Changed
 
+- **Per-turn recall embeds the prompt without numpy** (#1217). The user_prompt_submit
+  hook imported numpy twice over to embed one prompt: through the potion loader, which
+  also read the whole 30 MB embedding table, and through `import sqlite_vec`, whose
+  `__init__` imports `numpy.typing`. The query is now embedded by `core/query_embed.py`,
+  which memory-maps the table, reads only the prompt's token rows and does the float32
+  arithmetic in Python in numpy's order, so the vector is byte-for-byte the one the numpy
+  path produces. sqlite-vec is loaded from its library file without importing the package
+  (`core/vec_ext.py`). Anything the new path does not reproduce exactly (fastembed, a
+  quantized or non-float32 table, an uncached model) falls back to the numpy path.
+  Measured on a copy of a 71,900-observation store, 9 runs each: hook median 345 ms ->
+  261 ms, and numpy is no longer imported. The median token length is cached in
+  `$TECHNE_HOME/.query_embed.json`.
+
 - **Hook liveness markers record how long each run took** (#1217). `hook:<name>:last_run`
   now carries `ms`, wall time from the `techne.hooks` package import to the marker write
   (interpreter boot excluded), and `cpu_ms`, the process's CPU time including boot. The
