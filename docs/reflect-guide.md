@@ -113,6 +113,11 @@ The edited text is what lands in knowledge; the original proposal stays on the c
 supersede was checked for faithfulness against its original text. `--content-file` reads the
 text from a file. `techne reflect stats` counts revisions separately (`revised`).
 
+**The faithfulness pass.** After `techne_consolidate_emit`/`ingest` stages merge and supersede
+candidates, `techne_faithfulness_emit`/`ingest` has your model check that each replacement keeps
+its sources' load-bearing claims; an unfaithful verdict flags a warning on the candidate in
+`techne reflect review` and never blocks it, so the operator still decides.
+
 `--by` and `--reason` are provenance. Leaving `--by` off records `unspecified`, so nobody can
 tell afterwards whether a person or an agent's bulk drain made the call.
 
