@@ -43,6 +43,17 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- **A vector backend swap now says so, and the query path refuses a mismatched index**
+  (#1049). `_ensure_vec_backend_identity` writes a `vec_reembed` marker in the same
+  transaction as the DROP; `vectors:coverage` and `techne vectors status` name the swap
+  ("re-embedding after backend swap A/384 -> B/256 ... E of N rows embedded") until
+  `backfill_vectors` has embedded everything and clears it. `search_vec` compares the
+  stored `embedding_backend` stamp with the live query backend and, on a mismatch, returns
+  nothing with the vec-channel error set, so the per-turn rail shows `degraded`. Before,
+  a width change returned an empty list with no signal, and a same-width swap ranked in the
+  wrong embedding space. Recall stays FTS-only during the re-embed (a full backfill of a
+  79k-row store took about 2 minutes on dev04); no old index is kept beside the new one.
+
 - **The fastembed embedding path returns float32 rows, as documented** (#536).
   `EmbeddingBackend.embed()` passed fastembed's output through unchanged, so the float32
   contract held only on the model2vec path. It now casts each row (a no-op when it is

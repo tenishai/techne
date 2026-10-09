@@ -1,7 +1,7 @@
 ---
 card: arch-card:techne-liveness
 updated: 2026-10-05
-anchor: techne/core/checks.py sha=8e7353f00ce1a5c76698818939e7edf36846574d
+anchor: techne/core/checks.py sha=88ce8bb399e4705fd35ae3c141d4c2381e61f772
 ---
 # liveness — subsystem health checks (techne#468/#469)
 
@@ -64,6 +64,8 @@ A CHECK MAY REPORT A CONFIG THAT MAKES A FEATURE MEANINGLESS, NOT ONLY ONE THAT 
   COUNT EVERY PART OF THE POPULATION, NOT MOST OF IT. `backfill_vectors` acts on `(NOT in vec OR vec_stale = 1) AND superseded_by IS NULL`. The first cut of the fix scoped the denominator correctly and then counted two of that population's three parts, leaving `vec_stale = 1` — set on ANY in-place content edit — checked by nothing in this module. That produced the MIRROR-IMAGE false green: 100%, remedy None, while a backfill had real work to do. Scoping the population is half the job; enumerating its conditions is the other half.
 
 THE NEWEST ROWS ARE PENDING, NOT MISSING (techne#704). `post_tool_use` captures every Bash call and only `backfill_vectors` embeds one, so the remedy, the re-check and the query that inspects them each land an unembedded row: the check could not be relied on to read clean in a live session, which is the can-never-go-green harm above. Observation and thread rows younger than `_VECTOR_TAIL_GRACE` (15 min; threads keyed on `updated_at`, since a summary re-save re-inserts the row) are named in the detail as pending and left out of the verdict. AGE, NOT A BACKFILL WATERMARK: a watermark freezes when the backfill stops running — the #814 incident, when every `techne init` deleted the SessionStart segment — and every row after it would read as pending forever. Age keeps that backlog loud.
+
+A BACKEND SWAP IS NAMED, NOT JUST COUNTED (techne#1049). While the `vec_reembed` extension_state marker exists, `vectors:coverage` leads its detail with "re-embedding after backend swap X/dim -> Y/dim (since T): E of N rows embedded; vector recall is FTS-only until done" and adds `reembed_in_progress=True` to the evidence. The check reads the marker row only; it still never builds the backend (techne#361). The marker forces STALE with the unchanged remedy `techne vectors backfill`, even when every unembedded row is still inside the grace window.
 
 EMPTY KNOWLEDGE GETS NO PERCENTAGE (techne#942, 2026-09-17). `vectors:coverage` printed "0/0 live knowledge embedded and current (100%)" on an external store holding 35,096 fully embedded observations and no knowledge: true, and it said nothing about either. With no live knowledge the detail now reads "no live knowledge yet" and reports the sibling tables' coverage outright ("observations 35096/35096 embedded"), or "nothing to embed yet" on an empty store. THE VERDICT DID NOT CHANGE: it still keys on whether anything the remedy acts on is unembedded, so fully embedded observations with no knowledge stay LIVE (the vector channel is whole) and unembedded observations stay STALE. Only the text was wrong. The companion field is `vector_channel_status`'s `unembedded` / `backfill_needed` (techne#948), because `re-embed needed` answers only "did the backend change?" and was read as "is everything embedded?".
 

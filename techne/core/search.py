@@ -1102,6 +1102,8 @@ def search_vec(
     try:
         if not _ensure_sqlite_vec(conn, sqlite_vec):
             return []
+        if _index_backend_mismatch(conn):
+            return []
         return _vec_channel_rows(
             conn,
             q_bytes,
@@ -1114,6 +1116,30 @@ def search_vec(
     finally:
         if own_conn:
             conn.close()
+
+
+def _index_backend_mismatch(conn: sqlite3.Connection) -> bool:
+    """True, with `_VEC_CHANNEL_ERROR` set, when the index was built by another backend.
+
+    Querying it would raise on a width change (swallowed into an empty result with no
+    signal) or rank in the wrong embedding space when two models share a width
+    (techne#1049). No stamp (legacy store) or no live model (a caller passed
+    ``query_vec``) skips the guard.
+    """
+    global _VEC_CHANNEL_ERROR
+    from techne.core.extension_state import get_state
+
+    model = embeddings_mod._embedding_model
+    if model is None:
+        return False
+    stamp = get_state(conn, "embedding_backend")
+    if not stamp or (stamp.get("name"), stamp.get("dim")) == (model.name, model.dim):
+        return False
+    _VEC_CHANNEL_ERROR = (
+        f"vector index built by {stamp.get('name')}/{stamp.get('dim')}, "
+        f"query backend is {model.name}/{model.dim}; run techne vectors backfill"
+    )
+    return True
 
 
 def _vec_channel_rows(
@@ -2830,7 +2856,12 @@ def backfill_vectors(
         # per-table loop below recreates them at the new dim and the
         # "NOT IN (SELECT rowid FROM vec_tbl)" backfill query naturally re-embeds
         # every row against an empty table. See _ensure_vec_backend_identity.
-        _ensure_vec_backend_identity(conn, model)
+        # Create all three tables up front: a run cut short before the knowledge
+        # table's turn would otherwise leave knowledge_vec absent, and
+        # vectors:coverage reads that as "not initialised", not as a swap (#1049).
+        if _ensure_vec_backend_identity(conn, model):
+            for _vec_tbl in sorted(_VEC_TABLE_NAMES):
+                _ensure_vec_table(conn, _vec_tbl, model.dim)
 
         for tbl, content_col, vec_tbl in [
             ("threads", "summary", "threads_vec"),
@@ -2915,6 +2946,14 @@ def backfill_vectors(
                     )
                 conn.commit()
                 counts[tbl] += len(rows)
+
+        from techne.core.extension_state import clear_state, get_state
+        from techne.core.vector_status import _unembedded_count
+
+        if get_state(conn, _VEC_REEMBED_STATE_NAME) is not None and not any(
+            _unembedded_count(conn, name) for name in _VEC_TABLE_NAMES
+        ):
+            clear_state(conn, _VEC_REEMBED_STATE_NAME)
 
     finally:
         conn.close()
@@ -3018,6 +3057,10 @@ def _ensure_vec_table(conn: sqlite3.Connection, name: str, dim: int):
         conn.execute(f"CREATE VIRTUAL TABLE {name} USING vec0(embedding float[{dim}])")
 
 
+#: extension_state row marking a backend-swap re-embed in progress (techne#1049).
+_VEC_REEMBED_STATE_NAME = "vec_reembed"
+
+
 def _ensure_vec_backend_identity(conn: sqlite3.Connection, backend) -> bool:
     """Detect an embedding-backend swap and drop+restamp the vec tables if so.
 
@@ -3088,6 +3131,23 @@ def _ensure_vec_backend_identity(conn: sqlite3.Connection, backend) -> bool:
     # semantically-incomparable embeddings can never be queried against the
     # new backend, then restamp. Tables are recreated lazily by the
     # _ensure_vec_table call that follows in backfill_vectors.
+    # The marker is written in the same transaction as the DROP, so a read-only
+    # check can name the cause of an empty index without building the model
+    # (techne#1049). backfill_vectors clears it once every row is embedded.
+    from techne.core.vector_status import population_count
+
+    totals = {name: population_count(conn, name) for name in sorted(_VEC_TABLE_NAMES)}
+    set_state(
+        conn,
+        _VEC_REEMBED_STATE_NAME,
+        {
+            "from": {"name": state.get("name"), "dim": state.get("dim")},
+            "to": {"name": backend.name, "dim": backend.dim},
+            "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "totals": totals,
+        },
+        commit=False,
+    )
     for name in sorted(_VEC_TABLE_NAMES):
         conn.execute(f"DROP TABLE IF EXISTS {name}")
     set_state(conn, _VEC_BACKEND_STATE_NAME, {"name": backend.name, "dim": backend.dim})
