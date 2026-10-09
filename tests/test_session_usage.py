@@ -198,11 +198,17 @@ def test_missing_session_row_writes_nothing(cfg, tmp_path):
     conn.close()
 
 
-def test_errors_are_returned_not_raised(cfg, tmp_path):
+def test_errors_are_returned_not_raised(cfg, tmp_path, monkeypatch):
+    from techne.platforms.claude_code import usage
+
+    def broken(paths):
+        raise ValueError("bad transcript")
+
+    monkeypatch.setattr(usage, "sum_usage", broken)
     main = _write(tmp_path / f"{SID}.jsonl", [_asst("m1", o=5)])
-    cfg.db_path = tmp_path / "missing-dir" / "x" / "techne.db"
     out = record_session_usage(cfg, SID, main)
-    assert out["recorded"] is False and out["reason"]
+    assert out == {"recorded": False, "reason": "ValueError: bad transcript"}
+    assert _row(cfg) == (None, None, None, None, None)
 
 
 def test_hook_timeout_is_not_swallowed(cfg, tmp_path, monkeypatch):
