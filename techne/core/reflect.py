@@ -453,6 +453,49 @@ def _bucket_observations(threads: list[Thread], observations: list[dict]) -> dic
     return out
 
 
+def _tag_pending_observations(
+    config: Config, session_id: str, observations: list[dict] | None = None
+) -> None:
+    """Tag this session's pending observations before reflect renders them (#1192).
+
+    The post_tool_use hook stores rows with kind NULL and leaves tagging to the
+    SessionStart `vectors backfill`, but reflect usually runs on the session that
+    just ended, before that backfill. `_render_observations` shows each row's kind
+    to the model, which is how it picks out decision- and fact-shaped rows. Both
+    reflect entry points call this: `load_session_for_reflection` (the emit/ingest
+    path) and `reflect_on_session` (the headless pass `run_session_end` runs from
+    the SessionEnd and PreCompact hooks, only when `reflect.model` is set).
+
+    When `observations` is given (already fetched by the caller), their `kind`
+    and `tags` are refreshed in place. Best-effort: a failure leaves rows pending,
+    and they render without a kind, as before.
+    """
+    from techne.core.database import connect
+    from techne.core.inference import backfill_tags
+
+    try:
+        tagged = backfill_tags(config.db_path, config, pending_only=True, session_id=session_id)
+        if not observations or not tagged.get("scanned"):
+            return
+        ids = [o["id"] for o in observations if o.get("kind") is None and "id" in o]
+        if not ids:
+            return
+        conn = connect(config.db_path)
+        try:
+            rows = conn.execute(
+                f"SELECT id, tags, kind FROM observations WHERE id IN ({','.join('?' * len(ids))})",
+                ids,
+            ).fetchall()
+        finally:
+            conn.close()
+        fresh = {r[0]: (r[1], r[2]) for r in rows}
+        for o in observations:
+            if o.get("id") in fresh:
+                o["tags"], o["kind"] = fresh[o["id"]]
+    except Exception as exc:
+        log.debug("pending tag inference before reflect failed: %s", exc)
+
+
 def load_session_for_reflection(config: Config, session_id: str) -> tuple[list[Thread], list[dict]]:
     """Reconstruct (threads, observations) for a session the same way
     run_session_end does — heuristic detection, no LLM. Lets the agent-assisted
@@ -461,6 +504,7 @@ def load_session_for_reflection(config: Config, session_id: str) -> tuple[list[T
     from techne.core.state import get_observations
     from techne.core.thread_orchestrator import detect_summarize_with_metadata
 
+    _tag_pending_observations(config, session_id)  # #1192, see the helper
     observations = get_observations(config.db_path, session_id)
     threads, _scores = detect_summarize_with_metadata(observations, config)
     return threads, observations
@@ -2198,6 +2242,10 @@ def reflect_on_session(
             return result
 
     from techne.core.thread_orchestrator import persisted_thread_id
+
+    # After the model gate on purpose: this loads the embedding model, which is
+    # only worth it on a run that is about to call an LLM (#1192).
+    _tag_pending_observations(config, session_id, observations)
 
     obs_by_thread = _bucket_observations(threads, observations)
 

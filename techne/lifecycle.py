@@ -958,8 +958,15 @@ def capture_tool_use(
     tool_output: str | None,
     *,
     event_at: str | None = None,
+    defer_inference: bool = False,
 ) -> bool:
     """Capture a tool use as an observation. Returns True if captured, False if filtered.
+
+    `defer_inference=True` stores the observation untagged (`kind` NULL) for
+    `techne vectors backfill` to tag later; see `state.add_observation`. Only a
+    caller whose platform runs that backfill should pass it. The Claude Code
+    hook does, from its SessionStart chain. The default keeps write-time tagging
+    for other platforms, which have no such step.
 
     Applies the same `should_capture` filtering used by the Claude Code hook.
     Also respects config.hooks.post_tool_use — returns False if hook is disabled.
@@ -979,5 +986,12 @@ def capture_tool_use(
     if not should_capture(config, tool_name, tool_input):
         return False
     content = summarize(tool_name, tool_input, tool_output)
-    add_observation(config.db_path, session_id, tool_name, content, event_at=event_at)
+    add_observation(
+        config.db_path,
+        session_id,
+        tool_name,
+        content,
+        event_at=event_at,
+        infer_tags=not defer_inference,
+    )
     return True

@@ -553,8 +553,17 @@ def add_observation(
     tier: str = "hot",
     config=None,
     event_at: str | None = None,
+    *,
+    infer_tags: bool = True,
 ):
     """Record a tool-use observation.
+
+    `infer_tags=False` stores the row with `tags` and `kind` NULL instead of
+    running embedding inference here. NULL `kind` marks the row as pending, and
+    `techne vectors backfill` infers it later (`inference.backfill_tags` with
+    `pending_only=True`). The Claude Code post_tool_use hook passes False: it
+    runs in a fresh process per tool call, and inference there costs a numpy
+    import and a model load, about 195 ms of a 360 ms hook (issue 1192).
 
     `event_at` is an optional ISO-8601 timestamp for the real-world event time.
     Leave None for live captures (tool-use → DB write is sub-second, so
@@ -578,8 +587,13 @@ def add_observation(
     # the exact pre-redaction payload without re-exposing it.
     content_hash = hashlib.sha256(content.encode()).hexdigest() if redacted != content else None
 
-    result = infer(redacted, config)
-    tags_str = " ".join(result.tags) if result.tags else None
+    if infer_tags:
+        result = infer(redacted, config)
+        tags_str = " ".join(result.tags) if result.tags else None
+        kind = result.kind
+    else:
+        tags_str = None
+        kind = None
 
     # NORMALISE AT THE PUBLIC BOUNDARY (#515). event_at is caller-supplied, and
     # both surfaces ASK for the shape migration 023 exists to eliminate — the MCP
@@ -596,7 +610,7 @@ def add_observation(
             """INSERT INTO observations
                    (session_id, tool_name, content, tier, tags, kind, event_at, content_hash)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (session_id, tool_name, redacted, tier, tags_str, result.kind, event_at, content_hash),
+            (session_id, tool_name, redacted, tier, tags_str, kind, event_at, content_hash),
         )
         conn.commit()
     finally:

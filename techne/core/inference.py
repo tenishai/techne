@@ -266,6 +266,8 @@ def backfill_tags(
     config: "Config | None" = None,
     *,
     only_missing: bool = True,
+    pending_only: bool = False,
+    session_id: str | None = None,
     batch_size: int = 500,
 ) -> dict[str, int]:
     """Re-run tag/kind inference over stored observations and fill the columns.
@@ -287,6 +289,17 @@ def backfill_tags(
     re-scanned on the next ``only_missing`` run; this is cheap (a local embed)
     and keeps the filter simple. Returns ``{"scanned": n, "tagged": m}`` where
     ``tagged`` counts rows that received at least one tag.
+
+    ``pending_only`` touches only rows whose ``kind`` is NULL: rows the
+    post_tool_use hook stored without inference (``add_observation(...,
+    infer_tags=False)``) and transcript-imported rows. Inference always sets
+    ``kind``, so a pending row is scanned once, unlike ``only_missing``. In this
+    mode nothing is written unless the model and prototypes load, because
+    ``infer()`` degrades to a default ``kind`` on a cold model cache, and
+    stamping that would mark rows done without inferring them. This is the
+    mode `techne vectors backfill` runs on every call, including from the
+    SessionStart hook. ``session_id`` (pending mode only) limits it to one
+    session; reflect uses that before rendering a session's observations.
     """
     from techne.core.database import connect
     from techne.core.embeddings import backend_available
@@ -294,13 +307,24 @@ def backfill_tags(
     if not backend_available():
         return {"scanned": 0, "tagged": 0}
 
-    where = "WHERE tags IS NULL OR tags = ''" if only_missing else ""
+    if pending_only:
+        key = _override_active(config)
+        if not _get_prototype_embeddings(load_prototypes(config), key=key, config=config):
+            return {"scanned": 0, "tagged": 0}
+        where = "WHERE kind IS NULL"
+        if session_id is not None:
+            where += " AND session_id = ?"
+    elif only_missing:
+        where = "WHERE tags IS NULL OR tags = ''"
+    else:
+        where = ""
     scanned = 0
     tagged = 0
     conn = connect(db_path)
     try:
+        params = (session_id,) if pending_only and session_id is not None else ()
         rows = conn.execute(
-            f"SELECT id, content FROM observations {where} ORDER BY id"
+            f"SELECT id, content FROM observations {where} ORDER BY id", params
         ).fetchall()
         for i, (obs_id, content) in enumerate(rows, 1):
             scanned += 1
