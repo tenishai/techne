@@ -190,6 +190,45 @@ def _with_public_provenance(rows: list[dict]) -> list[dict]:
     return rows
 
 
+#: Ceiling and floor for a caller's `row_chars` (#386). 20000 chars is about 5k
+#: tokens per row; the longest live knowledge row was 13598 chars when this was set.
+_ROW_CHARS_MIN = 500
+_ROW_CHARS_MAX = 20000
+
+
+def _row_chars(args: dict) -> int | None:
+    """The caller's per-knowledge-row character cap, clamped; None when absent (#386)."""
+    v = args.get("row_chars")
+    if v is None:
+        return None
+    return max(_ROW_CHARS_MIN, min(int(v), _ROW_CHARS_MAX))
+
+
+def _with_token_estimates(rows: list[dict]) -> list[dict]:
+    """Add `est_tokens` (and `est_tokens_full` on cut knowledge rows) to each row (#386).
+
+    `est_tokens` prices the text in the row as delivered. `est_tokens_full` appears
+    only on a knowledge row cut below `content_chars_total`, and prices re-fetching it
+    whole with `row_chars`. Observations and threads are capped whatever `row_chars`
+    says, so a "full" figure for them could not be acted on. Applied at the tool
+    boundary, never inside `search()`: the per-turn rail and the federation merge
+    reuse those rows. Mutates and returns ``rows``; call it on the copies
+    `_public_rows` returns.
+    """
+    from techne.core.tokens import approx_tokens
+
+    for r in rows:
+        if "content" in r:
+            text = r.get("content")
+        else:
+            text = "".join(str(r.get(k) or "") for k in ("label", "summary", "resume_points"))
+        r["est_tokens"] = approx_tokens(text)
+        total = r.get("content_chars_total")
+        if r.get("source_table") == "knowledge" and total and total > len(r.get("content") or ""):
+            r["est_tokens_full"] = (total + 3) // 4
+    return rows
+
+
 #: The server's long-lived READ connection (techne#1095). ``main()`` sets it and
 #: closes it on exit, so only the server process ever holds one; everywhere else
 #: (the CLI, tests calling a handler directly) it stays None and search opens its
@@ -236,8 +275,9 @@ def _techne_search(args: dict, config: Config) -> dict:
         # techne#1142: an explicit search gets the rare-phrase seat; the per-turn
         # and inbound rails do not (see search()).
         phrase_seat=True,
+        row_chars=_row_chars(args),
     )
-    results = _public_rows(results)
+    results = _with_token_estimates(_public_rows(results))
     return {"results": results, "count": len(results)}
 
 
@@ -582,6 +622,7 @@ def _ordered_recall(
                 identifier_head_slots=config.search.identifier_head_slots,
                 identifier_rare_fraction=config.search.identifier_rare_fraction,
                 phrase_seat=True,  # techne#1142: recall is an explicit call
+                row_chars=_row_chars(args),
             )
             for r in rows:
                 r["_store"] = "local"
@@ -652,8 +693,8 @@ def _ordered_recall(
         {"identity_matches": identity_matches},
         ladder_kw,
     )
-    out["search_results"] = _with_public_provenance(
-        _public_rows(out["search_results"], _PUBLIC_UNDERSCORE_KEYS)
+    out["search_results"] = _with_token_estimates(
+        _with_public_provenance(_public_rows(out["search_results"], _PUBLIC_UNDERSCORE_KEYS))
     )
     _surface_conflicts(out, conflicts, args)
     return out
@@ -899,6 +940,7 @@ def _techne_recall(args: dict, config: Config) -> dict:
             identifier_head_slots=config.search.identifier_head_slots,
             identifier_rare_fraction=config.search.identifier_rare_fraction,
             phrase_seat=True,  # techne#1142: recall is an explicit call
+            row_chars=_row_chars(args),
         )
         # Graded staleness (techne#90): grade anchored knowledge results against the
         # current working tree and attach a freshness tag. Non-anchored results are
@@ -919,8 +961,8 @@ def _techne_recall(args: dict, config: Config) -> dict:
             archivist_binding,
             {"identity_matches": _identity_matches()},
         )
-        out["search_results"] = _with_public_provenance(
-            _public_rows(out["search_results"], _PUBLIC_UNDERSCORE_KEYS)
+        out["search_results"] = _with_token_estimates(
+            _with_public_provenance(_public_rows(out["search_results"], _PUBLIC_UNDERSCORE_KEYS))
         )
         return out
 
@@ -948,6 +990,7 @@ def _techne_recall(args: dict, config: Config) -> dict:
         identifier_head_slots=config.search.identifier_head_slots,
         identifier_rare_fraction=config.search.identifier_rare_fraction,
         phrase_seat=True,  # techne#1142: recall is an explicit call
+        row_chars=_row_chars(args),
     )
     for r in local_results:
         r["_store"] = "local"
@@ -1013,8 +1056,8 @@ def _techne_recall(args: dict, config: Config) -> dict:
         {"identity_matches": _identity_matches()},
     )
     # After the merge and the tier ladder, both of which read row tags.
-    out["search_results"] = _with_public_provenance(
-        _public_rows(out["search_results"], _PUBLIC_UNDERSCORE_KEYS)
+    out["search_results"] = _with_token_estimates(
+        _with_public_provenance(_public_rows(out["search_results"], _PUBLIC_UNDERSCORE_KEYS))
     )
 
     _surface_conflicts(out, conflicts, args)
@@ -1090,7 +1133,9 @@ TOOLS = [
         "description": (
             "Call this when you need breadth across history — search across sessions, "
             "threads, knowledge, and identity. (For focused topic context, prefer "
-            "techne_recall.)"
+            "techne_recall.) Each row carries `est_tokens`, the estimated tokens of the text "
+            "delivered; a knowledge row cut short also carries `est_tokens_full`, the cost of "
+            "reading it whole (pass `row_chars`)."
         ),
         "inputSchema": {
             "type": "object",
@@ -1102,6 +1147,17 @@ TOOLS = [
                     "default": "all",
                 },
                 "limit": {"type": "integer", "default": 20},
+                "row_chars": {
+                    "type": "integer",
+                    "minimum": 500,
+                    "maximum": 20000,
+                    "description": (
+                        "Cap per KNOWLEDGE row in characters (default 500). Rows with "
+                        "est_tokens_full > est_tokens were cut; re-call with row_chars >= "
+                        "content_chars_total to read the whole row. Observations and threads "
+                        "are not affected, and rows from federated remotes are not either."
+                    ),
+                },
             },
             "required": ["query"],
         },
@@ -1372,12 +1428,26 @@ TOOLS = [
             "On a federated recall each memory row names its source: `store` (the "
             "connection name, or `local`) and `role` (that connection's role). "
             "`_store`/`_role` carry the same values and are DEPRECATED: read "
-            "`store`/`role`; the underscore names will be removed in a future release."
+            "`store`/`role`; the underscore names will be removed in a future release. "
+            "Each row carries `est_tokens` (tokens of the text delivered); a knowledge "
+            "row cut short also carries `est_tokens_full` (the cost of reading it whole, "
+            "via `row_chars`)."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "topic": {"type": "string", "description": "Topic to recall context for"},
+                "row_chars": {
+                    "type": "integer",
+                    "minimum": 500,
+                    "maximum": 20000,
+                    "description": (
+                        "Cap per KNOWLEDGE row in characters (default 500). Rows with "
+                        "est_tokens_full > est_tokens were cut; re-call with row_chars >= "
+                        "content_chars_total to read the whole row. Observations and threads "
+                        "are not affected, and rows from federated remotes are not either."
+                    ),
+                },
                 "include_federation_conflicts": {
                     "type": "boolean",
                     "default": False,

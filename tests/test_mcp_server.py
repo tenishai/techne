@@ -881,3 +881,140 @@ class TestNoInternalKeysInToolOutput:
             {k for r in rows for k in r if k.startswith("_") and k not in {"_store", "_role"}}
         )
         assert leaked == [], f"internal keys reached techne_recall output: {leaked}"
+
+
+# --- est_tokens / row_chars (#386) ----------------------------------------------------
+
+
+def _call(config, name, **arguments):
+    resp = handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments},
+        },
+        config,
+    )
+    return json.loads(resp["result"]["content"][0]["text"])
+
+
+def _knowledge(config, text):
+    from techne.core.knowledge import store
+
+    return store(config.db_path, text, type="fact", source="t")
+
+
+def _search_rows(config, **kw):
+    return _call(config, "techne_search", query="zebrafish", table="knowledge", **kw)["results"]
+
+
+def test_search_rows_carry_est_tokens(config):
+    _knowledge(config, "zebrafish " + "a" * 90)  # 100 chars
+    (row,) = _search_rows(config)
+    assert row["est_tokens"] == 25
+    assert "est_tokens_full" not in row
+
+
+def test_long_knowledge_row_reports_est_tokens_full(config):
+    _knowledge(config, "zebrafish " + "a" * 1990)  # 2000 chars
+    (row,) = _search_rows(config)
+    assert len(row["content"]) == 500
+    assert row["est_tokens"] == 125
+    assert row["est_tokens_full"] == 500
+
+
+def test_row_chars_opens_the_row(config):
+    _knowledge(config, "zebrafish " + "a" * 1990)
+    (row,) = _search_rows(config, row_chars=2000)
+    assert len(row["content"]) == 2000
+    assert row["est_tokens"] == 500
+    assert "est_tokens_full" not in row
+
+
+def test_row_chars_clamped(config):
+    from techne.mcp_server import _row_chars
+
+    assert _row_chars({}) is None
+    assert _row_chars({"row_chars": 1}) == 500
+    assert _row_chars({"row_chars": 10**9}) == 20000
+    assert _row_chars({"row_chars": 1200}) == 1200
+    _knowledge(config, "zebrafish " + "a" * 1990)
+    (row,) = _search_rows(config, row_chars=1)
+    assert len(row["content"]) == 500
+
+
+def test_observation_rows_have_est_tokens_but_not_full(config):
+    import sqlite3
+
+    conn = sqlite3.connect(config.db_path)
+    conn.execute("INSERT INTO sessions (id) VALUES ('s1')")
+    conn.execute(
+        "INSERT INTO observations (session_id, kind, content) VALUES ('s1', 'note', ?)",
+        ("zebrafish " + "b" * 1990,),
+    )
+    conn.commit()
+    conn.close()
+    rows = _call(config, "techne_search", query="zebrafish", table="observations")["results"]
+    assert rows, "fixture sanity: the observation must be found"
+    for row in rows:
+        assert row["est_tokens"] == (len(row["content"]) + 3) // 4
+        assert "est_tokens_full" not in row
+
+
+@pytest.mark.parametrize("path", ["local", "federated", "ordered"])
+def test_recall_all_three_paths_carry_the_field(config, monkeypatch, path):
+    import techne.core.federation as fed
+    import techne.mcp_server as srv
+
+    _knowledge(config, "zebrafish " + "a" * 1990)
+    if path == "federated":
+        monkeypatch.setattr(
+            fed, "fan_out_search", lambda db, conns, topic, limit=10, local_results=None, **kw: (local_results, [])
+        )
+        monkeypatch.setattr(srv, "_effective_connections", lambda c: {"peer": object()})
+    elif path == "ordered":
+        from techne.config import RecallOrderEntry
+
+        config.recall.order = [RecallOrderEntry("memory")]
+
+    rows = _call(config, "techne_recall", topic="zebrafish")["search_results"]
+    kn = [r for r in rows if r.get("source_table") == "knowledge"]
+    assert kn, "fixture sanity: the knowledge row must be recalled"
+    assert all("est_tokens" in r for r in rows)
+    assert kn[0]["est_tokens_full"] == 500
+
+    opened = _call(config, "techne_recall", topic="zebrafish", row_chars=2000)["search_results"]
+    kn = [r for r in opened if r.get("source_table") == "knowledge"]
+    assert len(kn[0]["content"]) == 2000
+    assert "est_tokens_full" not in kn[0]
+
+
+def test_thread_rows_price_label_summary_and_resume_points():
+    from techne.mcp_server import _with_token_estimates
+
+    (row,) = _with_token_estimates(
+        [{"label": "abcd", "summary": "efgh", "resume_points": "ijkl", "source_table": "threads"}]
+    )
+    assert row["est_tokens"] == 3
+
+
+def test_approx_tokens_alias_unchanged():
+    from techne.hooks._injection_log import _approx_tokens
+
+    assert _approx_tokens("abcde") == 2
+    assert _approx_tokens("") == 0
+
+
+def test_est_tokens_round_up_and_full_is_knowledge_only():
+    from techne.mcp_server import _with_token_estimates
+
+    k, o = _with_token_estimates(
+        [
+            {"source_table": "knowledge", "content": "a" * 5, "content_chars_total": 2001},
+            # a windowed observation also carries content_chars_total; it must not get a "full" price
+            {"source_table": "observations", "content": "a" * 5, "content_chars_total": 2001},
+        ]
+    )
+    assert k["est_tokens"] == 2 and k["est_tokens_full"] == 501
+    assert o["est_tokens"] == 2 and "est_tokens_full" not in o
