@@ -1292,7 +1292,11 @@ def main():
         with bounded_hook(config.hooks.timeout_s, label="post_tool_use:capture"):
             from techne.lifecycle import capture_tool_use
 
-            captured = capture_tool_use(config, session_id, tool_name, tool_input, tool_output)
+            # Tagging is deferred to the SessionStart `vectors backfill`: inferring
+            # here cost ~195 ms of a ~360 ms hook on every tool call (issue 1192).
+            captured = capture_tool_use(
+                config, session_id, tool_name, tool_input, tool_output, defer_inference=True
+            )
         # RECORDED ON EVERY PATH, including capture-disabled. `hooks.post_tool_use`
         # turns off CAPTURE, not this hook — it goes on to run the reminder, coord
         # and edit rails below either way — so skipping the marker there would
