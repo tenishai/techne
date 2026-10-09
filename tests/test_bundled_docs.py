@@ -145,22 +145,18 @@ def test_the_mcp_instructions_point_at_the_reader():
     assert "techne guide" in SERVER_INSTRUCTIONS
 
 
+#: Claude Code truncates each MCP server's `instructions` at 2,048 characters
+#: (https://code.claude.com/docs/en/mcp.md, "For MCP server authors"; override
+#: CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH, v2.1.280+). Observed 2026-10-04: cut after
+#: UTF-16 unit 2,048. techne#1179.
+CLAUDE_CODE_INSTRUCTIONS_LIMIT = 2048
+
 #: What `SERVER_INSTRUCTIONS` is allowed to cost, in characters.
 #:
-#: THIS IS A BUDGET, NOT A STYLE RULE. Everything in that string ships in the context of
-#: EVERY agent that connects this server, on EVERY session, whether or not it ever touches
-#: the thing the sentence describes. Measured 2026-08-28: 2,707 chars before 0.16.0 and
-#: 4,081 after, against ~30,400 chars of tool schemas — so instructions are the small half
-#: of techne's MCP footprint and the easy half to grow without noticing.
-#:
-#: RAISING IT IS ALLOWED AND IS THE POINT. The number exists so that growth is a decision
-#: someone made rather than a drift nobody measured; bump it in the same commit as the text
-#: and say what the tokens bought. What this catches is the OTHER case — a paragraph added
-#: because it seemed useful, costing every session forever, that would have been better as
-#: a section in a guide the agent reads only when it is already doing that work. One
-#: paragraph was moved out for exactly that reason (the skill-stub guidance, ~350 chars,
-#: which lives in `investigating` and `surveying` where an agent meets it in context).
-MCP_INSTRUCTIONS_BUDGET_CHARS = 4400
+#: THE CAP IS THE CLIENT LIMIT, NOT A STYLE BUDGET. Text past 2,048 never reaches the
+#: model, so raising this above 2,048 is a no-op for Claude Code. The string also ships in
+#: every session's context, so detail an agent needs only mid-task belongs in a guide.
+MCP_INSTRUCTIONS_BUDGET_CHARS = 1900
 
 
 def test_the_per_session_instructions_stay_within_budget():
@@ -169,9 +165,40 @@ def test_the_per_session_instructions_stay_within_budget():
     assert len(SERVER_INSTRUCTIONS) <= MCP_INSTRUCTIONS_BUDGET_CHARS, (
         f"SERVER_INSTRUCTIONS is {len(SERVER_INSTRUCTIONS)} chars against a budget of "
         f"{MCP_INSTRUCTIONS_BUDGET_CHARS}. This ships in every agent's context on every "
-        "session. Either move the new text into a guide (agents read those on demand, at "
-        "zero per-session cost) or raise the budget in this commit and say what it bought."
+        "session, and the client truncates at 2,048. Move the new text into a guide "
+        "(agents read those on demand, at zero per-session cost)."
     )
+
+
+def _utf16_len(s):
+    return len(s.encode("utf-16-le")) // 2
+
+
+def test_instructions_fit_under_the_client_limit_with_margin():
+    from techne.mcp_server import SERVER_INSTRUCTIONS as S
+
+    assert MCP_INSTRUCTIONS_BUDGET_CHARS <= CLAUDE_CODE_INSTRUCTIONS_LIMIT - 100
+    assert _utf16_len(S) <= MCP_INSTRUCTIONS_BUDGET_CHARS
+    assert S.isascii(), "non-ASCII makes the client's unit (UTF-16 vs bytes) matter"
+
+
+def test_the_load_bearing_lines_survive_truncation():
+    from techne.mcp_server import SERVER_INSTRUCTIONS as S
+
+    seen = S[:CLAUDE_CODE_INSTRUCTIONS_LIMIT]  # what the model gets
+    for needle in (
+        "codex_search",
+        "codex_blast_radius",
+        "techne_guide",
+        "techne guide",
+        "four-functions",
+        "techne_send",
+        "'coord'",
+        "techne_reflect_ingest",
+    ):
+        assert needle in seen, needle
+    # steering order: the loop and coordination precede domains, which precede guides
+    assert S.index("RECALL") < S.index("COORDINATE") < S.index("DOMAINS") < S.index("GUIDES")
 
 
 def test_guidance_an_agent_needs_only_mid_task_lives_in_the_guides():
