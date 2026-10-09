@@ -78,3 +78,83 @@ def test_lazy_logger_forwards_attribute_assignment():
         assert real.propagate is False and real.disabled is True
     finally:
         real.propagate, real.disabled = True, False
+
+
+def test_recall_path_does_not_import_numpy(tmp_path):
+    """Issue 1217: per-turn recall embeds the prompt without numpy or the
+    sqlite_vec package (whose __init__ imports numpy.typing). Runs the real
+    user_prompt_submit.main() in a subprocess against a store with knowledge
+    vectors, with a tiny potion-layout model planted in a private HF cache under
+    the default model's name, so the AUTO choice resolves to it offline."""
+    pytest.importorskip("numpy")
+    pytest.importorskip("tokenizers")
+    pytest.importorskip("safetensors")
+    pytest.importorskip("sqlite_vec")
+    from techne.core import embeddings
+
+    if embeddings._select_backend(None)[0] != "model2vec":
+        pytest.skip("AUTO picks fastembed here; the numpy-free path is model2vec-only")
+
+    import json
+    import os
+
+    from tests.test_query_embed import write_model
+
+    hub = tmp_path / "hub"
+    name = embeddings._DEFAULT_MODEL2VEC_MODEL
+    snap = hub / f"models--{name.replace('/', '--')}" / "snapshots" / "fixture"
+    write_model(snap, dim=32, seed=3)
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {**os.environ, "TECHNE_HOME": str(home), "HF_HUB_CACHE": str(hub)}
+
+    seed = (
+        "from techne.core.database import init_db\n"
+        "from techne.core.knowledge import store\n"
+        "from techne.core.search import backfill_vectors\n"
+        "from pathlib import Path\n"
+        f"db = Path({str(home / 'techne.db')!r})\n"
+        "init_db(db).close()\n"
+        "for i, t in enumerate(['alpha beta gamma', 'search hook recall', 'vector model']):\n"
+        "    store(db, f'{t} fact {i}', type='fact')\n"
+        "print(backfill_vectors(db, allow_download=False))\n"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", seed], capture_output=True, text=True, env=env, timeout=120
+    )
+    assert out.returncode == 0, out.stderr
+    assert "'knowledge': 3" in out.stdout, out.stdout  # the vector channel has rows
+
+    report = tmp_path / "report.json"
+    probe = (
+        "import json, sys\n"
+        "from techne.hooks import user_prompt_submit\n"
+        "try:\n"
+        "    user_prompt_submit.main()\n"
+        "except SystemExit:\n"
+        "    pass\n"
+        "from techne.core import query_embed\n"
+        f"open({str(report)!r}, 'w').write(json.dumps({{\n"
+        "    'numpy': 'numpy' in sys.modules,\n"
+        "    'sqlite_vec': 'sqlite_vec' in sys.modules,\n"
+        "    'fast_path_models': len(query_embed._MODELS),\n"
+        "}))\n"
+    )
+    payload = json.dumps(
+        {"session_id": "s-1217", "prompt": "alpha search hook", "cwd": str(tmp_path)}
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", probe],
+        input=payload,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=120,
+    )
+    assert out.returncode == 0, out.stderr
+    got = json.loads(report.read_text())
+    assert got["fast_path_models"] == 1, (got, out.stderr)
+    assert got == {"numpy": False, "sqlite_vec": False, "fast_path_models": 1}, (
+        "the per-turn recall path imported numpy or sqlite_vec again; "
+        f"stderr: {out.stderr[-2000:]}"
+    )

@@ -5,6 +5,15 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Added
+
+- **`est_tokens` on every `techne_search` and `techne_recall` row, and `row_chars` to open a cut one**
+  (#386). `est_tokens` prices the text delivered; a local knowledge row cut short of its full
+  length (500 characters by default) also carries `est_tokens_full`. Both tools take
+  `row_chars` (500 to 20000) to read local knowledge rows whole; before this, MCP callers had
+  no way past the 500-character cut. Cross-store dedup still matches a row opened this way
+  against its remote replica. The token helper moved to `techne.core.tokens`.
+
 ### Changed
 
 - **PR pushes run the `test` job on Python 3.12 only** (#1233). Main pushes and
@@ -13,6 +22,28 @@ All notable changes to techne are documented here. Format loosely follows
   (3.12, 3.13), plus eval-vec's vector gate, on a CPU-bound self-hosted pool. `fork-pr` keeps both
   versions. CONTRIBUTING.md now asks for the tests covering a change before pushing,
   with CI as the full gate (#1232).
+
+- **Per-turn recall embeds the prompt without numpy** (#1217). The user_prompt_submit
+  hook imported numpy twice over to embed one prompt: through the potion loader, which
+  also read the whole 30 MB embedding table, and through `import sqlite_vec`, whose
+  `__init__` imports `numpy.typing`. The query is now embedded by `core/query_embed.py`,
+  which memory-maps the table, reads only the prompt's token rows and does the float32
+  arithmetic in Python in numpy's order, so the vector is byte-for-byte the one the numpy
+  path produces. sqlite-vec is loaded from its library file without importing the package
+  (`core/vec_ext.py`). Anything the new path does not reproduce exactly (fastembed, a
+  quantized or non-float32 table, an uncached model) falls back to the numpy path.
+  Measured on a copy of a 71,900-observation store, 9 runs each: hook median
+  341-345 ms -> 259-264 ms, and numpy is no longer imported. The median token length is cached in
+  `$TECHNE_HOME/.query_embed.json`. The backend-stamp guard from #1049 checks the index
+  against the model the fast path embedded with, since that path never builds the
+  embeddings singleton the guard otherwise reads.
+
+- **Hook liveness markers record how long each run took** (#1217). `hook:<name>:last_run`
+  now carries `ms`, wall time from the `techne.hooks` package import to the marker write
+  (interpreter boot excluded), and `cpu_ms`, the process's CPU time including boot. The
+  last 50 `ms` values are kept in `hook:<name>:ms_recent`, so a per-hook p50 can be read
+  from the store instead of reconstructed from transcripts. The marker writes now share
+  one transaction.
 
 - **Hook processes no longer import `logging` or `tempfile` unless they use them**
   (#1192). Seven modules on the post_tool_use path created a logger or imported
