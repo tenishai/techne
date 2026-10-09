@@ -5827,6 +5827,13 @@ def vectors_status(ctx):
     # embedded" while 25 promoted knowledge rows had no vectors.
     click.echo(f"re-embed needed: {status['reembed_needed']}")
     click.echo(f"backfill needed: {status['backfill_needed']}")
+    marker = status["reembed_marker"]
+    if marker:
+        click.echo(
+            f"re-embed in progress: {marker['from']['name']}/{marker['from']['dim']} -> "
+            f"{marker['to']['name']}/{marker['to']['dim']} since {marker['started_at']}; "
+            "vector recall is FTS-only until it finishes"
+        )
     if status["reembed_needed"]:
         click.echo(
             "vector channel is stale after a backend change — "

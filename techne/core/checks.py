@@ -3163,6 +3163,26 @@ def check_vector_coverage(config) -> CheckResult:
             + f" pending (under {minutes} min old — embedded at the next session start)"
         )
 
+    reembed = None
+    conn = connect(config.db_path)
+    try:
+        from techne.core.extension_state import get_state
+
+        reembed = get_state(conn, "vec_reembed")
+    except Exception:  # noqa: BLE001 — a marker read must never fail a health check
+        pass
+    finally:
+        conn.close()
+    if reembed:
+        done = embedded + sum(e for e, _t in sibling_counts.values())
+        total_rows = sum((reembed.get("totals") or {}).values())
+        frm, to = reembed.get("from") or {}, reembed.get("to") or {}
+        detail = (
+            f"re-embedding after backend swap {frm.get('name')}/{frm.get('dim')} -> "
+            f"{to.get('name')}/{to.get('dim')} (since {reembed.get('started_at')}): "
+            f"{done} of {total_rows} rows embedded; vector recall is FTS-only until done. "
+        ) + detail
+
     healthy = missing == 0 and stale == 0 and orphans == 0 and not sibling_gaps
     return CheckResult(
         name="vectors:coverage",
@@ -3174,6 +3194,7 @@ def check_vector_coverage(config) -> CheckResult:
             f"superseded={superseded}, superseded-but-embedded={orphans}, "
             f"dangling={dangling}, unembedded-within-grace="
             f"{sum(sibling_pending.values())}"
+            + (", reembed_in_progress=True" if reembed else "")
         ),
         detail=detail,
         remedy=None if healthy else "techne vectors backfill",
