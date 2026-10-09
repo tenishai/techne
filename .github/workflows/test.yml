@@ -281,7 +281,14 @@ jobs:
     timeout-minutes: 45
     strategy:
       matrix:
-        python-version: ['3.12', '3.13']
+        # 3.12 ONLY ON PULL REQUESTS; the full 3.12/3.13 matrix on main pushes and
+        # workflow_dispatch (issue 1233). Every PR push ran the full suite twice
+        # (3.12, 3.13) plus eval-vec's vector gate on the self-hosted pool; the suite
+        # is CPU-bound, so concurrent jobs share one host's threads. The cost: a break that only
+        # shows on 3.13 is caught on main after merge, not on the PR. To run 3.13
+        # for a PR branch on demand: `gh workflow run test.yml --ref <branch>`.
+        # fork-pr keeps both versions: it runs on GitHub-hosted runners, not ours.
+        python-version: ${{ fromJSON(github.event_name == 'pull_request' && '["3.12"]' || '["3.12", "3.13"]') }}
       fail-fast: false
 
     steps:
