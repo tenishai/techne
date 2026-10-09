@@ -76,7 +76,9 @@ def test_fresh_db_is_current_version(db):
         # nullable and not backfilled -- every existing row is unparked, as before.
         # Bumped 28 -> 29 for techne#1195: the lesson_meta table for agent
         # self-lessons. A new table only; nothing backfilled.
-        assert v == SCHEMA_VERSION == 29
+        # Bumped 29 -> 30 for techne#689: sessions.tokens_* + usage_updated_at,
+        # nullable and not backfilled by the migration (`techne usage-backfill`).
+        assert v == SCHEMA_VERSION == 30
         # Fresh DB already has the correct (tags/kind) triggers.
         sql = conn.execute(
             "SELECT sql FROM sqlite_master WHERE name='observations_ai'"

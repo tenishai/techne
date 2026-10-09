@@ -484,6 +484,9 @@ techne import [PATH] [--no-prompts] [--force]
                                            # ~/.claude/projects/<slug>/ for the current cwd.
                                            # Idempotent — skips sessions that already have
                                            # observations unless --force.
+techne usage-backfill [--force]            # fill sessions.tokens_* (in/out/cache write/cache
+                                           # read, subagents included) from transcripts still on
+                                           # disk. Only NULL rows unless --force. Idempotent.
 
 # Capture + integration helpers (for non-Claude-Code runtimes)
 techne observe --session-id ID [--content TEXT] [--tool-name NAME] [--platform P]

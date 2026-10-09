@@ -451,6 +451,10 @@ COMMAND_TREE_AT_LAST_REVIEW = {
     "threads",
     "threads redetect",
     "threads show",
+    # RE-BLESSED 2026-10-08 after #689 added `usage-backfill`. It only READS
+    # transcripts (message.usage) and writes sessions.tokens_*; it never moves,
+    # compresses or deletes one, so "nothing archives transcripts" still holds.
+    "usage-backfill",
     "vectors",
     "vectors backfill",
     "vectors status",

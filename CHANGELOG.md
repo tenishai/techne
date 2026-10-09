@@ -13,6 +13,13 @@ All notable changes to techne are documented here. Format loosely follows
   `row_chars` (500 to 20000) to read local knowledge rows whole; before this, MCP callers had
   no way past the 500-character cut. Cross-store dedup still matches a row opened this way
   against its remote replica. The token helper moved to `techne.core.tokens`.
+- **Per-session token usage on `sessions`** (#689, schema v30). Four nullable columns,
+  `tokens_in`, `tokens_out`, `tokens_cache_write`, `tokens_cache_read`, plus
+  `usage_updated_at`, summed from the Claude Code transcript's `message.usage` over the
+  main transcript and its `subagents/agent-*.jsonl`. Claude Code logs each API message
+  once per content block, so usage is deduped on `message.id`. Written by the SessionEnd
+  hook (not Stop, which fires every turn) and by `techne usage-backfill [--force]` for
+  history. NULL means unknown (no transcript), 0 a measured zero. No dollars are stored.
 
 ### Changed
 
