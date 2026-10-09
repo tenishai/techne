@@ -11,8 +11,9 @@ surface is deliberately vendor-neutral (techne#499).
 **Context cost.** Claude Code defers MCP tool schemas by default: only tool names and
 `SERVER_INSTRUCTIONS` load at session start, and a schema loads when the model needs the
 tool ([tool search](https://code.claude.com/docs/en/mcp.md)). Schemas are paid up front
-only where tool search is off or unsupported: `ENABLE_TOOL_SEARCH=false`, a non-first-party
-`ANTHROPIC_BASE_URL`, and models or platforms without `tool_reference` support. Other MCP
+only where tool search is off or unsupported: `ENABLE_TOOL_SEARCH=false`,
+`CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS`, a non-first-party `ANTHROPIC_BASE_URL`, and
+models or platforms without `tool_reference` support. Other MCP
 clients may not defer at all. `test_tool_schema_payload_stays_under_the_tripwire` flags
 growth of the total schema size (techne#808).
 
