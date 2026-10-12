@@ -6481,6 +6481,33 @@ def evidence_cmd(ctx, session_id, since):
 # ---------------------------------------------------------------------------
 
 
+@main.command("scrub-credentials")
+@click.option("--apply", is_flag=True, help="Rewrite the rows. Without it, only count them.")
+@click.option("--json", "as_json", is_flag=True, help="Emit the counts as JSON.")
+@click.pass_context
+def scrub_credentials_cmd(ctx, apply, as_json):
+    """Re-apply credential redaction to rows already stored (techne#1245).
+
+    Redaction runs at write time, so a widened pattern set protects new rows
+    only. Dry run by default: counts per column, never the matched text. Take a
+    `techne backup` first if you want a way back, and note that existing
+    backups and exports still hold whatever they held.
+    """
+    config = ctx.obj["config"]
+    from techne.core.scrub import scrub
+
+    counts = scrub(config.db_path, apply=apply)
+    total = sum(counts.values())
+    if as_json:
+        click.echo(json.dumps({"applied": apply, "rows": counts, "total": total}, indent=2))
+        return
+    verb = "redacted" if apply else "would redact"
+    for name, n in counts.items():
+        if n:
+            click.echo(f"  {name}: {n}")
+    click.echo(f"{verb} {total} row(s)" + ("" if apply or not total else "; rerun with --apply"))
+
+
 @main.command("fsck")
 @click.pass_context
 def fsck_cmd(ctx):

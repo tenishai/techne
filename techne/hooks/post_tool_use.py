@@ -498,14 +498,18 @@ def _preview(text: str) -> str:
     """
     if len(text) <= _PREVIEW_MAX_CHARS:
         return text
+    from techne.core.redaction import safe_cut, safe_start
+
     tail_chars = _PREVIEW_MAX_CHARS - _PREVIEW_HEAD_CHARS - _PREVIEW_MARKER_BUDGET
-    head = text[:_PREVIEW_HEAD_CHARS]
+    # Neither cut may land inside a credential: a fragment matches no redaction
+    # pattern and would be stored in the clear (techne#1245).
+    head = safe_cut(text, _PREVIEW_HEAD_CHARS)
     # Discard through the first newline so no fragment of a cut line survives.
     # The no-newline case needs no guard: partition returns (whole, "", "") when
     # the separator is absent, so `tail` is already "" and the preview degrades
     # to head-only — the safe direction, tested by
     # test_preview_drops_an_unaligned_tail_entirely.
-    _, _, tail = text[-tail_chars:].partition("\n")
+    _, _, tail = text[safe_start(text, len(text) - tail_chars) :].partition("\n")
     # Computed from the real retained lengths, never from the nominal budget —
     # line-alignment makes the dropped span longer than tail_chars implies.
     elided = len(text) - len(head) - len(tail)
@@ -514,6 +518,8 @@ def _preview(text: str) -> str:
 
 
 def summarize(tool_name: str, tool_input: dict, tool_output) -> str:
+    from techne.core.redaction import safe_cut
+
     if isinstance(tool_output, dict):
         tool_output = json.dumps(tool_output, default=str)
     elif not isinstance(tool_output, str):
@@ -525,12 +531,12 @@ def summarize(tool_name: str, tool_input: dict, tool_output) -> str:
         return f"Ran: {cmd}\nOutput: {output_preview}"
     elif tool_name == "Edit":
         fp = tool_input.get("file_path", "")
-        old = tool_input.get("old_string", "")[:100]
-        new = tool_input.get("new_string", "")[:100]
+        old = safe_cut(tool_input.get("old_string", ""), 100)
+        new = safe_cut(tool_input.get("new_string", ""), 100)
         return f"Edited: {fp}\nChange: {old} → {new}"
     elif tool_name == "Write":
         fp = tool_input.get("file_path", "")
-        content = tool_input.get("content", "")[:500]
+        content = safe_cut(tool_input.get("content", ""), 500)
         return f"Wrote: {fp}\nContent: {content}..."
     elif tool_name == "Grep":
         pattern = tool_input.get("pattern", "")
@@ -542,7 +548,7 @@ def summarize(tool_name: str, tool_input: dict, tool_output) -> str:
         url = tool_input.get("url", "")
         return f"Fetched: {url}\nContent: {output_preview}"
     else:
-        input_summary = json.dumps(tool_input)[:500]
+        input_summary = safe_cut(json.dumps(tool_input), 500)
         return f"Tool: {tool_name}\nInput: {input_summary}\nOutput: {output_preview}"
 
 

@@ -25,6 +25,8 @@ _PATTERNS: list[tuple[str, str]] = [
     (r"sk-ant-[A-Za-z0-9_-]{20,}", "sk-ant"),
     # OpenAI-style keys (sk-proj-... and plain sk-...)
     (r"sk-proj-[A-Za-z0-9_-]{20,}", "sk"),
+    # OpenRouter (sk-or-v1-…): the hyphens defeat the plain sk- pattern below
+    (r"sk-or-[A-Za-z0-9_-]{20,}", "sk"),
     (r"sk-[A-Za-z0-9]{20,}", "sk"),
     # GitHub personal access tokens (classic)
     (r"ghp_[A-Za-z0-9]{20,}", "github"),
@@ -32,15 +34,20 @@ _PATTERNS: list[tuple[str, str]] = [
     (r"ghs_[A-Za-z0-9]{20,}", "github-apps"),
     # GitHub fine-grained PATs
     (r"github_pat_[A-Za-z0-9_]{20,}", "github-fine-grained"),
+    # GitHub OAuth (gho_, what `gh auth token` prints), user-to-server (ghu_) and
+    # refresh (ghr_) tokens (techne#1245)
+    (r"gh[our]_[A-Za-z0-9]{20,}", "github-oauth"),
+    # GitLab personal access tokens and npm automation tokens (techne#1245)
+    (r"glpat-[A-Za-z0-9_-]{20,}", "gitlab"),
+    (r"npm_[A-Za-z0-9]{30,}", "npm"),
     # Stripe secret keys use UNDERSCORES: sk_live_… / sk_test_… (techne#134 — the
     # old hyphen shape `sk-live-` never matched a real key). Distinct `sk_` prefix,
     # so no conflict with the plain `sk-` pattern above.
     (r"sk_(?:live|test)_[A-Za-z0-9]{20,}", "stripe"),
     # Slack bot tokens
     (r"xoxb-[A-Za-z0-9-]+", "slack"),
-    # Slack user/app tokens (bonus)
-    (r"xoxp-[A-Za-z0-9-]+", "slack"),
-    (r"xoxa-[A-Za-z0-9-]+", "slack"),
+    # Slack user/app/session/refresh tokens
+    (r"xox[pasr]-[A-Za-z0-9-]+", "slack"),
     # AWS access key IDs (AKIA…) and temporary/STS keys (ASIA…)
     (r"A(?:KIA|SIA)[0-9A-Z]{16}", "aws-access-key"),
     # AWS secret access keys: 40-char base64. The bare shape is too common
@@ -74,6 +81,21 @@ _PATTERNS: list[tuple[str, str]] = [
     # placeholder values. JWTs are already caught by the jwt pattern above, so
     # this primarily catches opaque OAuth2 / API gateway tokens.
     (r"(?i)Authorization:\s*Bearer\s+\S{20,}", "bearer"),
+    # Other Authorization schemes (techne#1245). Basic is base64(user:password),
+    # so it needs no length floor beyond a non-placeholder 8 chars.
+    (r"(?i)Authorization:\s*(?:Basic|Token|Digest)\s+\S{8,}", "http-auth"),
+    # Credentials in a URL: scheme://user:password@host (psql, git remotes,
+    # redis, pip index URLs). Only the userinfo is replaced; the host stays
+    # readable (techne#1245).
+    (r"(?<=://)[^/\s:@]+:[^@\s/]+(?=@)", "url-userinfo"),
+    # curl/wget basic auth: -u user:pass / --user user:pass (techne#1245). The
+    # colon is required, so `git push -u origin main` is untouched.
+    (r"(?<=\s-u )[^\s:$]+:\S+", "basic-auth"),
+    (r"(?<=--user[ =])[^\s:$]+:\S+", "basic-auth"),
+    # Env-style (ahead of the lowercase forms so an UPPER_CASE name keeps the
+    # `env` tag): SOME_KEY=value, SOME_TOKEN=value, SOME_SECRET=value,
+    # SOME_PASSWORD=value (PASSWORD added in techne#1245)
+    (r"[A-Z][A-Z0-9_]*_(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD)=\S+", "env"),
     # Lowercase / JSON credential assignments (techne#243). The env pattern above
     # only covers UPPERCASE names; these fill the gap for JSON output and shell
     # assignments. Require ≥8 non-whitespace chars for the value to stay above
@@ -83,11 +105,34 @@ _PATTERNS: list[tuple[str, str]] = [
     # shape (`export secret=…`, `--password=…`). Allowing spaces (`key = value`)
     # over-redacts prose and code (`password = get_password()`), which now flows
     # through the LLM-prose sinks this pass wired up (decision_reason, summaries).
-    (r"(?i)\b(?:api_key|password|secret)=\S{8,}", "lowered-credential"),
+    #
+    # The name may carry a prefix (`db_password=`, `DB_PASSWORD=`, `GITHUB_TOKEN=`):
+    # `\b` before `password` used to fail after `_`, which let every prefixed
+    # name through (techne#1245). Bare `token=` and `passwd=` were missing. Not
+    # matched: pagination cursors (`page_token=`, `nextPageToken`), `==` version
+    # pins (`tiktoken==0.7.0`), and `PWD`, which is a directory, not a password.
+    (
+        r"(?i)(?<![A-Za-z0-9])[A-Za-z0-9_]*(?<!page)(?<!page_)(?:api_key|password|passwd|secret|token)"
+        r"=(?![=$]|<redacted:)\S{8,}",
+        "lowered-credential",
+    ),
     #   JSON form:  "api_key": "longvalue123"  (spaces around ':' are normal JSON)
-    (r'(?i)"(?:api_key|password|secret)"\s*:\s*"[^"]{8,}"', "lowered-credential"),
-    # Env-style: SOME_KEY=value, SOME_TOKEN=value, SOME_SECRET=value
-    (r"[A-Z][A-Z0-9_]*_(?:KEY|TOKEN|SECRET)=\S+", "env"),
+    (
+        r'(?i)"[A-Za-z0-9_]*(?<!page)(?<!page_)(?:api_key|password|passwd|secret|token)"'
+        r'\s*:\s*"[^"]{8,}"',
+        "lowered-credential",
+    ),
+    # Space-separated secret flags: --password VALUE, --token VALUE,
+    # --with-token VALUE (techne#1245). A `$VAR` reference is left alone: it
+    # names where the secret lives, not the secret.
+    # One fixed-width lookbehind per flag keeps the flag name readable. A value
+    # an earlier pattern already replaced is left as it is.
+    (
+        r"(?i)(?:(?<=--password[ =])|(?<=--passwd[ =])|(?<=--token[ =])"
+        r"|(?<=--with-token[ =])|(?<=--api-key[ =])|(?<=--secret[ =]))"
+        r"(?!\$|<redacted:)\S{8,}",
+        "flag-credential",
+    ),
 ]
 
 _COMPILED: list[tuple[re.Pattern[str], str]] = [(re.compile(pat), tag) for pat, tag in _PATTERNS]
@@ -117,3 +162,44 @@ def redact_credentials(text: str) -> str:
     for pattern, tag in _COMPILED:
         text = pattern.sub(f"<redacted:{tag}>", text)
     return text
+
+
+#: How far either side of a cut point to look for a credential that straddles
+#: it. The longest bounded pattern is the 8KB PEM body; the rest are far shorter.
+_CUT_WINDOW = 9000
+
+
+def _straddling(text: str, pos: int) -> tuple[int, int] | None:
+    """The credential match that contains ``pos`` strictly inside it, if any."""
+    lo = max(0, pos - _CUT_WINDOW)
+    window = text[lo : pos + _CUT_WINDOW]
+    for pattern, _ in _COMPILED:
+        for m in pattern.finditer(window):
+            a, b = m.start() + lo, m.end() + lo
+            if a < pos < b:
+                return a, b
+    return None
+
+
+def safe_cut(text: str, n: int) -> str:
+    """``text[:n]``, pulled back so the cut never lands inside a credential.
+
+    Truncating BEFORE redaction can cut a secret mid-token, and the fragment no
+    longer matches any pattern, so the sink-boundary redaction lets it through
+    (techne#1245: Edit/Write previews and tool-output heads). Cutting at the
+    start of the straddling match drops the secret instead; the full-text
+    redaction downstream then sees no partial secret and the content_hash
+    invariant of add_observation is unchanged."""
+    if len(text) <= n:
+        return text
+    hit = _straddling(text, n)
+    return text[: hit[0]] if hit else text[:n]
+
+
+def safe_start(text: str, i: int) -> int:
+    """A start offset at or after ``i`` that does not begin inside a credential.
+
+    The tail counterpart of :func:`safe_cut`: a tail that starts mid-secret keeps
+    the secret's end, which also matches no pattern."""
+    hit = _straddling(text, i)
+    return hit[1] if hit else i

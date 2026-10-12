@@ -469,3 +469,103 @@ def test_pem_bounded_span_no_redos_on_unterminated_opener():
     assert "<redacted:pem-private-key>" not in result
     # Bounded work: comfortably under a second even on slow CI.
     assert elapsed < 2.0, f"PEM matching took {elapsed:.3f}s — bound may be ineffective"
+
+
+# ---------------------------------------------------------------------------
+# techne#1245: shapes that used to pass through, and truncation that split a secret
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text, secret",
+    [
+        ("export DB_PASSWORD=hunter2hunter2x", "hunter2hunter2x"),
+        ("db_password=hunter2hunter2x", "hunter2hunter2x"),
+        ("TOKEN=abcdefghijklmnopqrstuvwxyz0123", "abcdefghijklmnopqrstuvwxyz0123"),
+        ("curl -u admin:s3cretpass http://x", "s3cretpass"),
+        ("curl --user admin:s3cretpass http://x", "s3cretpass"),
+        ("psql postgres://user:pw12345678@host/db", "pw12345678"),
+        ("gh auth login --with-token gho_abcdefghijklmnopqrstuvwxyz0123456789", "gho_abcdef"),
+        ("ghu_abcdefghijklmnopqrstuvwxyz0123", "ghu_abcdef"),
+        ("Authorization: Basic dXNlcjpwYXNzd29yZA==", "dXNlcjpwYXNzd29yZA=="),
+        ("Authorization: token 0123456789abcdef", "0123456789abcdef"),
+        ("mysql --password hunter2hunter2 db", "hunter2hunter2"),
+        ("glpat-abcdefghijklmnopqrstuvwxyz", "glpat-abcdef"),
+        ("npm_abcdefghijklmnopqrstuvwxyz0123456789", "npm_abcdef"),
+        ("xoxs-1234-abcdef", "xoxs-1234"),
+        ("sk-or-v1-abcdef0123456789abcdef0123", "abcdef0123456789"),
+        ('{"github_token": "abcdefghijklmnop"}', "abcdefghijklmnop"),
+    ],
+)
+def test_1245_shapes_are_redacted(text, secret):
+    out = redact_credentials(text)
+    assert secret not in out, out
+    assert "<redacted:" in out
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "git push -u origin main",
+        "max_tokens=4096",
+        "tokens_out=12345678",
+        "ssh://git@host:22/repo",
+        "export GITHUB_TOKEN_FILE=/etc/x",
+        "PASSWORD_FILE=/etc/x",
+        "password = get_password()",
+        "tool --token $GITHUB_TOKEN",
+        "token=$GH_TOKEN",
+        "see https://example.com/a:b@c",
+        "next_page_token=CAESBggDEAEYAQ",
+        '{"nextPageToken": "CAESBggDEAEYAQ"}',
+        "pip install tiktoken==0.12.0",
+        "OLDPWD=/Users/someone/working",
+    ],
+)
+def test_1245_near_misses_are_left_alone(text):
+    assert redact_credentials(text) == text
+
+
+def test_1245_flag_names_stay_readable():
+    out = redact_credentials("gh auth login --with-token gho_abcdefghijklmnopqrstuvwxyz0123456789")
+    assert out == "gh auth login --with-token <redacted:github-oauth>"
+    assert redact_credentials("curl -u admin:s3cretpass x") == "curl -u <redacted:basic-auth> x"
+
+
+def test_safe_cut_never_splits_a_secret():
+    from techne.core.redaction import safe_cut
+
+    key = "sk-ant-api03-" + "A" * 40
+    text = "a" * 80 + key + " tail"
+    cut = safe_cut(text, 100)
+    assert cut == "a" * 80
+    assert redact_credentials(cut) == cut  # nothing partial left to slip through
+    assert safe_cut("short", 100) == "short"
+    assert safe_cut("b" * 200, 100) == "b" * 100  # no secret: plain cut
+
+
+def test_safe_start_skips_past_a_straddled_secret():
+    from techne.core.redaction import safe_start
+
+    key = "ghp_" + "Z" * 36
+    text = "x" * 10 + key + "\nrest"
+    assert safe_start(text, 20) == 10 + len(key)
+    assert safe_start(text, 5) == 5
+
+
+def test_summarize_does_not_store_a_cut_secret():
+    """Edit/Write previews are truncated before the sink redacts; a key cut
+    mid-token used to survive both (techne#1245)."""
+    from techne.hooks.post_tool_use import summarize
+
+    key = "sk-ant-api03-" + "Q" * 40
+    edit = summarize(
+        "Edit", {"file_path": "f", "old_string": "a" * 80 + key, "new_string": "b"}, ""
+    )
+    write = summarize(
+        "Write", {"file_path": "f", "content": "y" * 480 + "DB_PASSWORD=hunter2hunter2"}, ""
+    )
+    for s in (edit, write):
+        stored = redact_credentials(s)
+        assert "QQQQ" not in stored and "hunter2" not in stored
+        assert "sk-ant-api03" not in stored and "DB_PASSW" not in stored
