@@ -145,9 +145,10 @@ code.
 compaction since <date>` or `idle — no compaction recorded yet`. Those hooks run only
 when a session compacts, and a session with a 1M-token context can run a long time
 without one, so no recent run is not a fault (#1075). A compaction hook that ran and failed
-still reads BROKEN. A live `hook:post_compact` means a checkpoint was there to restore from.
-The restore itself reaches the model through SessionStart, which Claude Code fires with
-`source=compact` after every compaction (#1242).
+still reads BROKEN. LIVE only means the hook ran recently. Its last outcome tells you more:
+`ok` means a checkpoint was there to restore from, `noop:no-checkpoint` means there was
+none. The restore itself reaches the model through SessionStart, which Claude Code fires
+with `source=compact` after every compaction (#1242).
 
 `techne doctor` also lists the keys your `config.yaml` pins. On an install upgraded from
 0.17.0 or earlier it names any key whose value in the file is not the value in effect,
