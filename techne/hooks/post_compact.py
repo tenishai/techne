@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""PostCompact hook — rehydrates context from checkpoint after compaction."""
+"""PostCompact hook, plus the restore that SessionStart(compact) delivers.
+
+Claude Code drops a PostCompact hook's stdout: only UserPromptSubmit,
+UserPromptExpansion, SessionStart and PostModelSwitch put plain stdout in context
+(hooks reference, checked 2026-10-12). Until techne#1242 this hook printed the
+restore anyway and recorded `ok`, so the restore never reached the model. The
+restore is now built by `build_restore` and sent by session_start when it fires
+with `source == "compact"`. This hook only records whether a checkpoint exists to
+restore from.
+"""
 
 import json
 import sys
@@ -8,18 +17,80 @@ from techne.config import Config
 from techne.core.database import connect
 from techne.core.state import get_latest_checkpoint
 
-# Liveness key namespace: `hook:post_compact:last_run` (techne#468). Unlike its
-# pre-side sibling, this hook only READS (a checkpoint) and prints — it writes
-# nothing, so before #468 a restore that silently produced nothing was
-# indistinguishable from one that was never invoked.
+# Liveness key namespace: `hook:post_compact:last_run` (techne#468). `ok` means a
+# checkpoint was there to restore from, not that anything reached the model: this
+# event has no channel to the model (techne#1242).
 HOOK_NAME = "post_compact"
+
+#: Active threads restored after a compaction, newest last. Compaction exists to
+#: reclaim context, so the restore keeps the most recent threads, not all of them.
+MAX_RESTORED_THREADS = 10
+#: Per-field cut for a thread's summary and resume points.
+MAX_THREAD_FIELD_CHARS = 300
+
+
+def build_restore(db_path, session_id: str) -> tuple[str, int] | None:
+    """Render the post-compaction restore for `session_id`.
+
+    Returns None when there is no checkpoint, else (text, thread_count); text is
+    empty when the checkpoint and threads hold nothing to restore.
+    """
+    checkpoint = get_latest_checkpoint(db_path, session_id)
+    if not checkpoint:
+        return None
+
+    cp_data = checkpoint["data"]
+    output_parts = []
+
+    # Thread context comes from the database, which compaction does not touch.
+    conn = connect(db_path)
+    try:
+        threads = conn.execute(
+            """SELECT label, summary, resume_points FROM threads
+               WHERE session_id = ? AND status = 'active'
+               ORDER BY thread_num DESC LIMIT ?""",
+            (session_id, MAX_RESTORED_THREADS),
+        ).fetchall()
+    finally:
+        conn.close()
+    threads = list(reversed(threads))
+
+    if threads:
+        output_parts.append("## Current Session Threads\n")
+        for t in threads:
+            output_parts.append(
+                f"**{t['label']}** — {(t['summary'] or '')[:MAX_THREAD_FIELD_CHARS]}"
+            )
+            if t["resume_points"]:
+                output_parts.append(f"Resume: {t['resume_points'][:MAX_THREAD_FIELD_CHARS]}")
+            output_parts.append("")
+
+    if cp_data.get("last_task"):
+        output_parts.append(f"## Last Task\n{cp_data['last_task']}\n")
+
+    if cp_data.get("files_modified"):
+        output_parts.append("## Files Modified\n")
+        for f in cp_data["files_modified"][-10:]:
+            output_parts.append(f"- `{f}`")
+        output_parts.append("")
+
+    if cp_data.get("recent_commands"):
+        output_parts.append("## Recent Commands\n")
+        for cmd in cp_data["recent_commands"]:
+            output_parts.append(f"- `{cmd}`")
+        output_parts.append("")
+
+    return "\n".join(output_parts), len(threads)
 
 
 def main():
     try:
         data = json.load(sys.stdin)
     except json.JSONDecodeError as exc:
-        print(f"techne: post_compact received invalid JSON on stdin — restore skipped: {exc}", file=sys.stderr)
+        print(
+            f"techne: post_compact received invalid JSON on stdin — restore skipped: {exc}",
+            file=sys.stderr,
+        )
         data = {}
 
     from techne.hooks._liveness import record_hook_run, resolve_db_path
@@ -51,63 +122,20 @@ def main():
 
     try:
         with bounded_hook(config.hooks.timeout_s, label="post_compact"):
-            # Get the latest checkpoint
-            checkpoint = get_latest_checkpoint(config.db_path, session_id)
-            if not checkpoint:
-                # pre_compact writes checkpoints, so this hook is observable only
-                # by its ABSENCE of effect (techne#468). A missing checkpoint here
-                # means the pre-side never ran or never stored — worth a fact,
-                # since the restore silently producing nothing is exactly what a
-                # working restore with nothing to say also looks like.
+            restore = build_restore(config.db_path, session_id)
+            if restore is None:
+                # pre_compact writes checkpoints, so a missing one means the
+                # pre-side never ran or never stored (techne#468).
                 record_hook_run(config.db_path, HOOK_NAME, outcome="noop:no-checkpoint")
                 sys.exit(0)
-
-            cp_data = checkpoint["data"]
-            output_parts = []
-
-            # Restore thread context from database (unaffected by compaction)
-            conn = connect(config.db_path)
-            try:
-                threads = conn.execute(
-                    """SELECT label, summary, resume_points FROM threads
-                       WHERE session_id = ? AND status = 'active'
-                       ORDER BY thread_num""",
-                    (session_id,),
-                ).fetchall()
-            finally:
-                conn.close()
-
-            if threads:
-                output_parts.append("## Current Session Threads\n")
-                for t in threads:
-                    output_parts.append(f"**{t['label']}** — {t['summary'][:300]}")
-                    if t["resume_points"]:
-                        output_parts.append(f"Resume: {t['resume_points']}")
-                    output_parts.append("")
-
-            # Restore checkpoint context
-            if cp_data.get("last_task"):
-                output_parts.append(f"## Last Task\n{cp_data['last_task']}\n")
-
-            if cp_data.get("files_modified"):
-                output_parts.append("## Files Modified\n")
-                for f in cp_data["files_modified"][-10:]:
-                    output_parts.append(f"- `{f}`")
-                output_parts.append("")
-
-            if cp_data.get("recent_commands"):
-                output_parts.append("## Recent Commands\n")
-                for cmd in cp_data["recent_commands"]:
-                    output_parts.append(f"- `{cmd}`")
-                output_parts.append("")
-
-            if output_parts:
-                print("\n".join(output_parts))
+            text, n_threads = restore
+            # Nothing is printed: PostCompact stdout goes to Claude Code's debug
+            # log, never to the model. SessionStart(compact) sends the restore.
             record_hook_run(
                 config.db_path,
                 HOOK_NAME,
-                outcome="ok" if output_parts else "noop:nothing-to-restore",
-                detail=f"{len(threads)} threads" if threads else None,
+                outcome="ok" if text else "noop:nothing-to-restore",
+                detail=f"{n_threads} threads" if n_threads else None,
             )
     except Exception as e:
         print(f"techne: post_compact failed: {e}", file=sys.stderr)

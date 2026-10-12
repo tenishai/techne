@@ -151,8 +151,9 @@ DEFERRED_CONTEXT_KEY = "session_start:deferred"
 #: and `clear` is the operator asking for a clean slate. These get REACTIVATION_LINE
 #: instead, and what replaces the banner differs per source — stated, not assumed:
 #: `resume` restores the prior transcript, which already carries the banner it was
-#: given; `compact` keeps the compaction summary and PostCompact restores the
-#: checkpoint; `clear` gets NOTHING back by design. After `clear`, techne_resume
+#: given; `compact` keeps the compaction summary and gets the checkpoint restore
+#: (`_compact_restore`) after the line, because PostCompact has no channel to the
+#: model (techne#1242); `clear` gets NOTHING back by design. After `clear`, techne_resume
 #: (named in the line) restores active threads, recent threads and knowledge;
 #: coordination comes back only through techne_inbox, and the model's copy of drift
 #: does not come back (drift is the operator's to act on). Per-turn recall, when on,
@@ -167,6 +168,23 @@ REACTIVATION_SOURCES = frozenset({"resume", "clear", "compact"})
 #: otherwise gets nothing back. `resume` is absent because the restored transcript
 #: already carries the band it was given.
 PRINCIPLE_REINJECT_SOURCES = frozenset({"clear", "compact"})
+
+
+def _compact_restore(config, session_id: str | None) -> str:
+    """The post-compaction restore (threads, last task, files, commands) from the
+    checkpoint pre_compact wrote. It rides SessionStart because Claude Code drops
+    PostCompact's stdout (techne#1242). Never raises: a broken restore must not
+    cost the session its reactivation line."""
+    if not session_id:
+        return ""
+    try:
+        from techne.hooks.post_compact import build_restore
+
+        restore = build_restore(config.db_path, session_id)
+        return restore[0] if restore else ""
+    except Exception as e:  # noqa: BLE001
+        print(f"techne: compact restore skipped: {e}", file=sys.stderr)
+        return ""
 
 
 def _principle_band(config, session_id: str | None) -> str:
@@ -743,6 +761,10 @@ def _run_phases_2_to_9(
             # stashed either: deferring the full summary would re-inject it on the
             # next prompt, which is the re-injection this avoids.
             summary = REACTIVATION_LINE.format(source=source)
+            if source == "compact":
+                restore = _compact_restore(config, session_id)
+                if restore:
+                    summary = f"{summary}\n\n{restore}"
             if source in PRINCIPLE_REINJECT_SOURCES:
                 band = _principle_band(config, session_id)
                 if band:
