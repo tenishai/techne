@@ -81,7 +81,8 @@ def test_compact_session_start_delivers_the_restore(tmp_path):
     assert ctx.startswith(REACTIVATION_LINE.format(source="compact"))
     assert "## Current Session Threads" in ctx and "**Thread 1** — summary 1" in ctx
     assert "Resume: resume 1" in ctx
-    assert "## Last Task\nFix the compact restore" in ctx
+    assert "## Checkpoint saved " in ctx and " UTC\n" in ctx
+    assert "### Last Task\nFix the compact restore" in ctx
     assert "- `a.py`" in ctx
 
 
@@ -94,6 +95,35 @@ def test_other_warm_starts_get_no_restore(tmp_path, source):
     )
     ctx = out["hookSpecificOutput"]["additionalContext"]
     assert "Current Session Threads" not in ctx and "Last Task" not in ctx
+
+
+def test_a_failing_restore_keeps_the_reactivation_line(tmp_path, monkeypatch, capsys):
+    """_compact_restore's guard: without it, a raising build_restore empties
+    SessionStart's stdout and the session loses its reactivation line."""
+    import io
+
+    import techne.hooks.post_compact as post_compact
+    from techne.hooks import session_start
+
+    db, env = _home(tmp_path)
+    _seed(db)
+    for k in ("HOME", "CLAUDE_CONFIG_DIR", "TECHNE_HOME"):
+        monkeypatch.setenv(k, env[k])
+
+    def boom(*a, **k):
+        raise RuntimeError("restore exploded")
+
+    monkeypatch.setattr(post_compact, "build_restore", boom)
+    monkeypatch.setattr(
+        "sys.stdin", io.StringIO(json.dumps({"session_id": SID, "source": "compact"}))
+    )
+    session_start.main()
+    captured = capsys.readouterr()
+    out = json.loads(captured.out)
+    assert out["hookSpecificOutput"]["additionalContext"].startswith(
+        REACTIVATION_LINE.format(source="compact")
+    )
+    assert "compact restore skipped: restore exploded" in captured.err
 
 
 def test_restore_keeps_only_the_newest_threads(tmp_path):

@@ -65,17 +65,22 @@ def build_restore(db_path, session_id: str) -> tuple[str, int] | None:
                 output_parts.append(f"Resume: {t['resume_points'][:MAX_THREAD_FIELD_CHARS]}")
             output_parts.append("")
 
+    # The checkpoint fields are dated: if this compaction's pre_compact failed, the
+    # latest checkpoint is an earlier compaction's, and only the date says so.
+    if any(cp_data.get(k) for k in ("last_task", "files_modified", "recent_commands")):
+        output_parts.append(f"## Checkpoint saved {checkpoint['created_at']} UTC\n")
+
     if cp_data.get("last_task"):
-        output_parts.append(f"## Last Task\n{cp_data['last_task']}\n")
+        output_parts.append(f"### Last Task\n{cp_data['last_task']}\n")
 
     if cp_data.get("files_modified"):
-        output_parts.append("## Files Modified\n")
+        output_parts.append("### Files Modified\n")
         for f in cp_data["files_modified"][-10:]:
             output_parts.append(f"- `{f}`")
         output_parts.append("")
 
     if cp_data.get("recent_commands"):
-        output_parts.append("## Recent Commands\n")
+        output_parts.append("### Recent Commands\n")
         for cmd in cp_data["recent_commands"]:
             output_parts.append(f"- `{cmd}`")
         output_parts.append("")

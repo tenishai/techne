@@ -103,8 +103,9 @@ All notable changes to techne are documented here. Format loosely follows
   PostCompact hook's stdout, so the restore it printed (active threads, last task, files,
   recent commands) never arrived, while the hook recorded `ok` and doctor showed it live.
   SessionStart with `source=compact` now carries the restore in `additionalContext` after
-  the reactivation line, limited to the 10 newest active threads. The PostCompact hook prints
-  nothing and records only whether a checkpoint exists.
+  the reactivation line, limited to the 10 newest active threads. The checkpoint fields carry
+  the checkpoint's save time, so a stale one from an earlier compaction is visible. The
+  PostCompact hook prints nothing and records only whether a checkpoint exists.
 
 - **A vector backend swap now says so, and the query path refuses a mismatched index**
   (#1049). `_ensure_vec_backend_identity` writes a `vec_reembed` marker in the same
