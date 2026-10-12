@@ -99,6 +99,14 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- **The post-compaction restore now reaches the model** (#1242). Claude Code drops a
+  PostCompact hook's stdout, so the restore it printed (active threads, last task, files,
+  recent commands) never arrived, while the hook recorded `ok` and doctor showed it live.
+  SessionStart with `source=compact` now carries the restore in `additionalContext` after
+  the reactivation line, limited to the 10 newest active threads. The checkpoint fields carry
+  the checkpoint's save time, so a stale one from an earlier compaction is visible. The
+  PostCompact hook prints nothing and records only whether a checkpoint exists.
+
 - **A vector backend swap now says so, and the query path refuses a mismatched index**
   (#1049). `_ensure_vec_backend_identity` writes a `vec_reembed` marker in the same
   transaction as the DROP; `vectors:coverage` and `techne vectors status` name the swap
