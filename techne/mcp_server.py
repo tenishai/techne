@@ -2260,8 +2260,9 @@ TOOLS = [
     {
         "name": "techne_mark_read",
         "description": (
-            "Mark coordination messages read so they stop surfacing. With 'message_ids' "
-            "marks exactly those; otherwise marks everything currently unread. (techne#376)"
+            "Mark coordination messages read so they stop surfacing. Pass the "
+            "'message_ids' you handled. Without them, marks only messages you have "
+            "been shown; any that arrived since stay unread. (techne#376, techne#1243)"
         ),
         "inputSchema": {
             "type": "object",
@@ -2269,7 +2270,7 @@ TOOLS = [
                 "message_ids": {
                     "type": "array",
                     "items": {"type": "integer"},
-                    "description": "Specific message ids to mark read. Omit to mark all unread.",
+                    "description": "Message ids to mark read. Omit to mark those already shown.",
                 },
                 "session_id": {
                     "type": "string",

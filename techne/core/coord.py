@@ -492,6 +492,10 @@ def inbox(
     to it directly, not authored by it, with no read receipt yet. Oldest first.
 
     With ``mark_read=True`` the returned messages are marked read in the same call.
+
+    Every call records the highest id it returned as seen by this reader, which
+    bounds a bare ``mark_read`` (techne#1243). The post_tool_use injection reads
+    through here too, so an injected message counts as seen.
     """
     from techne.core.database import connect
 
@@ -501,6 +505,8 @@ def inbox(
     try:
         rows = _unread_rows(conn, session_id, chans, ident)
         msgs = [dict(r) for r in rows]
+        if msgs:
+            _note_seen(conn, ident[1], max(m["id"] for m in msgs))
         if mark_read and msgs:
             now = _now_iso()
             key = ident[1]
@@ -509,7 +515,7 @@ def inbox(
                 " VALUES (?, ?, ?)",
                 [(m["id"], key, now) for m in msgs],
             )
-            conn.commit()
+        conn.commit()
         return msgs
     finally:
         conn.close()
@@ -528,6 +534,32 @@ def unread_count(db_path: Path, session_id: str, *, channels: list[str] | None =
         conn.close()
 
 
+def _seen_key(reader: str) -> str:
+    return f"coord:seen:{reader}"
+
+
+def _seen_max(conn, reader: str) -> int | None:
+    """Highest message id ``reader`` has been shown, or None if never shown any."""
+    from techne.core.extension_state import get_state
+
+    st = get_state(conn, _seen_key(reader)) or {}
+    v = st.get("max_id")
+    return v if isinstance(v, int) else None
+
+
+def _note_seen(conn, reader: str, max_id: int) -> None:
+    """Raise ``reader``'s seen high-water mark to ``max_id``. Caller commits.
+
+    Ids are monotonic and ``inbox()`` returns every unread message at once, so a
+    single high-water mark is exact: an unread id below it was in some earlier
+    result this reader received."""
+    from techne.core.extension_state import set_state
+
+    cur = _seen_max(conn, reader)
+    if cur is None or max_id > cur:
+        set_state(conn, _seen_key(reader), {"max_id": max_id}, commit=False)
+
+
 def mark_read(
     db_path: Path,
     session_id: str,
@@ -536,16 +568,26 @@ def mark_read(
     channels: list[str] | None = None,
 ) -> int:
     """Mark messages read for ``session_id``. With ``message_ids`` given, marks
-    exactly those; otherwise marks everything currently unread. Returns the number
-    of new read receipts written (idempotent — re-marking is a no-op)."""
+    exactly those; otherwise marks the unread messages this reader has been shown
+    (by ``inbox()`` or the post_tool_use injection), and nothing that arrived
+    after. Returns the number of new read receipts written (idempotent —
+    re-marking is a no-op).
+
+    The bound is techne#1243: injected messages carried no ids, so agents called
+    this bare, and "everything currently unread" also swallowed any message a peer
+    sent while the agent was thinking. That message was never injected and never
+    seen, yet read."""
     from techne.core.database import connect
 
     ident = _identity(session_id)
     conn = connect(db_path)
     try:
         if message_ids is None:
+            seen = _seen_max(conn, ident[1])
+            if seen is None:
+                return 0
             chans = _channels_for(session_id, channels)
-            ids = [r["id"] for r in _unread_rows(conn, session_id, chans, ident)]
+            ids = [r["id"] for r in _unread_rows(conn, session_id, chans, ident) if r["id"] <= seen]
         else:
             ids = list(message_ids)
         if not ids:
