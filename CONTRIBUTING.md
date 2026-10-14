@@ -66,6 +66,29 @@ A few things worth knowing before you spend effort:
 Issues are the place for design discussion. A PR that changes behaviour is easier to
 review when it says what it measured, not only what it intends.
 
+## On macOS, put the GNU tools first
+
+The scripts here, and the commands in this repo's docs, are written for the GNU versions of `sed`, `awk`, `grep`, `find`, `xargs`, `tar`, `date`, `stat`, `readlink`, `env` and `diff`, as on Linux. The BSD versions that ship with macOS take different flags. A common case is `sed -i`: BSD needs a backup suffix after it, GNU doesn't. Some commands fail outright, and some print something else and carry on. Install the GNU tools and put them ahead of `/usr/bin` on your `PATH`.
+
+With MacPorts:
+
+```bash
+sudo port install coreutils findutils gsed gawk grep gnutar diffutils
+export PATH="/opt/local/libexec/gnubin:$PATH"    # in ~/.profile or ~/.zshrc
+```
+
+With Homebrew:
+
+```bash
+brew install coreutils findutils gnu-sed gawk grep gnu-tar diffutils
+for f in coreutils findutils gnu-sed gawk grep gnu-tar; do
+  PATH="$(brew --prefix)/opt/$f/libexec/gnubin:$PATH"
+done
+export PATH                                      # in ~/.profile or ~/.zshrc
+```
+
+Check: `sed --version` should print `sed (GNU sed)`. Re-open your shell, or source the profile, after changing `PATH`.
+
 ## Developer Certificate of Origin
 
 techne uses the [Developer Certificate of Origin](https://developercertificate.org/)
