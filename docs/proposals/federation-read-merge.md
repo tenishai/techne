@@ -5,7 +5,7 @@
 **Issue:** [#222](https://github.com/tenishai/techne/issues/222) · **Epic:** [#212](https://github.com/tenishai/techne/issues/212)
 **Companion:** [memory-system-architecture.md](../memory-system-architecture.md) §4/§11.3 — this is the concrete mechanism for that doc's read-merge (its self-declared "*this rule is the product*").
 **Depends on (all merged):** #213 (contradiction detection), #214 (decayed ranking), #220 (schema fork → **techne↔techne**).
-**Author:** Poe (Opus 4.8) + Richard, 2026-07-05.
+**Author:** Richard DiMartino + AI, 2026-07-05.
 
 ---
 
