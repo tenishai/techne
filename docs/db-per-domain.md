@@ -14,7 +14,7 @@ Each domain/persona gets its **own db file**, behind a `StoreAdapter`:
 | `techne.db` | personal memory (you) | sessions, threads, observations, **knowledge** (incl. document *cards*), identity, outbox |
 | `librarian.db` | Librarian | `documents` + fts (full content of transcripts, docs) — **FTS only**; there is no `documents_vec` |
 | `architect.db` | Architect | patterns (the architectural-patterns corpus) |
-| `codex.db` | Codex | repo/graph domain (nodes/edges) |
+| `codex/<repo>-<hash8>.db` | Codex | repo/graph domain (nodes/edges), one db per indexed repo (#209) |
 
 Core (`techne.db`) stops carrying domain tables. Domains are routed by a small **store registry** (config: domain → adapter + dsn). This replaces #88's "register in-db domains" with "route to the domain's own store," and generalizes #87's `StoreAdapter` from patterns-only to *every* domain.
 
@@ -46,8 +46,9 @@ A document's **gist card** is personal recall (it's *your* memory that this thin
 stores:
   librarian: { adapter: sqlite, dsn: "sqlite:///~/.techne/librarian.db" }
   architect: { adapter: sqlite, dsn: "sqlite:///~/.techne/architect.db" }
-  codex:     { adapter: sqlite, dsn: "sqlite:///~/.techne/codex.db" }
 ```
+
+Codex is the exception: its live db is per repo, `<data_dir>/codex/<repo>-<hash8>.db`, derived from the repo root by `repo_db_path()` (#209). `stores.codex.dsn` names only the legacy global `codex.db`, which `migrate_legacy_codex_db` moves away from; the read path never consults it.
 
 `load_store("librarian")` returns the domain's `StoreAdapter` (mirrors `load_adapter(config.sync.adapter)`). `StoreAdapter` is the per-domain persistence handle: `migrate / health / get`, plus `connect()` for the domain's own SQL. **SQLite-only by decision (techne#135)** — an earlier design advertised a backend-agnostic `add`/`search` so domains could "leap to Postgres," but every domain bypassed it to raw SQLite and those methods had no callers, so they were removed. techne is local-first; a server backend would be designed against a real driver if/when one is ever needed.
 
@@ -69,7 +70,7 @@ This is the elegant part: **the card model makes federation a keyed `get`, not a
 - **`techne.db`** — unchanged tables: sessions, threads, observations, knowledge (incl. `document_card` rows), identity, outbox, knowledge_candidates. `documents`/`_fts`/`_vec` are **removed from `SCHEMA_SQL`**.
 - **`librarian.db`** — `documents` + `documents_fts`. **No `documents_vec`** — document search is FTS-only; the `[vectors]` extra serves the archivist, not the librarian. The Librarian schema lives in the Librarian domain module, applied via `StoreAdapter.migrate()`, not core.
 - **`architect.db`** — patterns (per #87 spec). Pure team knowledge, queried directly from the store; *not* carded into personal recall by default (it isn't your personal memory).
-- **`codex.db`** — repo/graph domain (#89): nodes/edges (graphqlite). Same pattern.
+- **`codex/<repo>-<hash8>.db`** — repo/graph domain (#89): nodes/edges in plain SQLite, queried with recursive CTEs. graphqlite was considered and is deferred (see `docs/codex-usage.md` and `docs/roadmap.md`). One db per indexed repo (#209).
 
 ## Migration plan
 

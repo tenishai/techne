@@ -73,7 +73,7 @@ Two things feed the same pipe; the only variable is *where the raw came from*:
 |---|---|---|
 | core knowledge | `knowledge` | `techne_recall` / `techne_search` |
 | architecture patterns | `architect.db` | `pattern_search` |
-| code graph | `codex.db` | `codex_search` |
+| code graph | `codex/<repo>-<hash8>.db` (one per repo) | `codex_search` |
 | raw capture | `observations` | (internal; feeds the distiller) |
 
 A **role** is just *which domains a techne instance runs, and whether it's shared /
@@ -159,7 +159,7 @@ techne's export surface (advise, don't deliver) is three MCP tools:
 `techne_mark_pushed(id, sink)`. The agent reads the menu, **does the send itself**,
 marks it pushed.
 
-> **The noop is the sentinel.** **[EXISTS]** `lifecycle.py:22` gates enqueue on
+> **The noop is the sentinel.** **[EXISTS]** `lifecycle.py:69` gates enqueue on
 > `config.sync.adapter != "noop"`; the sink lane self-gates (`enqueue` to an
 > unregistered sink raises). With a ledger, the never-export case is *inherently*
 > clean: no sink → empty ledger → nothing to push → zero orphan/duplicate rows.
@@ -255,7 +255,7 @@ Omitted from the public copy: it planned code moves inside the private orchestra
 | techne MCP server (local memory) | **EXISTS** |
 | outbox + sinks + two lanes (techne#22) | **EXISTS** (bypassed for knowledge) |
 | sync adapters (noop/filesystem/github/…) | **EXISTS** |
-| multi-domain: `architect.db`, `codex.db` | **EXISTS** |
+| multi-domain: `architect.db`, per-repo `codex/*.db` | **EXISTS** |
 | doom-loop guards + activity log | **EXISTS** |
 | cabal Archivist/Librarian personas | **EXISTS** |
 | the distiller (`drain.py`, fire-up/close, idempotent) | **BUILT** (2026-07-04) |

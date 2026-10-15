@@ -381,7 +381,7 @@ print(techne.identity.list_entries(config.db_path, prefix="team."))
 
 ## MCP tools
 
-The complete agent-facing surface — 38 tools, grouped by purpose — is documented in
+The complete agent-facing surface — 39 tools, grouped by purpose — is documented in
 **[`docs/mcp-tools.md`](docs/mcp-tools.md)**, generated from the live registry and
 pinned by a test so a new tool cannot ship undocumented.
 
@@ -395,11 +395,14 @@ order (#1089).
 ## CLI reference
 
 ```
-techne init [--platform claude-code|codex|opencode|standalone] [--identity-dir DIR]
+techne init [--platform claude-code|codex|opencode|standalone|cabal] [--identity-dir DIR]
             [--posture auto|observe|spool-primary] [--skills/--no-skills] [--force-skills]
             [--vectors/--no-vectors] [--allow-worktree]
                                            # create the store, register hooks + MCP server,
-                                           # install skills, download the embedding model
+                                           # install skills, download the embedding model.
+                                           # Only claude-code registers anything; the other
+                                           # platforms are recorded in config and stamped on
+                                           # sessions, and standalone prints embedding steps
                                            # and embed what is stored (--no-vectors skips).
                                            # Also rewrites a pre-0.18 config.yaml to the
                                            # sparse form (backup: config.yaml.bak-<stamp>)
@@ -471,6 +474,11 @@ techne outbox prune-orphans [--target T]   # mark pending rows for unregistered 
                                            # refuses while a sink entry point is refused or
                                            # failed, unless --target names what to prune
 techne outbox purge [--target T] [--yes]   # delete drainable-but-unconfigured pending rows
+techne outbox sweep [--retain-days N] [--apply]
+                                           # drop delivered rows nothing reads again (#518):
+                                           # collapse ledger lanes, age out the rest (default
+                                           # 7 days); never pending or dead rows. Dry run
+                                           # unless --apply
 
 # Sinks
 techne sinks list                          # all registered sinks: name, description, schema

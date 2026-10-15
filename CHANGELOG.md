@@ -21,6 +21,17 @@ All notable changes to techne are documented here. Format loosely follows
   hook (not Stop, which fires every turn) and by `techne usage-backfill [--force]` for
   history. NULL means unknown (no transcript), 0 a measured zero. No dollars are stored.
 
+- **`scripts/ci_queue_wait.py` measures CI queue-wait per job** (#897). Read-only, on
+  demand, stdlib plus the `gh` CLI: it fetches a workflow's last N completed runs and
+  prints queue-wait (`started_at - created_at`) and execution p50/p90/max per job, by
+  event and by UTC hour, with a packing model and a verdict on whether one more runner
+  would pay. CONTRIBUTING.md points at it; it is not wired into CI.
+- **A tripwire on the MCP tool schemas' size** (#808). A test caps
+  `len(json.dumps(TOOLS))` at 42,000 characters and another fails any tool description
+  over Claude Code's 2,048-character cap. docs/mcp-tools.md gains a note on tool-schema
+  deferral: about 1.4k tokens per session on first-party Claude Code, about 14.2k on a
+  client that loads every schema up front. No runtime change.
+
 ### Changed
 
 - **PR pushes run the `test` job on Python 3.12 only** (#1233). Main pushes and
@@ -97,6 +108,13 @@ All notable changes to techne are documented here. Format loosely follows
   key in its single JSON output, including with `--tags`, which used to print a second
   JSON document.
 
+- **The MCP server instructions fit under Claude Code's 2,048-character cap** (#1179).
+  Claude Code truncates a server's instructions at 2,048 characters; ours were 4,097, so
+  the codex domain, the feeder commands and the `techne_guide` pointer never reached the
+  model. They are rewritten to 1,646 ASCII characters, most important first, with the
+  detail left to the guides they point at. `MCP_INSTRUCTIONS_BUDGET_CHARS` goes from 4400
+  to 1900, and tests keep the text under it and the load-bearing lines inside the cut.
+
 ### Fixed
 
 - **The post-compaction restore now reaches the model** (#1242). Claude Code drops a
@@ -126,6 +144,28 @@ All notable changes to techne are documented here. Format loosely follows
   The documents vector-search test was also marked as #536, but it fails for another
   reason: there is no document vector search. It keeps a strict expected-failure marker
   with that reason.
+
+- **A bare `techne_mark_read` marks only messages the reader was shown** (#1243). It
+  used to mark everything unread at call time, including a message a peer sent while the
+  agent was thinking, which was then never shown. `techne_inbox` now records a per-reader
+  high-water mark (`coord:seen:<reader>`), and a bare `mark_read` marks only unread ids at
+  or below it; with no mark it marks nothing. Injected peer messages now show each `(#id)`.
+
+- **`techne doctor` no longer reports a session-scoped hook STALE because a peer session
+  is running** (#1235). The four session-scoped hooks were judged against the
+  second-newest session, which could be a running peer that had not fired them yet. They
+  are now judged against the newest session that is not in flight and not present on this
+  host.
+
+- **`techne doctor` no longer suggests retiring an entry a correction already annotates**
+  (#1202). Its prose-supersession check treated "corrects" like "supersedes", so a
+  partial correction printed supersede commands that would retire live rules. A
+  correction is now skipped once the target points back at it ("corrected by knowledge
+  N"); "supersedes" is still reported.
+
+- **`LazyLogger` forwards attribute assignment to the real logger** (#1221). Setting
+  `log.propagate` or `log.disabled` raised `AttributeError` instead of reaching the
+  logger. Nothing assigned one yet.
 
 ## [0.18.2] — 2026-10-07
 

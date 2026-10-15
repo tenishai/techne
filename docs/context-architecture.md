@@ -66,6 +66,8 @@ for other clients/users.
 | `platforms/claude_code/` | 645 | **CC-locked, quarantined** (slug formula, hook registration, transcript paths). |
 | `hooks/` | 864 | **CC-locked** (lifecycle entry points; thin — format + delegate into core). |
 
+The LOC column is as measured on 2026-06-27. Re-measured 2026-10-15 (`wc -l` over each directory's `.py` files): `core/` 40,875, `sync/` 2,295, `platforms/claude_code/` 3,357, `hooks/` 6,068, of 71,735 in `techne/`. The CC-specific share is now about 13%, still confined to the same two layers.
+
 **CC-specific surface ≈ 1,500 LOC (~10% of ~13.7k), isolated in named layers — not smeared
 through core.** Porting to client X = rewrite those ~1,500 LOC (lifecycle entry points,
 paths/slug, a `TranscriptSource` for X's format — which is **#96**), not the 10,500 portable
@@ -82,7 +84,7 @@ existing seam (render in core, write/inject in `platforms/claude_code`), never i
 ## 3. What techne actually stores (the storage reality, HIGH — read live)
 
 - **`observations` (techne.db) = a lossy ledger, NOT a transcript.** 6,306 rows; each is a
-  truncated summary (`summarize()` caps tool outputs at 2–4 KB, inputs at 100–500 chars, then
+  truncated summary (`summarize()` caps tool outputs at 2,000 characters, head and tail kept (`_PREVIEW_MAX_CHARS`), inputs at 100–500 chars, then
   redacts). Captures tool calls + `UserPrompt` rows, **not** Claude's prose/reasoning turns
   (the hook fires on tool use). You can reconstruct *what happened* (action sequence + your
   asks), **not a verbatim replay**.

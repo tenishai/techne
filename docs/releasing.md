@@ -65,8 +65,10 @@ step 2 is the one step here that fails loudly. It exists because the *next* step
 previous `@vX.Y.Z` — README, ARCHITECTURE.md and docs/modules.md carry install lines
 pinned to a tag, and a stale one sends new users to the previous release.
 
-**4. Green the gates.** Full suite, `scripts/check_arch_cards.py`, and `ruff check` on
-changed files. An out-of-sync architecture-card anchor is a hard CI failure. Also run
+**4. Green the gates.** Full suite and `scripts/check_arch_cards.py`. An out-of-sync
+architecture-card anchor is a hard CI failure. Run `ruff check` on changed files too, but
+it is advisory: CI runs it with `|| true`, so lint never fails the build (see
+CONTRIBUTING.md). Also run
 `scripts/acceptance.sh` — it builds the wheel, installs it fresh, and proves the
 *installed* artifact rather than the checkout (techne#1059); CI's `acceptance` job already
 runs it on every PR, so a green PR covers this, but re-run it by hand against the tag
