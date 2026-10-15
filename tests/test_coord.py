@@ -105,13 +105,41 @@ def test_plain_body_is_stored_unchanged(db_path):
     assert [m["body"] for m in coord.inbox(db_path, B)] == [body]
 
 
-def test_mark_read_all(db_path):
+def test_mark_read_all_shown(db_path):
     coord.send(db_path, A, "m1")
     coord.send(db_path, A, "m2")
     assert coord.unread_count(db_path, B) == 2
+    coord.inbox(db_path, B)  # shown
     n = coord.mark_read(db_path, B)
     assert n == 2
     assert coord.unread_count(db_path, B) == 0
+
+
+def test_bare_mark_read_marks_nothing_never_shown(db_path):
+    """techne#1243: a bare mark_read must not mark messages the reader never saw."""
+    coord.send(db_path, A, "m1")
+    assert coord.mark_read(db_path, B) == 0
+    assert coord.unread_count(db_path, B) == 1
+
+
+def test_bare_mark_read_spares_a_message_sent_after_the_inbox(db_path):
+    """techne#1243: B reads A's message, C's arrives while B thinks, B marks bare."""
+    coord.send(db_path, A, "seen")
+    assert [m["body"] for m in coord.inbox(db_path, B)] == ["seen"]
+    coord.send(db_path, A, "arrived while thinking")
+    assert coord.mark_read(db_path, B) == 1
+    assert [m["body"] for m in coord.inbox(db_path, B)] == ["arrived while thinking"]
+
+
+def test_bare_mark_read_spares_a_message_sent_after_injection(db_path):
+    """The same race through the post_tool_use injection path."""
+    from techne.hooks.post_tool_use import _inject_coord_messages
+
+    coord.send(db_path, A, "injected", from_name="claude_1")
+    assert "injected" in _inject_coord_messages(_config(db_path), B)
+    coord.send(db_path, A, "late", from_name="claude_1")
+    assert coord.mark_read(db_path, B) == 1
+    assert [m["body"] for m in coord.inbox(db_path, B)] == ["late"]
 
 
 def test_mark_read_specific(db_path):
@@ -124,6 +152,7 @@ def test_mark_read_specific(db_path):
 
 def test_mark_read_idempotent(db_path):
     coord.send(db_path, A, "m1")
+    coord.inbox(db_path, B)
     assert coord.mark_read(db_path, B) == 1
     assert coord.mark_read(db_path, B) == 0  # nothing left unread
 
@@ -138,6 +167,7 @@ def test_inbox_mark_read_flag(db_path):
 def test_broadcast_read_state_is_per_reader(db_path):
     """A reading a broadcast must not clear it for B (independent receipts)."""
     coord.send(db_path, "sess-X", "to everyone", to="coord")
+    coord.inbox(db_path, A)
     coord.mark_read(db_path, A)
     assert coord.unread_count(db_path, A) == 0
     assert coord.unread_count(db_path, B) == 1  # B still has it
@@ -744,6 +774,9 @@ def test_injection_surfaces_once(db_path):
 
     first = _inject_coord_messages(cfg, B)
     assert first is not None and "ping B" in first and "claude_1" in first
+    # techne#1243: the id is rendered and named in the mark_read instruction
+    mid = coord.inbox(db_path, B)[0]["id"]
+    assert f"(#{mid})" in first and f"message_ids [{mid}]" in first
 
     # surfaced once — same unread message does not re-inject
     assert _inject_coord_messages(cfg, B) is None
@@ -890,6 +923,7 @@ def test_a_relaunched_session_does_not_re_read_the_backlog(db_path, named):
 
     coord.send(db_path, B, "one", to="coord", from_name="poe_2")
     coord.send(db_path, B, "two", to="coord", from_name="poe_2")
+    coord.inbox(db_path, A)  # shown first: a bare mark_read is bounded (techne#1243)
     assert coord.mark_read(db_path, A) == 2  # poe_1 reads them under session A
 
     # Same agent, new launch, new UUID.
@@ -905,6 +939,7 @@ def test_a_different_name_still_reads_independently(db_path, named):
     named[C] = "poe_3"
 
     coord.send(db_path, B, "for everyone", to="coord", from_name="poe_2")
+    coord.inbox(db_path, A)  # shown first: a bare mark_read is bounded (techne#1243)
     coord.mark_read(db_path, A)
 
     assert [m["body"] for m in coord.inbox(db_path, C)] == ["for everyone"]
@@ -918,6 +953,7 @@ def test_an_unnamed_session_falls_back_to_the_uuid(db_path, named):
     # READER_UUID set to "", asserting nothing (#490 review; fourth instance of
     # this shape in one session).
     assert coord.reader_key(A) == f"uuid:{A}"
+    coord.inbox(db_path, A)  # shown first: a bare mark_read is bounded (techne#1243)
     coord.mark_read(db_path, A)
     assert coord.unread_count(db_path, A) == 0
     assert coord.unread_count(db_path, A2) == 1  # a new UUID still re-reads
@@ -954,6 +990,7 @@ def test_receipts_are_namespaced_so_the_column_says_which_identity_it_holds(db_p
     """
     named[A] = "poe_1"
     coord.send(db_path, B, "x", to="coord", from_name="poe_2")
+    coord.inbox(db_path, A)  # shown first: a bare mark_read is bounded (techne#1243)
     coord.mark_read(db_path, A)
 
     from techne.core.database import connect
@@ -1030,6 +1067,7 @@ def test_two_live_sessions_sharing_a_name_keep_independent_inboxes(db_path, monk
     )
     coord.send(db_path, B, "everyone should see this", to="coord", from_name="poe_2")
 
+    coord.inbox(db_path, A)  # shown first: a bare mark_read is bounded (techne#1243)
     coord.mark_read(db_path, A)
     assert coord.unread_count(db_path, A) == 0
     assert coord.unread_count(db_path, A2) == 1, "one peer's read emptied the other's inbox"
@@ -1096,6 +1134,8 @@ def test_the_unread_path_reads_the_sidecars_once(db_path, monkeypatch):
     coord.inbox(db_path, A, mark_read=True)
     assert calls["n"] == 1, f"inbox scanned the sidecars {calls['n']}x"
 
+    coord.send(db_path, B, "y", to="coord", from_name="poe_2")
+    coord.inbox(db_path, A)  # shown first: a bare mark_read is bounded (techne#1243)
     calls["n"] = 0
     coord.mark_read(db_path, A)
     assert calls["n"] == 1, f"mark_read scanned the sidecars {calls['n']}x"
@@ -1140,6 +1180,7 @@ def test_twins_taking_turns_do_not_share_one_receipt_row(db_path, monkeypatch):
     _honest(monkeypatch, recs)
     coord.send(db_path, B, "branch claim nobody should miss", to="coord", from_name="poe_2")
 
+    coord.inbox(db_path, A)  # shown first: a bare mark_read is bounded (techne#1243)
     coord.mark_read(db_path, A)  # window 1: A active, A2 dormant
 
     recs[0]["updatedAt"] -= _STALE * 1000  # window 2: they swap
