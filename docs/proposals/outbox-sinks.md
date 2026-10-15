@@ -202,7 +202,7 @@ The canonical pattern for cabal-side sinks is A2A delivery — sender names the 
 
 Sinks declare their payload schema as a dataclass. Two reasons:
 
-1. **Producer-side type checking.** `DepositFindingPayload(addressee="rook-primus", sender="investigator", raw_content="...")` fails at construction if a field is missing. The producer sees the error before `enqueue` is called.
+1. **Producer-side type checking.** `DepositFindingPayload(addressee="mason-primus", sender="investigator", raw_content="...")` fails at construction if a field is missing. The producer sees the error before `enqueue` is called.
 2. **Server-side introspection.** `list_sinks()` returns the schema types; a future `techne sinks describe <name>` CLI command can render the expected payload shape for an operator debugging an integration.
 
 Schemas are *not* JSON Schema — that would force a runtime dep and a second source of truth alongside the dataclass. The dataclass is canonical; serialization to JSON Schema can come later if external tooling needs it.
@@ -367,7 +367,7 @@ enqueue(
     db_path=techne_db,
     target="archivist",
     data={
-        "addressee": ["rook-primus"],
+        "addressee": ["mason-primus"],
         "sender": "investigator",
         "raw_content": "<finding>",
         "parent_task": task_id,
