@@ -1134,8 +1134,8 @@ tenishai is a small team of engineers who build with AI coding agents. Most of
 this code was written in pairing sessions with Claude models in Claude Code: a
 person set the design, directed the work and reviewed what landed, and the
 agent wrote much of the code and docs. Many commits name the agent in a
-`Co-Authored-By:` trailer, either a Claude model or Poe (earlier Raven), the
-name of the agent one of us pairs with. A commit without a trailer may still
+`Co-Authored-By:` trailer, either a Claude model or the name of the
+agent one of us pairs with. A commit without a trailer may still
 have had AI help.
 
 ## Contributing
