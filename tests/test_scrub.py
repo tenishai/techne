@@ -122,9 +122,9 @@ def test_scrubs_thread_labels_candidates_and_lesson_rules(tmp_path):
     )
     conn.execute(
         "INSERT INTO knowledge_candidates (scope, type, content, source_session_id,"
-        " model_used, prompt_hash, raw_response, decision_reason, revised_content)"
-        " VALUES ('knowledge', 'fact', ?, 's1', 'm', 'h', ?, ?, ?)",
-        (leak, leak, leak, leak),
+        " model_used, prompt_hash, raw_response, decision_reason, revised_content,"
+        " faithfulness_warning) VALUES ('knowledge', 'fact', ?, 's1', 'm', 'h', ?, ?, ?, ?)",
+        (leak, leak, leak, leak, leak),
     )
     kid = conn.execute(
         "INSERT INTO knowledge (type, content) VALUES ('procedure', 'clean') RETURNING id"
@@ -140,6 +140,7 @@ def test_scrubs_thread_labels_candidates_and_lesson_rules(tmp_path):
         "knowledge_candidates.raw_response",
         "knowledge_candidates.decision_reason",
         "knowledge_candidates.revised_content",
+        "knowledge_candidates.faithfulness_warning",
         "lesson_meta.rule",
     ):
         assert counts[key] == 1, key
@@ -149,8 +150,8 @@ def test_scrubs_thread_labels_candidates_and_lesson_rules(tmp_path):
         str(v)
         for q in (
             "SELECT label FROM threads",
-            "SELECT content, raw_response, decision_reason, revised_content"
-            " FROM knowledge_candidates",
+            "SELECT content, raw_response, decision_reason, revised_content,"
+            " faithfulness_warning FROM knowledge_candidates",
             "SELECT rule FROM lesson_meta",
         )
         for row in conn.execute(q)

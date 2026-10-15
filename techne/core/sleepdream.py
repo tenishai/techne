@@ -336,7 +336,7 @@ def _insert_consolidation_candidate(
             json.dumps(sorted(target_ids)),
             status,
             decided_by,
-            decision_reason,
+            redact_credentials(decision_reason) if decision_reason else decision_reason,
         ),
     )
 
@@ -730,7 +730,7 @@ def _insert_dream_candidate(
             json.dumps(sorted(group_ids)),
             status,
             decided_by,
-            decision_reason,
+            redact_credentials(decision_reason) if decision_reason else decision_reason,
         ),
     )
 

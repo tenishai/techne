@@ -38,6 +38,7 @@ TARGETS: list[tuple[str, str, bool]] = [
     ("knowledge_candidates", "raw_response", False),
     ("knowledge_candidates", "decision_reason", False),
     ("knowledge_candidates", "revised_content", False),
+    ("knowledge_candidates", "faithfulness_warning", False),
     ("lesson_meta", "rule", False),
     ("checkpoints", "data_json", True),
     ("outbox", "data_json", True),
