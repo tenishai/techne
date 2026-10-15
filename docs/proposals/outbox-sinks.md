@@ -241,7 +241,7 @@ from techne.sync.outbox import (
 ```
 techne sinks list                      # name, description, schema field summary
 techne sinks describe <name>           # full schema field list with types
-techne outbox stats                    # existing; now also breaks down by target
+techne outbox status                   # existing; now also breaks down by target
 techne outbox prune-orphans            # delete pending rows for unregistered targets
 techne outbox flush-sinks              # manual trigger (the lifecycle hook is auto)
 ```

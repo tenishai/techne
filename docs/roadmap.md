@@ -8,7 +8,7 @@
 
 Status legend: ☐ todo · ◐ in progress · ☑ done · ⏸ parked/blocked
 
-> **Markers reconciled against GitHub 2026-08-06 (#425).** Every `#N` in this file was checked with `gh issue view N --json state,stateReason`; 11 markers said todo/parked for issues since closed as COMPLETED (#19, #20, #56, #76, #80–#86) and were corrected to ☑. Two are genuinely still open and were left alone (#75 parked, #89 in progress). **One exception:** #73 is ☑ but closed `NOT_PLANNED`, not `COMPLETED` — its own line says so ("CLOSED as largely-addressed") and is left as written.
+> **Markers reconciled against GitHub 2026-08-06 (#425).** Every `#N` in this file was checked with `gh issue view N --json state,stateReason`; 11 markers said todo/parked for issues since closed as COMPLETED (#19, #20, #56, #76, #80–#86) and were corrected to ☑. Two are genuinely still open and were left alone (#75 parked, #89 in progress). (#75 has since closed, 2026-09-25.) **One exception:** #73 is ☑ but closed `NOT_PLANNED`, not `COMPLETED` — its own line says so ("CLOSED as largely-addressed") and is left as written.
 > **The first pass of this reconciliation MISSED the "Recommended sequence" section** (caught in review, #495): the sweep matched a bulleted `- ☐ **#N` pattern, so a NUMBERED list was invisible to it, and the file briefly contradicted itself — #19/#20 marked ☑ above while that section still called them blocked/parked. A sweep is only as good as the shapes its pattern can see; when reconciling this file again, enumerate every `#N` in the raw text FIRST and only then look at what marker precedes it.
 > **Why this mattered:** the header below already says this document is historical, and a reviewer read it anyway and cited closed #84 as an open risk, building an argument on a wrong premise (#424). A `☐` reads as live status regardless of what the surrounding prose claims — a stale marker is worse than no marker, because it reads as authoritative.
 > **The dated PROSE in each review entry is deliberately NOT rewritten** — those are records of what was believed on that date and are correct as such. Only the status markers, which assert something about *now*, were touched. Markers drift as issues close; treat any marker as accurate only as of the date above.
@@ -59,7 +59,7 @@ Staff Python + architect review of the db-per-domain session (knowledge#337). Fi
 - ☑ **#70 — recall returns empty (FTS implicit-AND).** OR-of-terms fallback when the AND pass returns zero rows; verified on a live-db copy. Closed.
 - ☑ **#71 — version + package_path in `techne_status`.** Answers "is the running server current?" from a normal tool call. Closed.
 - ☑ **#72 — thread lifecycle never demotes.** Dropped the dead `resume_points` gate in `age_threads`; idle threads now complete→stale on the time knobs. Closed.
-- ☑ **#68 — eval discipline (M1+M2).** 2-arm recall-quality harness, frozen Phase-0 baseline (techne=1.0/bare=0.0), enforced kill-gate (≥0.85 floor + ≥0.30 margin, `pytest -m eval`). Closed; v2 (cold/warm arm + running-model LLM-judge) tracked in **#75**. Docs: `docs/eval.md`, `tests/eval/EVAL.md`, `PHASE0.md`.
+- ☑ **#68 — eval discipline (M1+M2).** 2-arm recall-quality harness, frozen Phase-0 baseline (techne=1.0/bare=0.0), enforced kill-gate (≥0.85 floor + ≥0.30 margin, `pytest -m eval`). Closed; v2 was tracked in **#75**, since closed: the LLM judge shipped under #118 and the cold/warm arm moved to #311. Docs: `docs/eval.md`, `tests/eval/EVAL.md`, `PHASE0.md`.
 
 **Operational follow-through:** MCP server still needs to restart to run the merged code (editable venv) — `/mcp` reconnect this session, automatic next launch. On the first session-end after relaunch, ~65 long-idle threads complete in one pass (#72 backfill).
 
@@ -113,7 +113,7 @@ Core (FTS-only default) runs on Debian/Ubuntu with **zero code changes**; paths 
 - ☑ **#86 — Linux `techne watch` polish** (systemd unit + inotify watch-limit docs).
 - ☑ **#20 — end-of-session reflect pass.** (Was: parked — mid 2-week observation window on `experiment/reflect-pass`.) Since CLOSED/COMPLETED.
 - ☑ **#19 — tag inference + MCP-sampling fact extraction.** (Was: blocked — no API key, no client supports MCP sampling; needed a local-model fallback first.) Since CLOSED/COMPLETED — the agent-loop `generate_fn` path removed the API-key blocker.
-- ⏸ **#75 — eval v2 (cold/warm arm + running-model LLM-judge).** Deferred — cold/warm needs a freshness feature; LLM-judge must use the running model (never an API key). Filed from #68 close-out.
+- ☑ **#75 — eval v2 (cold/warm arm + running-model LLM-judge).** Closed 2026-09-25 as a duplicate. The LLM judge shipped under #118 (`tests/eval/judge.py`, `pytest -m eval_llm -s`), but it takes local Ollama or an API key already in the environment, not the running model; see `docs/eval.md`. The cold/warm arm moved to #311's memory-state trio. Filed from #68 close-out.
 
 ---
 
@@ -123,7 +123,7 @@ Core (FTS-only default) runs on Debian/Ubuntu with **zero code changes**; paths 
 3. ✅ #79 outbox gate/purge — shipped.
 4. ☑ **#57 — memory portability.** CLOSED — opencode full parity (read+write). Optional follow-ups in the issue close comment. **NEXT within #57:** A.2 path de-hardcoding + decide PlatformHookContract's fate; then opencode prompt/session-end capture. Aider remains a later SourceAdapter test (markdown history; no MCP/hooks).
 5. ✅ Opportunistic: confirm-and-close **#51** (likely moot post-#79); **#56** staff-review backlog. — both CLOSED/COMPLETED.
-6. Blocked/parked: #75 (needs freshness feature) — **still open**. ✅ #19 (was: no API key / no MCP-sampling client) and ✅ #20 (was: mid reflect-experiment) have since CLOSED/COMPLETED; the blockers named here were real at the time and were subsequently cleared.
+6. Blocked/parked: #75 (needs freshness feature) — closed 2026-09-25 as a duplicate (judge shipped under #118; cold/warm arm moved to #311). ✅ #19 (was: no API key / no MCP-sampling client) and ✅ #20 (was: mid reflect-experiment) have since CLOSED/COMPLETED; the blockers named here were real at the time and were subsequently cleared.
 
 ## Parked: cabal (separate track)
 #13 three-tier memory · #14 archivist outbox sink · #12 A2A streaming · #11 AbortGraph. After techne core is trustworthy, unless a launch milestone needs cabal.

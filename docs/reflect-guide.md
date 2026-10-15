@@ -206,7 +206,7 @@ reads only `/tmp/batch.json` cannot see any of the three signals this loop turns
 - **MCP results have a hard ceiling, and emit used to default above it.** The 14 emit calls
   this store had refused by the client's tool-result cap ran 56,974–98,755 characters —
   every one of them *inside* the old 100,000 budget, which was also measured on compact JSON
-  while the server sends indent=2 (techne#993). The default is now 45,000, measured on the
+  while the server sends indent=2 (techne#993). (The 100,849-char refusal the CHANGELOG cites for #993 was seen during that issue, not recorded in this store's sample.) The default is now 45,000, measured on the
   result as sent, about 20% under the smallest refusal. A refusal is not silent data loss (the
   harness spills the payload to a file and hands back the path), but it does cost you the
   round trip.

@@ -45,6 +45,15 @@ agent → local model (Ollama) → MCP sampling (when a client supports it)**. T
 is why v1 scoring is deterministic — it has zero LLM dependency, so the harness
 is useful now and the judge question never gates it.
 
+**What shipped differs (#118, Stage 2).** The LLM judge exists
+(`tests/eval/judge.py`, run with `pytest -m eval_llm -s`) and scores the
+negative-polarity tasks (absence, deletion, cascade). Its model comes from
+`resolve_eval_generate_fn()` in `tests/eval/answerer.py`: local Ollama first, then
+an `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` or `GEMINI_API_KEY` already set in the
+environment, else the test skips. There is no running-agent tier and no MCP-sampling
+tier, and the env-var tier is a separately provisioned key, which the constraint
+above rules out. It never provisions a key or reads a key file. CI does not run it.
+
 ## Layout
 ```
 tests/eval/
@@ -73,6 +82,14 @@ tests/eval/
                            # score 0.167 where synthetic scores 0.667, so both synthetic
                            # arms understate production. The real arm is local-only and
                            # skips without a store.
+  test_rescue_gate.py     # #583: pytest -m eval_gate — does a supersede reach the ranker (rescue@10)
+  test_row_chars_vec_channel.py # #842: pytest -m eval_vec — the row-length cap on the vec channel
+  answerer.py             # #118 Stage 2: model resolver + answer-from-context prompt
+  judge.py                # #118 Stage 2: per-category LLM judge, fail-closed verdict parsing
+  test_recall_eval_llm.py # #118 Stage 2: pytest -m eval_llm runner (skips with no model)
+  search_kwargs.py        # #1086: which optional search() kwargs a task sets
+  test_scoring.py, test_judge.py, test_search_kwargs.py
+                           # unit tests for the harness; NOT eval-marked, run in the default suite
   results/                # JSONL outputs (gitignored)
   EVAL.md, PHASE0.md      # (M2) methodology + frozen baseline scores + gate number
 ```
@@ -201,8 +218,10 @@ Run: `pytest -m eval_vec -s`. Excluded from the default suite via the
   frozen (`PHASE0.md`, aggregate techne=1.0/bare=0.0); kill-gate set (≥0.85
   floor + ≥0.30 margin, `EVAL.md`) and enforced as a hard `pytest -m eval`
   assertion.
-- **M3 / v2** — `techne-warm` arm once a freshness feature exists; LLM-judge via
-  the running model (see constraint); run under a non-Claude-Code client (#57).
+- **M3 / v2** — `techne-warm` arm once a freshness feature exists; run under a
+  non-Claude-Code client (#57). The LLM-judge half shipped under #118 (Stage 2,
+  single techne arm, `pytest -m eval_llm -s`), but not via the running model: see
+  "What shipped differs" above. The bare/techne/raw comparison for it is still open.
 
 ## Notes / findings
 - The starter queries are multi-word and each contains a term absent from the

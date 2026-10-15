@@ -1,7 +1,7 @@
 # Proposal: make reflect ingest exactly-once (drained marker + candidate dedup)
 
 - **Filed:** 2026-07-04 · from a review agent's drain build
-- **Status:** proposed (follow-up "B"; the drain script ships the "A" workaround today)
+- **Status:** shipped. Gap 1 by candidate dedup (schema v14, `ON CONFLICT(prompt_hash, content) ... DO NOTHING` in `techne/core/reflect.py`); gap 2 by `reflection_queue.drained_at` (schema v22). Kept as the design record.
 - **Motivation:** the out-of-band drain (a per-agent `drain.py` script) distills a
   capture-only agent's observations after the fact, and runs at BOTH fire-up and
   close, so it must be safe to double-run. Two gaps in techne make it not

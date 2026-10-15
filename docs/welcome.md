@@ -287,8 +287,10 @@ techne is opinionated that a confident wrong memory is worse than no memory:
   results rest on a guess. Ask for only what it can prove with `only_proven`.
 - **Checks that can go green** — `techne doctor` and `techne fsck` name a remedy
   command instead of just reporting a fault, because a check that can never pass
-  trains you to ignore it. `techne fsck` also refuses to guess: it will repair the
-  faults with one safe answer and hand you the ones that need a judgment call.
+  trains you to ignore it. `techne fsck` only reports and prints the remedy; it never
+  runs one. The repair lives in `techne cards repair --apply`, which refuses to guess:
+  it retypes the pointerless cards that have one safe answer and hands you the ones that
+  need a judgment call.
 
 ### 🧹 Two workflows that ship with the tool
 

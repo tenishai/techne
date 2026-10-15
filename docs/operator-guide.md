@@ -27,7 +27,9 @@ to a no-op on error.
 
 **Three more capabilities exist and are worth knowing, but stay opt-in** — turn
 them on if the shape fits your work, not by default (`capture_read`, above, is the
-fourth):
+fourth). `techne capabilities` tracks 8 hook capabilities and `inbound_recall` is not
+one of them, which is why [welcome.md](./welcome.md) counts 3 opt-in where this page
+lists 4:
 
 | Hook | What it does | Why it isn't default |
 |---|---|---|
