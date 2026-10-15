@@ -89,3 +89,78 @@ def test_cli_dry_run_by_default_then_apply(tmp_path):
     res = CliRunner().invoke(main, ["scrub-credentials", "--apply"], obj={"config": cfg})
     assert res.exit_code == 0 and "redacted 2 row(s)" in res.output
     assert sum(scrub(cfg.db_path).values()) == 0
+
+
+def test_every_target_exists_in_the_schema(tmp_path):
+    """A target naming a renamed or dropped column is skipped silently by scrub(),
+    so pin each one against a fresh schema. context_injections is created by the
+    injection logger on first use, not by init_db, so build it the same way."""
+    from techne.core.scrub import TARGETS
+    from techne.hooks._injection_log import _DDL, _ensure_columns
+
+    p = tmp_path / "t.db"
+    init_db(p).close()
+    conn = connect(p)
+    conn.execute(_DDL)
+    _ensure_columns(conn)
+    for table, col, _ in TARGETS:
+        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        assert col in cols, f"{table}.{col}"
+    conn.close()
+
+
+def test_scrubs_thread_labels_candidates_and_lesson_rules(tmp_path):
+    """Columns redacted at write time by thread_orchestrator, reflect/conflict/
+    sleepdream and lessons, which the first version of TARGETS left out."""
+    p = _db(tmp_path)
+    leak = f"export DB_PASSWORD={SECRET}"
+    conn = connect(p)
+    conn.execute(
+        "INSERT INTO threads (id, session_id, thread_num, label, summary)"
+        " VALUES ('t1', 's1', 1, ?, 'ok')",
+        (leak,),
+    )
+    conn.execute(
+        "INSERT INTO knowledge_candidates (scope, type, content, source_session_id,"
+        " model_used, prompt_hash, raw_response, decision_reason, revised_content)"
+        " VALUES ('knowledge', 'fact', ?, 's1', 'm', 'h', ?, ?, ?)",
+        (leak, leak, leak, leak),
+    )
+    kid = conn.execute(
+        "INSERT INTO knowledge (type, content) VALUES ('procedure', 'clean') RETURNING id"
+    ).fetchone()[0]
+    conn.execute("INSERT INTO lesson_meta (knowledge_id, rule) VALUES (?, ?)", (kid, leak))
+    conn.commit()
+    conn.close()
+
+    counts = scrub(p)
+    for key in (
+        "threads.label",
+        "knowledge_candidates.content",
+        "knowledge_candidates.raw_response",
+        "knowledge_candidates.decision_reason",
+        "knowledge_candidates.revised_content",
+        "lesson_meta.rule",
+    ):
+        assert counts[key] == 1, key
+    scrub(p, apply=True)
+    conn = connect(p)
+    dump = " ".join(
+        str(v)
+        for q in (
+            "SELECT label FROM threads",
+            "SELECT content, raw_response, decision_reason, revised_content"
+            " FROM knowledge_candidates",
+            "SELECT rule FROM lesson_meta",
+        )
+        for row in conn.execute(q)
+        for v in row
+    )
+    assert SECRET not in dump and "<redacted:" in dump
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM threads_fts WHERE threads_fts MATCH ?", (SECRET,)
+        ).fetchone()[0]
+        == 0
+    )
+    conn.close()

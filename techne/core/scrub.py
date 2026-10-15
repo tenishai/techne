@@ -6,8 +6,9 @@ value the current patterns would change. Dry run by default: it counts and never
 prints matched text.
 
 What it does not reach: vector embeddings (derived, not text), FTS shadow
-tables (rebuilt by the UPDATE triggers on observations and knowledge), backups
-and exports already written, and anything already pushed to a remote sink.
+tables (rebuilt by the UPDATE triggers on observations, knowledge and threads),
+the librarian's documents (a separate database, librarian.db), backups and
+exports already written, and anything already pushed to a remote sink.
 """
 
 from __future__ import annotations
@@ -26,12 +27,18 @@ TARGETS: list[tuple[str, str, bool]] = [
     ("sessions", "summary", False),
     ("sessions", "summary_llm", False),
     ("sessions", "summary_heuristic", False),
+    ("threads", "label", False),
     ("threads", "summary", False),
     ("threads", "resume_points", False),
     ("coord_messages", "body", False),
     ("context_injections", "trigger_snippet", False),
     ("reminders", "note", False),
     ("curated_memory", "content", False),
+    ("knowledge_candidates", "content", False),
+    ("knowledge_candidates", "raw_response", False),
+    ("knowledge_candidates", "decision_reason", False),
+    ("knowledge_candidates", "revised_content", False),
+    ("lesson_meta", "rule", False),
     ("checkpoints", "data_json", True),
     ("outbox", "data_json", True),
 ]
