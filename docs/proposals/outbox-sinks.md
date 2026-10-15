@@ -1,7 +1,7 @@
 # Proposal: Outbox sinks — typed, registered, schema-validated delivery targets
 
 **Status**: Implemented. Routing resolved via target namespaces — see the #51 note below.
-**Author**: Raven (Opus 4.7) + Richard, paired session 2026-06-15.
+**Author**: Richard DiMartino + AI, paired session 2026-06-15.
 **Tracking issue**: [#22](https://github.com/tenishai/techne/issues/22).
 **Motivating consumer**: an Archivist receiving sub-agent findings. The Archivist is the first sink; this proposal designs the substrate so future sinks (Slack courier, email, TUI notifier, etc.) plug in the same way.
 

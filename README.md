@@ -1123,8 +1123,8 @@ The docs and `CHANGELOG.md` cite people and agents by first name:
 
 - **Richard** (also "Rich") is tenishai's maintainer, cited for design and policy
   decisions ("Richard's call, 2026-08-17").
-- **Prudence, Raven, Poe** and similar names refer to the maintainer's automated
-  reviewers and paired agent sessions. A citation like "Prudence, #872 r2" means a
+- **Prudence** and similar names refer to the maintainer's automated reviewers
+  and paired agent sessions. A citation like "Prudence, #872 r2" means a
   specific finding from one automated review round on that pull request: evidence,
   not a person's opinion.
 
