@@ -28,9 +28,10 @@ All notable changes to techne are documented here. Format loosely follows
   would pay. CONTRIBUTING.md points at it; it is not wired into CI.
 - **A tripwire on the MCP tool schemas' size** (#808). A test caps
   `len(json.dumps(TOOLS))` at 42,000 characters and another fails any tool description
-  over Claude Code's 2,048-character cap. docs/mcp-tools.md gains a note on tool-schema
-  deferral: about 1.4k tokens per session on first-party Claude Code, about 14.2k on a
-  client that loads every schema up front. No runtime change.
+  over Claude Code's 2,048-character cap. docs/mcp-tools.md gains a note on when Claude Code defers tool
+  schemas and when they load up front. Measured for #808: the schemas cost about 1.4k
+  tokens per session on first-party Claude Code with tool search on, and about 14.2k
+  with it off. No runtime change.
 
 ### Changed
 
@@ -111,7 +112,7 @@ All notable changes to techne are documented here. Format loosely follows
 - **The MCP server instructions fit under Claude Code's 2,048-character cap** (#1179).
   Claude Code truncates a server's instructions at 2,048 characters; ours were 4,097, so
   the codex domain, the feeder commands and the `techne_guide` pointer never reached the
-  model. They are rewritten to 1,646 ASCII characters, most important first, with the
+  model. They are rewritten to 1,703 ASCII characters, most important first, with the
   detail left to the guides they point at. `MCP_INSTRUCTIONS_BUDGET_CHARS` goes from 4400
   to 1900, and tests keep the text under it and the load-bearing lines inside the cut.
 

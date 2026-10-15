@@ -16,7 +16,8 @@ investigation that reshaped #109 and surfaced a latent question about what techn
 - **CC auto-memory is OFF on this machine** (`autoMemoryEnabled: false`, dir absent). So CC
   reads/writes nothing there, and **#107's curated-memory drain is currently dormant** for us.
 - **We are far *less* CC-locked than it feels.** The CC-specific surface is ~1,500 LOC
-  isolated in two named layers; core (~10.5k LOC) and the MCP server are client-agnostic.
+  (2026-06-27; ~9.4k of ~72k on 2026-10-15)
+  isolated in two named layers; core (~10.5k LOC in June) and the MCP server are client-agnostic.
 - **techne.db is a *lossy ledger*, not a transcript.** "Rebuild full context" from techne.db
   alone is not possible today; the verbatim record lives in CC's JSONL files.
 - **Open strategic question:** should techne become a *durable context store* (Model B) that
@@ -66,7 +67,7 @@ for other clients/users.
 | `platforms/claude_code/` | 645 | **CC-locked, quarantined** (slug formula, hook registration, transcript paths). |
 | `hooks/` | 864 | **CC-locked** (lifecycle entry points; thin — format + delegate into core). |
 
-The LOC column is as measured on 2026-06-27. Re-measured 2026-10-15 (`wc -l` over each directory's `.py` files): `core/` 40,875, `sync/` 2,295, `platforms/claude_code/` 3,357, `hooks/` 6,068, of 71,735 in `techne/`. The CC-specific share is now about 13%, still confined to the same two layers.
+The LOC column, and the ~1,500 LOC / ~10% figures in this section and in the summary above, are as measured on 2026-06-27. Re-measured 2026-10-15 (`wc -l` over each directory's `.py` files): `core/` 40,875, `sync/` 2,295, `platforms/claude_code/` 3,357, `hooks/` 6,068, of 71,735 in `techne/`. `platforms/claude_code/` plus `hooks/` is now 9,425 LOC, about 13%, still confined to those two layers.
 
 **CC-specific surface ≈ 1,500 LOC (~10% of ~13.7k), isolated in named layers — not smeared
 through core.** Porting to client X = rewrite those ~1,500 LOC (lifecycle entry points,
