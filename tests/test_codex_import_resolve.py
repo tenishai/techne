@@ -1595,7 +1595,9 @@ def test_a_v5_database_gains_to_orig_and_owes_a_reparse(tmp_path):
     _run_codex_steps(conn, 5, CODEX_VERSION)  # re-entrant
     conn.close()
     assert "to_orig" in cols
-    assert owed == ("6",)
+    # At least 6: the chain runs to CODEX_VERSION, and a later parse-derived
+    # column overwrites the key (v7, techne#1284). One reparse fills both.
+    assert owed is not None and int(owed[0]) >= 6
 
 
 class TestTheDecoyStaysUnreachableAfterV6:

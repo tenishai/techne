@@ -7,6 +7,17 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Added
 
+- **codex indexes Go** (#1284, codex schema v7). `techne codex index` extracts Go functions,
+  methods (the signature names the receiver), structs (kind `class`) and interfaces, plus
+  their calls and imports, and skips `vendor/` and `testdata/` for Go files. Go is in the
+  default `--language` set, and the `codex` extra adds `tree-sitter-go`. A Go-only resolver
+  binds same-package calls across files and `pkg.F()` calls through `go.mod`, and rules
+  standard-library, out-of-repo and predeclared names (`len`, `string`) `external`. Calls
+  through a value or a field (`s.db.Get()`) stay name-matched; proving them needs gopls
+  (#324). **Every call edge now records its call-site lines**, in all languages, so
+  `codex callers` prints each line a caller calls from, and `codex_blast_radius` gives direct
+  callers a `call_lines` field. The v7 upgrade makes the next `codex index` of each repo
+  re-parse every file once.
 - **`est_tokens` on every `techne_search` and `techne_recall` row, and `row_chars` to open a cut one**
   (#386). `est_tokens` prices the text delivered; a local knowledge row cut short of its full
   length (500 characters by default) also carries `est_tokens_full`. Both tools take

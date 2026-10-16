@@ -419,9 +419,13 @@ def resolve_edges_by_import(conn) -> dict:
               FROM edges e JOIN symbols s ON s.id = e.from_symbol
              WHERE e.kind = 'call'
                AND e.to_symbol IS NULL
+               AND COALESCE(s.language, '') != 'go'
                AND e.resolution_status IN ({",".join("?" * len(_OVERWRITABLE))})""",
         _OVERWRITABLE,
     ).fetchall()
+    # GO IS NOT THIS PASS'S (techne#1284): a Go import binds a package and its
+    # calls are bound through their qualifier, so `go_resolve.resolve_go_edges`
+    # owns every Go row. One owner per language keeps the two from disagreeing.
 
     for rowid, file, to_name, language in rows:
         binding = bindings.get((file, to_name))
@@ -564,6 +568,7 @@ def resolve_edges_by_scope(conn) -> dict:
              WHERE e.kind = 'call'
                AND e.to_symbol IS NULL
                AND e.bare_call = 1
+               AND COALESCE(s.language, '') != 'go'
                AND e.resolution_status IN ({",".join("?" * len(_OVERWRITABLE))})""",
         _OVERWRITABLE,
     ).fetchall()

@@ -1500,7 +1500,8 @@ TOOLS = [
             "tests/fixtures/** nodes are excluded by default (name-collision noise in the "
             "v1 name-based edge model; set include_fixtures=true to keep them). Scoped to "
             "one repo (db-per-repo, techne#209): pass `repo` to pick it, else the "
-            "server's working directory's repo is used. Each node carries `proven`: "
+            "server's working directory's repo is used. A direct caller (depth 1, "
+            "direction in) carries `call_lines`, the lines it calls from. Each node carries `proven`: "
             "false means it is reached only by matching a bare call name and may not be "
             "a real dependent (techne#606) — see only_proven. Returns the closest `limit` "
             "nodes by depth (default 50), with `walked` and `truncated` stating what was "
@@ -2616,6 +2617,19 @@ def _codex_blast_radius(args: dict, config: Config) -> dict:
         raw = filtered
     for r in raw:
         r["proven"] = r["id"] in proven_ids
+    # DIRECT CALLERS CARRY THEIR CALL-SITE LINES (techne#1284). A caller that calls
+    # the symbol seven times is one node, and the lines are what a reader opens next.
+    if direction == "in":
+        from techne.core.codegraph import callers as _callers
+
+        lines_by_id = {
+            c["id"]: c["call_lines"]
+            for c in _callers(db_path, symbol_id, exclude_fixtures=not include_fixtures)
+            if c.get("call_lines")
+        }
+        for r in raw:
+            if r.get("depth") == 1 and r["id"] in lines_by_id:
+                r["call_lines"] = lines_by_id[r["id"]]
     rows = annotate_freshness(db_path, raw)
     stale_count = sum(1 for r in rows if r.get("freshness") in ("stale", "missing"))
     inferred_count = sum(1 for r in rows if not r["proven"])
