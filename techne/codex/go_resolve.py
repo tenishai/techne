@@ -19,18 +19,32 @@ Three outcomes, each written only on positive evidence, never on a failed lookup
   imports a package under that name, the import path maps through a `go.mod`
   module path to an indexed directory, and that package holds exactly one
   module-level function or struct of that name.
-- `external`: the import path is outside every in-repo module (Go import paths
-  are absolute, so this is a fact, not a guess), or a bare call names a
-  predeclared identifier (`len`, `append`, `string`) that the package does not
-  shadow.
+- `external`: the caller's own directory is governed by a found `go.mod` and
+  the import path is outside every in-repo module (Go import paths are
+  absolute, so that is a fact), or the path is standard-library shaped, or a
+  bare call names a predeclared identifier (`len`, `append`, `string`) that the
+  package does not shadow.
 
 LEFT UNRESOLVED, deliberately: calls through a value or a field (`s.db.Get()`,
 `clients.PubSub.NewSubscriber()`), which need types and are issue #324's job;
-rows mixing bare and qualified sites, or two qualifiers; calls through a dot
-import; and names rebound by a local variable or parameter, which this table
-cannot see (the same accepted gap as the Python scope pass). A local variable
-that shadows an imported package name is the one case that can bind wrongly; Go
-linters flag it, and it is recorded here rather than guessed around.
+rows mixing bare and qualified sites, or two names for different paths; calls
+through a dot import; and build-tagged twins, which are ambiguous.
+
+NOT PROVEN, AND IT CAN WRITE A FALSE FACT: this table records no local
+bindings, so a local variable or parameter that reuses a name misleads every
+outcome above. Three shapes, all accepted as the Python scope pass accepts its
+own (card, v5 paragraph):
+
+- a local shadowing an imported package name (`store := x; store.Get()`)
+  binds `import_resolved` to that package's `Get`;
+- a parameter or local shadowing a package-level function
+  (`func run(helper func()) { helper() }`) binds `scope_resolved` to the
+  package's `helper`;
+- a local shadowing a predeclared name (`close := func() {}; close()`, or a
+  parameter named `min`) is written `external`.
+
+Go linters flag the first two. Ruling them out needs scopes, which is gopls
+(issue #324).
 """
 
 from __future__ import annotations
@@ -69,30 +83,47 @@ def _parse_go_mod(path: Path) -> str | None:
     return None
 
 
-def _module_roots(repo_root: Path | None, go_dirs: set[str]) -> list[tuple[str, str]]:
-    """(module path, repo-relative dir) for every go.mod governing an indexed Go dir.
+def _module_roots(
+    repo_root: Path | None, go_dirs: set[str]
+) -> tuple[list[tuple[str, str]], set[str]]:
+    """Every go.mod governing an indexed Go dir, and which dirs one governs.
 
+    Returns ((module path, repo-relative dir) longest path first, governed dirs).
     Found by walking up from each directory that holds indexed Go files, so a
     repo with several modules (a go.work workspace, or nested modules) maps
-    each import to the right one. Longest module path first, so a nested
-    module wins over the module that contains it.
+    each import to the right one, and a nested module wins over its parent.
+
+    THE GOVERNED SET IS WHAT MAKES `external` A FACT (Prudence, PR #1285 r1).
+    "Outside every found module" is evidence only for a caller that a found
+    module governs: a module-less directory beside a nested `go.mod` imports by
+    some other root, and ruling its in-repo imports external asserted that a
+    callee sitting in the index could not be one.
     """
     if repo_root is None:
-        return []
+        return [], set()
     found: dict[str, str] = {}
-    seen: set[str] = set()
+    governing: dict[str, str | None] = {}  # dir -> the module dir that governs it
     for d in go_dirs:
+        chain = []
         cur = d
-        while cur not in seen:
-            seen.add(cur)
+        owner: str | None = None
+        while True:
+            if cur in governing:
+                owner = governing[cur]
+                break
+            chain.append(cur)
             mod = _parse_go_mod(repo_root / cur / "go.mod")
             if mod is not None:
                 found.setdefault(mod, cur)
+                owner = cur
                 break
             if cur in ("", "."):
                 break
             cur = posixpath.dirname(cur)
-    return sorted(found.items(), key=lambda kv: len(kv[0]), reverse=True)
+        for c in chain:
+            governing[c] = owner
+    modules = sorted(found.items(), key=lambda kv: len(kv[0]), reverse=True)
+    return modules, {d for d, owner in governing.items() if owner is not None}
 
 
 def _import_dir(import_path: str, modules: list[tuple[str, str]]) -> str | None:
@@ -152,7 +183,7 @@ def resolve_go_edges(conn, repo_root: Path | None = None) -> dict:
         if name and not name.endswith("_test"):
             packages_in.setdefault(d, set()).add(name)
 
-    modules = _module_roots(repo_root, {d for d, _ in pkg_of.values()})
+    modules, governed = _module_roots(repo_root, {d for d, _ in pkg_of.values()})
 
     # file -> qualifier -> import path. An unaliased import of an in-repo package
     # also binds the name in that package's clause, which the path-based guess
@@ -235,10 +266,10 @@ def resolve_go_edges(conn, repo_root: Path | None = None) -> dict:
         path = next(iter(paths))
         d = _import_dir(path, modules)
         if d is None:
-            # Outside every in-repo module is positive evidence only when some
-            # module was found to compare against; with no go.mod in reach, only
-            # the standard library can be ruled out.
-            if modules or _is_stdlib(path):
+            # Outside every in-repo module is positive evidence only when a
+            # found go.mod governs THIS caller; otherwise only the standard
+            # library can be ruled out.
+            if _is_stdlib(path) or pkg_of[file][0] in governed:
                 mark_external(rowid)
             else:
                 counts["unplaced"] += 1

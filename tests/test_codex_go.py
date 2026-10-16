@@ -13,19 +13,32 @@ import sqlite3
 
 import pytest
 
-pytest.importorskip("tree_sitter_go")
-
-from techne.codex.go_resolve import resolve_go_edges  # noqa: E402
-from techne.codex.import_resolve import resolve_edges_by_import, resolve_edges_by_scope  # noqa: E402
-from techne.codex.source import (  # noqa: E402
+from techne.codex.go_resolve import resolve_go_edges
+from techne.codex.import_resolve import resolve_edges_by_import, resolve_edges_by_scope
+from techne.codex.source import (
     RepoSource,
     _extract_import_names,
     _walk_repo,
     go_default_package_name,
     index_file,
 )
-from techne.core.codegraph import callers, decode_call_sites, encode_call_sites  # noqa: E402
-from techne.core.codex import CODEX_SCHEMA  # noqa: E402
+from techne.core.codegraph import callers, decode_call_sites, encode_call_sites
+from techne.core.codex import CODEX_SCHEMA
+
+
+def _has_go_grammar() -> bool:
+    try:
+        import tree_sitter_go  # noqa: F401
+
+        return True
+    except ImportError:
+        return False
+
+
+#: Only the tests that PARSE Go need the grammar. The migration, the pre-v7 read,
+#: the encoding and the walk run without it, so an older `[codex]` install still
+#: exercises them rather than skipping the whole file (Prudence, PR #1285 r1).
+needs_go = pytest.mark.skipif(not _has_go_grammar(), reason="tree-sitter-go not installed")
 
 GO_MOD = "module example.com/papi\n\ngo 1.22\n"
 
@@ -104,6 +117,7 @@ def _import_node(src: str):
 # --------------------------------------------------------------------------
 
 
+@needs_go
 @pytest.mark.parametrize(
     "spec,expected",
     [
@@ -135,6 +149,7 @@ def test_default_package_name_follows_the_convention(path, name):
     assert go_default_package_name(path) == name
 
 
+@needs_go
 def test_every_go_kind_is_indexed_with_a_go_signature(tmp_path):
     db = _db(
         tmp_path,
@@ -157,6 +172,7 @@ def test_every_go_kind_is_indexed_with_a_go_signature(tmp_path):
     assert syms[("Close", "method")] == "func (*Client) Close(...)"
 
 
+@needs_go
 def test_every_call_site_keeps_its_line_and_qualifier(tmp_path):
     """Seven calls inside one function were one edge with no line before v7."""
     db = _db(
@@ -221,6 +237,7 @@ def test_vendor_and_testdata_are_skipped_for_go_only(tmp_path):
     assert walked == {"main.go", "vendor/lib.py"}
 
 
+@needs_go
 def test_go_is_in_the_default_languages(tmp_path):
     _write(tmp_path, {"main.go": "package main\n\nfunc main() {}\n"})
     db = tmp_path / "codex.db"
@@ -260,6 +277,7 @@ PAPI = {
 }
 
 
+@needs_go
 def test_a_bare_call_resolves_across_files_of_one_package(tmp_path):
     db = _db(tmp_path, PAPI)
     _resolve(db, tmp_path)
@@ -267,6 +285,7 @@ def test_a_bare_call_resolves_across_files_of_one_package(tmp_path):
     assert (status, target) == ("scope_resolved", "run.go::run::function::3")
 
 
+@needs_go
 def test_a_qualified_call_resolves_through_go_mod(tmp_path):
     db = _db(tmp_path, PAPI)
     _resolve(db, tmp_path)
@@ -281,6 +300,7 @@ def test_a_qualified_call_resolves_through_go_mod(tmp_path):
     )
 
 
+@needs_go
 def test_stdlib_and_predeclared_names_are_external(tmp_path):
     db = _db(tmp_path, PAPI)
     _resolve(db, tmp_path)
@@ -288,6 +308,7 @@ def test_stdlib_and_predeclared_names_are_external(tmp_path):
     assert _call(db, "run", "len")[0] == "external"
 
 
+@needs_go
 def test_a_package_that_shadows_a_predeclared_name_binds_it(tmp_path):
     db = _db(
         tmp_path,
@@ -301,6 +322,7 @@ def test_a_package_that_shadows_a_predeclared_name_binds_it(tmp_path):
     assert _call(db, "f", "len")[:2] == ("scope_resolved", "a.go::len::function::3")
 
 
+@needs_go
 def test_a_module_outside_the_repo_is_external(tmp_path):
     db = _db(
         tmp_path,
@@ -313,6 +335,7 @@ def test_a_module_outside_the_repo_is_external(tmp_path):
     assert _call(db, "f", "Do")[0] == "external"
 
 
+@needs_go
 def test_without_go_mod_only_the_stdlib_is_ruled_external(tmp_path):
     """No module path to compare against is no evidence that a path is foreign."""
     db = _db(
@@ -331,6 +354,7 @@ def test_without_go_mod_only_the_stdlib_is_ruled_external(tmp_path):
     assert report["unplaced"] == 1
 
 
+@needs_go
 def test_a_call_through_a_field_or_value_stays_unresolved(tmp_path):
     db = _db(
         tmp_path,
@@ -354,6 +378,7 @@ def test_a_call_through_a_field_or_value_stays_unresolved(tmp_path):
     assert report["not_a_package"] == 1
 
 
+@needs_go
 def test_two_names_for_one_import_path_are_one_target(tmp_path):
     db = _db(
         tmp_path,
@@ -371,6 +396,7 @@ def test_two_names_for_one_import_path_are_one_target(tmp_path):
     assert _call(db, "f", "Get")[:2] == ("import_resolved", "m/m.go::Get::function::3")
 
 
+@needs_go
 def test_the_package_clause_beats_the_path_convention(tmp_path):
     """`.../go-foo` holding `package foo`: the unaliased import binds `foo`."""
     db = _db(
@@ -385,6 +411,7 @@ def test_the_package_clause_beats_the_path_convention(tmp_path):
     assert _call(db, "f", "Bar")[:2] == ("import_resolved", "go-foo/foo.go::Bar::function::3")
 
 
+@needs_go
 def test_two_definitions_in_one_package_are_ambiguous(tmp_path):
     """Build-tagged twins (`x_linux.go`, `x_darwin.go`) cannot be ranked."""
     db = _db(
@@ -401,6 +428,7 @@ def test_two_definitions_in_one_package_are_ambiguous(tmp_path):
     assert report["ambiguous"] == 1
 
 
+@needs_go
 def test_an_external_test_package_is_its_own_scope(tmp_path):
     db = _db(
         tmp_path,
@@ -414,6 +442,7 @@ def test_an_external_test_package_is_its_own_scope(tmp_path):
     assert _call(db, "TestX", "helper")[0] == "unresolved"
 
 
+@needs_go
 def test_a_nested_module_wins_over_its_parent(tmp_path):
     db = _db(
         tmp_path,
@@ -428,6 +457,53 @@ def test_a_nested_module_wins_over_its_parent(tmp_path):
     assert _call(db, "f", "Run")[:2] == ("import_resolved", "tools/gen/gen.go::Run::function::3")
 
 
+@needs_go
+def test_a_module_less_caller_beside_a_nested_module_is_not_ruled_external(tmp_path):
+    """Outside every found module is evidence only for a caller a found module governs.
+
+    Prudence, PR #1285 r1: `tools/go.mod` plus a module-less `app/` importing its
+    own `app/store` by a GOPATH-style path wrote `external` over a callee sitting
+    in the index.
+    """
+    db = _db(
+        tmp_path,
+        {
+            "tools/go.mod": "module example.com/tools\n",
+            "tools/gen/gen.go": "package gen\n\nfunc Run() {}\n",
+            "app/store/s.go": "package store\n\nfunc Get() {}\n",
+            "app/main.go": (
+                "package main\n\n"
+                'import "github.com/me/repo/app/store"\n\n'
+                "func main() { store.Get() }\n"
+            ),
+        },
+    )
+    report = _resolve(db, tmp_path)
+    assert _call(db, "main", "Get")[0] == "unresolved"
+    assert report["unplaced"] == 1
+
+
+@needs_go
+def test_a_shadowing_parameter_is_a_known_false_binding(tmp_path):
+    """PINNED COST, not a goal: the table records no local bindings (card, v7).
+
+    `helper` here is the parameter, and the resolver binds the package's
+    `helper`. If this starts failing because scopes became visible, delete it.
+    """
+    db = _db(
+        tmp_path,
+        {
+            "a.go": (
+                "package a\n\nfunc helper() {}\n\n"
+                "func run(helper func()) { helper() }\n"
+            )
+        },
+    )
+    _resolve(db, tmp_path)
+    assert _call(db, "run", "helper")[:2] == ("scope_resolved", "a.go::helper::function::3")
+
+
+@needs_go
 def test_the_generic_passes_leave_go_rows_alone(tmp_path):
     """One owner per language, so two passes cannot disagree about a row."""
     db = _db(tmp_path, {"go.mod": GO_MOD, "a.go": "package a\n\nfunc g() {}\n\nfunc f() { g() }\n"})
@@ -442,6 +518,7 @@ def test_the_generic_passes_leave_go_rows_alone(tmp_path):
     assert _call(db, "f", "g")[0] == "scope_resolved"
 
 
+@needs_go
 def test_resolution_is_idempotent(tmp_path):
     db = _db(tmp_path, PAPI)
     first = _resolve(db, tmp_path)
@@ -450,6 +527,7 @@ def test_resolution_is_idempotent(tmp_path):
     assert again["import_resolved"] == again["scope_resolved"] == again["external"] == 0
 
 
+@needs_go
 def test_repo_root_defaults_to_codex_meta(tmp_path):
     db = _db(tmp_path, PAPI)
     conn = sqlite3.connect(db)
@@ -467,6 +545,7 @@ def test_repo_root_defaults_to_codex_meta(tmp_path):
 # --------------------------------------------------------------------------
 
 
+@needs_go
 def test_callers_report_every_call_site_line(tmp_path):
     db = _db(
         tmp_path,
@@ -498,14 +577,16 @@ def test_callers_report_every_call_site_line(tmp_path):
 
 def test_callers_read_a_pre_v7_index(tmp_path):
     """The read path does not migrate, so a v6 db has no call_sites column."""
-    db = _db(tmp_path, {"a.go": "package a\n\nfunc g() {}\n\nfunc f() { g() }\n"})
+    db = _db(tmp_path, {})
+    _write(tmp_path, {"a.py": "def g():\n    pass\n\n\ndef f():\n    g()\n"})
+    index_file(db, tmp_path / "a.py", tmp_path)
     conn = sqlite3.connect(db)
     try:
         conn.execute("ALTER TABLE edges DROP COLUMN call_sites")
         conn.commit()
     finally:
         conn.close()
-    (row,) = callers(db, "a.go::g::function::3")
+    (row,) = callers(db, "a.py::g::function::1")
     assert row["name"] == "f" and row["call_lines"] == []
 
 
@@ -513,9 +594,13 @@ def test_a_v6_database_gains_call_sites_and_owes_a_reparse(tmp_path):
     from techne.core import migrator
     from techne.core.codex import CODEX_VERSION, _apply_codex_migration
 
-    db = _db(tmp_path, {"a.go": "package a\n\nfunc f() {}\n"})
+    db = _db(tmp_path, {})
     conn = sqlite3.connect(db)
     try:
+        conn.execute(
+            "INSERT INTO symbols (id, file, name, kind) "
+            "VALUES ('a.go::f::function::3', 'a.go', 'f', 'function')"
+        )
         conn.execute("ALTER TABLE edges DROP COLUMN call_sites")
         migrator.user_version_io.write(conn, 6)
         conn.commit()
@@ -536,6 +621,7 @@ def test_a_v6_database_gains_call_sites_and_owes_a_reparse(tmp_path):
     assert version == CODEX_VERSION == 7
 
 
+@needs_go
 def test_cli_index_and_callers_on_a_go_repo(tmp_path, monkeypatch):
     from click.testing import CliRunner
 

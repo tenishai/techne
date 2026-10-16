@@ -101,8 +101,9 @@ def _module_candidates(dotted: str, language: str | None = None) -> tuple[str, .
     row reaches the evidence gate with no lookup attempted, so it can still be
     written `external` if its module root names nothing in the repo — it does not
     become `unresolved` by default. That is correct for a genuine stdlib import
-    and is unreachable today anyway: `_EXT_LANGUAGE` maps exactly two extensions
-    and `_parse_file` always writes one, so the only NULL-language route is
+    and is unreachable today anyway: every language `_EXT_LANGUAGE` maps either
+    has candidate shapes here or is Go, whose rows this pass skips (#1284), and
+    `_parse_file` always writes one, so the only NULL-language route is
     `codegraph.add_symbol`'s default, which has no production caller. `.tsx` is
     the language that would first walk into it. No indexed symbol
     in any live codex db has a NULL language (measured 2026-08-31 across techne,
