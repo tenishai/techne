@@ -152,22 +152,32 @@ class _Modules:
         directories declare the module it falls under and neither governs the
         caller.
         """
-        for mod in self._paths:
-            if import_path != mod and not import_path.startswith(mod + "/"):
-                continue
-            dirs = self._dirs_by_path[mod]
-            own = self._owner.get(caller_dir)
-            if len(dirs) == 1:
-                mod_dir = next(iter(dirs))
-            elif own in dirs:
-                mod_dir = own
-            else:
-                return AMBIGUOUS
-            rest = import_path[len(mod) + 1 :]
-            if not rest:
-                return mod_dir
-            return posixpath.normpath(posixpath.join(mod_dir, rest)) if mod_dir else rest
-        return None
+        matching = [
+            m for m in self._paths if import_path == m or import_path.startswith(m + "/")
+        ]
+        if not matching:
+            return None
+        own = self._owner.get(caller_dir)
+        mod = matching[0]  # longest
+        dirs = self._dirs_by_path[mod]
+        if len(dirs) == 1:
+            mod_dir = next(iter(dirs))
+        elif own in dirs:
+            mod_dir = own
+        else:
+            return AMBIGUOUS
+        # A DUPLICATED SHORTER PATH TAINTS A LONGER MATCH (Prudence, PR #1285 r3).
+        # With `ex1` and `ex2` both `module example` and `ex1/sub` declaring
+        # `example/sub`, a caller in `ex2` importing `example/sub` matched the
+        # nested module in the OTHER copy, where Go would use `ex2/sub`. Which
+        # copy a longer module belongs to cannot be read without `require` and
+        # `replace`, so the match stands only when it is the caller's own module.
+        if mod_dir != own and any(len(self._dirs_by_path[m]) > 1 for m in matching[1:]):
+            return AMBIGUOUS
+        rest = import_path[len(mod) + 1 :]
+        if not rest:
+            return mod_dir
+        return posixpath.normpath(posixpath.join(mod_dir, rest)) if mod_dir else rest
 
 
 def _is_stdlib(import_path: str) -> bool:

@@ -513,6 +513,36 @@ def test_two_modules_declaring_one_path_resolve_within_the_callers_own(tmp_path)
     assert report["unplaced"] == 1
 
 
+def test_a_nested_module_in_one_copy_of_a_duplicated_path_does_not_capture_the_other(
+    tmp_path,
+):
+    """Prudence, PR #1285 r3: the longest match ran before the caller's-own rule.
+
+    `ex1/sub/go.mod` declares `example/sub`; a caller in `ex2` importing
+    `example/sub` means its own `ex2/sub`, and was bound into `ex1/sub`. Reads
+    real go.mod files and needs no grammar.
+    """
+    from techne.codex.go_resolve import AMBIGUOUS, _Modules
+
+    _write(
+        tmp_path,
+        {
+            "ex1/go.mod": "module example\n",
+            "ex1/sub/go.mod": "module example/sub\n",
+            "ex2/go.mod": "module example\n",
+        },
+    )
+    m = _Modules(tmp_path, {"ex1", "ex1/sub", "ex2", "ex2/sub"})
+    assert m.dir_for("example/sub", "ex2") == AMBIGUOUS
+    assert m.dir_for("example/sub", "ex2/sub") == AMBIGUOUS
+    # A caller inside the nested module still resolves within it.
+    assert m.dir_for("example/sub/x", "ex1/sub") == "ex1/sub/x"
+    # And an unduplicated path is untouched.
+    _write(tmp_path, {"solo/go.mod": "module solo.example\n"})
+    m = _Modules(tmp_path, {"solo", "solo/a"})
+    assert m.dir_for("solo.example/a", "solo") == "solo/a"
+
+
 @needs_go
 def test_a_shadowing_parameter_is_a_known_false_binding(tmp_path):
     """PINNED COST, not a goal: the table records no local bindings (card, v7).
