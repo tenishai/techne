@@ -83,58 +83,91 @@ def _parse_go_mod(path: Path) -> str | None:
     return None
 
 
-def _module_roots(
-    repo_root: Path | None, go_dirs: set[str]
-) -> tuple[list[tuple[str, str]], set[str]]:
-    """Every go.mod governing an indexed Go dir, and which dirs one governs.
+#: `_Modules.dir_for` could not choose between modules declaring one path.
+AMBIGUOUS = "<ambiguous>"
 
-    Returns ((module path, repo-relative dir) longest path first, governed dirs).
+
+class _Modules:
+    """The go.mod files governing the indexed Go dirs, and how an import maps through them.
+
     Found by walking up from each directory that holds indexed Go files, so a
-    repo with several modules (a go.work workspace, or nested modules) maps
-    each import to the right one, and a nested module wins over its parent.
+    repo with several modules (a go.work workspace, or nested modules) maps each
+    import to the module Go would use: the LONGEST module path the import path
+    falls under, so a nested module wins over its parent.
 
     THE GOVERNED SET IS WHAT MAKES `external` A FACT (Prudence, PR #1285 r1).
     "Outside every found module" is evidence only for a caller that a found
     module governs: a module-less directory beside a nested `go.mod` imports by
     some other root, and ruling its in-repo imports external asserted that a
     callee sitting in the index could not be one.
+
+    TWO go.mod FILES MAY DECLARE ONE PATH (Prudence, PR #1285 r2): several
+    `examples/*/` each made with `go mod init example`, or a copied module kept
+    beside its original. Keying modules by path alone kept whichever directory
+    the set walk reached first, so a call bound into the OTHER module's package,
+    and two runs over one tree could disagree. Every directory is kept now: the
+    caller's own module wins when it is one of them, and otherwise the import
+    is AMBIGUOUS, which the resolver counts as unplaced. The path stays known
+    either way, so a governed caller's import of it is never ruled external.
     """
-    if repo_root is None:
-        return [], set()
-    found: dict[str, str] = {}
-    governing: dict[str, str | None] = {}  # dir -> the module dir that governs it
-    for d in go_dirs:
+
+    def __init__(self, repo_root: Path | None, go_dirs: set[str]) -> None:
+        self._dirs_by_path: dict[str, set[str]] = {}
+        #: dir -> the directory of the go.mod governing it, or None.
+        self._owner: dict[str, str | None] = {}
+        self._path_of_mod_dir: dict[str, str] = {}
+        if repo_root is not None:
+            for d in sorted(go_dirs):
+                self._walk_up(repo_root, d)
+        self._paths = sorted(self._dirs_by_path, key=len, reverse=True)
+
+    def _walk_up(self, repo_root: Path, d: str) -> None:
         chain = []
         cur = d
         owner: str | None = None
         while True:
-            if cur in governing:
-                owner = governing[cur]
+            if cur in self._owner:
+                owner = self._owner[cur]
                 break
             chain.append(cur)
             mod = _parse_go_mod(repo_root / cur / "go.mod")
             if mod is not None:
-                found.setdefault(mod, cur)
+                self._dirs_by_path.setdefault(mod, set()).add(cur)
+                self._path_of_mod_dir[cur] = mod
                 owner = cur
                 break
             if cur in ("", "."):
                 break
             cur = posixpath.dirname(cur)
         for c in chain:
-            governing[c] = owner
-    modules = sorted(found.items(), key=lambda kv: len(kv[0]), reverse=True)
-    return modules, {d for d, owner in governing.items() if owner is not None}
+            self._owner[c] = owner
 
+    def governs(self, caller_dir: str) -> bool:
+        return self._owner.get(caller_dir) is not None
 
-def _import_dir(import_path: str, modules: list[tuple[str, str]]) -> str | None:
-    """The repo-relative directory an import path names, or None if it is not in the repo."""
-    for mod, mod_dir in modules:
-        if import_path == mod:
-            return mod_dir
-        if import_path.startswith(mod + "/"):
+    def dir_for(self, import_path: str, caller_dir: str) -> str | None:
+        """The repo-relative directory *import_path* names from *caller_dir*.
+
+        None when it falls under no found module, AMBIGUOUS when two
+        directories declare the module it falls under and neither governs the
+        caller.
+        """
+        for mod in self._paths:
+            if import_path != mod and not import_path.startswith(mod + "/"):
+                continue
+            dirs = self._dirs_by_path[mod]
+            own = self._owner.get(caller_dir)
+            if len(dirs) == 1:
+                mod_dir = next(iter(dirs))
+            elif own in dirs:
+                mod_dir = own
+            else:
+                return AMBIGUOUS
             rest = import_path[len(mod) + 1 :]
+            if not rest:
+                return mod_dir
             return posixpath.normpath(posixpath.join(mod_dir, rest)) if mod_dir else rest
-    return None
+        return None
 
 
 def _is_stdlib(import_path: str) -> bool:
@@ -183,7 +216,7 @@ def resolve_go_edges(conn, repo_root: Path | None = None) -> dict:
         if name and not name.endswith("_test"):
             packages_in.setdefault(d, set()).add(name)
 
-    modules, governed = _module_roots(repo_root, {d for d, _ in pkg_of.values()})
+    modules = _Modules(repo_root, {d for d, _ in pkg_of.values()})
 
     # file -> qualifier -> import path. An unaliased import of an in-repo package
     # also binds the name in that package's clause, which the path-based guess
@@ -197,8 +230,8 @@ def resolve_go_edges(conn, repo_root: Path | None = None) -> dict:
         binds = imports.setdefault(file, {})
         binds[to_name] = path
         if to_name == go_default_package_name(path):
-            d = _import_dir(path, modules)
-            names = packages_in.get(d, set()) if d is not None else set()
+            d = modules.dir_for(path, posixpath.dirname(file))
+            names = packages_in.get(d, set()) if d not in (None, AMBIGUOUS) else set()
             if len(names) == 1:
                 binds.setdefault(next(iter(names)), path)
 
@@ -264,12 +297,15 @@ def resolve_go_edges(conn, repo_root: Path | None = None) -> dict:
             counts["mixed_or_typed"] += 1
             continue
         path = next(iter(paths))
-        d = _import_dir(path, modules)
+        d = modules.dir_for(path, pkg_of[file][0])
+        if d == AMBIGUOUS:
+            counts["unplaced"] += 1
+            continue
         if d is None:
             # Outside every in-repo module is positive evidence only when a
             # found go.mod governs THIS caller; otherwise only the standard
             # library can be ruled out.
-            if _is_stdlib(path) or pkg_of[file][0] in governed:
+            if _is_stdlib(path) or modules.governs(pkg_of[file][0]):
                 mark_external(rowid)
             else:
                 counts["unplaced"] += 1

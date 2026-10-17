@@ -484,6 +484,36 @@ def test_a_module_less_caller_beside_a_nested_module_is_not_ruled_external(tmp_p
 
 
 @needs_go
+def test_two_modules_declaring_one_path_resolve_within_the_callers_own(tmp_path):
+    """Prudence, PR #1285 r2: keyed by path alone, the first directory walked won.
+
+    Several `examples/*` made with `go mod init example` is the ordinary case.
+    A caller inside one of them binds into its own module; a caller in neither
+    cannot choose, and stays unresolved rather than being ruled external.
+    """
+    db = _db(
+        tmp_path,
+        {
+            "ex1/go.mod": "module example\n",
+            "ex1/util/u.go": "package util\n\nfunc Get() {}\n",
+            "ex2/go.mod": "module example\n",
+            "ex2/util/u.go": "package util\n\nfunc Get() {}\n",
+            "ex2/main.go": (
+                'package main\n\nimport "example/util"\n\nfunc main() { util.Get() }\n'
+            ),
+            "other/go.mod": "module example.com/other\n",
+            "other/o.go": (
+                'package other\n\nimport "example/util"\n\nfunc run() { util.Get() }\n'
+            ),
+        },
+    )
+    report = _resolve(db, tmp_path)
+    assert _call(db, "main", "Get")[:2] == ("import_resolved", "ex2/util/u.go::Get::function::3")
+    assert _call(db, "run", "Get")[0] == "unresolved"
+    assert report["unplaced"] == 1
+
+
+@needs_go
 def test_a_shadowing_parameter_is_a_known_false_binding(tmp_path):
     """PINNED COST, not a goal: the table records no local bindings (card, v7).
 

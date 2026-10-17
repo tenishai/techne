@@ -12,7 +12,9 @@ All notable changes to techne are documented here. Format loosely follows
   their calls and imports, and skips `vendor/` and `testdata/` for Go files. Go is in the
   default `--language` set, and the `codex` extra adds `tree-sitter-go`. A Go-only resolver
   binds same-package calls across files and `pkg.F()` calls through `go.mod`, and rules
-  standard-library, out-of-repo and predeclared names (`len`, `string`) `external`. Calls
+  standard-library and predeclared names (`len`, `string`) `external`, plus out-of-repo
+  imports from a file that a `go.mod` governs (from a module-less directory they stay
+  unresolved). Calls
   through a value or a field (`s.db.Get()`) stay name-matched; proving them needs gopls
   (#324). **Every call edge now records its call-site lines**, in all languages, so
   `codex callers` prints each line a caller calls from, and `codex_blast_radius` gives direct
