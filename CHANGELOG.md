@@ -7,6 +7,17 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Added
 
+- **Hand curation for the pattern corpus** (#1293, architect schema v7).
+  `techne architect tag <id> --applies <target>` tags a pattern for a configured project and
+  `--no-applies <target>` removes one, including a target derived from the body. Both are
+  stored with an `origin` (`curated`, `excluded`; derived rows are `body`), so a later
+  `architect backfill` neither drops a hand-set target nor re-derives a removed one.
+  `architect.target_aliases` maps a word bodies use to a configured target, e.g.
+  `{prudence: agents}`. `techne architect reverdict` takes `--reason` and `--clear-reason`,
+  and warns when a skip becomes patterns-only or full-eval with its skip reason still
+  attached, or when a new reason cites no `[[pattern]]` and no file:line.
+  `techne architect snapshot` now covers hand-set applies rows, so its digest changes once
+  on upgrade; take before-and-after snapshots on the same version.
 - **`est_tokens` on every `techne_search` and `techne_recall` row, and `row_chars` to open a cut one**
   (#386). `est_tokens` prices the text delivered; a local knowledge row cut short of its full
   length (500 characters by default) also carries `est_tokens_full`. Both tools take

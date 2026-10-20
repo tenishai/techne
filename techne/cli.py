@@ -1633,9 +1633,7 @@ def lesson_enforced_by(ctx, knowledge_id, mechanism):
     """Record the hook, test or guard that now enforces a principle ('' clears)."""
     from techne.core import lessons
 
-    lessons.set_enforced_by(
-        ctx.obj["config"].db_path, knowledge_id, mechanism, operator=True
-    )
+    lessons.set_enforced_by(ctx.obj["config"].db_path, knowledge_id, mechanism, operator=True)
     click.echo(f"{knowledge_id}: enforced_by={mechanism or None}")
 
 
@@ -5072,23 +5070,64 @@ def architect_add(ctx, name, source, surveyed, body, body_file, verdict, surveye
     default=None,
     help="Angle the survey was done from. Defaults to config `architect.lens` ('infra').",
 )
+@click.option(
+    "--reason",
+    default=None,
+    help="Replace the investigation's skip reason. Cite a [[pattern]], a file:line, "
+    "or an availability fact (dead repo, licence, closed source).",
+)
+@click.option(
+    "--clear-reason",
+    is_flag=True,
+    default=False,
+    help="Remove the skip reason, e.g. when a skip becomes patterns-only.",
+)
 @click.pass_context
-def architect_reverdict(ctx, url, verdict, surveyed_by, lens):
-    """Correct one investigation's verdict (techne#428).
+def architect_reverdict(ctx, url, verdict, surveyed_by, lens, reason, clear_reason):
+    """Correct one investigation's verdict, and optionally its reason (techne#428, #1293).
 
-    Does not touch surveyed_at — correcting a judgment is not a re-survey.
+    Does not touch surveyed_at — correcting a judgment is not a re-survey. Without
+    --reason or --clear-reason the existing reason is kept.
     """
+    if reason is not None and clear_reason:
+        raise click.UsageError("--reason and --clear-reason are mutually exclusive")
     config = ctx.obj["config"]
     surveyed_by = surveyed_by or config.architect.surveyed_by
     lens = lens or config.architect.lens
     from techne.core.architect import architect_db
-    from techne.core.patterns import set_verdict
+    from techne.core.patterns import get_investigation, reason_cites_evidence, set_verdict
 
+    db = architect_db(config)
+    before = get_investigation(db, url=url, surveyed_by=surveyed_by, lens=lens)
+    kwargs = {}
+    if clear_reason:
+        kwargs["reason"] = None
+    elif reason is not None:
+        kwargs["reason"] = reason.strip() or None
     updated = set_verdict(
-        architect_db(config), url=url, verdict=verdict, surveyed_by=surveyed_by, lens=lens
+        db, url=url, verdict=verdict, surveyed_by=surveyed_by, lens=lens, **kwargs
     )
     if updated:
         click.echo(f"{url} -> {verdict}")
+        if kwargs.get("reason") and not reason_cites_evidence(kwargs["reason"]):
+            click.echo(
+                "warning: the reason cites no [[pattern]] and no file:line. Fine if it "
+                "rests on an availability fact (dead repo, licence, closed source); "
+                "otherwise it has not been filtered yet.",
+                err=True,
+            )
+        if (
+            not kwargs
+            and before
+            and before["skip_reason"]
+            and before["verdict"].startswith("skip")
+            and not verdict.startswith("skip")
+        ):
+            click.echo(
+                f"warning: {url} still carries its skip reason under the new verdict "
+                f"{verdict}; pass --clear-reason, or --reason to replace it.",
+                err=True,
+            )
     else:
         click.echo(f"No investigation found for {url} (surveyed_by={surveyed_by}, lens={lens}).")
         raise SystemExit(1)
@@ -5267,9 +5306,11 @@ def architect_snapshot(ctx):
     difference means nothing wrote" is the branch you proceed on. It covers EVERY column
     of `patterns`, `investigations` AND `pattern_outcomes`, including `status`, so a soft
     delete (status -> superseded), a new skip-with-flag row and a recorded outcome all
-    move it. It does NOT cover the derived graph — `pattern_relations` and
-    `pattern_applies` — because `backfill_graph` rebuilds both from content this does
-    cover, so a change there alone means the graph was refreshed, not edited.
+    move it. It does NOT cover the derived graph — `pattern_relations` and the
+    body-derived `pattern_applies` rows — because `backfill_graph` rebuilds both from
+    content this does cover, so a change there alone means the graph was refreshed, not
+    edited. Applies rows set by hand (`architect tag --applies/--no-applies`) ARE
+    covered, since nothing can re-derive them.
 
     (An earlier version of this text listed a third exclusion, `topics`. No such table
     exists; the real sibling missing from the list was `pattern_outcomes`, which is
@@ -5385,9 +5426,7 @@ def architect_targets(ctx):
         click.echo(f"  {r['target']:<16} {r['active']:>5}{mark}")
 
     if retired_only:
-        click.echo(
-            "\nretired only (no active pattern; `pattern_search` serves nothing for these):"
-        )
+        click.echo("\nretired only (no active pattern; `pattern_search` serves nothing for these):")
         for r in retired_only:
             click.echo(f"  {r['target']:<16} {r['retired']:>5} retired")
 
@@ -5592,27 +5631,56 @@ def architect_topic(ctx, name, as_of):
     default=None,
     help="Salvage note: what this pattern contributed before being folded into its successor.",
 )
+@click.option(
+    "--applies",
+    "applies",
+    multiple=True,
+    help="Tag the pattern as applying to this configured target. Repeatable. "
+    "Survives `architect backfill` (techne#1293).",
+)
+@click.option(
+    "--no-applies",
+    "no_applies",
+    multiple=True,
+    help="Remove this target, including one derived from the body; the removal "
+    "survives `architect backfill`. Repeatable.",
+)
 @click.pass_context
-def architect_tag(ctx, pattern_id, topic, status, superseded_by, absorbed):
-    """Curate a pattern (techne#597): set its --topic, and/or supersede it via
-    --superseded-by (the atomic supersession path). Any subset of options applies."""
+def architect_tag(ctx, pattern_id, topic, status, superseded_by, absorbed, applies, no_applies):
+    """Curate a pattern (techne#597): set its --topic, supersede it via
+    --superseded-by (the atomic supersession path), or set its project targets with
+    --applies/--no-applies. Any subset of options applies."""
     config = ctx.obj["config"]
     from techne.core.architect import architect_db
-    from techne.core.patterns import tag_pattern
+    from techne.core.patterns import applies_of, tag_pattern
 
+    db = architect_db(config)
     try:
         changed = tag_pattern(
-            architect_db(config),
+            db,
             pattern_id,
             topic=topic,
             status=status,
             superseded_by=superseded_by,
             absorbed=absorbed,
+            applies=applies,
+            no_applies=no_applies,
         )
     except ValueError as exc:
         click.echo(str(exc), err=True)
         ctx.exit(1)
     click.echo("updated" if changed else "no change")
+    if applies or no_applies:
+        rows = applies_of(db, pattern_id)
+        held = [
+            r["target"] + ("" if r["origin"] == "body" else f" ({r['origin']})")
+            for r in rows
+            if r["origin"] != "excluded"
+        ]
+        out = [r["target"] for r in rows if r["origin"] == "excluded"]
+        click.echo(f"applies: {', '.join(held) or '(none)'}")
+        if out:
+            click.echo(f"excluded: {', '.join(out)}")
 
 
 @architect.command("graph")

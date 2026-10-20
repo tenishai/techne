@@ -84,6 +84,8 @@ directly, and you never hand-edit a markdown corpus as a way of writing to it.
 | write a corpus | `techne architect ingest FILE.md` |
 | tag a pattern's problem area | `techne architect tag <id> --topic <slug>` |
 | retire a beaten pattern | `techne architect tag <old> --superseded-by <new> --absorbed "…"` |
+| tag the projects a pattern applies to | `techne architect tag <id> --applies <target>` (`--no-applies` removes one); both survive `backfill` |
+| correct a verdict and its reason | `techne architect reverdict <url> --verdict <v> --reason "…"` (or `--clear-reason`) |
 | content hash, for the sandbox check | `techne architect snapshot` |
 
 **Use `dedup`, not `search`, and the reason changed in 0.16.0.** `patterns_fts` now

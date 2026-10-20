@@ -260,6 +260,12 @@ about:
 holds and prints the line to paste. Nothing already stored is lost, and
 `techne architect backfill` recovers any tags missed in between.
 
+Patterns written before a target was configured stay untagged for it: tags come only from a
+"where to apply in <target>" phrase in the body. Tag them by hand with `techne architect tag
+<id> --applies <target>`, which `backfill` never undoes (#1293). If bodies name a project by
+another word, such as a persona that lives in another repo, map it with
+`architect.target_aliases: {prudence: agents}`.
+
 **`techne init` owns the hook chain, and only `init` rewrites it.** `register_hooks` strips
 every hook group whose command mentions techne and re-appends its own template, so the
 SessionStart chain an install is running is the one written the last time `init` ran. An

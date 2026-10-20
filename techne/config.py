@@ -558,6 +558,26 @@ def _pattern_targets(raw: object) -> list[str]:
     return out or ["techne"]
 
 
+def _target_aliases(raw: object) -> dict[str, str]:
+    """Normalise `architect.target_aliases` from YAML (issue #1293).
+
+    A mapping of a name that pattern bodies use to the configured target it means,
+    e.g. `{prudence: agents}` for a persona that lives in another project's repo.
+    Keys and values are stripped and lowercased for the same reason as
+    `_pattern_targets`. Anything that is not a mapping, and any entry with an empty
+    side, is dropped: an alias is a convenience, so a malformed one should cost the
+    alias, not the config.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, str] = {}
+    for k, v in raw.items():
+        key, val = str(k).strip().lower(), str(v or "").strip().lower()
+        if key and val:
+            out[key] = val
+    return out
+
+
 @dataclass
 class ArchitectConfig:
     """Who the architect records as having surveyed a pattern (techne#754).
@@ -598,6 +618,11 @@ class ArchitectConfig:
     #: their store already uses, exactly like `surveyed_by` — `techne architect
     #: targets` prints what the store holds.
     pattern_targets: list[str] = field(default_factory=lambda: ["techne"])
+    #: Spellings a pattern body may use for a configured target (issue #1293), e.g.
+    #: `{prudence: agents}`. Applied by `_apply_targets` when it reads a "where to
+    #: apply in" phrase, on top of the built-in pre-rename aliases. An alias whose
+    #: value is not in `pattern_targets` resolves to nothing, like any unknown token.
+    target_aliases: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -1491,6 +1516,7 @@ class Config:
                 # one on the write side. A bad config should not look like a corpus
                 # with no targets.
                 pattern_targets=_pattern_targets(a.get("pattern_targets")),
+                target_aliases=_target_aliases(a.get("target_aliases")),
             )
         if "recall" in raw and isinstance(raw["recall"], dict):
             r = raw["recall"]
@@ -1712,6 +1738,7 @@ class Config:
                 "surveyed_by": self.architect.surveyed_by,
                 "lens": self.architect.lens,
                 "pattern_targets": list(self.architect.pattern_targets),
+                "target_aliases": dict(self.architect.target_aliases),
             },
             "search": {
                 "recency_weight": self.search.recency_weight,

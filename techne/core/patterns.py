@@ -89,6 +89,8 @@ _APPLY_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 _APPLY_SPLIT_RE = re.compile(_APPLY_SEP, re.IGNORECASE)
+
+
 # The projects a pattern may declare itself relevant to. NOT hardcoded prose:
 # every name here is a real target named in the /investigate-url skill's context
 # block, so a pattern that says "apply in prudence" resolves instead of being
@@ -111,12 +113,26 @@ def known_targets() -> set[str]:
 
     return {str(t) for t in Config.load().architect.pattern_targets}
 
+
 # Pre-rename spellings still present in older pattern bodies. Extraction
 # canonicalises through this map so ONE PROJECT CANNOT OCCUPY TWO TARGETS —
 # `limenal` was renamed to `liminal` on 2026-08-11 and the set was not updated,
 # so backfill emitted `limenal` while the direct-tag path wrote `liminal`,
 # leaving 11 patterns double-listed under both (techne#674).
 _TARGET_ALIASES = {"limenal": "liminal"}
+
+
+def target_aliases() -> dict[str, str]:
+    """Body spelling -> target: the built-in pre-rename aliases, overlaid with the
+    operator's `architect.target_aliases` (issue #1293).
+
+    Config wins on a clash, since it is the operator saying what a name means in
+    their corpus. Read it once per loop, like `known_targets()`.
+    """
+    from techne.config import Config
+
+    return {**_TARGET_ALIASES, **Config.load().architect.target_aliases}
+
 
 # Outcome lifecycle (techne#426). 'filed' → work exists; 'shipped' → it landed;
 # 'rejected' → considered and declined, which is a real signal, not an absence.
@@ -163,9 +179,7 @@ _OUTCOME_STATES = {"filed", "shipped", "rejected"}
 #: COALESCEd from the declined investigation, so a kept row can adopt a newer summary.
 #: They only ever fill a NULL, and unlike the date they make no claim about WHEN — so
 #: the "these are one fact" argument does not extend to them.
-_TAKES_NEW_SURVEY = (
-    "(:overwrite OR (:clears_skip AND investigations.verdict LIKE 'skip%'))"
-)
+_TAKES_NEW_SURVEY = "(:overwrite OR (:clears_skip AND investigations.verdict LIKE 'skip%'))"
 
 
 def _wikilink_targets(body: str) -> list[str]:
@@ -186,23 +200,28 @@ def _wikilink_targets(body: str) -> list[str]:
     return out
 
 
-def _apply_targets(body: str, allowed: set[str] | None = None) -> list[str]:
+def _apply_targets(
+    body: str, allowed: set[str] | None = None, aliases: dict[str, str] | None = None
+) -> list[str]:
     """Extract canonical project targets from `where to apply in <target>` phrases
     in *body*. The token after "apply in" is taken, plus any further tokens joined
     to it by `/`, `,`, `and` or `&` (issue #693); unknown tokens are dropped.
     Deduped, order-preserved.
 
-    *allowed* defaults to the configured set (`known_targets()`). Callers looping
-    over many rows should resolve it ONCE and pass it, rather than re-reading
-    config per row; tests pass the set they mean instead of the operator's.
+    *allowed* defaults to the configured set (`known_targets()`) and *aliases* to
+    `target_aliases()`. Callers looping over many rows should resolve both ONCE and
+    pass them, rather than re-reading config per row; tests pass the sets they mean
+    instead of the operator's.
     """
     out: list[str] = []
     seen: set[str] = set()
     if allowed is None:
         allowed = known_targets()
+    if aliases is None:
+        aliases = target_aliases()
     for group in _APPLY_RE.findall(body or ""):
         for raw in _APPLY_SPLIT_RE.split(group):
-            t = _TARGET_ALIASES.get(raw.lower(), raw.lower())
+            t = aliases.get(raw.lower(), raw.lower())
             if t in allowed and t not in seen:
                 seen.add(t)
                 out.append(t)
@@ -274,10 +293,14 @@ def upsert_investigation(
                VALUES (:id, :url, :surveyed_by, :lens, :surveyed_at, :verdict,
                        :summary, :skip_reason, :maturity)
                ON CONFLICT(url, surveyed_by, lens) DO UPDATE SET
-                 surveyed_at = CASE WHEN """ + _TAKES_NEW_SURVEY + """
+                 surveyed_at = CASE WHEN """
+            + _TAKES_NEW_SURVEY
+            + """
                                  THEN excluded.surveyed_at
                                  ELSE investigations.surveyed_at END,
-                 verdict = CASE WHEN """ + _TAKES_NEW_SURVEY + """
+                 verdict = CASE WHEN """
+            + _TAKES_NEW_SURVEY
+            + """
                              THEN excluded.verdict
                              ELSE investigations.verdict END,
                  summary = COALESCE(excluded.summary, investigations.summary),
@@ -303,6 +326,9 @@ def upsert_investigation(
         conn.close()
 
 
+_KEEP_REASON = object()
+
+
 def set_verdict(
     db_path: Path,
     *,
@@ -310,24 +336,65 @@ def set_verdict(
     verdict: str,
     surveyed_by: str = "operator",
     lens: str = "infra",
+    reason: object = _KEEP_REASON,
 ) -> bool:
     """Correct one investigation's verdict in place. True if a row was updated.
 
     Deliberately does NOT touch surveyed_at — correcting a judgment is not a
     re-survey, and conflating the two is the adjacent bug in techne#429.
+
+    *reason* (issue #1293): left out, `skip_reason` is kept as it is; a string
+    replaces it; None clears it. A verdict and the reason that explained it are one
+    judgment, so a correction that could only reach one of them left `dedup` printing
+    `verdict=patterns-only reason=<why we skipped it>`.
     """
     if verdict not in VERDICTS:
         raise ValueError(f"verdict must be one of {', '.join(VERDICTS)}; got {verdict!r}")
     conn = plain_connect(db_path)
     try:
-        cur = conn.execute(
-            "UPDATE investigations SET verdict = ? WHERE id = ?",
-            (verdict, _hash(url, surveyed_by, lens)),
-        )
+        if reason is _KEEP_REASON:
+            cur = conn.execute(
+                "UPDATE investigations SET verdict = ? WHERE id = ?",
+                (verdict, _hash(url, surveyed_by, lens)),
+            )
+        else:
+            cur = conn.execute(
+                "UPDATE investigations SET verdict = ?, skip_reason = ? WHERE id = ?",
+                (verdict, reason, _hash(url, surveyed_by, lens)),
+            )
         conn.commit()
         return cur.rowcount > 0
     finally:
         conn.close()
+
+
+def get_investigation(
+    db_path: Path, *, url: str, surveyed_by: str = "operator", lens: str = "infra"
+) -> dict | None:
+    """One investigation row by its identity (url, surveyed_by, lens), or None."""
+    conn = plain_connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT url, verdict, surveyed_at, skip_reason FROM investigations WHERE id = ?",
+            (_hash(url, surveyed_by, lens),),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+# A file:line citation: a path-ish token with an extension, then :N (or :N-M).
+_FILE_LINE_RE = re.compile(r"[\w./-]+\.[A-Za-z0-9]+:\d+")
+
+
+def reason_cites_evidence(reason: str) -> bool:
+    """True if a skip reason cites a [[pattern]] or a file:line (issue #1293).
+
+    The investigating guide also accepts an availability fact (dead repo, licence,
+    closed source) as grounds, which no pattern can recognise reliably, so a False
+    here is a prompt to check, never a refusal.
+    """
+    return "[[" in reason or bool(_FILE_LINE_RE.search(reason))
 
 
 def _url_slug(url: str) -> str:
@@ -524,14 +591,15 @@ def add_relation(
         conn.close()
 
 
-def add_apply(db_path: Path, *, pattern_id: str, target: str) -> bool:
+def add_apply(db_path: Path, *, pattern_id: str, target: str, origin: str = "body") -> bool:
     """Tag a pattern as applying to a project target (see known_targets()).
-    Idempotent. Returns True if a new row was inserted."""
+    Idempotent: an existing row for the pair is left as it is, origin included.
+    Returns True if a new row was inserted. Curation goes through `tag_pattern`."""
     conn = plain_connect(db_path)
     try:
         cur = conn.execute(
-            "INSERT OR IGNORE INTO pattern_applies (pattern_id, target) VALUES (?, ?)",
-            (pattern_id, target),
+            "INSERT OR IGNORE INTO pattern_applies (pattern_id, target, origin) VALUES (?, ?, ?)",
+            (pattern_id, target, origin),
         )
         conn.commit()
         return cur.rowcount > 0
@@ -588,11 +656,7 @@ def record_outcome(
             return True
         # `kind` counts as a change too — it was written but not reported, so the CLI
         # said "unchanged" for a row it had just modified.
-        return (
-            before[0] != state
-            or before[2] != kind
-            or (note is not None and before[1] != note)
-        )
+        return before[0] != state or before[2] != kind or (note is not None and before[1] != note)
     finally:
         conn.close()
 
@@ -748,8 +812,13 @@ def tag_pattern(
     status: str | None = None,
     superseded_by: str | None = None,
     absorbed: str | None = None,
+    applies: list[str] | tuple[str, ...] = (),
+    no_applies: list[str] | tuple[str, ...] = (),
 ) -> bool:
     """Curation mutator for a single pattern (techne#308 `architect tag`).
+
+    *applies* / *no_applies* (issue #1293) set or remove project targets by hand, for
+    patterns whose body never says "where to apply in <target>". See `set_applies`.
 
     If *superseded_by* is given, routes to the atomic `supersede()` (status is
     forced to 'superseded' and the `supersedes` edge written); a *topic* supplied
@@ -777,11 +846,20 @@ def tag_pattern(
     finally:
         conn.close()
 
+    # Validated before anything is written, so a typo in one target does not leave
+    # the topic or supersession applied and the applies change refused.
+    resolved = _resolve_applies(applies, no_applies)
+    applies_changed = False
+
     if superseded_by is not None:
         changed = supersede(db_path, old_id=pattern_id, new_id=superseded_by, absorbed=absorbed)
         if topic is not None:
             changed = _set_fields(db_path, pattern_id, {"topic": topic}) or changed
-        return changed
+        if resolved:
+            applies_changed = set_applies(db_path, pattern_id, resolved)
+        return changed or applies_changed
+    if resolved:
+        applies_changed = set_applies(db_path, pattern_id, resolved)
 
     fields: dict[str, str] = {}
     if topic is not None:
@@ -791,8 +869,92 @@ def tag_pattern(
     if absorbed is not None:
         fields["absorbed"] = absorbed
     if not fields:
-        return False
-    return _set_fields(db_path, pattern_id, fields)
+        return applies_changed
+    return _set_fields(db_path, pattern_id, fields) or applies_changed
+
+
+def _resolve_applies(
+    applies: list[str] | tuple[str, ...], no_applies: list[str] | tuple[str, ...]
+) -> dict[str, str]:
+    """Canonicalise hand-set targets to {target: 'curated' | 'excluded'} (issue #1293).
+
+    An added target must be configured: `tag` is where a typo would otherwise mint a
+    target the read side has never heard of, which is the failure `_apply_targets`
+    already refuses for bodies. A removed target need NOT be configured, because the
+    common reason to remove one is that the project was retired from the list.
+    Naming the same target on both sides is refused rather than resolved by order.
+    """
+    aliases = target_aliases()
+
+    def canon(t: str) -> str:
+        t = t.strip().lower()
+        return aliases.get(t, t)
+
+    add = [canon(t) for t in applies if t.strip()]
+    drop = [canon(t) for t in no_applies if t.strip()]
+    both = sorted(set(add) & set(drop))
+    if both:
+        raise ValueError(f"--applies and --no-applies both name: {', '.join(both)}")
+    if add:
+        allowed = known_targets()
+        unknown = sorted(t for t in set(add) if t not in allowed)
+        if unknown:
+            raise ValueError(
+                f"not a configured target: {', '.join(unknown)} "
+                f"(architect.pattern_targets: {', '.join(sorted(allowed))})"
+            )
+    return {**{t: "curated" for t in add}, **{t: "excluded" for t in drop}}
+
+
+def set_applies(db_path: Path, pattern_id: str, origins: dict[str, str]) -> bool:
+    """Write hand-set applies rows (issue #1293). True if any row changed.
+
+    'curated' adds the target, or turns an earlier exclusion back into a tag; a
+    body-derived row it meets is left as 'body', since it already applies. 'excluded'
+    keeps the row and marks it, rather than deleting it, because a deleted pair is
+    re-derived by the next `backfill_graph` whenever the body still names it.
+    """
+    conn = plain_connect(db_path)
+    try:
+        changed = 0
+        for target, origin in origins.items():
+            if origin == "curated":
+                cur = conn.execute(
+                    """INSERT INTO pattern_applies (pattern_id, target, origin)
+                       VALUES (?, ?, 'curated')
+                       ON CONFLICT(pattern_id, target) DO UPDATE SET origin = 'curated'
+                       WHERE pattern_applies.origin = 'excluded'""",
+                    (pattern_id, target),
+                )
+            else:
+                cur = conn.execute(
+                    """INSERT INTO pattern_applies (pattern_id, target, origin)
+                       VALUES (?, ?, 'excluded')
+                       ON CONFLICT(pattern_id, target) DO UPDATE SET origin = 'excluded'
+                       WHERE pattern_applies.origin != 'excluded'""",
+                    (pattern_id, target),
+                )
+            changed += cur.rowcount
+        conn.commit()
+        return changed > 0
+    finally:
+        conn.close()
+
+
+def applies_of(db_path: Path, pattern_id: str) -> list[dict]:
+    """Every applies row for one pattern, with its origin, excluded ones included,
+    target order. What `architect tag` prints after a change."""
+    conn = plain_connect(db_path)
+    try:
+        return [
+            dict(r)
+            for r in conn.execute(
+                "SELECT target, origin FROM pattern_applies WHERE pattern_id = ? ORDER BY target",
+                (pattern_id,),
+            )
+        ]
+    finally:
+        conn.close()
 
 
 def _set_fields(db_path: Path, pattern_id: str, fields: dict[str, str]) -> bool:
@@ -830,6 +992,7 @@ def backfill_graph(db_path: Path) -> dict:
         # Resolved ONCE for the whole backfill: _apply_targets would otherwise
         # re-read config per row, and this loop runs over every active pattern.
         _allowed_targets = known_targets()
+        _aliases = target_aliases()
         rel_total = rel_resolved = applies_total = 0
         for r in rows:
             src = r["id"]
@@ -849,7 +1012,10 @@ def backfill_graph(db_path: Path) -> dict:
                 )
                 rel_total += 1
                 rel_resolved += int(dst_id is not None)
-            for target in _apply_targets(r["body"], allowed=_allowed_targets):
+            for target in _apply_targets(r["body"], allowed=_allowed_targets, aliases=_aliases):
+                # OR IGNORE is what keeps curation (issue #1293): a pair already held
+                # as 'curated' stays curated, and one held as 'excluded' stays out,
+                # so `tag --no-applies` survives every later backfill.
                 conn.execute(
                     "INSERT OR IGNORE INTO pattern_applies (pattern_id, target) VALUES (?, ?)",
                     (src, target),
@@ -920,6 +1086,7 @@ def target_counts(db_path: Path) -> list[dict]:
                           SUM(p.status = 'active') AS active,
                           SUM(p.status != 'active') AS retired
                    FROM pattern_applies a JOIN patterns p ON p.id = a.pattern_id
+                   WHERE a.origin != 'excluded'
                    GROUP BY a.target
                    ORDER BY active DESC, retired DESC, a.target"""
             )
@@ -943,7 +1110,7 @@ def patterns_for_target(db_path: Path, target: str, *, limit: int = 100) -> list
             for r in conn.execute(
                 """SELECT p.id, p.name, p.source_url, p.confidence
                    FROM pattern_applies a JOIN patterns p ON p.id = a.pattern_id
-                   WHERE a.target = ? AND p.status = 'active'
+                   WHERE a.target = ? AND p.status = 'active' AND a.origin != 'excluded'
                    ORDER BY p.name LIMIT ?""",
                 (target, limit),
             )
@@ -1417,8 +1584,7 @@ def ingest_patterns_md(
         # malformed no-lift BULLETS as well as pattern sections, and a key called
         # `heading` holding a bullet is a field whose name is a lie.
         "skipped": [
-            {"label": sk.label, "kind": sk.kind, "reason": sk.reason}
-            for sk in parsed.skipped
+            {"label": sk.label, "kind": sk.kind, "reason": sk.reason} for sk in parsed.skipped
         ],
         "graph": graph,
         **stats(db_path),
@@ -1557,11 +1723,17 @@ def store_snapshot(db_path: Path) -> str:
 
     So: every column of `patterns`, plus a second pass over `investigations`. Both are
     ordered by id so the digest is stable across row order. `pattern_relations`,
-    `pattern_topics` and `pattern_applies` remain outside it — they are derived by
+    `pattern_topics` and body-derived `pattern_applies` rows remain outside it — they are derived by
     `backfill_graph` from content this DOES cover, so a change there without a change
     here means the graph was rebuilt, not that the corpus was edited. That is a
     deliberate boundary rather than an oversight, and `techne architect snapshot --help`
     states what the digest covers so the converse can be read honestly.
+
+    HAND-SET `pattern_applies` ROWS ARE COVERED (issue #1293). `architect tag
+    --applies/--no-applies` writes 'curated' and 'excluded' rows that no backfill can
+    re-derive, so they fail the exclusion test above exactly as `pattern_outcomes`
+    did. Only those rows are hashed; 'body' rows stay out, so a backfill still moves
+    nothing here.
 
     `pattern_outcomes` IS COVERED, and leaving it out was the same defect one table over
     (Prudence, #807 r2 I3). Nothing derives it — `record_outcome` writes it with a real
@@ -1590,8 +1762,19 @@ def store_snapshot(db_path: Path) -> str:
             h.update(f"{table}:{','.join(cols)}".encode("utf-8"))
             h.update(b"\x1e")
             order = "id" if "id" in cols else cols[0]
-            select = ", ".join(f'COALESCE(CAST("{c}" AS TEXT), \'\')' for c in cols)
+            select = ", ".join(f"COALESCE(CAST(\"{c}\" AS TEXT), '')" for c in cols)
             for row in conn.execute(f'SELECT {select} FROM "{table}" ORDER BY "{order}"'):
+                for field in row:
+                    h.update(str(field).encode("utf-8"))
+                    h.update(b"\x1f")
+            h.update(b"\x1d")
+        applies_cols = {r[1] for r in conn.execute("PRAGMA table_info(pattern_applies)")}
+        if "origin" in applies_cols:
+            h.update(b"pattern_applies:hand-set\x1e")
+            for row in conn.execute(
+                "SELECT pattern_id, target, origin FROM pattern_applies "
+                "WHERE origin != 'body' ORDER BY pattern_id, target"
+            ):
                 for field in row:
                     h.update(str(field).encode("utf-8"))
                     h.update(b"\x1f")

@@ -24,7 +24,7 @@ from techne.config import Config
 from techne.core import migrator
 from techne.core.stores import StoreAdapter, migrated_store, plain_connect
 
-ARCHITECT_VERSION = 6  # PRAGMA user_version on architect.db
+ARCHITECT_VERSION = 7  # PRAGMA user_version on architect.db
 
 _PATTERNS_FTS_DDL = """
 -- `source_url` IS INDEXED; its absence was a silent false negative (techne#430).
@@ -110,9 +110,14 @@ CREATE TABLE IF NOT EXISTS pattern_relations (
 );
 CREATE INDEX IF NOT EXISTS idx_pattern_relations_dst ON pattern_relations(dst_pattern_id);
 
+-- origin (issue #1293): 'body' = derived by backfill from a "where to apply in" phrase;
+-- 'curated' = set by `architect tag --applies`; 'excluded' = removed by
+-- `architect tag --no-applies`, kept as a row so a later backfill cannot re-derive it.
+-- Readers count only body and curated.
 CREATE TABLE IF NOT EXISTS pattern_applies (
     pattern_id TEXT REFERENCES patterns(id),
-    target     TEXT NOT NULL,                 -- cabal | techne | limenal | agent-infra | …
+    target     TEXT NOT NULL,                 -- cabal | techne | liminal | kobo | …
+    origin     TEXT NOT NULL DEFAULT 'body',
     PRIMARY KEY (pattern_id, target)
 );
 
@@ -315,6 +320,26 @@ def _step_v5_to_v6_index_source_url(conn) -> None:
     )
 
 
+def _step_v6_to_v7_applies_origin(conn) -> None:
+    """Add `pattern_applies.origin` (issue #1293).
+
+    Until now every applies row was derived from a pattern body, so the table could
+    be treated as a rebuildable index. `architect tag --applies/--no-applies` adds
+    rows nothing can re-derive, and an exclusion that must outlive the next
+    backfill. The column says which is which. Existing rows are all body-derived,
+    so the DEFAULT is their true value. Column-presence guard, like the rest of
+    the ladder; a store predating the table has nothing to alter.
+    """
+    have = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='pattern_applies'"
+    ).fetchone()
+    if not have:
+        return
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(pattern_applies)")}
+    if "origin" not in cols:
+        conn.execute("ALTER TABLE pattern_applies ADD COLUMN origin TEXT NOT NULL DEFAULT 'body'")
+
+
 def _architect_run_steps(conn, current: int, target: int) -> None:
     """Apply architect.db migration steps from *current* up to *target*.
 
@@ -335,6 +360,8 @@ def _architect_run_steps(conn, current: int, target: int) -> None:
         _step_v4_to_v5_pattern_outcomes(conn)
     if current < 6:
         _step_v5_to_v6_index_source_url(conn)
+    if current < 7:
+        _step_v6_to_v7_applies_origin(conn)
     migrator.user_version_io.write(conn, target)
     conn.commit()
 
