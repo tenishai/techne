@@ -719,6 +719,98 @@ class TestHealCommand:
         assert not cmd.startswith("pipx reinstall")
         assert not cmd.startswith("python3 -m pip install")
 
+    @staticmethod
+    def _uv_tool(tmp_path, requirements, version_info="3.14.8"):
+        """A uv tool venv as uv 0.13.1 leaves it: receipt + pyvenv.cfg, no python."""
+        tool = tmp_path / "share" / "uv" / "tools" / "tenish-techne"
+        (tool / "bin").mkdir(parents=True)
+        (tool / "uv-receipt.toml").write_text(f"[tool]\nrequirements = [{requirements}]\n")
+        (tool / "pyvenv.cfg").write_text(f"home = /gone/bin\nversion_info = {version_info}\n")
+        return tool
+
+    def test_uv_tool_editable_keeps_extras_and_minor_version(self, monkeypatch, tmp_path):
+        # Dropping the extras on a heal silently loses sqlite_vec and model2vec.
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        tool = self._uv_tool(
+            tmp_path,
+            '{ name = "tenish-techne", extras = ["vectors", "watch"], editable = "/src/techne" }',
+        )
+        monkeypatch.setattr(hooks_mod, "_interpreter", lambda: tool / "bin" / "python")
+        assert hooks_mod._heal_command() == (
+            "uv tool install --force --python 3.14 --editable '/src/techne[vectors,watch]'"
+        )
+
+    def test_uv_tool_git_pin(self, monkeypatch, tmp_path):
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        tool = self._uv_tool(
+            tmp_path,
+            '{ name = "tenish-techne", '
+            'git = "https://github.com/tenishai/techne.git?rev=v0.18.2" }',
+        )
+        monkeypatch.setattr(hooks_mod, "_interpreter", lambda: tool / "bin" / "python")
+        assert hooks_mod._heal_command() == (
+            "uv tool install --force --python 3.14 "
+            "'tenish-techne @ git+https://github.com/tenishai/techne.git@v0.18.2'"
+        )
+
+    def test_uv_tool_directory(self, monkeypatch, tmp_path):
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        tool = self._uv_tool(
+            tmp_path, '{ name = "tenish-techne", extras = ["codex"], directory = "/src/techne" }'
+        )
+        monkeypatch.setattr(hooks_mod, "_interpreter", lambda: tool / "bin" / "python")
+        assert hooks_mod._heal_command() == (
+            "uv tool install --force --python 3.14 'tenish-techne[codex] @ file:///src/techne'"
+        )
+
+    @pytest.mark.parametrize(
+        "requirements",
+        [
+            '{ name = "tenish-techne", specifier = ">=0.18" }',  # shape not verified
+            '{ name = "tenish-techne", editable = "/src/techne" }, { name = "rich" }',  # --with
+            '{ name = "tenish-techne", git = "https://x/techne.git?subdirectory=py" }',
+        ],
+    )
+    def test_uv_tool_unrebuildable_receipt_warns_not_heals(
+        self, monkeypatch, tmp_path, requirements
+    ):
+        # A heal that installs something other than what was there is worse than none.
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        tool = self._uv_tool(tmp_path, requirements)
+        monkeypatch.setattr(hooks_mod, "_interpreter", lambda: tool / "bin" / "python")
+        monkeypatch.setattr(hooks_mod, "_venv_state", lambda _e: (True, str(tool)))
+        cmd = hooks_mod._heal_command()
+        assert cmd.startswith("echo ")
+        assert cmd.endswith("exit 1")
+
+    def test_uv_tool_found_by_receipt_outside_default_tool_dir(self, monkeypatch, tmp_path):
+        # UV_TOOL_DIR can put the venv anywhere; the receipt is what marks it.
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        tool = tmp_path / "custom-tools" / "tenish-techne"
+        (tool / "bin").mkdir(parents=True)
+        (tool / "uv-receipt.toml").write_text(
+            '[tool]\nrequirements = [{ name = "tenish-techne", editable = "/src/techne" }]\n'
+        )
+        (tool / "pyvenv.cfg").write_text("version_info = 3.13.16\n")
+        monkeypatch.setattr(hooks_mod, "_interpreter", lambda: tool / "bin" / "python")
+        assert hooks_mod._heal_command() == (
+            "uv tool install --force --python 3.13 --editable /src/techne"
+        )
+
+    def test_uv_tool_missing_receipt_warns_not_heals(self, monkeypatch, tmp_path):
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        tool = tmp_path / "share" / "uv" / "tools" / "tenish-techne"
+        (tool / "bin").mkdir(parents=True)
+        monkeypatch.setattr(hooks_mod, "_interpreter", lambda: tool / "bin" / "python")
+        monkeypatch.setattr(hooks_mod, "_venv_state", lambda _e: (True, str(tool)))
+        assert hooks_mod._heal_command().startswith("echo ")
+
     def test_pipx_detection_requires_path_segment(self, monkeypatch):
         # Only the `pipx/venvs/` PATH SEGMENT triggers pipx mode. A random
         # path that contains 'pipx' elsewhere must not false-positive.

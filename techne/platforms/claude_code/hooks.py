@@ -468,6 +468,54 @@ def _under_worktree(p: Path) -> Path | None:
     return None
 
 
+def _uv_tool_heal(exe: str) -> str | None:
+    """Heal for a uv tool venv: ``uv tool install --force`` of the recorded requirement.
+
+    ``uv tool upgrade`` refuses a tool whose interpreter is gone ("not installed"),
+    so the heal reinstalls from scratch. Only ``uv-receipt.toml`` records the extras,
+    and a reinstall that drops them loses sqlite_vec and model2vec while everything
+    still appears to work. ``--python`` pins the dead venv's minor version (from its
+    pyvenv.cfg, which survives the interpreter) so wheels resolve as before.
+
+    Receipt shapes verified against uv 0.13.1: ``editable``, ``directory`` and
+    ``git`` (``<url>?rev=<rev>``). Anything else, a ``--with`` requirement, or an
+    unreadable receipt returns None rather than a heal that installs the wrong thing.
+
+    A uv tool venv is recognised by its receipt, not by a ``/uv/tools/`` path
+    segment: ``UV_TOOL_DIR`` can put it anywhere.
+    """
+    tool_dir = Path(exe).parent.parent  # <venv>/bin/python, unresolved
+    if not (tool_dir / "uv-receipt.toml").is_file():
+        return None
+    try:
+        import tomllib
+
+        reqs = tomllib.loads((tool_dir / "uv-receipt.toml").read_text())["tool"]["requirements"]
+        if len(reqs) != 1:
+            return None
+        req = reqs[0]
+        extras = f"[{','.join(req['extras'])}]" if req.get("extras") else ""
+        if "editable" in req:
+            target = f"--editable {shlex.quote(req['editable'] + extras)}"
+        elif "directory" in req:
+            target = shlex.quote(f"{req['name']}{extras} @ {Path(req['directory']).as_uri()}")
+        elif "git" in req:
+            url, _, query = req["git"].split("#")[0].partition("?")
+            params = dict(p.split("=", 1) for p in query.split("&") if p)
+            if set(params) - {"rev"}:
+                return None
+            rev = f"@{params['rev']}" if "rev" in params else ""
+            target = shlex.quote(f"{req['name']}{extras} @ git+{url}{rev}")
+        else:
+            return None
+        cfg = (tool_dir / "pyvenv.cfg").read_text()
+    except (OSError, KeyError, IndexError, TypeError, ValueError):
+        return None
+    version = re.search(r"^version_info\s*=\s*(\d+\.\d+)", cfg, re.M)
+    python = f"--python {version.group(1)} " if version else ""
+    return f"uv tool install --force {python}{target}"
+
+
 def _heal_command() -> str:
     """Install-method-aware heal command baked into the launcher (techne#276).
 
@@ -483,6 +531,11 @@ def _heal_command() -> str:
       By naming ``python3`` explicitly we survive the common case of a minor-version
       removal (e.g. 3.11→3.12 Homebrew upgrade) as long as ``python3`` and ``pipx`` are
       on PATH at heal time. MEDIUM confidence. Best-effort path.
+
+    - **uv tool** (the venv holds a ``uv-receipt.toml``): ``uv tool install --force``
+      of the requirement recorded in the tool's ``uv-receipt.toml``; see
+      ``_uv_tool_heal``. A receipt it cannot rebuild falls through to the plain-venv
+      message below.
 
     - **system/non-venv** (sys.prefix == sys.base_prefix): attempt ``pip install -e``
       under whatever ``python3`` PATH resolves to at heal time, with
@@ -513,6 +566,10 @@ def _heal_command() -> str:
         venv_name = re.search(r"pipx/venvs/([^/]+)/", exe)
         name = venv_name.group(1) if venv_name else DIST_NAME
         return f'pipx reinstall --python "$(command -v python3)" {shlex.quote(name)}'
+
+    uv_heal = _uv_tool_heal(exe)
+    if uv_heal:
+        return uv_heal
 
     if not in_venv:
         # system install: fresh editable install under PATH's python3, then re-point PY
