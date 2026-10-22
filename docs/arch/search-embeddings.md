@@ -6,7 +6,7 @@ anchor: techne/core/static_direct.py sha=a70c7baba16383dae6c588849f7abc9cc105869
 anchor: techne/core/search.py sha=ff8bbe5e2c7be5360d3f96edf1c3524d93189845
 anchor: techne/core/query_embed.py sha=5055d672359d25abbb59b9bf8cbacb6335a47799
 anchor: techne/core/vec_ext.py sha=a2ba558ab16f0706c2a383b60744a2d6ea0efe01
-anchor: techne/platforms/claude_code/hooks.py sha=a944ab34ee84661acc54b1184cadae614c2e5c50
+anchor: techne/platforms/claude_code/hooks.py sha=7bf2d64f632124e34e2f1a7e8d12d5f4af148022
 ---
 # search / embeddings — hybrid FTS + vector recall
 
