@@ -477,8 +477,10 @@ def _uv_tool_heal(exe: str) -> str | None:
     still appears to work. ``--python`` pins the dead venv's minor version (from its
     pyvenv.cfg, which survives the interpreter) so wheels resolve as before.
 
-    Receipt shapes verified against uv 0.13.1: ``editable``, ``directory`` and
-    ``git`` (``<url>?rev=<rev>``). Anything else, a ``--with`` requirement, or an
+    Receipt shapes verified against uv 0.13.1 and 0.13.5: ``editable``, ``directory``
+    and ``git`` (``<url>?rev=<rev>``). Anything else, a ``--with`` requirement, a
+    ``[tool]`` key beyond ``requirements``/``entrypoints``/``python`` (``constraints``
+    and ``options`` record ``-c`` and resolver flags the reinstall would drop), or an
     unreadable receipt returns None rather than a heal that installs the wrong thing.
 
     A uv tool venv is recognised by its receipt, not by a ``/uv/tools/`` path
@@ -490,7 +492,10 @@ def _uv_tool_heal(exe: str) -> str | None:
     try:
         import tomllib
 
-        reqs = tomllib.loads((tool_dir / "uv-receipt.toml").read_text())["tool"]["requirements"]
+        receipt = tomllib.loads((tool_dir / "uv-receipt.toml").read_text())["tool"]
+        if set(receipt) - {"requirements", "entrypoints", "python"}:
+            return None
+        reqs = receipt["requirements"]
         if len(reqs) != 1:
             return None
         req = reqs[0]

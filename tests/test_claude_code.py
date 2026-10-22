@@ -720,11 +720,14 @@ class TestHealCommand:
         assert not cmd.startswith("python3 -m pip install")
 
     @staticmethod
-    def _uv_tool(tmp_path, requirements, version_info="3.14.8"):
+    def _uv_tool(tmp_path, requirements, version_info="3.14.8", extra=""):
         """A uv tool venv as uv 0.13.1 leaves it: receipt + pyvenv.cfg, no python."""
         tool = tmp_path / "share" / "uv" / "tools" / "tenish-techne"
         (tool / "bin").mkdir(parents=True)
-        (tool / "uv-receipt.toml").write_text(f"[tool]\nrequirements = [{requirements}]\n")
+        (tool / "uv-receipt.toml").write_text(
+            f"[tool]\nrequirements = [{requirements}]\n"
+            f'entrypoints = [{{ name = "techne", install-path = "/bin/techne" }}]\n{extra}'
+        )
         (tool / "pyvenv.cfg").write_text(f"home = /gone/bin\nversion_info = {version_info}\n")
         return tool
 
@@ -747,7 +750,9 @@ class TestHealCommand:
         tool = self._uv_tool(
             tmp_path,
             '{ name = "tenish-techne", '
-            'git = "https://github.com/tenishai/techne.git?rev=v0.18.2" }',
+            'git = "https://github.com/tenishai/techne.git?rev=v0.18.2'
+            '#0123456789abcdef0123456789abcdef01234567" }',
+            extra='python = "3.14"\n',
         )
         monkeypatch.setattr(hooks_mod, "_interpreter", lambda: tool / "bin" / "python")
         assert hooks_mod._heal_command() == (
@@ -767,20 +772,30 @@ class TestHealCommand:
         )
 
     @pytest.mark.parametrize(
-        "requirements",
+        ("requirements", "extra"),
         [
-            '{ name = "tenish-techne", specifier = ">=0.18" }',  # shape not verified
-            '{ name = "tenish-techne", editable = "/src/techne" }, { name = "rich" }',  # --with
-            '{ name = "tenish-techne", git = "https://x/techne.git?subdirectory=py" }',
+            ('{ name = "tenish-techne", specifier = ">=0.18" }', ""),  # shape not verified
+            # --with
+            ('{ name = "tenish-techne", editable = "/src/techne" }, { name = "rich" }', ""),
+            ('{ name = "tenish-techne", git = "https://x/techne.git?subdirectory=py" }', ""),
+            # -c and --prerelease, as uv 0.13.5 records them
+            (
+                '{ name = "tenish-techne", editable = "/src/techne" }',
+                'constraints = [{ name = "six", specifier = "<2" }]\n',
+            ),
+            (
+                '{ name = "tenish-techne", editable = "/src/techne" }',
+                '[tool.options]\nprerelease = "allow"\n',
+            ),
         ],
     )
     def test_uv_tool_unrebuildable_receipt_warns_not_heals(
-        self, monkeypatch, tmp_path, requirements
+        self, monkeypatch, tmp_path, requirements, extra
     ):
         # A heal that installs something other than what was there is worse than none.
         from techne.platforms.claude_code import hooks as hooks_mod
 
-        tool = self._uv_tool(tmp_path, requirements)
+        tool = self._uv_tool(tmp_path, requirements, extra=extra)
         monkeypatch.setattr(hooks_mod, "_interpreter", lambda: tool / "bin" / "python")
         monkeypatch.setattr(hooks_mod, "_venv_state", lambda _e: (True, str(tool)))
         cmd = hooks_mod._heal_command()
