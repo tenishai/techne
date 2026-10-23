@@ -1082,6 +1082,8 @@ _EGRESS_PROBES: dict[str, object] = {
     "recall.allowed_sources": ["probe-source"],
     "recall.allow_unlisted_sources": True,
     "archivist_db_path": "/tmp/probe-archivist.db",
+    # techne#1298. A non-empty tag list turns the publish lane on.
+    "archivist_publish_tags": ["team"],
     "standalone": False,
     "stores": {"librarian": {"adapter": "sqlite", "dsn": "/tmp/probe-lib.db"}},
     "sources": {"claude_code_transcripts": {"paths": ["/tmp/probe-transcripts"]}},

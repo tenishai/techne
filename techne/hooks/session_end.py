@@ -190,7 +190,7 @@ def main():
                 # So a row that failed immediate delivery is drainable here too
                 # (#346), installed packages' sinks included (#1172).
                 ensure_sinks_registered(config)
-                flush_sinks(config.db_path)
+                flush_sinks(config.db_path, budget_s=config.sync.flush_budget_s or None)
             except Exception as e:
                 print(f"techne: sink flush deferred: {e}", file=sys.stderr)
 

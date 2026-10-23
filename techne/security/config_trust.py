@@ -113,6 +113,10 @@ EGRESS_KEYS: tuple[str, ...] = (
     # an unpinned way to repoint what the old spelling cannot — the exact gap the
     # reflect.model/conflict.model pair exists to close.
     "archivist",
+    # techne#1298. Turns on the publish lane and decides which knowledge leaves for a
+    # network archivist, so it is a destination choice like `archivist` above. The
+    # sink that delivers it is admitted separately through `sync.allowed_sinks`.
+    "archivist_publish_tags",
     # techne#1170. Which installed packages may feed recall. Recall output goes straight
     # into the model's context, so admitting a source is an INGRESS trust decision, the
     # same reasoning as `connections` above. `recall.order` is not listed: it orders

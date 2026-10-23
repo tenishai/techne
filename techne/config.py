@@ -170,6 +170,10 @@ class SyncConfig:
     #: layer with the rest of the `sync` block.
     allowed_sinks: list[str] = field(default_factory=list)
     allow_unlisted_sinks: bool = False
+    #: Seconds the session-end hook may spend delivering outbox rows to sinks (#1298).
+    #: Rows not reached stay pending for the next session end. 0 = unbounded, which
+    #: suits local sinks; set it when a sink makes a network call per row.
+    flush_budget_s: float = 0.0
     # `auth`, `audience` and an `extra` catch-all for other `sync:` keys lived here
     # until techne#1074 and reached nothing: every `load_adapter` call passes only
     # `url`, `path` and `allow_unlisted`. A config.yaml that still carries them
@@ -944,6 +948,10 @@ class Config:
     # Base Archivist store (techne#346): the techne-schema SQLite db a non-standalone
     # instance's sink:archivist writes team memory into. "" → <data_dir>/archivist.db.
     archivist_db_path: str = ""
+    #: The publish lane (#1298): live knowledge carrying any of these tags is
+    #: enqueued to `sink:archivist_publish` for a network archivist. Empty turns the
+    #: lane off; it never means "everything".
+    archivist_publish_tags: list[str] = field(default_factory=list)
     #: WHO this instance is, when it writes into a shared store (techne#553). Stamped
     #: on federated knowledge as `written_by`. Empty means NULL rather than a guess —
     #: an unattributed row is honest, a wrongly-attributed one is worse than none in
@@ -1215,6 +1223,13 @@ class Config:
             cfg.archivist = value
         if "archivist_db_path" in raw:
             cfg.archivist_db_path = str(raw["archivist_db_path"])
+        if "archivist_publish_tags" in raw:
+            tags = raw["archivist_publish_tags"] or []
+            if isinstance(tags, str):
+                tags = tags.split(",")
+            if not isinstance(tags, list):
+                raise ValueError("archivist_publish_tags must be a list of tags.")
+            cfg.archivist_publish_tags = [str(t).strip() for t in tags if str(t).strip()]
         if "instance_name" in raw:
             cfg.instance_name = str(raw["instance_name"])
         if "model" in raw:
@@ -1280,7 +1295,10 @@ class Config:
                 allowed_sinks=[str(n) for n in (s.get("allowed_sinks") or [])],
                 # Only a real `true` opens an egress gate: bool("false") is True.
                 allow_unlisted_sinks=s.get("allow_unlisted_sinks") is True,
+                flush_budget_s=float(s.get("flush_budget_s") or 0),
             )
+            if cfg.sync.flush_budget_s < 0:
+                raise ValueError("sync.flush_budget_s must be 0 (unbounded) or positive.")
 
         if "threads" in raw and isinstance(raw["threads"], dict):
             t = raw["threads"]
@@ -1636,6 +1654,7 @@ class Config:
             "standalone": self.standalone,
             "archivist": self.archivist,
             "archivist_db_path": self.archivist_db_path,
+            "archivist_publish_tags": list(self.archivist_publish_tags),
             "instance_name": self.instance_name,
             "model": self.model,
             "model_engine": self.model_engine,
@@ -1836,6 +1855,8 @@ class Config:
             data["sync"]["allowed_sinks"] = list(self.sync.allowed_sinks)
         if self.sync.allow_unlisted_sinks:
             data["sync"]["allow_unlisted_sinks"] = True
+        if self.sync.flush_budget_s:
+            data["sync"]["flush_budget_s"] = self.sync.flush_budget_s
         # DEFAULT PATHS ARE NOT WRITTEN (techne#947). `techne init` is a load->save
         # round-trip, and writing the resolved default pinned this home's absolute
         # path into the file: a copied home kept pointing at the original store.
