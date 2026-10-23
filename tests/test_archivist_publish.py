@@ -105,6 +105,30 @@ def test_a_revision_keeps_the_chain_id_of_the_first_row(config):
     assert payload["chain_id"] == first
 
 
+def test_a_merge_takes_the_oldest_ancestor_of_every_branch(config):
+    # Temperance r1 on PR 1299: w(1) -> x(3) and an unrelated y(2), merged into z(4).
+    # The oldest ancestor of z is w, reached through the deeper branch.
+    from techne.core.knowledge import store, supersede
+
+    w = store(config.db_path, "the archivist runs on mash1", tags="team")
+    y = store(config.db_path, "the archivist is behind traefik basicAuth", tags="team")
+    x = supersede(config.db_path, w, "the archivist runs on mash1 in docker")
+    z = store(
+        config.db_path,
+        "the archivist runs on mash1 in docker, behind traefik basicAuth",
+        tags="team",
+        supersedes=[x, y],
+    )
+    assert w < y < x < z
+    config.archivist_publish_tags = ["team"]
+    with use_registry({ARCHIVIST_PUBLISH_TARGET: _sink()}):
+        assert publish_tagged_knowledge(config) == 1
+    (row,) = _rows(config)
+    payload = json.loads(row["data_json"])
+    assert payload["knowledge_id"] == z
+    assert payload["chain_id"] == w
+
+
 def test_a_second_call_enqueues_nothing_new(config):
     from techne.core.knowledge import store
 

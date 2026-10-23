@@ -553,28 +553,31 @@ def _row_tags(raw: str | None) -> set[str]:
 
 
 def _chain_roots(db_path) -> dict[int, int]:
-    """Map each knowledge id that superseded something to the oldest id in its chain."""
+    """Map each knowledge id that superseded something to the oldest id among all of
+    its ancestors. A merge (several rows superseded by one) can join branches of
+    different depth, so every branch is followed, not just the nearest predecessor."""
     from techne.core.stores import plain_connect
 
     conn = plain_connect(db_path)
     try:
-        prev: dict[int, int] = {}
+        preds: dict[int, set[int]] = {}
         for old, new in conn.execute(
             "SELECT id, superseded_by FROM knowledge WHERE superseded_by IS NOT NULL"
         ):
-            # A merge can point several rows at one successor; the lowest id is the
-            # stable choice.
-            prev[new] = min(old, prev.get(new, old))
+            preds.setdefault(new, set()).add(old)
     finally:
         conn.close()
 
     roots: dict[int, int] = {}
-    for start in prev:
-        node, seen = start, {start}
-        while node in prev and prev[node] not in seen:
-            node = prev[node]
-            seen.add(node)
-        roots[start] = node
+    for start in preds:
+        oldest, stack, seen = start, [start], {start}
+        while stack:
+            for p in preds.get(stack.pop(), ()):
+                if p not in seen:
+                    seen.add(p)
+                    oldest = min(oldest, p)
+                    stack.append(p)
+        roots[start] = oldest
     return roots
 
 
