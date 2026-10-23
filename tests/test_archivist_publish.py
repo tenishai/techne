@@ -55,7 +55,7 @@ def _rows(config, target=ARCHIVIST_PUBLISH_TARGET):
 def test_lane_is_off_without_tags(config):
     from techne.core.knowledge import store
 
-    store(config.db_path, "mash1 runs traefik", tags="team")
+    store(config.db_path, "the gateway runs traefik", tags="team")
     # No tags configured and no sink registered: nothing is enqueued and nothing raises.
     with use_registry({}):
         assert publish_tagged_knowledge(config) == 0
@@ -66,7 +66,7 @@ def test_only_tagged_rows_are_enqueued(config):
     from techne.core.knowledge import store
 
     kept = store(
-        config.db_path, "nzbget scripts live in /var/servers/nzbget/scripts", tags="mash1,Team"
+        config.db_path, "nzbget scripts live in /srv/nzbget/scripts", tags="media,Team"
     )
     store(config.db_path, "PR 349 is open", tags="cabal")
     config.archivist_publish_tags = ["team"]
@@ -85,13 +85,13 @@ def test_only_tagged_rows_are_enqueued(config):
 def test_a_revision_keeps_the_chain_id_of_the_first_row(config):
     from techne.core.knowledge import store
 
-    first = store(config.db_path, "archivist is at archivist.mash1.lan", tags="team")
+    first = store(config.db_path, "archivist is at archivist.example.lan", tags="team")
     second = store(
-        config.db_path, "archivist is at archivist.mash1.lan/mcp", tags="team", supersedes=[first]
+        config.db_path, "archivist is at archivist.example.lan/mcp", tags="team", supersedes=[first]
     )
     third = store(
         config.db_path,
-        "archivist is at archivist.mash1.lan/mcp behind basicAuth",
+        "archivist is at archivist.example.lan/mcp behind basicAuth",
         tags="team",
         supersedes=[second],
     )
@@ -110,12 +110,12 @@ def test_a_merge_takes_the_oldest_ancestor_of_every_branch(config):
     # The oldest ancestor of z is w, reached through the deeper branch.
     from techne.core.knowledge import store, supersede
 
-    w = store(config.db_path, "the archivist runs on mash1", tags="team")
+    w = store(config.db_path, "the archivist runs on the media host", tags="team")
     y = store(config.db_path, "the archivist is behind traefik basicAuth", tags="team")
-    x = supersede(config.db_path, w, "the archivist runs on mash1 in docker")
+    x = supersede(config.db_path, w, "the archivist runs on the media host in docker")
     z = store(
         config.db_path,
-        "the archivist runs on mash1 in docker, behind traefik basicAuth",
+        "the archivist runs on the media host in docker, behind traefik basicAuth",
         tags="team",
         supersedes=[x, y],
     )
