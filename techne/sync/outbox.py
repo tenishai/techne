@@ -12,6 +12,7 @@ path for per-target typed delivery — see techne/sync/sinks.py.
 import hashlib
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -316,15 +317,26 @@ def _mark_pending_with_error(conn, row_id: int, error: str | None) -> None:
     )
 
 
-def flush_sinks(db_path: Path) -> dict[str, tuple[int, int]]:
+def flush_sinks(db_path: Path, budget_s: float | None = None) -> dict[str, tuple[int, int]]:
     """Flush pending rows to registered sinks, grouped by target.
 
     Rows whose target has no registered sink are left pending — they'll be
     delivered if the sink is registered later, or drained by prune_orphans.
 
+    *budget_s* bounds the time spent delivering (#1298): once it is used up, the
+    remaining rows are left pending, untouched and with no error recorded, for the
+    next flush. At least one row is always attempted, so a slow start cannot stall a
+    backlog forever. None or 0 means unbounded.
+
     Returns {target: (synced, failed)} for diagnostics.
     """
     from techne.sync.sinks import DeliveryResult, get_sink
+
+    deadline = time.monotonic() + budget_s if budget_s else None
+    attempted = False
+
+    def out_of_time() -> bool:
+        return attempted and deadline is not None and time.monotonic() >= deadline
 
     conn = connect(db_path)
     try:
@@ -332,6 +344,8 @@ def flush_sinks(db_path: Path) -> dict[str, tuple[int, int]]:
 
         summary: dict[str, tuple[int, int]] = {}
         for target, rows in rows_by_target.items():
+            if out_of_time():
+                break
             sink = get_sink(target)
             if sink is None:
                 logger.debug(
@@ -344,6 +358,10 @@ def flush_sinks(db_path: Path) -> dict[str, tuple[int, int]]:
 
             synced = failed = 0
             for row in rows:
+                if out_of_time():
+                    logger.debug("flush_sinks: budget of %ss used, rest left pending", budget_s)
+                    break
+                attempted = True
                 try:
                     result = sink.handler(json.loads(row["data_json"]))
                 except Exception as e:

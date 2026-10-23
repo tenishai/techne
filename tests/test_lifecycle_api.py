@@ -82,7 +82,7 @@ def test_run_session_end_full_lifecycle(config, db_path, monkeypatch):
     # for techne#514's `queued_for_reflection`.
     assert set(result.keys()) == {
         "threads", "linked", "aged_completed", "aged_stale", "queued",
-        "queued_for_reflection", "knowledge_pushed", "reflect",
+        "queued_for_reflection", "knowledge_pushed", "knowledge_published", "reflect",
     }
     assert isinstance(result["threads"], int)
     assert isinstance(result["linked"], int)

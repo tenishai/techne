@@ -866,6 +866,13 @@ sync:
   allow_unlisted_adapter: false  # true permits a non-built-in adapter (default deny)
   allowed_sinks: []           # `techne.outbox_sinks` entry-point names allowed to load
   allow_unlisted_sinks: false # true loads every installed sink
+  flush_budget_s: 0           # seconds the session-end hook may spend delivering to sinks;
+                              #   0 = unbounded. Set it (e.g. 2) when a sink makes a network
+                              #   call per row; undelivered rows wait for the next session end.
+
+archivist_publish_tags: []    # publish lane (#1298): live knowledge with any of these tags is
+                              #   enqueued to `sink:archivist_publish` for a network archivist.
+                              #   [] = off. Needs a package that registers that sink.
 
 recall:                       # which sources recall consults, in what order (#1170)
   order: []                   # [] = the built-in ladder, then any allowed plugged-in source
@@ -889,7 +896,7 @@ The keys that choose **where memory can go**, or what reaches the model's contex
 (the whole block, so `sync.allow_unlisted_adapter`, `sync.allowed_sinks` and
 `sync.allow_unlisted_sinks` ride with it), `connections`, `llm_api_base`, `llm_api_key`,
 `model`, `model_engine`, `reflect.model`, `conflict.model`, `custodian.model`,
-`custodian.rail_models`, `archivist_db_path`, `standalone`, `archivist`, `recall.allowed_sources`,
+`custodian.rail_models`, `archivist_db_path`, `standalone`, `archivist`, `archivist_publish_tags`, `recall.allowed_sources`,
 `recall.allow_unlisted_sources`, `stores`, `sources` — can be pinned in a `config.operator.yaml` that techne honors **only
 while the file is provably not writable by the process reading it**. Resolved in order:
 
