@@ -96,10 +96,11 @@ _PATTERNS: list[tuple[str, str]] = [
     # colon is required, so `git push -u origin main` is untouched, and the
     # value may not start with `+` or `%`, so `date -u +%H:%M:%S` is too (it
     # showed up on a real store).
-    # Docker/podman take `-u uid:gid` and `--user root:root`; a numeric pair or
-    # a `root:` user is an identity, not a password.
-    (r"(?<=\s-u )(?![+%])(?!\d+:\d+(?!\S))(?!root:)[^\s:$]+:\S+", "basic-auth"),
-    (r"(?<=--user[ =])(?!\d+:\d+(?!\S))(?!root:)[^\s:$]+:\S+", "basic-auth"),
+    # Docker/podman take `-u uid:gid` and `--user root:root`; a numeric pair,
+    # `root:root` or `root:<gid>` is an identity, not a password. Any other
+    # `root:` value is a password (`curl -u root:…`) and stays redacted.
+    (r"(?<=\s-u )(?![+%])(?!\d+:\d+(?!\S))(?!root:(?:root|\d+)(?!\S))[^\s:$]+:\S+", "basic-auth"),
+    (r"(?<=--user[ =])(?!\d+:\d+(?!\S))(?!root:(?:root|\d+)(?!\S))[^\s:$]+:\S+", "basic-auth"),
     # Env-style (ahead of the lowercase forms so an UPPER_CASE name keeps the
     # `env` tag): SOME_KEY=value, SOME_TOKEN=value, SOME_SECRET=value,
     # SOME_PASSWORD=value (PASSWORD added in techne#1245)

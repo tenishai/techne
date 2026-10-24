@@ -515,6 +515,7 @@ def test_1245_shapes_are_redacted(text, secret):
         "docker run -u 1000:1000 img",
         "docker run --user 1000:1000 img",
         "docker exec -u root:root c",
+        "docker exec -u root:0 c",
         "skopeo copy docker://nginx:1.25@sha256:" + "a" * 64,
         '"GH_TOKEN": "${{ github.token }}"',
         "docker build --secret id=npmrc,src=/home/u/.npmrc .",
@@ -605,4 +606,29 @@ def test_safe_cut_pulls_back_past_an_outer_match():
     s = "https://alice:hunter2pass_ghp_" + "A" * 36 + "@github.com"
     for n in range(len(s)):
         assert "hunter2pass" not in redact_credentials(safe_cut(s, n)), n
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "curl -u root:S3cr3tPassw0rd https://x",
+        "curl --user root:S3cr3tPassw0rd https://x",
+        "wget --user=root:S3cr3tPassw0rd https://x",
+    ],
+)
+def test_a_root_password_is_still_redacted(text):
+    """Prudence round 2 on PR 1272: `(?!root:)` skipped every root user, so
+    `curl -u root:<password>` was stored in the clear."""
+    assert "S3cr3tPassw0rd" not in redact_credentials(text)
+
+
+def test_safe_cut_repeats_until_no_match_straddles():
+    """Prudence round 2 on PR 1272: picking the earliest match is not enough on
+    its own: when two matches overlap, one pull-back can land inside the other,
+    and only repeating clears it."""
+    # The `x_token=` match starts inside the password and runs past the `@`, so
+    # a cut after the `@` pulls back to its start, still inside the password.
+    s = "see https://alice:Hunter2pass.x_token=Zq81mXv0Lp4tR7wK@github.com/x " + "y" * 200
+    for n in range(len(s)):
+        assert "Hunter2pass" not in redact_credentials(safe_cut(s, n)), n
 
