@@ -93,10 +93,10 @@ def card_type_or_fact(ktype: str, tags: str | None) -> str:
     with nothing behind it, and fsck's dangling_cards check goes red.
 
     Demote rather than reject: the content is real prose about a document and worth
-    keeping, it just isn't a card. store() applies this, so every writer through it
-    is covered; the two reflect paths that INSERT directly call it themselves. The
-    #633 fix guarded only those two, and live-mode reflect went through store()
-    unguarded (#1300).
+    keeping, it just isn't a card. store() and _merge_in_conn() (under merge_into()
+    and the promote merge dispatch) apply this; reflect's promote-add path INSERTs
+    directly and calls it itself. The #633 fix guarded only the two promote paths,
+    and live-mode reflect went through store() unguarded (#1300).
     """
     from techne.core.cards import CARD_TYPE, card_doc_id
 
@@ -799,6 +799,7 @@ def _merge_in_conn(
     a freshly-minted `current` row would resurrect it under a different id — the
     same resurrection this guard already blocks for a superseded row.
     """
+    ktype = card_type_or_fact(ktype, tags)
     seen: set[int] = set()
     for oid in old_ids:
         if oid in seen:

@@ -2536,7 +2536,6 @@ def _apply_merge(conn, row, db_path: Path) -> int | None:
         CONFIDENCE_NUMERIC,
         VALID_CONFIDENCE,
         _merge_in_conn,
-        card_type_or_fact,
     )
     from techne.core.knowledge import GENERIC_TYPES as VALID_TYPES  # techne#1195
 
@@ -2546,9 +2545,7 @@ def _apply_merge(conn, row, db_path: Path) -> int | None:
             f"merge candidate {row['id']} needs at least two target_ids, got {targets}"
         )
     conf = row["confidence"] if row["confidence"] in VALID_CONFIDENCE else "medium"
-    ktype = card_type_or_fact(
-        row["type"] if row["type"] in VALID_TYPES else "fact", row["tags"] or ""
-    )
+    ktype = row["type"] if row["type"] in VALID_TYPES else "fact"  # card guard: _merge_in_conn
     return _merge_in_conn(
         conn,
         targets,

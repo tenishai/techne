@@ -1934,6 +1934,25 @@ def test_store_demotes_only_a_card_without_a_doc_pointer(tmp_path, tags, expecte
     assert row["type"] == expected
 
 
+def test_merge_into_demotes_an_unbacked_document_card(tmp_path):
+    """#1300 pre-pass: merge_into() INSERTs through _merge_in_conn, not store(), so the
+    guard has to live there too or a public merge can mint an unbacked card."""
+    from techne.core.knowledge import merge_into, store
+
+    db_path = tmp_path / "t.db"
+    init_db(db_path).close()
+    a = store(db_path, "first claim", type="fact")
+    b = store(db_path, "second claim", type="fact")
+    kid = merge_into(db_path, [a, b], "merged claim", type="document_card", confidence="high")
+
+    conn = connect(db_path)
+    try:
+        row = conn.execute("SELECT type FROM knowledge WHERE id = ?", (kid,)).fetchone()
+    finally:
+        conn.close()
+    assert row["type"] == "fact"
+
+
 # ---------------------------------------------------------------------------
 # techne#733 — the emit cursor was keyed on an UNSTABLE value
 # ---------------------------------------------------------------------------

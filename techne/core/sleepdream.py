@@ -100,7 +100,7 @@ def consolidate_clusters(
     Excludes `document_card` (techne#823): a card's identity is its `doc:` pointer,
     not its gist, so cards with one gist cluster as perfect duplicates while pointing
     at different documents. And a merge cannot even produce a card: the candidate is
-    written with empty tags, so `_card_type_or_fact` demotes the result to a `fact`
+    written with empty tags, so `knowledge.card_type_or_fact` demotes the result to a `fact`
     with no pointer. Measured 2026-08-29: a 9-way cluster over nine distinct `doc:`
     ids, judged `keep` by hand, recurring on every drain since.
     """
