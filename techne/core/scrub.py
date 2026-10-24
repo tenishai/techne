@@ -2,9 +2,11 @@
 
 Redaction runs at write time, so widening the pattern set protects new rows
 only. This walks the free-text columns that carry captured or model-written text
-and rewrites any value the current patterns would change. Most of them are
-redacted at write time; `context_injections.trigger_snippet` is NOT yet (issue
-#1238), so for that column this pass is the only redaction it gets. Dry run by default: it counts and never
+and rewrites any value the current patterns would change. Write-time redaction
+does not cover all of them: `context_injections.trigger_snippet` and the
+thread-summary payloads `run_session_end` enqueues into `outbox.data_json` are
+stored raw (issue #1238), and there may be others, so for those this pass is
+the only redaction they get. Dry run by default: it counts and never
 prints matched text.
 
 What it does not reach: vector embeddings (derived, not text), FTS shadow
