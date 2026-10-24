@@ -1,6 +1,7 @@
 """Knowledge store — durable facts, decisions, patterns, evaluations, procedures."""
 
 import hashlib
+import logging
 import re
 from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
@@ -8,6 +9,8 @@ from pathlib import Path
 
 from techne.core.database import connect, like_escape
 from techne.core.redaction import redact_credentials
+
+log = logging.getLogger(__name__)
 
 VALID_TYPES = (
     "fact",
@@ -81,6 +84,32 @@ DEFAULT_CONFIDENCE_HALF_LIFE_DAYS = 30.0
 UNCERTAIN_CONFIDENCE_PENALTY = 0.5
 
 
+def card_type_or_fact(ktype: str, tags: str | None) -> str:
+    """Refuse to mint a `document_card` that has no `doc:<id>` pointer (#633, #1300).
+
+    `document_card` is a MANAGED type: the card summary pass owns it and supplies
+    the librarian pointer. A writer with no document in hand (reflect-promote,
+    consolidate-merge, live-mode reflect, an agent's store) can only mint a card
+    with nothing behind it, and fsck's dangling_cards check goes red.
+
+    Demote rather than reject: the content is real prose about a document and worth
+    keeping, it just isn't a card. store() applies this, so every writer through it
+    is covered; the two reflect paths that INSERT directly call it themselves. The
+    #633 fix guarded only those two, and live-mode reflect went through store()
+    unguarded (#1300).
+    """
+    from techne.core.cards import CARD_TYPE, card_doc_id
+
+    if ktype == CARD_TYPE and card_doc_id(tags or "") is None:
+        log.warning(
+            "refusing to mint an unbacked %s (no doc: pointer in tags); storing as fact "
+            "instead — tenishai/techne#633",
+            CARD_TYPE,
+        )
+        return "fact"
+    return ktype
+
+
 def store(
     db_path: Path,
     content: str,
@@ -141,6 +170,7 @@ def store(
         raise ValueError(f"Invalid knowledge type '{type}'. Must be one of: {GENERIC_TYPES}")
     if confidence not in VALID_CONFIDENCE:
         raise ValueError(f"Invalid confidence '{confidence}'. Must be one of: {VALID_CONFIDENCE}")
+    type = card_type_or_fact(type, tags)
 
     anchor_path: str | None = None
     anchor_symbol: str | None = None
