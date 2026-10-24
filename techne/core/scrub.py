@@ -1,8 +1,10 @@
 """Re-apply credential redaction to rows already stored (techne#1245).
 
 Redaction runs at write time, so widening the pattern set protects new rows
-only. This walks the free-text columns that redaction guards and rewrites any
-value the current patterns would change. Dry run by default: it counts and never
+only. This walks the free-text columns that carry captured or model-written text
+and rewrites any value the current patterns would change. Most of them are
+redacted at write time; `context_injections.trigger_snippet` is NOT yet (issue
+#1238), so for that column this pass is the only redaction it gets. Dry run by default: it counts and never
 prints matched text.
 
 What it does not reach: vector embeddings (derived, not text), FTS shadow
