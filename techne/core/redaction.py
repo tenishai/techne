@@ -86,11 +86,15 @@ _PATTERNS: list[tuple[str, str]] = [
     (r"(?i)Authorization:\s*(?:Basic|Token|Digest)\s+\S{8,}", "http-auth"),
     # Credentials in a URL: scheme://user:password@host (psql, git remotes,
     # redis, pip index URLs). Only the userinfo is replaced; the host stays
-    # readable (techne#1245).
-    (r"(?<=://)[^/\s:@]+:[^@\s/]+(?=@)", "url-userinfo"),
+    # readable (techne#1245). A password that is a `$VAR` reference is left
+    # alone, as everywhere else here: `sed "s#://#://x:$TOKEN@#"` names a
+    # secret, it does not contain one.
+    (r"(?<=://)[^/\s:@]+:(?!\$)[^@\s/]+(?=@)", "url-userinfo"),
     # curl/wget basic auth: -u user:pass / --user user:pass (techne#1245). The
-    # colon is required, so `git push -u origin main` is untouched.
-    (r"(?<=\s-u )[^\s:$]+:\S+", "basic-auth"),
+    # colon is required, so `git push -u origin main` is untouched, and the
+    # value may not start with `+` or `%`, so `date -u +%H:%M:%S` is too (it
+    # showed up on a real store).
+    (r"(?<=\s-u )(?![+%])[^\s:$]+:\S+", "basic-auth"),
     (r"(?<=--user[ =])[^\s:$]+:\S+", "basic-auth"),
     # Env-style (ahead of the lowercase forms so an UPPER_CASE name keeps the
     # `env` tag): SOME_KEY=value, SOME_TOKEN=value, SOME_SECRET=value,
@@ -130,7 +134,9 @@ _PATTERNS: list[tuple[str, str]] = [
     (
         r"(?i)(?:(?<=--password[ =])|(?<=--passwd[ =])|(?<=--token[ =])"
         r"|(?<=--with-token[ =])|(?<=--api-key[ =])|(?<=--secret[ =]))"
-        r"(?!\$|<redacted:)\S{8,}",
+        # `--secret id=…` is BuildKit's secret MOUNT spec (`docker build`), a
+        # name and a path, not the secret itself.
+        r"(?!\$|<redacted:|id=)\S{8,}",
         "flag-credential",
     ),
 ]

@@ -507,6 +507,9 @@ def test_1245_shapes_are_redacted(text, secret):
     "text",
     [
         "git push -u origin main",
+        "date -u +%Y-%m-%dT%H:%M:%SZ",
+        "docker build --secret id=npmrc,src=/home/u/.npmrc .",
+        'sed -e "s#://#://x-access-token:$GH_TOKEN@#" .git/config',
         "max_tokens=4096",
         "tokens_out=12345678",
         "ssh://git@host:22/repo",
