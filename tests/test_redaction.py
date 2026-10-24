@@ -4,7 +4,7 @@ import pytest
 
 from techne.core.database import init_db
 from techne.core.knowledge import list_entries, store
-from techne.core.redaction import redact_credentials
+from techne.core.redaction import redact_credentials, safe_cut
 from techne.core.state import add_observation, get_observations, start_session
 
 # ---------------------------------------------------------------------------
@@ -508,6 +508,15 @@ def test_1245_shapes_are_redacted(text, secret):
     [
         "git push -u origin main",
         "date -u +%Y-%m-%dT%H:%M:%SZ",
+        # Prudence round 1 on PR 1272: real text from this repo and from Docker.
+        'unk_token="[UNK]"))',
+        "tokenizer.pad_token=tokenizer.eos_token",
+        "Client(token=self._token)",
+        "docker run -u 1000:1000 img",
+        "docker run --user 1000:1000 img",
+        "docker exec -u root:root c",
+        "skopeo copy docker://nginx:1.25@sha256:" + "a" * 64,
+        '"GH_TOKEN": "${{ github.token }}"',
         "docker build --secret id=npmrc,src=/home/u/.npmrc .",
         'sed -e "s#://#://x-access-token:$GH_TOKEN@#" .git/config',
         "max_tokens=4096",
@@ -572,3 +581,28 @@ def test_summarize_does_not_store_a_cut_secret():
         stored = redact_credentials(s)
         assert "QQQQ" not in stored and "hunter2" not in stored
         assert "sk-ant-api03" not in stored and "DB_PASSW" not in stored
+
+
+def test_a_long_underscore_run_is_linear():
+    """Prudence round 1 on PR 1272: the prefixed-name pattern could start after
+    every `_` and rescan the word, 17.5s on 20,000 underscores."""
+    import time
+
+    t = time.perf_counter()
+    redact_credentials("_" * 20000)
+    assert time.perf_counter() - t < 1.0
+
+
+def test_safe_cut_on_the_at_sign_keeps_no_url_password():
+    """Prudence round 1 on PR 1272: a cut exactly on the `@` kept the whole
+    password and dropped the `@` that url-userinfo needs, at one offset per URL."""
+    s = "git clone https://alice:hunter2pass@github.com/x/y " + "x" * 200
+    for n in range(len(s)):
+        assert "hunter2pass" not in redact_credentials(safe_cut(s, n)), n
+
+
+def test_safe_cut_pulls_back_past_an_outer_match():
+    s = "https://alice:hunter2pass_ghp_" + "A" * 36 + "@github.com"
+    for n in range(len(s)):
+        assert "hunter2pass" not in redact_credentials(safe_cut(s, n)), n
+

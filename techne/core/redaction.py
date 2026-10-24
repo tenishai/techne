@@ -89,13 +89,17 @@ _PATTERNS: list[tuple[str, str]] = [
     # readable (techne#1245). A password that is a `$VAR` reference is left
     # alone, as everywhere else here: `sed "s#://#://x:$TOKEN@#"` names a
     # secret, it does not contain one.
-    (r"(?<=://)[^/\s:@]+:(?!\$)[^@\s/]+(?=@)", "url-userinfo"),
+    # An image reference with a digest (`docker://nginx:1.25@sha256:…`) has the
+    # same shape and is not a credential.
+    (r"(?<=://)[^/\s:@]+:(?!\$)[^@\s/]+(?=@(?!sha(?:256|512):))", "url-userinfo"),
     # curl/wget basic auth: -u user:pass / --user user:pass (techne#1245). The
     # colon is required, so `git push -u origin main` is untouched, and the
     # value may not start with `+` or `%`, so `date -u +%H:%M:%S` is too (it
     # showed up on a real store).
-    (r"(?<=\s-u )(?![+%])[^\s:$]+:\S+", "basic-auth"),
-    (r"(?<=--user[ =])[^\s:$]+:\S+", "basic-auth"),
+    # Docker/podman take `-u uid:gid` and `--user root:root`; a numeric pair or
+    # a `root:` user is an identity, not a password.
+    (r"(?<=\s-u )(?![+%])(?!\d+:\d+(?!\S))(?!root:)[^\s:$]+:\S+", "basic-auth"),
+    (r"(?<=--user[ =])(?!\d+:\d+(?!\S))(?!root:)[^\s:$]+:\S+", "basic-auth"),
     # Env-style (ahead of the lowercase forms so an UPPER_CASE name keeps the
     # `env` tag): SOME_KEY=value, SOME_TOKEN=value, SOME_SECRET=value,
     # SOME_PASSWORD=value (PASSWORD added in techne#1245)
@@ -115,15 +119,28 @@ _PATTERNS: list[tuple[str, str]] = [
     # name through (techne#1245). Bare `token=` and `passwd=` were missing. Not
     # matched: pagination cursors (`page_token=`, `nextPageToken`), `==` version
     # pins (`tiktoken==0.7.0`), and `PWD`, which is a directory, not a password.
+    #
+    # The lookbehind excludes `_` as well, so a match can only start at the
+    # beginning of a name. Without it every `_` was a fresh start that rescanned
+    # the rest of the word: quadratic on a long run of underscores.
     (
-        r"(?i)(?<![A-Za-z0-9])[A-Za-z0-9_]*(?<!page)(?<!page_)(?:api_key|password|passwd|secret|token)"
+        r"(?i)(?<![A-Za-z0-9_])[A-Za-z0-9_]*(?<!page)(?<!page_)(?:api_key|password|passwd|secret)"
         r"=(?![=$]|<redacted:)\S{8,}",
+        "lowered-credential",
+    ),
+    # `token=` separately: tokenizer and client code assigns identifiers and
+    # literals to `*_token` names (`unk_token="[UNK]"`, `pad_token=tok.eos_token`,
+    # `Client(token=self._token)`). A value that is a bare dotted identifier, or a
+    # bracketed/angled literal, is code, not a secret.
+    (
+        r"(?i)(?<![A-Za-z0-9_])[A-Za-z0-9_]*(?<!page)(?<!page_)token"
+        r"=(?![=$]|<redacted:)(?![A-Za-z_][A-Za-z_.]*(?:[),\]]|\s|$))(?![\"']?[\[<])\S{8,}",
         "lowered-credential",
     ),
     #   JSON form:  "api_key": "longvalue123"  (spaces around ':' are normal JSON)
     (
         r'(?i)"[A-Za-z0-9_]*(?<!page)(?<!page_)(?:api_key|password|passwd|secret|token)"'
-        r'\s*:\s*"[^"]{8,}"',
+        r'\s*:\s*"(?!\$)[^"]{8,}"',
         "lowered-credential",
     ),
     # Space-separated secret flags: --password VALUE, --token VALUE,
@@ -175,16 +192,22 @@ def redact_credentials(text: str) -> str:
 _CUT_WINDOW = 9000
 
 
-def _straddling(text: str, pos: int) -> tuple[int, int] | None:
-    """The credential match that contains ``pos`` strictly inside it, if any."""
+def _straddling(text: str, pos: int, *, at_end: bool) -> tuple[int, int] | None:
+    """The earliest-starting credential match that ``pos`` cuts, if any.
+
+    A head cut (``at_end=True``) also counts when it lands exactly on a match's
+    end: `url-userinfo` needs the `@` after its match, so a cut on the `@` keeps
+    the whole password and drops the context that made it match."""
     lo = max(0, pos - _CUT_WINDOW)
     window = text[lo : pos + _CUT_WINDOW]
+    best: tuple[int, int] | None = None
     for pattern, _ in _COMPILED:
         for m in pattern.finditer(window):
             a, b = m.start() + lo, m.end() + lo
-            if a < pos < b:
-                return a, b
-    return None
+            if a < pos < b or (at_end and a < pos == b):
+                if best is None or a < best[0]:
+                    best = (a, b)
+    return best
 
 
 def safe_cut(text: str, n: int) -> str:
@@ -198,8 +221,10 @@ def safe_cut(text: str, n: int) -> str:
     invariant of add_observation is unchanged."""
     if len(text) <= n:
         return text
-    hit = _straddling(text, n)
-    return text[: hit[0]] if hit else text[:n]
+    # Repeat: pulling back to one match's start can land inside an outer one.
+    while (hit := _straddling(text, n, at_end=True)) is not None:
+        n = hit[0]
+    return text[:n]
 
 
 def safe_start(text: str, i: int) -> int:
@@ -207,5 +232,6 @@ def safe_start(text: str, i: int) -> int:
 
     The tail counterpart of :func:`safe_cut`: a tail that starts mid-secret keeps
     the secret's end, which also matches no pattern."""
-    hit = _straddling(text, i)
-    return hit[1] if hit else i
+    while (hit := _straddling(text, i, at_end=False)) is not None:
+        i = hit[1]
+    return i
