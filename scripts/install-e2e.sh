@@ -7,10 +7,9 @@
 #   scripts/install-e2e.sh --path source   # source | pipx
 #   scripts/install-e2e.sh --ref v0.18.2   # a published tag over https
 #
-# Commit mode installs HEAD from git, not uncommitted edits. --ref needs GitHub
-# access while the repo is private (GH_TOKEN or a logged-in gh); the token goes
-# only to the clone and the pipx install, as GIT_CONFIG_* env vars. CI's
-# `install-e2e` job runs it.
+# Commit mode installs HEAD, not uncommitted edits. --ref needs GH_TOKEN or a
+# logged-in gh while the repo is private; the token reaches only the clone and
+# pipx install, as GIT_CONFIG_* env vars. Run by CI's `install-e2e` job.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -21,7 +20,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --path) PATHS="$2"; shift 2 ;;
     --ref) REF="$2"; shift 2 ;;
-    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
     *) echo "install-e2e: unknown argument $1" >&2; exit 2 ;;
   esac
 done
@@ -134,7 +133,7 @@ missing = {"techne_store", "techne_recall"} - names
 if missing:
     sys.exit(f"tools/list lacks {sorted(missing)}")
 print(f"    -> {len(names)} tools")
-stored = tool(3, "techne_store", {"content": FACT, "knowledge_type": "fact"})
+stored = tool(3, "techne_store", {"content": FACT, "type": "fact"})
 if not stored.get("stored"):
     sys.exit(f"techne_store did not store: {stored}")
 found = tool(4, "techne_recall", {"topic": "plover gravel"})
