@@ -591,7 +591,9 @@ def test_a_non_finite_float_does_not_leave_as_invalid_json(team):
 @pytest.mark.parametrize(
     "sql",
     [
-        "SELECT length(zeroblob(50000000))",  # the issue's reproduction, ~590 MB before
+        # the issue's reproduction, ~590 MB before:
+        "SELECT length(replace(hex(zeroblob(50000000)), '0', '00'))",
+        "SELECT length(zeroblob(50000000))",
         "SELECT length(replace(hex(zeroblob(1500000)), '0', '00'))",
         "SELECT length(randomblob(50000000))",
     ],

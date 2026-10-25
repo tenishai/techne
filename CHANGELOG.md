@@ -136,8 +136,8 @@ All notable changes to techne are documented here. Format loosely follows
   ...` no longer renders as a second message from someone else. Recalled rows and the
   session-start Key Knowledge block get the same one-line rendering.
 - **One `archivist_query` call can no longer take hundreds of MB** (#1256). Its work budget
-  counts VM steps, and a C function runs as one, so `SELECT length(zeroblob(50000000))`
-  completed at about 590 MB. The guarded connection now caps any string or blob a query
+  counts VM steps, and a C function runs as one, so
+  `SELECT length(replace(hex(zeroblob(50000000)), '0', '00'))` completed at about 590 MB. The guarded connection now caps any string or blob a query
   builds at 1 MB and SQL text at 100 KB, and the result is read with a running total that
   refuses the query past 16 MB of values (UTF-8 bytes for text); each refusal names its limit. Not yet bounded:
   SQLite's sorter, for an `ORDER BY` over many large generated rows.

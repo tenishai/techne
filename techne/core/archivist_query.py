@@ -368,9 +368,10 @@ def _connect(path: Path, denied: list[str], ops: list[str]) -> sqlite3.Connectio
         return 1 if state["n"] > OP_BUDGET else 0
 
     conn.set_progress_handler(_tick, 1000)
-    # The op budget counts VM steps, and a C function runs as one: zeroblob(5e7)
-    # or a replace() over hex() took ~590 MB in a single step (techne#1256). Cap
-    # the size of any string or blob a query can build, and of the SQL text.
+    # The op budget counts VM steps, and a C function runs as one:
+    # length(replace(hex(zeroblob(5e7)), '0', '00')) took ~590 MB in a few steps
+    # (techne#1256). Cap the size of any string or blob a query can build, and of
+    # the SQL text.
     conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, MAX_VALUE_BYTES)
     conn.setlimit(sqlite3.SQLITE_LIMIT_SQL_LENGTH, MAX_SQL_BYTES)
     return conn

@@ -1,7 +1,7 @@
 ---
 card: arch-card:techne-archivist-query
 updated: 2026-08-21
-anchor: techne/core/archivist_query.py sha=ff7eec67d7d61a7fbfcbe5be9ae20ae5e27ac7c4
+anchor: techne/core/archivist_query.py sha=0f4fe1bcde40dee1cea8736a7723f28276ebc2f9
 ---
 # archivist-query — guarded read-only SQL over the team store (techne#554)
 
@@ -12,7 +12,7 @@ GUARD STACK — five layers, each enforced by SQLite or by query()'s fetch loop,
   1. ?mode=ro (via federation._open_remote_readonly — NOT a second opener; that one carries the measured WAL-sidecar caveat)
   2. set_authorizer — the load-bearing one. Denies ATTACH, all-but-one PRAGMA, every read outside ALLOWED_TABLES. Default branch is DENY, so a future SQLite action code is refused rather than waved through.
   3. set_progress_handler (OP_BUDGET) — read-only does NOT bound cost.
-  4. size: setlimit SQLITE_LIMIT_LENGTH = MAX_VALUE_BYTES (1 MB) and SQLITE_LIMIT_SQL_LENGTH = MAX_SQL_BYTES (100 KB), because the op budget counts VM steps and a C function (zeroblob(5e7), replace() over hex()) runs as ONE step, ~590 MB before (techne#1256); and query() iterates the cursor with a running total of value bytes (UTF-8 for text), refusing past MAX_RESULT_BYTES (16 MB), because up to MAX_LIMIT under-limit rows were materialised at once (~600 MB at 200 rows). NOT BOUNDED: SQLite's sorter. An ORDER BY over many large generated rows builds the whole sort before the first row (measured ~550 MB at 1000 x 1 MB rows); see techne#1313. A size refusal is a QueryDenied naming the limit.
+  4. size: setlimit SQLITE_LIMIT_LENGTH = MAX_VALUE_BYTES (1 MB) and SQLITE_LIMIT_SQL_LENGTH = MAX_SQL_BYTES (100 KB), because the op budget counts VM steps and a C function runs as ONE step: length(replace(hex(zeroblob(5e7)),'0','00')) took ~590 MB (techne#1256); and query() iterates the cursor with a running total of value bytes (UTF-8 for text), refusing past MAX_RESULT_BYTES (16 MB), because up to MAX_LIMIT under-limit rows were materialised at once (~600 MB at 200 rows). NOT BOUNDED: SQLite's sorter. An ORDER BY over many large generated rows builds the whole sort before the first row (measured ~550 MB at 1000 x 1 MB rows); see techne#1313. A size refusal is a QueryDenied naming the limit.
   5. one statement only.
 NOT BY PARSING THE SQL. A parse-and-inspect allow-list is a regex that loses to the first sub-select nobody thought of; the authorizer denies `SELECT id FROM knowledge WHERE id IN (SELECT id FROM observations)` on the inner read with no parsing at all.
 
