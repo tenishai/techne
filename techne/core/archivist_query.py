@@ -17,14 +17,18 @@ to close. The cost of SQL is that it must be GUARDED, which is the rest of this 
 
 === THE GUARD STACK ===
 
-Four independent layers. Each is enforced by SQLite itself, not by convention, and
-none of them is load-bearing alone:
+Five independent layers. Each is enforced by SQLite itself or by query()'s fetch
+loop, not by convention, and none of them is load-bearing alone:
 
   1. ?mode=ro          — writes to the db CONTENT are physically impossible.
   2. set_authorizer    — checked by SQLite during prepare. Denies ATTACH, all but one
                          PRAGMA, and every read outside ALLOWED_TABLES.
   3. progress handler  — aborts a runaway query. Read-only does not mean cheap.
-  4. single statement  — one SELECT, executed through a parameterless execute().
+  4. size limits       — SQLite caps a value (MAX_VALUE_BYTES), a row's width
+                         (MAX_COLUMNS) and the SQL text; query() caps the whole
+                         result (MAX_RESULT_BYTES) as it fetches (techne#1256). The
+                         sorter is not bounded (techne#1313).
+  5. single statement  — one SELECT, executed through a parameterless execute().
 
 THE AUTHORIZER IS THE LOAD-BEARING ONE, and it is why this file does not "parse the
 SQL and check the table names". A parse-and-inspect allow-list is a regex over SQL
