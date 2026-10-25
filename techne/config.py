@@ -152,6 +152,13 @@ def _warn_if_outside_home(key: str, value: Path, home: Path) -> None:
     print(msg, file=sys.stderr)
 
 
+def _positive(key: str, value):
+    """A config number that must be above zero, or a ValueError naming the key."""
+    if value <= 0:
+        raise ValueError(f"{key} must be positive; got {value!r}.")
+    return value
+
+
 @dataclass
 class SyncConfig:
     adapter: str = "noop"
@@ -933,6 +940,12 @@ class Config:
     #: enqueued to `sink:archivist_publish` for a network archivist. Empty turns the
     #: lane off; it never means "everything".
     archivist_publish_tags: list[str] = field(default_factory=list)
+    #: The worker that runs a guarded `techne_archivist_query` (techne#1313): SQLite's
+    #: heap cap in that process, and the wall-clock deadline after which it is killed.
+    #: The heap cap is what bounds the sorter; a real query against ~1,100 rows needs
+    #: well under 1 MB of it.
+    archivist_query_heap_bytes: int = 64 * 1024 * 1024
+    archivist_query_timeout_s: float = 10.0
     #: WHO this instance is, when it writes into a shared store (techne#553). Stamped
     #: on federated knowledge as `written_by`. Empty means NULL rather than a guess —
     #: an unattributed row is honest, a wrongly-attributed one is worse than none in
@@ -1211,6 +1224,16 @@ class Config:
             if not isinstance(tags, list):
                 raise ValueError("archivist_publish_tags must be a list of tags.")
             cfg.archivist_publish_tags = [str(t).strip() for t in tags if str(t).strip()]
+        # Spelled out per key, not looped, so test_config_roundtrip's `"<key>" in raw`
+        # scan sees them.
+        if "archivist_query_heap_bytes" in raw:
+            cfg.archivist_query_heap_bytes = _positive(
+                "archivist_query_heap_bytes", int(raw["archivist_query_heap_bytes"])
+            )
+        if "archivist_query_timeout_s" in raw:
+            cfg.archivist_query_timeout_s = _positive(
+                "archivist_query_timeout_s", float(raw["archivist_query_timeout_s"])
+            )
         if "instance_name" in raw:
             cfg.instance_name = str(raw["instance_name"])
         if "model" in raw:
@@ -1622,6 +1645,8 @@ class Config:
             "archivist": self.archivist,
             "archivist_db_path": self.archivist_db_path,
             "archivist_publish_tags": list(self.archivist_publish_tags),
+            "archivist_query_heap_bytes": self.archivist_query_heap_bytes,
+            "archivist_query_timeout_s": self.archivist_query_timeout_s,
             "instance_name": self.instance_name,
             "model": self.model,
             "model_engine": self.model_engine,

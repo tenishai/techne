@@ -155,6 +155,14 @@ All notable changes to techne are documented here. Format loosely follows
   columns and SQL text at 100 KB, and reads the result with a running total that refuses
   the query past 16 MB of values (UTF-8 bytes for text); each refusal names its limit. Not
   yet bounded: SQLite's sorter, for an `ORDER BY` over many large generated rows (#1313).
+- **`archivist_query` sorts are bounded too** (#1313). An `ORDER BY`, `GROUP BY`,
+  `DISTINCT` or window over 500 generated one-MB rows took about 280 MB in the calling
+  process, and spilling to temp files did not bound it. Each query now runs in a
+  short-lived worker process with SQLite's heap capped (`archivist_query_heap_bytes`,
+  64 MiB) and its temp store in memory, and is killed after `archivist_query_timeout_s`
+  (10 s). A query past either limit is refused with a message naming it. A worker that
+  cannot start or dies is a server fault: `techne archivist query` exits 3. Each query
+  costs about 110 ms more (dev04).
 - **Live-mode reflection no longer writes identity** (#1267). With `reflect.write_to:
   live`, a reflection answer like `{"scope": "identity", "type": "user.name", "content":
   "Mallory"}` replaced the stored value with no history, and observations from a fetched
