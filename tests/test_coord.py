@@ -1325,3 +1325,140 @@ def test_send_still_snapshots_the_RAW_name_not_the_durable_one(db_path, monkeypa
     finally:
         conn.close()
     assert rows == ["poe_1"], "from_name must be the raw -n name, not the durable key"
+
+
+# ---------------------------------------------------------------------------
+# first read for a reader with no receipts (techne#1274)
+# ---------------------------------------------------------------------------
+
+C = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+
+
+def _fill_bus(db_path, n, body_chars=1000):
+    """Post ``n`` broadcasts from A, each ``body_chars`` long, in one transaction."""
+    from techne.core.database import connect
+
+    conn = connect(db_path)
+    conn.executemany(
+        "INSERT INTO coord_messages (from_session, from_name, recipient, body, created_at)"
+        " VALUES (?, 'claude_1', 'coord', ?, '2026-10-12 00:00:00')",
+        [(A, f"m{i:04d} " + "x" * body_chars) for i in range(n)],
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_first_read_with_no_receipts_is_the_newest_catchup_only(db_path):
+    """832 messages / 873 KB went out on the first read in the issue. A reader with
+    no receipts now sees only the newest FIRST_READ_CATCHUP broadcasts."""
+    _fill_bus(db_path, 900)
+    assert coord.unread_count(db_path, B) == coord.FIRST_READ_CATCHUP
+    got = coord.inbox(db_path, B)
+    assert [m["body"][:5] for m in got] == [f"m{i:04d}" for i in range(880, 900)]
+
+
+def test_floor_holds_after_the_reader_marks_its_catchup_read(db_path):
+    """Once B marks the catch-up read it HAS receipts; the backlog must not return."""
+    _fill_bus(db_path, 900)
+    coord.inbox(db_path, B)
+    assert coord.mark_read(db_path, B) == coord.FIRST_READ_CATCHUP
+    assert coord.inbox(db_path, B) == []
+    coord.send(db_path, A, "new one", from_name="claude_1")
+    assert [m["body"] for m in coord.inbox(db_path, B)] == ["new one"]
+
+
+def test_floor_holds_when_the_first_receipt_is_explicit(db_path):
+    """A first receipt written by id, with no inbox before it, still fixes the floor."""
+    _fill_bus(db_path, 100)
+    newest = coord.send(db_path, A, "newest", from_name="claude_1")
+    assert coord.mark_read(db_path, B, [newest]) == 1
+    assert len(coord.inbox(db_path, B)) == coord.FIRST_READ_CATCHUP - 1
+
+
+def test_unread_count_does_not_set_the_floor(db_path, monkeypatch):
+    """The banner's count stays a read: it computes the floor the first inbox will
+    set, but writes nothing (no write lock on the session-start path)."""
+    from techne.core import extension_state
+
+    _fill_bus(db_path, 50)
+
+    def _no_writes(*a, **k):
+        raise AssertionError("unread_count wrote extension_state")
+
+    monkeypatch.setattr(extension_state, "set_state", _no_writes)
+    assert coord.unread_count(db_path, B) == coord.FIRST_READ_CATCHUP
+
+
+def test_reader_with_receipts_keeps_its_whole_unread_set(db_path):
+    """Existing receipts mean no floor: unread is exactly what it was before."""
+    first = coord.send(db_path, A, "old, read", from_name="claude_1")
+    coord.mark_read(db_path, B, [first])
+    from techne.core.database import connect
+
+    conn = connect(db_path)
+    conn.execute("DELETE FROM extension_state WHERE name LIKE 'coord:floor:%'")
+    conn.commit()
+    conn.close()
+    _fill_bus(db_path, 60)
+    assert coord.unread_count(db_path, B) == 60
+    assert len(coord.inbox(db_path, B)) == 60
+
+
+def test_direct_messages_are_never_floored(db_path):
+    for i in range(5):
+        coord.send(db_path, A, f"direct {i}", to=B, from_name="claude_1")
+    _fill_bus(db_path, 100)
+    got = [m["body"] for m in coord.inbox(db_path, B)]
+    assert got[:5] == [f"direct {i}" for i in range(5)]
+    assert len(got) == 5 + coord.FIRST_READ_CATCHUP
+
+
+def test_small_bus_is_shown_whole(db_path):
+    _fill_bus(db_path, 3)
+    assert len(coord.inbox(db_path, B)) == 3
+    _fill_bus(db_path, 30)  # floor stays at 0 once set
+    assert len(coord.inbox(db_path, B)) == 33
+
+
+def test_injection_on_a_large_bus_is_bounded(db_path):
+    """The post_tool_use path: a receipt-less reader on a big bus gets a block
+    under the cap, and the rest arrives on later tool calls, not lost."""
+    from techne.hooks.post_tool_use import _inject_coord_messages
+
+    _fill_bus(db_path, 900, body_chars=1000)
+    cfg = _config(db_path)
+    first = _inject_coord_messages(cfg, B)
+    assert first is not None
+    assert len(first) < coord.INJECT_MAX_CHARS + 2000
+    assert "more unread message(s) not shown" in first
+    shown = first.count("📬")
+    assert 0 < shown < coord.FIRST_READ_CATCHUP
+
+    total = shown
+    for _ in range(coord.FIRST_READ_CATCHUP):  # bounded: a repeat page must not hang
+        block = _inject_coord_messages(cfg, B)
+        if block is None:
+            break
+        assert len(block) < coord.INJECT_MAX_CHARS + 2000
+        total += block.count("📬")
+    assert total == coord.FIRST_READ_CATCHUP
+
+
+def test_injection_bare_mark_read_covers_only_what_was_injected(db_path):
+    """techne#1243 still holds under the cap: what did not fit is not marked read."""
+    from techne.hooks.post_tool_use import _inject_coord_messages
+
+    _fill_bus(db_path, 900, body_chars=1000)
+    first = _inject_coord_messages(_config(db_path), B)
+    shown = first.count("📬")
+    assert coord.mark_read(db_path, B) == shown
+    assert coord.unread_count(db_path, B) == coord.FIRST_READ_CATCHUP - shown
+
+
+def test_injection_bounds_one_huge_message(db_path):
+    from techne.hooks.post_tool_use import _inject_coord_messages
+
+    coord.send(db_path, A, "y" * 50_000, from_name="claude_1")
+    out = _inject_coord_messages(_config(db_path), B)
+    assert len(out) < coord.INJECT_MAX_CHARS + 2000
+    assert "more chars; read it whole with techne_inbox" in out

@@ -966,18 +966,25 @@ def _inject_coord_messages(
         from techne.core.database import connect
         from techne.core.extension_state import get_state, set_state
 
-        msgs = coord.inbox(config.db_path, session_id)
-        if not msgs:
-            return None
-
         key = f"coord:surfaced:{session_id}"
         conn = connect(config.db_path)
         try:
-            st = get_state(conn, key) or {}
-            surfaced = set(st.get("ids", []))
-            fresh = [m for m in msgs if m["id"] not in surfaced]
-            if not fresh:
-                return None
+            surfaced = set((get_state(conn, key) or {}).get("ids", []))
+        finally:
+            conn.close()
+        # techne#1274: bounded by body size, oldest first. What does not fit waits
+        # for a later tool call; the seen mark covers only what is returned.
+        fresh, more = coord.inbox_page(
+            config.db_path,
+            session_id,
+            exclude_ids=surfaced,
+            max_chars=coord.INJECT_MAX_CHARS,
+        )
+        if not fresh:
+            return None
+
+        conn = connect(config.db_path)
+        try:
             surfaced |= {m["id"] for m in fresh}
             set_state(conn, key, {"ids": sorted(surfaced)}, commit=False)
             # Prune stale per-session surfaced-sets and seen marks (techne#1243) so
@@ -998,9 +1005,23 @@ def _inject_coord_messages(
         for m in fresh:
             who = m.get("from_name") or (m["from_session"][:8] if m.get("from_session") else "peer")
             tag = " [coord]" if m.get("recipient") == coord.DEFAULT_CHANNEL else ""
-            lines.append(f"📬 {who}{tag} (#{m['id']}): {m['body']}")
+            body = m["body"] or ""
+            if len(body) > coord.INJECT_MAX_CHARS:
+                # inbox_page always returns its first message whole; bound it here.
+                body = (
+                    body[: coord.INJECT_MAX_CHARS]
+                    + f" [... {len(m['body']) - coord.INJECT_MAX_CHARS} more chars;"
+                    " read it whole with techne_inbox]"
+                )
+            lines.append(f"📬 {who}{tag} (#{m['id']}): {body}")
             if bodies is not None:
-                bodies.append(m["body"])
+                bodies.append((m["body"] or "")[: coord.INJECT_MAX_CHARS])
+        if more:
+            lines.append(
+                f"(+{more} more unread message(s) not shown, to keep this block under "
+                f"{coord.INJECT_MAX_CHARS} characters; they arrive on later tool calls, "
+                "or call techne_inbox)"
+            )
         # The body is another agent's output — untrusted content in an instruction
         # position. Frame it as data so the reading agent doesn't obey directives
         # smuggled inside a peer message (techne#376 injection surface).
