@@ -985,6 +985,7 @@ def _inject_coord_messages(
             session_id,
             exclude_ids=surfaced,
             max_chars=coord.INJECT_MAX_CHARS,
+            max_messages=coord.INJECT_MAX_MESSAGES,
         )
         if not fresh:
             return None
@@ -1007,26 +1008,30 @@ def _inject_coord_messages(
         finally:
             conn.close()
 
+        from techne.core.egress import one_line
+
         lines = []
         for m in fresh:
             who = m.get("from_name") or (m["from_session"][:8] if m.get("from_session") else "peer")
+            who = one_line(who)[:64]
             tag = " [coord]" if m.get("recipient") == coord.DEFAULT_CHANNEL else ""
-            body = m["body"] or ""
-            if len(body) > coord.INJECT_MAX_CHARS:
-                # inbox_page always returns its first message whole; bound it here.
-                body = (
-                    body[: coord.INJECT_MAX_CHARS]
-                    + f" [... {len(m['body']) - coord.INJECT_MAX_CHARS} more chars;"
+            raw = m["body"] or ""
+            # One quoted line per message (techne#1252): a line break in a body
+            # used to start a line that read as a second message from someone else.
+            body = one_line(raw[: coord.INJECT_MAX_BODY])
+            if len(raw) > coord.INJECT_MAX_BODY:
+                body += (
+                    f" [... {len(raw) - coord.INJECT_MAX_BODY} more chars;"
                     " read it whole with techne_inbox]"
                 )
-            lines.append(f"📬 {who}{tag} (#{m['id']}): {body}")
+            lines.append(f"📬 {who}{tag} (#{m['id']}): «{body}»")
             if bodies is not None:
-                bodies.append((m["body"] or "")[: coord.INJECT_MAX_CHARS])
+                bodies.append(raw[: coord.INJECT_MAX_BODY])
         if more:
             lines.append(
-                f"(+{more} more unread message(s) not shown, to keep this block under "
-                f"{coord.INJECT_MAX_CHARS} characters; they arrive on later tool calls, "
-                "or call techne_inbox)"
+                f"(+{more} more unread message(s) not shown: one block holds at most "
+                f"{coord.INJECT_MAX_MESSAGES} messages and {coord.INJECT_MAX_CHARS} "
+                "characters. They arrive on later tool calls, or call techne_inbox)"
             )
         # The body is another agent's output — untrusted content in an instruction
         # position. Frame it as data so the reading agent doesn't obey directives

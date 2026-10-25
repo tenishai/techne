@@ -304,13 +304,23 @@ def _fill_band(
     return chars_used
 
 
+def one_line(text: str) -> str:
+    """``text`` with every line break, Unicode ones included, made a single space.
+
+    Injected blocks are line-structured: one line per message or row, each opened
+    by a marker (``📬``, ``- ⟦techne#N⟧``). A stored body with a line break in it
+    could start a line that reads as a second message from someone else, or a
+    row the store never held (techne#1252)."""
+    return " ".join(text.splitlines())
+
+
 def _render_line(row: EgressRow, max_content: int = 200) -> str:
     """Render a single knowledge row as a bullet line with provenance prefix.
 
     An `uncertain` row (techne#117) carries an inline marker so it is never
     auto-injected as a confident fact — recall annotates, egress mirrors it.
     """
-    content = row["content"][:max_content]
+    content = one_line(row["content"][:max_content])
     marker = " [uncertain]" if row.get("status") == "uncertain" else ""
     return f"- ⟦techne#{row['id']}⟧{marker} [{row['type']}] {content}\n"
 

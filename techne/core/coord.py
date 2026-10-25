@@ -69,6 +69,10 @@ FIRST_READ_CATCHUP = 20
 #: a later tool call or an explicit techne_inbox (techne#1274). A total, not a
 #: per-message cap; the per-message and count caps are issue 1252.
 INJECT_MAX_CHARS = 8000
+#: Messages and body characters per message one injection shows (techne#1252).
+#: The rest waits for a later tool call or techne_inbox, which reads them whole.
+INJECT_MAX_MESSAGES = 5
+INJECT_MAX_BODY = 1500
 
 
 def _same_process_pids(recs: list[dict]) -> set[int]:
@@ -586,6 +590,7 @@ def inbox_page(
     mark_read: bool = False,
     exclude_ids: set[int] | frozenset[int] = frozenset(),
     max_chars: int | None = None,
+    max_messages: int | None = None,
 ) -> tuple[list[dict], int]:
     """:func:`inbox`, limited, returning ``(messages, not_returned)``.
 
@@ -593,7 +598,8 @@ def inbox_page(
     surfaced set). ``max_chars`` stops adding messages, oldest first, once their
     bodies would pass that many characters; the first message is always
     returned, whatever its size, so a caller that renders it must bound it.
-    ``not_returned`` counts the unread messages left out by ``max_chars``.
+    ``max_messages`` stops after that many. ``not_returned`` counts the unread
+    messages either limit left out.
 
     The seen mark is the highest id RETURNED, so a bare ``mark_read`` never
     covers a message cut here (techne#1243). Every unread id below it was either
@@ -607,15 +613,16 @@ def inbox_page(
     try:
         rows = _unread_rows(conn, session_id, chans, ident)
         candidates = [dict(r) for r in rows if r["id"] not in exclude_ids]
-        msgs = candidates
+        msgs = candidates if max_messages is None else candidates[:max_messages]
         if max_chars is not None:
-            msgs, used = [], 0
-            for m in candidates:
+            kept, used = [], 0
+            for m in msgs:
                 size = len(m["body"] or "")
-                if msgs and used + size > max_chars:
+                if kept and used + size > max_chars:
                     break
-                msgs.append(m)
+                kept.append(m)
                 used += size
+            msgs = kept
         if msgs:
             _note_seen(conn, ident[1], max(m["id"] for m in msgs))
         if mark_read and msgs:
