@@ -3052,7 +3052,13 @@ def _vector_lines(config, setup_vectors: bool) -> list[str]:
 
 
 @main.command("init")
-@click.option("--platform", type=click.Choice(list(PLATFORMS)), default="claude-code")
+@click.option(
+    "--platform",
+    type=click.Choice(list(PLATFORMS)),
+    default=None,
+    help="Platform to register for. Default: the one config.yaml names (claude-code on a "
+    "fresh install). Re-running init no longer resets it (techne#1255).",
+)
 @click.option(
     "--identity-dir",
     type=click.Path(exists=True),
@@ -3121,8 +3127,11 @@ def init(
     from techne.core.database import init_db
     from techne.core.memory_doctor import find_curated_memory_files
 
-    config = Config.load()
-    config.platform = platform
+    # ctx.obj's config, like every other command: a Config injected by the group or a
+    # test is the one init writes (techne#1255).
+    config = ctx.obj["config"]
+    if platform is not None:
+        config.platform = platform
     if identity_dir:
         config.identity_dir = Path(identity_dir)
 
@@ -3144,7 +3153,7 @@ def init(
     # first would claim Claude Code is here (#1123, #1137). `claude` on PATH or its
     # projects/ dir (techne never creates it) says it has actually run.
     cc_present = False
-    if platform == "claude-code":
+    if config.platform == "claude-code":
         from techne.platforms.claude_code import register_hooks, register_mcp
         from techne.platforms.claude_code.paths import claude_code_has_run
 
@@ -3254,11 +3263,11 @@ def init(
     # registered install with no config.yaml (#1030 r1).
     # Not when Claude Code is absent: its auto-memory "defaults on" only in the
     # sense that no settings file says otherwise, and there is nothing to turn off.
-    if platform == "claude-code" and cc_present:
+    if config.platform == "claude-code" and cc_present:
         _offer_auto_memory_off(spool_primary=resolved_mode == "spool-primary")
 
     # Platform-specific next-steps so the operator isn't left guessing.
-    if platform == "standalone":
+    if config.platform == "standalone":
         click.echo("")
         click.echo("Standalone init complete. Next steps:")
         click.echo("")
@@ -3344,7 +3353,7 @@ def watch_cmd(ctx, paths, include, exclude, debounce_ms, resync_hours):
     from techne.watch import WatchConfig
     from techne.watch import watch as run_watch
 
-    config = Config.load()
+    config = ctx.obj["config"]
     resolved_paths = [Path(p).resolve() for p in paths]
     session_id = start_session(
         config.db_path,
