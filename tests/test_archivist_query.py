@@ -583,3 +583,97 @@ def test_a_non_finite_float_does_not_leave_as_invalid_json(team):
 
     payload = json.loads(text, parse_constant=reject)
     assert payload["rows"][0]["a"] == "inf"
+
+
+# ---- techne#1256: one query cannot take hundreds of MB --------------------------
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # the issue's reproduction, ~590 MB before:
+        "SELECT length(replace(hex(zeroblob(50000000)), '0', '00'))",
+        "SELECT length(zeroblob(50000000))",
+        "SELECT length(replace(hex(zeroblob(1500000)), '0', '00'))",
+        "SELECT length(randomblob(50000000))",
+    ],
+)
+def test_a_value_past_the_size_limit_is_refused_before_it_is_built(team, sql):
+    with pytest.raises(QueryDenied, match="byte limit"):
+        query(team, sql)
+
+
+def test_a_value_past_the_size_limit_is_refused_when_returned(team):
+    from techne.core.archivist_query import MAX_VALUE_BYTES
+
+    big = MAX_VALUE_BYTES // 2 + 1  # hex() doubles it past the limit
+    with pytest.raises(QueryDenied, match="byte limit"):
+        query(team, f"SELECT hex(printf('%{big}s', 'x')) FROM knowledge LIMIT 1")
+
+
+def test_ordinary_functions_still_work(team):
+    result = query(team, "SELECT length(content), upper(substr(content, 1, 3)) FROM knowledge")
+    assert result["outcome"]["code"] == OUTCOME_ROWS
+
+
+def test_many_rows_of_under_limit_values_stop_at_the_result_budget(team):
+    """Prudence, PR 1311: each value under MAX_VALUE_BYTES, but 200 of them took
+    ~600 MB when fetched at once."""
+    from techne.core.archivist_query import MAX_RESULT_BYTES, MAX_VALUE_BYTES
+
+    width = MAX_VALUE_BYTES - 1000
+    rows = MAX_RESULT_BYTES // width + 5
+    sql = (
+        f"WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM r WHERE n<{rows}) "
+        f"SELECT printf('%{width}s', 'x') AS s FROM r"
+    )
+    with pytest.raises(QueryDenied, match="total limit"):
+        query(team, sql, limit=2000)
+
+
+def test_a_result_under_the_budget_is_returned_whole(team):
+    sql = (
+        "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM r WHERE n<10) "
+        "SELECT printf('%1000s', n) AS s FROM r"
+    )
+    assert len(query(team, sql, limit=2000)["rows"]) == 10
+
+
+def test_the_result_budget_counts_utf8_bytes_not_characters(team):
+    """Temperance, PR 1311 round 2: len() of a str counts code points, so text
+    made of 4-byte characters passed four times the stated byte budget."""
+    from techne.core.archivist_query import MAX_RESULT_BYTES
+
+    chars = 200_000  # 800 KB of UTF-8 per row, under the 1 MB value cap
+    rows = MAX_RESULT_BYTES // (chars * 4) + 3
+    sql = (
+        f"WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM r WHERE n<{rows}) "
+        f"SELECT replace(printf('%{chars}s', ''), ' ', char(128512)) AS s FROM r"
+    )
+    with pytest.raises(QueryDenied, match="total limit"):
+        query(team, sql, limit=2000)
+
+
+def test_a_query_wider_than_the_column_cap_is_refused_before_it_runs(team):
+    """Prudence, PR 1311 round 4: the result budget runs per row, so 400 wide
+    columns were built (~1.2 GB) before it saw them."""
+    from techne.core.archivist_query import MAX_COLUMNS
+
+    # Tiny columns, so only the column cap can refuse it: with wide ones the result
+    # budget refused it too, and the test passed with the cap removed (PR 1311 r6).
+    cols = ", ".join(f"{i} AS c{i}" for i in range(MAX_COLUMNS + 1))
+    with pytest.raises(QueryDenied, match=f"more than {MAX_COLUMNS} columns"):
+        query(team, f"SELECT {cols}", limit=1)
+
+
+def test_too_many_sort_terms_is_a_named_refusal(team):
+    from techne.core.archivist_query import MAX_COLUMNS
+
+    terms = ", ".join(f"id+{i}" for i in range(MAX_COLUMNS + 1))
+    with pytest.raises(QueryDenied, match=f"more than {MAX_COLUMNS}"):
+        query(team, f"SELECT id FROM knowledge ORDER BY {terms}")
+
+
+def test_the_widest_real_join_still_fits_the_column_cap(team):
+    result = query(team, "SELECT * FROM knowledge JOIN knowledge_deps LIMIT 1")
+    assert result["outcome"]["code"] in (OUTCOME_ROWS, OUTCOME_NO_ROWS)

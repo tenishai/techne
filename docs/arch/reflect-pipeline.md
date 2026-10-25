@@ -1,7 +1,7 @@
 ---
 card: arch-card:techne-reflect-pipeline
 updated: 2026-10-24
-anchor: techne/core/reflect.py sha=4802b2063f13c0343843f1e59167ab1a6e8de0cd
+anchor: techne/core/reflect.py sha=9965a783501c847e02952fd18ffcd0dc856108cb
 anchor: techne/core/sleepdream.py sha=ceafcb424d9fc1fdb6bf66e4f181146229d0d21d
 anchor: techne/lifecycle.py sha=7c3b7864af1e79da71775b3c2a8c1b8e22cdf914
 ---
@@ -13,6 +13,7 @@ SEAM: resident-model emit/ingest (techne#19) — self-maintenance runs on the AG
 TRIGGER (techne#514): reflection debt is DURABLY QUEUED, not re-derived from recency. session_end enqueues one reflection_queue row per thread (THREAD IDS, re-rendered at drain time — a stored prompt would embed a snapshot that drifts from the ledger it renders from). Before #514 session_end COUNTED the debt and enqueued nothing, so reflection survived only the polite exit path; every crash/timeout dropped it silently. The queue DECOUPLES producer from reflector: any session can drain another's threads, because answering a rendered prompt needs the thread's observations, not the original session's context.
 PIECES:
 - reflect.py: per fresh thread → proposes durable facts/decisions/procedures/identity claims (candidates, human-reviewed).
+- write_to='live' promotes KNOWLEDGE candidates only (techne#1267). Identity candidates stay pending for reviewed promotion even in live mode: identity.set_value is an upsert with no history, and observations (a fetched page, a peer message) can steer a reflection.
 - REFLECT TAGS THE SESSION'S PENDING OBSERVATIONS FIRST (#1192), via `_tag_pending_observations`: the post_tool_use hook stores rows with kind NULL and leaves tagging to the SessionStart `vectors backfill`, but reflect usually runs on the session that just ended, before that backfill. `_render_observations` shows each row's kind to the model (how it picks decision-/fact-shaped rows). BOTH ENTRY POINTS call it: `load_session_for_reflection` (emit/ingest) and `reflect_on_session` (headless, from `run_session_end` in the SessionEnd and PreCompact hooks, after its `reflect.model` gate so a hook without a reflect model never loads the embedding model; it also refreshes the caller's already-fetched observation dicts). Best-effort: a failure renders rows without kind, as before.
 - reflect.py queue quartet (#514): emittable_thread_ids (THE predicate for "is this thread owed reflection" — enqueue and emit MUST both come here; the threads table has no observation linkage so it cannot be expressed in SQL) / enqueue_reflection_debt (session_end and redetect, INSERT OR IGNORE on the UNIQUE thread_id — idempotent by schema) / pending_reflection_queue (SessionStart nudge reads it) / drain_reflection_queue (called from ingest_one_and_drain — the SHARED path, not one caller — STAMPS drained_at, never deletes).
 - Drain fires ONLY on a pass that happened: gated on `not parse_failures and not errors`. The parse-failure branch is the one whose comment reads "THE PASS DID NOT HAPPEN"; draining there stamps a DISCARDED reflection as paid, permanently, since drain is guarded on `drained_at IS NULL`.

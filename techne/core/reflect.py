@@ -418,8 +418,9 @@ def _insert_candidate(
 def _write_live(
     db_path: Path, candidate: Candidate, source: str, session_id: str | None = None
 ) -> int | None:
-    """Write straight to the live knowledge / identity tables. Used only when
-    config.reflect.write_to='live' — intended for after the test concludes.
+    """Write a knowledge candidate straight to the live knowledge table. Used only
+    when config.reflect.write_to='live' — intended for after the test concludes.
+    Identity candidates are never written live (techne#1267).
 
     `session_id` goes into `origin_session` in the same INSERT (techne#949), the way
     reviewed promotion stamps it."""
@@ -435,11 +436,8 @@ def _write_live(
             source=source,
             provenance={"origin_session": session_id} if session_id else None,
         )
-    if candidate.scope == "identity":
-        from techne.core.identity import set_value
-
-        set_value(db_path, candidate.type, candidate.content, source=source)
-        return None
+    # Identity scope is not written here (techne#1267); the caller leaves those
+    # candidates pending, and this refuses them as a second guard.
     return None
 
 
@@ -2140,7 +2138,11 @@ def ingest_reflection_response(
             if cand_id is None:
                 continue
             counts["candidates_written"] += 1
-            if effective_write_to(config) == "live":
+            # Identity is never auto-written, even in live mode (techne#1267): an
+            # observation (a fetched page, a peer message) could steer a reflection
+            # to replace user.name or any other key, and set_value keeps no
+            # history. Identity candidates stay pending for reviewed promotion.
+            if effective_write_to(config) == "live" and c.scope != "identity":
                 promoted_id = _write_live(
                     config.db_path,
                     c,

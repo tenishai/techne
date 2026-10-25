@@ -17,14 +17,18 @@ to close. The cost of SQL is that it must be GUARDED, which is the rest of this 
 
 === THE GUARD STACK ===
 
-Four independent layers. Each is enforced by SQLite itself, not by convention, and
-none of them is load-bearing alone:
+Five independent layers. Each is enforced by SQLite itself or by query()'s fetch
+loop, not by convention, and none of them is load-bearing alone:
 
   1. ?mode=ro          — writes to the db CONTENT are physically impossible.
   2. set_authorizer    — checked by SQLite during prepare. Denies ATTACH, all but one
                          PRAGMA, and every read outside ALLOWED_TABLES.
   3. progress handler  — aborts a runaway query. Read-only does not mean cheap.
-  4. single statement  — one SELECT, executed through a parameterless execute().
+  4. size limits       — SQLite caps a value (MAX_VALUE_BYTES), a row's width
+                         (MAX_COLUMNS) and the SQL text; query() caps the whole
+                         result (MAX_RESULT_BYTES) as it fetches (techne#1256). The
+                         sorter is not bounded (techne#1313).
+  5. single statement  — one SELECT, executed through a parameterless execute().
 
 THE AUTHORIZER IS THE LOAD-BEARING ONE, and it is why this file does not "parse the
 SQL and check the table names". A parse-and-inspect allow-list is a regex over SQL
@@ -155,6 +159,15 @@ MAX_LIMIT = 2000
 #: units. A budget, not a timeout: it bounds WORK, so it does not punish a query that
 #: is merely waiting on a busy writer.
 OP_BUDGET = 50_000
+#: Largest string or blob a guarded query may build or return (techne#1256).
+#: Archivist rows are text a few KB long; 1 MB, the issue's figure, leaves room.
+MAX_VALUE_BYTES = 1_000_000
+#: Total size of the string and blob values one query may return.
+MAX_RESULT_BYTES = 16_000_000
+#: Longest SQL text the surface accepts.
+MAX_SQL_BYTES = 100_000
+#: Widest row a query may return, so one row is at most MAX_COLUMNS x MAX_VALUE_BYTES.
+MAX_COLUMNS = 64
 
 #: Outcome codes. THREE, not two, and the third is the point (#554 constraint 1).
 #: An empty result must be distinguishable from an unasked question, and BOTH must be
@@ -361,6 +374,17 @@ def _connect(path: Path, denied: list[str], ops: list[str]) -> sqlite3.Connectio
         return 1 if state["n"] > OP_BUDGET else 0
 
     conn.set_progress_handler(_tick, 1000)
+    # The op budget counts VM steps, and a C function runs as one:
+    # length(replace(hex(zeroblob(5e7)), '0', '00')) took ~590 MB in a few steps
+    # (techne#1256). Cap the size of any string or blob a query can build, and of
+    # the SQL text.
+    conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, MAX_VALUE_BYTES)
+    conn.setlimit(sqlite3.SQLITE_LIMIT_SQL_LENGTH, MAX_SQL_BYTES)
+    # And the width of a row: the result budget runs per row, after SQLite and
+    # Python hold the whole row, so 400 one-MB columns took ~1.2 GB before the
+    # budget saw them (Prudence, PR 1311 round 4). The widest real read,
+    # knowledge JOIN knowledge_deps, is 25 columns.
+    conn.setlimit(sqlite3.SQLITE_LIMIT_COLUMN, MAX_COLUMNS)
     return conn
 
 
@@ -397,6 +421,25 @@ def readable_schema(config) -> dict:
         "tables": tables,
         "row_limit": {"default": DEFAULT_LIMIT, "max": MAX_LIMIT},
     }
+
+
+def _value_bytes(v: object) -> int:
+    """A value's size in bytes, as SQLite's own length limit counts it: UTF-8 for
+    text, raw for blobs. len() of a str counts code points, which undercounts any
+    non-ASCII text (Temperance, PR 1311 round 2)."""
+    if isinstance(v, bytes):
+        return len(v)
+    if isinstance(v, str):
+        return len(v.encode("utf-8", "surrogatepass"))
+    return 0
+
+
+def _too_big(e: Exception) -> QueryDenied:
+    return QueryDenied(
+        f"A value in this query passed the {MAX_VALUE_BYTES:,}-byte limit ({e}). The "
+        "limit bounds the size of any one value a query builds (techne#1256); select "
+        "less, or a substr() of it."
+    )
 
 
 def query(config, sql: str | None = None, limit: int | None = None) -> dict:
@@ -451,6 +494,14 @@ def query(config, sql: str | None = None, limit: int | None = None) -> dict:
             # because "you may send one statement" is a fact about this surface.
             raise QueryDenied(f"{e} This surface takes exactly one SELECT.") from e
         except sqlite3.DatabaseError as e:
+            if isinstance(e, sqlite3.DataError):
+                raise _too_big(e) from e
+            if "too many columns" in str(e) or "too many terms" in str(e):
+                # SQLITE_LIMIT_COLUMN also caps ORDER BY / GROUP BY terms.
+                raise QueryDenied(
+                    f"The query has more than {MAX_COLUMNS} columns or sort terms ({e}). "
+                    "The limit bounds the size of one row (techne#1256); use fewer."
+                ) from e
             if ops:
                 refused = sorted(set(ops))
                 detail = (
@@ -475,8 +526,28 @@ def query(config, sql: str | None = None, limit: int | None = None) -> dict:
                     "out of reach (techne#554)."
                 ) from e
             raise
-        rows = [_jsonable(dict(r)) for r in cur.fetchmany(cap + 1)]
+        # Iterate rather than fetchmany: each value is capped by MAX_VALUE_BYTES,
+        # but up to MAX_LIMIT rows of them were materialised at once, ~600 MB at
+        # 200 rows (Prudence, PR 1311). The running total stops a query at
+        # MAX_RESULT_BYTES, before the rows behind it are fetched.
+        rows, total = [], 0
+        for r in cur:
+            total += sum(_value_bytes(v) for v in r)
+            if total > MAX_RESULT_BYTES:
+                raise QueryDenied(
+                    f"The result passed the {MAX_RESULT_BYTES:,}-byte total limit after "
+                    f"{len(rows)} row(s) (techne#1256). Select fewer rows or columns, "
+                    "or a substr() of the large ones."
+                )
+            rows.append(_jsonable(dict(r)))
+            if len(rows) > cap:
+                # The row past the cap only signals truncation, but its bytes were
+                # counted above, so a result whose returned rows fit can still be
+                # refused. Refusing is the safe direction; keep it.
+                break
         columns = [d[0] for d in (cur.description or [])]
+    except sqlite3.DataError as e:
+        raise _too_big(e) from e
     except sqlite3.OperationalError as e:
         if "interrupted" in str(e).lower():
             raise QueryDenied(
