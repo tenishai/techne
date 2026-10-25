@@ -1703,3 +1703,18 @@ def test_cli_run_exit_status_counts_emit_errors_and_failed_answers(config, monke
     monkeypatch.setattr("techne.core.custodian.run_custodian", lambda *a, **k: report)
     result = CliRunner().invoke(main, ["custodian", "run", "--rail", "consolidate"])
     assert result.exit_code == code, result.output
+
+
+def test_cli_run_json_also_exits_nonzero_on_failure(config, monkeypatch):
+    """PR 1312 review: --json returned before the failure count, exiting 0."""
+    from click.testing import CliRunner
+
+    from techne.cli import main
+
+    report = {"bound": True, "rails": [{"rail": "consolidate", "counts": {}, "error": None,
+                                        "emitted": 10, "answered": 1, "failed": 9}]}
+    monkeypatch.setattr("techne.config.Config.load", lambda *a, **k: config)
+    monkeypatch.setattr("techne.core.custodian.run_custodian", lambda *a, **k: report)
+    result = CliRunner().invoke(main, ["custodian", "run", "--rail", "consolidate", "--json"])
+    assert result.exit_code == 1
+    assert '"failed": 9' in result.output

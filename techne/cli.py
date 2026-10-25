@@ -2020,6 +2020,19 @@ def custodian_status(ctx):
         conn.close()
 
 
+def _rail_failed(run: dict) -> bool:
+    """Whether one rail's run is a failure for `custodian run`'s exit status.
+
+    Answered none of what it emitted (#555), an emit that raised, or any answer
+    that failed (techne#1248). The one error that is not: a rail with no model
+    bound, which stays resident by design."""
+    return bool(
+        (run["emitted"] and run["answered"] == 0)
+        or (run["error"] and not str(run["error"]).startswith("no model bound"))
+        or run["failed"] > 0
+    )
+
+
 @custodian.command("run")
 @click.option("--rail", "rail_names", multiple=True, help="Rail to run (repeatable). Default: all.")
 @click.option("--limit", type=int, default=None, help="Max prompts per rail this run.")
@@ -2114,6 +2127,10 @@ def custodian_run(ctx, rail_names, limit, dry_run, as_json):
 
     if as_json:
         click.echo(_json.dumps(report, indent=2, default=str))
+        # --json used to return here, exiting 0 whatever happened (PR 1312 review):
+        # a cron job reading the JSON still needs the exit status.
+        if report["bound"] and any(_rail_failed(run) for run in report["rails"]):
+            raise SystemExit(1)
         return
 
     if not report["bound"]:
@@ -2138,14 +2155,7 @@ def custodian_run(ctx, rail_names, limit, dry_run, as_json):
         # success while producing nothing is the exact #555 failure, one layer up.
         if run["error"]:
             click.echo(f"  error: {run['error']}")
-        # An emit that raised, or any answer that failed, is a failure too
-        # (techne#1248). The one error that is not: a rail with no model bound,
-        # which stays resident by design.
-        if (
-            (run["emitted"] and run["answered"] == 0)
-            or (run["error"] and not str(run["error"]).startswith("no model bound"))
-            or run["failed"] > 0
-        ):
+        if _rail_failed(run):
             failures += 1
 
     if failures:
