@@ -127,7 +127,7 @@ techne codex index .
 ## Sync & team memory  ·  *opt-in, pluggable, off by default*
 
 Personal memory is yours and local. When you *want* to share or ingest, techne has a clean adapter seam:
-- **SourceAdapters** pull external material *in* — Claude Code's curated memory, full session transcripts, GitHub issues, the filesystem.
+- **SourceAdapters** pull external material *in* — Claude Code's curated memory, GitHub issues, the filesystem. (Session transcripts come in through `techne import` and the hooks, not an adapter.)
 - **SyncAdapters** push curated knowledge *out* to a team backend via an outbox (default `noop` — nothing leaves your machine unless you wire it).
 
 **Why it's different:** team memory is a deliberate, configured act with its own boundary — never a silent default. A personal install stays a personal install.

@@ -130,23 +130,6 @@ EGRESS_KEYS: tuple[str, ...] = (
     # SQLite-only, but a world-readable DSN is already a cross-agent leak in the
     # one-install-per-agent deployment where this gate is meant to be a wall.
     "stores",
-    # `sources.claude_code_transcripts.paths` is a list of arbitrary filesystem
-    # paths whose CONTENTS are ingested into the observation ledger. ADMITTED
-    # 2026-08-17 (techne#585, Richard's call) on the consistency argument: the
-    # rationale that admits `connections` above — "opened read-only, so this is
-    # ingestion rather than exfiltration — included anyway because a chosen input
-    # is a chosen trust source" — applies to it word for word, and keeping the
-    # two apart made the gate's own reasoning contradict itself.
-    #
-    # THIS CHANGED ENFORCEMENT, which is why it needed a decision rather than a
-    # test: under a LOCKED operator layer, EGRESS_KEYS entries in config.yaml are
-    # DROPPED, so a locked deployment now discards agent-supplied source paths
-    # instead of honouring them. That is the intended behaviour of locking — an
-    # agent choosing what gets read into its own memory is the thing being
-    # prevented — but it is a live behaviour change for any locked install that
-    # set `sources` in config.yaml, not a no-op. Pinned by
-    # TestKeySurgery::test_strip_removes_sources_now_that_it_is_governed.
-    "sources",
 )
 
 # The other half of the partition (techne#509). EGRESS_KEYS cannot be DERIVED —

@@ -416,9 +416,7 @@ BACKFILL_CURSOR_PREFIX = "backfill_cursor:"
 
 def _head_signature(path: Path, nbytes: int = 256) -> str:
     """Hash of the file's first line (capped at *nbytes*), to notice a transcript
-    replaced in place even when the inode is reused. Same check as
-    ``sync.jsonl_transcript._head_signature``, which this does not import because
-    that module pulls in ``logging`` and ``threading``. "" if unreadable."""
+    replaced in place even when the inode is reused. "" if unreadable."""
     try:
         with path.open("rb") as fh:
             return hashlib.sha1(fh.readline(nbytes)).hexdigest()
@@ -608,9 +606,9 @@ def backfill_uncaptured(
         if resumable:
             cursor = {**ident, "offset": offset, "pending": pending}
             if cursor != prior:
-                # In the SAME transaction as the inserts (as jsonl_transcript does,
-                # techne#170): a crash between them would otherwise leave rows
-                # committed behind a stale cursor, or a cursor past uncommitted rows.
+                # In the SAME transaction as the inserts (techne#170): a crash between
+                # them would otherwise leave rows committed behind a stale cursor, or a
+                # cursor past uncommitted rows.
                 set_state(conn, cursor_key, cursor, commit=False)
                 if prior is None:
                     # One key per session; nothing else removes them (techne#1073).

@@ -9,7 +9,7 @@ plaintext against that stored hash.
 Invariant scope (techne#270):
   - add_observation() (techne/core/state.py): FULL invariant — content_hash IS
     NOT NULL iff redaction fired.
-  - transcript_import.py and jsonl_transcript.py importer paths: FULL invariant
+  - transcript_import.py importer path: FULL invariant
     — backfilled on techne#270 to compute and store content_hash alongside every
     redacted INSERT, matching add_observation's behaviour.
 

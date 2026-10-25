@@ -94,7 +94,9 @@ existing seam (render in core, write/inject in `platforms/claude_code`), never i
   format, location, retention.
 - **`JsonlTranscriptSource` can index them** into techne — but currently stores a truncated
   4 KB redacted preview for search, not the verbatim body. The verbatim still lives only in
-  the JSONL.
+  the JSONL. *(2026-10: never wired in, and deleted in issue 1262. Transcripts reach techne
+  through `techne import` and the hooks, and reach the librarian through
+  `techne librarian index-transcripts`.)*
 - **`librarian.db` (documents domain) is built for full content** (documents + fts; **no vec** — document search is FTS-only) and
   is the natural home for a complete, indexed transcript archive.
 
@@ -135,7 +137,7 @@ a verbatim layer is the floor. Don't build the roof first.**
 Not verbatim-everything (swamp), not lossy-ledger-only (can't reconstruct). The sweet spot,
 most of whose machinery exists:
 
-- **Finish `JsonlTranscriptSource → librarian.db (documents)`**: ingest full transcript
+- **Finish `JsonlTranscriptSource → librarian.db (documents)`** *(superseded: `techne librarian index-transcripts` does this; the source was deleted in issue 1262)*: ingest full transcript
   *bodies* (drop the 4 KB cap on the stored body; keep a cap only on the FTS *preview*),
   incrementally, with retention you control. JSONL = cold verbatim; Librarian = warm, indexed,
   durable copy that survives CC pruning and is independent of auto-memory.
