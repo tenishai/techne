@@ -217,6 +217,10 @@ _NOT_A_DESTINATION: tuple[str, ...] = (
     "staleness_hours",
     "tag_threshold",
     "knowledge_confidence_half_life_days",
+    # Resource caps on the archivist_query worker (#1313): how much memory and time a
+    # query may use, not where any result goes.
+    "archivist_query_heap_bytes",
+    "archivist_query_timeout_s",
     # Which client's transcripts are read. Not a network target.
     "platform",
     # OUTPUTS of the trust gate, not inputs to it — set by config loading itself
