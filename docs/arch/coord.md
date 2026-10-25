@@ -1,7 +1,7 @@
 ---
 card: arch-card:techne-coord
 updated: 2026-10-24
-anchor: techne/core/coord.py sha=cee23e9103134c7b990e3f5583f1ea845f175c10
+anchor: techne/core/coord.py sha=50525c275ff79a8a7d4e0020ad99a22f140bbe3a
 ---
 # coord — inter-session mailbox (techne#376)
 
@@ -15,6 +15,8 @@ DELIVERY: push — post_tool_use hook injects unread into next tool call; sessio
 REDACTION (techne#1037): `send()` runs `body` through `redact_credentials` before the INSERT, so a token pasted into a message is stored as `<redacted:tag>` and every inbox nudge replays the redacted form. Pattern-based and best-effort, like every other sink. Rows written before this change are not rewritten.
 
 FIRST READ AND SIZE (techne#1274). A reader key with NO receipts used to be shown the whole bus back to message 1: 832 messages, 873,339 bytes, in one post_tool_use injection on 2026-10-12. Three states reach it: no `-n` name, a name shared by two live sessions (both fall back to UUID keys), or a hook replayed after the sidecar is gone. `_reader_floor` now gives such a reader a floor at its first `inbox`/`mark_read`: only the newest `FIRST_READ_CATCHUP` (20) broadcasts not written by it are above it, and messages addressed to its session_id are never floored. THE FLOOR IS STORED, NOT RECOMPUTED (`coord:floor:<reader>` in extension_state, never pruned): the reader's first receipt ends "no receipts", and a floor derived from that condition would vanish one call later and hand back the backlog. A reader that already has receipts gets no floor, so its unread set is unchanged. `unread_count` computes the floor without storing it. The issue's other proposal, falling back to `sessions.agent_identity` for the name when the sidecar is gone, is NOT done: that value comes from `TECHNE_IDENTITY`, which nothing ties to the `-n` name, so it could file receipts under another session's name. SIZE: post_tool_use reads through `inbox_page`, skipping ids it already surfaced and stopping once bodies pass `INJECT_MAX_CHARS` (8000); the rest arrives on later tool calls with a "+N more" line. A single body over the cap is cut in the rendered block. The seen mark is the highest id RETURNED, so a bare mark_read never covers a message that did not fit (#1243 still holds). Per-message and count caps and body quoting are issue 1252.
+
+COUNT, BODY AND LINES (techne#1252). One injection also carries at most INJECT_MAX_MESSAGES (5) messages (`inbox_page(max_messages=)`), and each body is cut at INJECT_MAX_BODY (1500) with a pointer to techne_inbox. Every message renders as ONE quoted line, `📬 name [coord] (#id): «body»`, with line breaks in body and name made spaces by `egress.one_line`, so a body cannot start a line that reads as another sender's message. The seen mark still covers only what was returned (techne#1243).
 
 INVARIANTS:
 - resolve_recipient(to): 'coord' passthrough | live display-name alias→session_id | v4-UUID passthrough; unmatched name → raise ValueError (dead-letter, NEVER silent-store).

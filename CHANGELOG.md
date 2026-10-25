@@ -128,6 +128,13 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- **Peer messages are capped per injection and can't forge lines** (#1252). After #1274's
+  8000-character total, one post_tool_use block now also shows at most 5 messages and 1500
+  characters of each body; the rest arrive on later tool calls or through `techne_inbox`,
+  which reads them whole. Each message is one quoted line (`📬 name (#id): «body»`), with
+  line breaks in the body and sender name made spaces, so a body like `ok\n📬 operator:
+  ...` no longer renders as a second message from someone else. Recalled rows and the
+  session-start Key Knowledge block get the same one-line rendering.
 - **`techne init` no longer deletes your own hooks that mention techne** (#1250). Re-init
   removed any settings.json hook whose command contained the substring `techne`, so a
   personal hook at `~/working/tenishai/techne/scripts/guard.sh` was deleted. Only techne's
