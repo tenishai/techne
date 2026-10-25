@@ -4,7 +4,7 @@ import pytest
 
 from techne.core.database import init_db
 from techne.core.knowledge import list_entries, store
-from techne.core.redaction import redact_credentials
+from techne.core.redaction import redact_credentials, safe_cut
 from techne.core.state import add_observation, get_observations, start_session
 
 # ---------------------------------------------------------------------------
@@ -469,3 +469,166 @@ def test_pem_bounded_span_no_redos_on_unterminated_opener():
     assert "<redacted:pem-private-key>" not in result
     # Bounded work: comfortably under a second even on slow CI.
     assert elapsed < 2.0, f"PEM matching took {elapsed:.3f}s — bound may be ineffective"
+
+
+# ---------------------------------------------------------------------------
+# techne#1245: shapes that used to pass through, and truncation that split a secret
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text, secret",
+    [
+        ("export DB_PASSWORD=hunter2hunter2x", "hunter2hunter2x"),
+        ("db_password=hunter2hunter2x", "hunter2hunter2x"),
+        ("TOKEN=abcdefghijklmnopqrstuvwxyz0123", "abcdefghijklmnopqrstuvwxyz0123"),
+        ("curl -u admin:s3cretpass http://x", "s3cretpass"),
+        ("curl --user admin:s3cretpass http://x", "s3cretpass"),
+        ("psql postgres://user:pw12345678@host/db", "pw12345678"),
+        ("gh auth login --with-token gho_abcdefghijklmnopqrstuvwxyz0123456789", "gho_abcdef"),
+        ("ghu_abcdefghijklmnopqrstuvwxyz0123", "ghu_abcdef"),
+        ("Authorization: Basic dXNlcjpwYXNzd29yZA==", "dXNlcjpwYXNzd29yZA=="),
+        ("Authorization: token 0123456789abcdef", "0123456789abcdef"),
+        ("mysql --password hunter2hunter2 db", "hunter2hunter2"),
+        ("glpat-abcdefghijklmnopqrstuvwxyz", "glpat-abcdef"),
+        ("npm_abcdefghijklmnopqrstuvwxyz0123456789", "npm_abcdef"),
+        ("xoxs-1234-abcdef", "xoxs-1234"),
+        ("sk-or-v1-abcdef0123456789abcdef0123", "abcdef0123456789"),
+        ('{"github_token": "abcdefghijklmnop"}', "abcdefghijklmnop"),
+    ],
+)
+def test_1245_shapes_are_redacted(text, secret):
+    out = redact_credentials(text)
+    assert secret not in out, out
+    assert "<redacted:" in out
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "git push -u origin main",
+        "date -u +%Y-%m-%dT%H:%M:%SZ",
+        # Prudence round 1 on PR 1272: real text from this repo and from Docker.
+        'unk_token="[UNK]"))',
+        "tokenizer.pad_token=tokenizer.eos_token",
+        "Client(token=self._token)",
+        "docker run -u 1000:1000 img",
+        "docker run --user 1000:1000 img",
+        "docker exec -u root:root c",
+        "docker exec -u root:0 c",
+        "skopeo copy docker://nginx:1.25@sha256:" + "a" * 64,
+        '"GH_TOKEN": "${{ github.token }}"',
+        "docker build --secret id=npmrc,src=/home/u/.npmrc .",
+        'sed -e "s#://#://x-access-token:$GH_TOKEN@#" .git/config',
+        "max_tokens=4096",
+        "tokens_out=12345678",
+        "ssh://git@host:22/repo",
+        "export GITHUB_TOKEN_FILE=/etc/x",
+        "PASSWORD_FILE=/etc/x",
+        "password = get_password()",
+        "tool --token $GITHUB_TOKEN",
+        "token=$GH_TOKEN",
+        "see https://example.com/a:b@c",
+        "next_page_token=CAESBggDEAEYAQ",
+        '{"nextPageToken": "CAESBggDEAEYAQ"}',
+        "pip install tiktoken==0.12.0",
+        "OLDPWD=/Users/someone/working",
+    ],
+)
+def test_1245_near_misses_are_left_alone(text):
+    assert redact_credentials(text) == text
+
+
+def test_1245_flag_names_stay_readable():
+    out = redact_credentials("gh auth login --with-token gho_abcdefghijklmnopqrstuvwxyz0123456789")
+    assert out == "gh auth login --with-token <redacted:github-oauth>"
+    assert redact_credentials("curl -u admin:s3cretpass x") == "curl -u <redacted:basic-auth> x"
+
+
+def test_safe_cut_never_splits_a_secret():
+    from techne.core.redaction import safe_cut
+
+    key = "sk-ant-api03-" + "A" * 40
+    text = "a" * 80 + key + " tail"
+    cut = safe_cut(text, 100)
+    assert cut == "a" * 80
+    assert redact_credentials(cut) == cut  # nothing partial left to slip through
+    assert safe_cut("short", 100) == "short"
+    assert safe_cut("b" * 200, 100) == "b" * 100  # no secret: plain cut
+
+
+def test_safe_start_skips_past_a_straddled_secret():
+    from techne.core.redaction import safe_start
+
+    key = "ghp_" + "Z" * 36
+    text = "x" * 10 + key + "\nrest"
+    assert safe_start(text, 20) == 10 + len(key)
+    assert safe_start(text, 5) == 5
+
+
+def test_summarize_does_not_store_a_cut_secret():
+    """Edit/Write previews are truncated before the sink redacts; a key cut
+    mid-token used to survive both (techne#1245)."""
+    from techne.hooks.post_tool_use import summarize
+
+    key = "sk-ant-api03-" + "Q" * 40
+    edit = summarize(
+        "Edit", {"file_path": "f", "old_string": "a" * 80 + key, "new_string": "b"}, ""
+    )
+    write = summarize(
+        "Write", {"file_path": "f", "content": "y" * 480 + "DB_PASSWORD=hunter2hunter2"}, ""
+    )
+    for s in (edit, write):
+        stored = redact_credentials(s)
+        assert "QQQQ" not in stored and "hunter2" not in stored
+        assert "sk-ant-api03" not in stored and "DB_PASSW" not in stored
+
+
+def test_a_long_underscore_run_is_linear():
+    """Prudence round 1 on PR 1272: the prefixed-name pattern could start after
+    every `_` and rescan the word, 17.5s on 20,000 underscores."""
+    import time
+
+    t = time.perf_counter()
+    redact_credentials("_" * 20000)
+    assert time.perf_counter() - t < 1.0
+
+
+def test_safe_cut_on_the_at_sign_keeps_no_url_password():
+    """Prudence round 1 on PR 1272: a cut exactly on the `@` kept the whole
+    password and dropped the `@` that url-userinfo needs, at one offset per URL."""
+    s = "git clone https://alice:hunter2pass@github.com/x/y " + "x" * 200
+    for n in range(len(s)):
+        assert "hunter2pass" not in redact_credentials(safe_cut(s, n)), n
+
+
+def test_safe_cut_pulls_back_past_an_outer_match():
+    s = "https://alice:hunter2pass_ghp_" + "A" * 36 + "@github.com"
+    for n in range(len(s)):
+        assert "hunter2pass" not in redact_credentials(safe_cut(s, n)), n
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "curl -u root:S3cr3tPassw0rd https://x",
+        "curl --user root:S3cr3tPassw0rd https://x",
+        "wget --user=root:S3cr3tPassw0rd https://x",
+    ],
+)
+def test_a_root_password_is_still_redacted(text):
+    """Prudence round 2 on PR 1272: `(?!root:)` skipped every root user, so
+    `curl -u root:<password>` was stored in the clear."""
+    assert "S3cr3tPassw0rd" not in redact_credentials(text)
+
+
+def test_safe_cut_repeats_until_no_match_straddles():
+    """Prudence round 2 on PR 1272: picking the earliest match is not enough on
+    its own: when two matches overlap, one pull-back can land inside the other,
+    and only repeating clears it."""
+    # The `x_token=` match starts inside the password and runs past the `@`, so
+    # a cut after the `@` pulls back to its start, still inside the password.
+    s = "see https://alice:Hunter2pass.x_token=Zq81mXv0Lp4tR7wK@github.com/x " + "y" * 200
+    for n in range(len(s)):
+        assert "Hunter2pass" not in redact_credentials(safe_cut(s, n)), n
+

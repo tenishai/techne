@@ -126,6 +126,15 @@ All notable changes to techne are documented here. Format loosely follows
   except tab and line breaks become spaces, and lone surrogates become U+FFFD. The recall hooks
   log the cleaned query, because a surrogate in the logged trigger made the injection log drop
   that row without a word.
+- **A coord reader with no read receipts no longer gets the whole bus** (#1274). A session with no
+  `-n` name, one sharing its name with another live session, or a replayed hook whose sidecar was
+  gone had no receipts, so its first tool call injected every message back to the first: 832
+  messages and 873 KB on 2026-10-12. Such a reader now starts at the newest 20 broadcasts plus
+  any messages addressed to it, and that floor is stored so it holds after the reader marks
+  them read. Readers that already have receipts see the same unread set as before. The
+  post_tool_use injection now stops at 8000 characters of message text and says how many more
+  are waiting; they arrive on later tool calls, and a bare `techne_mark_read` still covers only
+  what was shown.
 
 - **The post-compaction restore now reaches the model** (#1242). Claude Code drops a
   PostCompact hook's stdout, so the restore it printed (active threads, last task, files,

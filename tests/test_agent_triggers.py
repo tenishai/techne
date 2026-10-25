@@ -437,6 +437,9 @@ COMMAND_TREE_AT_LAST_REVIEW = {
     # no transcript and no session row, so deployment.md's migration trigger stands.
     "reflect undecline",
     "restore",
+    # Reviewed 2026-10-12 (techne#1245): `scrub-credentials` rewrites stored text in
+    # place to re-apply redaction. It reads no transcript and writes no archive.
+    "scrub-credentials",
     "search",
     "serve",
     "session-end",
