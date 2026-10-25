@@ -9,7 +9,8 @@
 #
 # Commit mode installs HEAD from git, not uncommitted edits. --ref needs GitHub
 # access while the repo is private (GH_TOKEN or a logged-in gh); the token goes
-# to git via GIT_CONFIG_* env vars only. Run by CI's `install-e2e` job.
+# only to the clone and the pipx install, as GIT_CONFIG_* env vars. CI's
+# `install-e2e` job runs it.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -20,8 +21,17 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --path) PATHS="$2"; shift 2 ;;
     --ref) REF="$2"; shift 2 ;;
-    -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
     *) echo "install-e2e: unknown argument $1" >&2; exit 2 ;;
+  esac
+done
+
+# Only $HOME is replaced per path, so every variable that points techne, Claude
+# Code or pip at a real install must go first: an agent seat's TECHNE_HOME and
+# CLAUDE_CONFIG_DIR made `techne init` rewrite that seat (PR 1320, round 1).
+for v in $(compgen -e); do
+  case "$v" in
+    TECHNE_*|CLAUDE_*|CLAUDECODE|XDG_*|PIPX_*|PIP_*|VIRTUAL_ENV|PYTHONPATH|PYTHONHOME) unset "$v" ;;
   esac
 done
 
@@ -31,8 +41,6 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 # techne's permission checks behave differently for root, and no README reader
 # installs as root. Refuse rather than test something nobody runs.
 [ "$(id -u)" -ne 0 ] || fail "run as a non-root user (root bypasses the permission checks a user hits)"
-command -v git >/dev/null || fail "git not found (the README requires it)"
-command -v python3 >/dev/null || fail "python3 not found"
 
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "$WORKDIR"' EXIT
@@ -46,21 +54,24 @@ for d in "${entries[@]}"; do
 done
 export PATH="$clean_path"
 ! command -v uv >/dev/null || fail "uv still on PATH after cleaning: $(command -v uv)"
+command -v git >/dev/null || fail "git not on PATH after removing uv's directories (the README requires git)"
+command -v python3 >/dev/null || fail "python3 not on PATH after removing uv's directories"
 
 # --- where the install comes from ------------------------------------------
 # Commit mode: a bare repo holding HEAD as `main`, so a clone from it has
 # origin/main exactly as a clone from GitHub does (doctor's runtime:revision
 # reads it). A checkout with no .git (plain files copied into a container) is
 # committed as-is first.
+GIT_AUTH=()
 if [ -n "$REF" ]; then
   ORIGIN="https://github.com/tenishai/techne.git"
   PIN="$REF"
   token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
   [ -n "$token" ] || token="$(gh auth token 2>/dev/null || true)"
   if [ -n "$token" ]; then
-    export GIT_CONFIG_COUNT=1
-    export GIT_CONFIG_KEY_0="url.https://x-access-token:${token}@github.com/.insteadOf"
-    export GIT_CONFIG_VALUE_0="https://github.com/"
+    GIT_AUTH=(GIT_CONFIG_COUNT=1
+      "GIT_CONFIG_KEY_0=url.https://x-access-token:${token}@github.com/.insteadOf"
+      GIT_CONFIG_VALUE_0=https://github.com/)
   fi
   unset token
 else
@@ -138,8 +149,8 @@ PY
 # PINNED, NOT ASSERTED CLEAN (techne#1318). On a fresh install, before any
 # session, doctor exits 1: registered hooks that have never fired and rails with
 # no input yet count as "not confirmed working". Until 1318 decides how a fresh
-# install should read, this pins TODAY's set by name, so a check that newly
-# fails, or one that stops failing, breaks this test instead of slipping by.
+# install should read, this pins TODAY's ?, ✗ and ! lines by name, so a check
+# that newly reads unobservable, broken or stale, or stops, breaks this test.
 # runtime:loaded joins it for a git checkout without `ps` (it reads the process
 # table); a packaged install reports it dormant.
 EXPECTED_UNCONFIRMED="hook:codex_grep_assist hook:post_tool_use hook:session_end hook:user_prompt_submit rail:consolidate rail:dream"
@@ -147,7 +158,10 @@ EXPECTED_UNCONFIRMED="hook:codex_grep_assist hook:post_tool_use hook:session_end
 check_install() {
   local label="$1"
   echo "  + techne init"
+  ! env | grep -qE '^(TECHNE_|CLAUDE_CONFIG_DIR=)' || fail "$label: a TECHNE_/CLAUDE_CONFIG_DIR variable survived; init would write outside \$HOME"
   techne init >"$WORKDIR/init-$label.log" 2>&1 || { cat "$WORKDIR/init-$label.log"; fail "$label: techne init failed"; }
+  [ -f "$HOME/.claude/settings.json" ] && grep -qF "Config saved: $HOME/.techne/config.yaml" "$WORKDIR/init-$label.log" \
+    || { cat "$WORKDIR/init-$label.log"; fail "$label: techne init wrote somewhere other than the fresh \$HOME"; }
 
   echo "  + every hook event in settings.json runs through techne-hook.sh"
   python3 - <<'PY' || fail "$label: hook registration"
@@ -180,7 +194,7 @@ PY
   local rc=0
   techne doctor >"$WORKDIR/doctor-$label.log" 2>&1 || rc=$?
   local got
-  got="$(sed -nE 's/^  [?✗] ([a-z_:-]+) .*/\1/p' "$WORKDIR/doctor-$label.log" | sort | tr '\n' ' ' | sed 's/ $//')"
+  got="$(sed -nE 's/^  (\?|✗|!) ([a-z_:-]+) .*/\2/p' "$WORKDIR/doctor-$label.log" | sort | tr '\n' ' ' | sed 's/ $//')"
   echo "    -> exit $rc; not confirmed: ${got:-none}"
   if [ -z "$REF" ]; then
     local want="$EXPECTED_UNCONFIRMED"
@@ -200,7 +214,7 @@ run_source() {
   mkdir -p "$HOME"
   (
     cd "$HOME"
-    git clone -q "$ORIGIN" techne
+    env ${GIT_AUTH[@]+"${GIT_AUTH[@]}"} git clone -q "$ORIGIN" techne
     cd techne
     [ -z "$REF" ] || git -c advice.detachedHead=false checkout -q "$PIN"
     python3 -m venv .venv
@@ -231,7 +245,7 @@ run_pipx() {
     fi
     local url="$ORIGIN"
     [ -n "$REF" ] || url="file://$ORIGIN"
-    "$pipx" install "tenish-techne[recommended] @ git+$url@$PIN" >"$WORKDIR/pipx.log" 2>&1 \
+    env ${GIT_AUTH[@]+"${GIT_AUTH[@]}"} "$pipx" install "tenish-techne[recommended] @ git+$url@$PIN" >"$WORKDIR/pipx.log" 2>&1 \
       || { tail -20 "$WORKDIR/pipx.log"; fail "pipx: install failed"; }
     "$pipx" ensurepath >/dev/null 2>&1 || true
     # "Now open a new shell": what ensurepath adds, ~/.local/bin, is on PATH there.

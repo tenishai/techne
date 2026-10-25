@@ -1090,6 +1090,8 @@ jobs:
   # and a recall, in a fresh $HOME with uv off PATH. The runner has no docker
   # socket, so it runs on the runner's own python3, not
   # a stock image; the script is also run by hand in python:3.12-slim.
+  # The embedding model downloads cold on every run, on purpose: that is a user's
+  # first `vectors backfill`, so no model cache is warmed here (unlike #535).
   install-e2e:
     runs-on: [self-hosted, linux, x64, techne-ci]
     if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
