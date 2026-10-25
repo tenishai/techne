@@ -1,19 +1,19 @@
 ---
 card: arch-card:techne-archivist-query
 updated: 2026-08-21
-anchor: techne/core/archivist_query.py sha=4a1c505a1901583988f6db5ba8605b1311d21257
+anchor: techne/core/archivist_query.py sha=5c365a9abfc224b287fe8e01dd9ce9eea705af13
 ---
 # archivist-query — guarded read-only SQL over the team store (techne#554)
 
 SEAM: `query(config, sql, limit)` + `readable_schema(config)`. The ACCESS half of team memory; techne#553 (writer provenance) is the schema half — a query surface without provenance answers "what do we know" but never "who says so".
 WHY SQL, NOT A FILTER DSL: #554's complaint is questions nobody wrote an endpoint for; a verb-per-question surface reproduces the gap it closes. The price is that it must be guarded, which is the whole module.
 
-GUARD STACK — four layers, each enforced by SQLite, none load-bearing alone:
+GUARD STACK — five layers, each enforced by SQLite or by query()'s fetch loop, none load-bearing alone:
   1. ?mode=ro (via federation._open_remote_readonly — NOT a second opener; that one carries the measured WAL-sidecar caveat)
   2. set_authorizer — the load-bearing one. Denies ATTACH, all-but-one PRAGMA, every read outside ALLOWED_TABLES. Default branch is DENY, so a future SQLite action code is refused rather than waved through.
   3. set_progress_handler (OP_BUDGET) — read-only does NOT bound cost.
-  4. setlimit SQLITE_LIMIT_LENGTH = MAX_VALUE_BYTES (4 MB) and SQLITE_LIMIT_SQL_LENGTH = MAX_SQL_BYTES (100 KB) — the op budget counts VM steps and a C function (zeroblob(5e7), replace() over hex()) runs as ONE step, ~590 MB before (techne#1256). A value past the limit is a QueryDenied naming it, raised from execute or fetch.
-  4. one statement only.
+  4. size: setlimit SQLITE_LIMIT_LENGTH = MAX_VALUE_BYTES (1 MB) and SQLITE_LIMIT_SQL_LENGTH = MAX_SQL_BYTES (100 KB), because the op budget counts VM steps and a C function (zeroblob(5e7), replace() over hex()) runs as ONE step, ~590 MB before (techne#1256); and query() iterates the cursor with a running total, refusing past MAX_RESULT_BYTES (16 MB), because up to MAX_LIMIT under-limit rows were materialised at once (~600 MB at 200 rows). NOT BOUNDED: SQLite's sorter. An ORDER BY over many large generated rows builds the whole sort before the first row (measured ~550 MB at 1000 x 1 MB rows); see techne#1313. A size refusal is a QueryDenied naming the limit.
+  5. one statement only.
 NOT BY PARSING THE SQL. A parse-and-inspect allow-list is a regex that loses to the first sub-select nobody thought of; the authorizer denies `SELECT id FROM knowledge WHERE id IN (SELECT id FROM observations)` on the inner read with no parsing at all.
 
 ATTACH IS THE ONE TO UNDERSTAND: a ?mode=ro connection can still ATTACH the operator's PERSONAL techne.db and read it out through this "team" surface. mode=ro does not stop that; only the authorizer does.

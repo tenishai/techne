@@ -612,3 +612,26 @@ def test_a_value_past_the_size_limit_is_refused_when_returned(team):
 def test_ordinary_functions_still_work(team):
     result = query(team, "SELECT length(content), upper(substr(content, 1, 3)) FROM knowledge")
     assert result["outcome"]["code"] == OUTCOME_ROWS
+
+
+def test_many_rows_of_under_limit_values_stop_at_the_result_budget(team):
+    """Prudence, PR 1311: each value under MAX_VALUE_BYTES, but 200 of them took
+    ~600 MB when fetched at once."""
+    from techne.core.archivist_query import MAX_RESULT_BYTES, MAX_VALUE_BYTES
+
+    width = MAX_VALUE_BYTES - 1000
+    rows = MAX_RESULT_BYTES // width + 5
+    sql = (
+        f"WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM r WHERE n<{rows}) "
+        f"SELECT printf('%{width}s', 'x') AS s FROM r"
+    )
+    with pytest.raises(QueryDenied, match="total limit"):
+        query(team, sql, limit=2000)
+
+
+def test_a_result_under_the_budget_is_returned_whole(team):
+    sql = (
+        "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM r WHERE n<10) "
+        "SELECT printf('%1000s', n) AS s FROM r"
+    )
+    assert len(query(team, sql, limit=2000)["rows"]) == 10

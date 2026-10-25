@@ -156,8 +156,10 @@ MAX_LIMIT = 2000
 #: is merely waiting on a busy writer.
 OP_BUDGET = 50_000
 #: Largest string or blob a guarded query may build or return (techne#1256).
-#: Archivist rows are text a few KB long; 4 MB leaves room and bounds memory.
-MAX_VALUE_BYTES = 4_000_000
+#: Archivist rows are text a few KB long; 1 MB, the issue's figure, leaves room.
+MAX_VALUE_BYTES = 1_000_000
+#: Total size of the string and blob values one query may return.
+MAX_RESULT_BYTES = 16_000_000
 #: Longest SQL text the surface accepts.
 MAX_SQL_BYTES = 100_000
 
@@ -412,8 +414,8 @@ def readable_schema(config) -> dict:
 def _too_big(e: Exception) -> QueryDenied:
     return QueryDenied(
         f"A value in this query passed the {MAX_VALUE_BYTES:,}-byte limit ({e}). The "
-        "limit bounds the memory one query can take (techne#1256); select less, or a "
-        "substr() of it."
+        "limit bounds the size of any one value a query builds (techne#1256); select "
+        "less, or a substr() of it."
     )
 
 
@@ -495,7 +497,22 @@ def query(config, sql: str | None = None, limit: int | None = None) -> dict:
                     "out of reach (techne#554)."
                 ) from e
             raise
-        rows = [_jsonable(dict(r)) for r in cur.fetchmany(cap + 1)]
+        # Iterate rather than fetchmany: each value is capped by MAX_VALUE_BYTES,
+        # but up to MAX_LIMIT rows of them were materialised at once, ~600 MB at
+        # 200 rows (Prudence, PR 1311). The running total stops a query at
+        # MAX_RESULT_BYTES, before the rows behind it are fetched.
+        rows, total = [], 0
+        for r in cur:
+            total += sum(len(v) for v in r if isinstance(v, (str, bytes)))
+            if total > MAX_RESULT_BYTES:
+                raise QueryDenied(
+                    f"The result passed the {MAX_RESULT_BYTES:,}-byte total limit after "
+                    f"{len(rows)} row(s) (techne#1256). Select fewer rows or columns, "
+                    "or a substr() of the large ones."
+                )
+            rows.append(_jsonable(dict(r)))
+            if len(rows) > cap:
+                break
         columns = [d[0] for d in (cur.description or [])]
     except sqlite3.DataError as e:
         raise _too_big(e) from e
