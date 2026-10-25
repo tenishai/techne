@@ -677,3 +677,81 @@ def test_too_many_sort_terms_is_a_named_refusal(team):
 def test_the_widest_real_join_still_fits_the_column_cap(team):
     result = query(team, "SELECT * FROM knowledge JOIN knowledge_deps LIMIT 1")
     assert result["outcome"]["code"] in (OUTCOME_ROWS, OUTCOME_NO_ROWS)
+
+
+# ---- the sorter is bounded by the worker's heap cap (techne#1313) -----------------
+
+_GEN = "WITH RECURSIVE g(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM g WHERE n<500) "
+_BIG = "printf('%999000s', 'x') || n"
+
+
+def _parent_peak_bytes() -> int:
+    import resource
+    import sys
+
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return peak if sys.platform == "darwin" else peak * 1024
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        _GEN + f"SELECT {_BIG} AS s FROM g ORDER BY s DESC",
+        _GEN + f"SELECT {_BIG} AS s, count(*) FROM g GROUP BY s",
+        _GEN + f"SELECT row_number() OVER (ORDER BY {_BIG}) FROM g",
+    ],
+    ids=["order-by", "group-by", "window"],
+)
+def test_a_sort_over_large_generated_rows_is_refused_at_the_heap_cap(team, sql):
+    """500 one-MB rows: ~280 MB in-process before #1313, and spilling to disk did
+    not bound it. The worker's heap cap must refuse it, and the parent must not
+    grow by the sort's size — that is the point of running it elsewhere."""
+    before = _parent_peak_bytes()
+    with pytest.raises(QueryDenied, match="SQLite memory limit"):
+        query(team, sql, limit=1)
+    grown = _parent_peak_bytes() - before
+    assert grown < 100 * 1024 * 1024, f"the parent grew by {grown:,} bytes"
+
+
+def test_the_heap_cap_does_not_leak_into_the_calling_process(team):
+    """`hard_heap_limit` is process-wide and can only be lowered. Set in the caller
+    it would cap every SQLite connection there for life."""
+    query(team, "SELECT id FROM knowledge")
+    conn = sqlite3.connect(":memory:")
+    try:
+        assert conn.execute("PRAGMA hard_heap_limit").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_a_real_table_sort_still_works_under_the_cap(team):
+    result = query(team, "SELECT * FROM knowledge ORDER BY content DESC")
+    assert result["outcome"]["code"] == OUTCOME_ROWS
+    assert result["row_count"] == 3
+
+
+def test_the_worker_is_killed_at_the_deadline(team):
+    team.archivist_query_timeout_s = 0.001  # shorter than interpreter start
+    with pytest.raises(QueryDenied, match="deadline"):
+        query(team, "SELECT id FROM knowledge")
+
+
+def test_a_bad_query_still_raises_the_sqlite_class(team):
+    """The worker reports errors as JSON; the caller must still get sqlite3's own
+    class, or the denial-vs-bad-SQL split this surface depends on is gone."""
+    with pytest.raises(sqlite3.OperationalError, match="no such column"):
+        query(team, "SELECT nope FROM knowledge")
+
+
+def test_a_broken_worker_is_a_server_fault_not_a_denial(team, monkeypatch):
+    monkeypatch.setattr("techne.core.archivist_query.sys.executable", "false")
+    with pytest.raises(RuntimeError, match="worker exited"):
+        query(team, "SELECT id FROM knowledge")
+
+
+@pytest.mark.parametrize("key", ["archivist_query_heap_bytes", "archivist_query_timeout_s"])
+def test_worker_limits_must_be_positive(key):
+    from techne.config import Config
+
+    with pytest.raises(ValueError, match=key):
+        Config._from_dict({key: 0})

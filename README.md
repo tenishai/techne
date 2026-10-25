@@ -879,6 +879,8 @@ sync:
 archivist_publish_tags: []    # publish lane (#1298): live knowledge with any of these tags is
                               #   enqueued to `sink:archivist_publish` for a network archivist.
                               #   [] = off. Needs a package that registers that sink.
+archivist_query_heap_bytes: 67108864  # SQLite heap cap for the techne_archivist_query worker (#1313)
+archivist_query_timeout_s: 10         # the worker is killed after this many seconds
 
 recall:                       # which sources recall consults, in what order (#1170)
   order: []                   # [] = the built-in ladder, then any allowed plugged-in source
