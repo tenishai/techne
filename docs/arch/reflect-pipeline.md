@@ -1,8 +1,8 @@
 ---
 card: arch-card:techne-reflect-pipeline
-updated: 2026-10-23
-anchor: techne/core/reflect.py sha=f5b5afdd8a7e8eba730eeed038671fed71b0a730
-anchor: techne/core/sleepdream.py sha=aa3bd99733d9b1fe94bf22c138d1c0d973841ba6
+updated: 2026-10-24
+anchor: techne/core/reflect.py sha=cf01a9a278745f93340e862309389b4a8395bc4f
+anchor: techne/core/sleepdream.py sha=d9c0c1182115da744d69468d1f30254828a7725e
 anchor: techne/lifecycle.py sha=7c3b7864af1e79da71775b3c2a8c1b8e22cdf914
 ---
 # reflect / consolidate / dream — self-maintenance
@@ -84,7 +84,7 @@ AND ONE #733 TEST WAS AMENDED, WHICH IS THE PART TO DISTRUST FIRST. `test_a_drif
 
 **A REVIEWER CAN PROMOTE AN EDIT, AND THE PROPOSAL IS NEVER OVERWRITTEN (techne#952, 2026-09-17).** Review had promote and discard. A blind-judged external run found the common disagreement was a durable claim wrapped in counts or ids that go stale: discard lost the claim, promote stored the wrapper. `promote_candidate(revised_content=...)` / `techne reflect promote --content` applies the edit through the same applier by handing it a copy of the row with `content` swapped, and stores the edit in `knowledge_candidates.revised_content`.
 `content` STAYS AS PROPOSED, FOR TWO REASONS. It is half of `idx_kc_reflect_dedup (prompt_hash, content)`, so rewriting it would let a re-ingest of the same answer insert a fresh pending duplicate. And it is the record of what the model proposed, which is what a prompt change (#950) is measured against; `candidate_stats` reports `revised` for that.
-ADD-ONLY (`_REVISABLE_ACTIONS`). A merge or supersede carries a faithfulness verdict computed on its original text. Revising it leaves the verdict describing text that is not applied, and resetting the verdict instead would turn revision into a way past the gate. A revision also requires a `decision_reason`.
+ADD-ONLY (`_REVISABLE_ACTIONS`). A merge or supersede carries a faithfulness verdict computed on its original text. Revising it leaves the verdict describing text that is not applied, and resetting the verdict instead would turn revision into a way past the gate. A revision also requires a `decision_reason`. Every free-text value these producers write to `knowledge_candidates`, `decision_reason` included, goes through `redact_credentials` at write time (techne#1245); `techne scrub-credentials` re-applies it to rows stored earlier.
 
 **PROMOTED KNOWLEDGE RECORDS ITS SESSION (techne#949, schema v26).** `knowledge.origin_session` was NULL on every promoted row (3,090 of 3,090 on the operator's store); the session was reachable only through `knowledge_candidates.promoted_to_id` or by parsing `source`. `promote_candidate` now stamps it for `_ROW_MINTING_ACTIONS` (add, supersede, merge) in the same transaction, and the `write_to: live` auto-path passes it in `store()`'s provenance. RETIRE IS EXCLUDED on purpose: its applier returns an existing survivor, which did not originate in the retiring session. SO IS THE SLEEP SENTINEL (Prudence, #961 r1): consolidate merges, dream adds and every conflict supersede are filed under `SYSTEM_SLEEP_SESSION` ('system:sleep'), a placeholder that satisfies the FK. Stamping it recorded a merged fact, or a team store's fact, as originating in a local session. `_is_real_session` skips it, so in practice only reflect `add`s are stamped; the others stay NULL, unattributed rather than guessed. The v26 migration backfills existing rows by the same rule, sentinel included, where v25 refused to backfill its columns: a federated row's local source had been discarded, but a promoted row's session is recorded on its candidate. The thread is still reached through `knowledge_candidates.source_thread_id`; `knowledge` has no thread column.
 

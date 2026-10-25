@@ -573,6 +573,12 @@ techne cards repair [--apply]              # retype document_cards that never ha
                                            # (they were mistyped knowledge, not cards). Dry-run by
                                            # default. REFUSES to touch a card whose pointer exists
                                            # but doesn't resolve — that needs a human
+techne scrub-credentials [--apply] [--json]
+                                           # re-apply current credential redaction to rows
+                                           # already stored (observations, knowledge, summaries,
+                                           # coord, reminders, candidates, ...). Dry-run counts
+                                           # only; --apply rewrites in one transaction. Does not
+                                           # reach vectors, librarian.db, backups or remote sinks
 techne reconcile                           # force the schema drift-reconcile passes on techne.db;
                                            # use when you suspect schema drift or after an
                                            # additive SCHEMA_SQL change at unchanged SCHEMA_VERSION

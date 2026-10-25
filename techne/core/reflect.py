@@ -2697,7 +2697,7 @@ def promote_candidate(
                 WHERE id = ? AND status = 'pending'""",
             (
                 decided_by,
-                decision_reason,
+                redact_credentials(decision_reason) if decision_reason else decision_reason,
                 # Redacted like every other text written to this table (Prudence #961
                 # r1); `reflect review` echoes it back.
                 redact_credentials(revised_content) if revised_content is not None else None,
@@ -2754,7 +2754,11 @@ def discard_candidate(
                   SET status = 'discarded', reviewed_at = CURRENT_TIMESTAMP,
                       decided_by = ?, decision_reason = ?
                 WHERE id = ? AND status = 'pending'""",
-            (decided_by, decision_reason, candidate_id),
+            (
+                decided_by,
+                redact_credentials(decision_reason) if decision_reason else decision_reason,
+                candidate_id,
+            ),
         )
         if cur.rowcount == 0:
             raise ValueError(f"Candidate {candidate_id} not found or already reviewed")
