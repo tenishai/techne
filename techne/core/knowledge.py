@@ -1409,25 +1409,31 @@ def archive_scan(
     if not to_archive or dry_run:
         return to_archive
 
-    # TOCTOU note: candidates are read on one connection above and UPDATEd on a
-    # fresh connection below. A concurrent reaffirm() landing between the two could
-    # archive a just-reaffirmed row. Negligible for a single-operator CLI (the only
-    # caller); the miss self-heals on the next scan or via unarchive(). Documented
-    # rather than defended (a held write-lock across the whole scan isn't worth it).
-    # Write: flip status to 'archived' for each qualifying row.
-    ids = [r["id"] for r in to_archive]
-    placeholders = ",".join("?" * len(ids))
+    # Candidates are read on one connection above and UPDATEd on a fresh one below,
+    # and MCP sessions reconfirm concurrently (techne#1269). The UPDATE re-checks
+    # the selection condition, so a row reconfirmed in between is left alone, and
+    # only the rows it actually archived are returned.
     conn = connect(db_path)
+    archived: set[int] = set()
     try:
-        conn.execute(
-            f"""UPDATE knowledge
-                SET status = 'archived', updated_at = CURRENT_TIMESTAMP
-                WHERE id IN ({placeholders})""",
-            ids,
-        )
+        # One UPDATE per row, in one transaction, so rowcount says which rows were
+        # still eligible (RETURNING would need SQLite 3.35).
+        for r in to_archive:
+            cur = conn.execute(
+                """UPDATE knowledge
+                   SET status = 'archived', updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ?
+                     AND superseded_by IS NULL
+                     AND status = 'uncertain'
+                     AND last_confirmed_at < ?""",
+                (r["id"], cutoff_str),
+            )
+            if cur.rowcount:
+                archived.add(r["id"])
         conn.commit()
     finally:
         conn.close()
+    to_archive = [r for r in to_archive if r["id"] in archived]
 
     return to_archive
 

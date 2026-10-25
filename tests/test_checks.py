@@ -196,6 +196,21 @@ class TestBuiltinChecks:
         assert hook.verdict is Verdict.BROKEN
         assert "boom" in hook.detail
 
+    def test_a_recovering_hook_says_how_many_clean_runs_since(self, config):
+        """techne#1251 keeps the error for CLEAN_RUNS_TO_CLEAR clean runs; doctor must
+        not say "last run FAILED" when the last runs succeeded (PR 1312 review)."""
+        from techne.hooks._liveness import record_hook_run
+
+        record_hook_run(
+            config.db_path, "session_end", outcome="failed", error={"stage": "s", "msg": "boom"}
+        )
+        for _ in range(3):
+            record_hook_run(config.db_path, "session_end", outcome="ok")
+        hook = next(r for r in run_checks(config) if r.name == "hook:session_end")
+        assert hook.verdict is Verdict.BROKEN
+        assert "last run FAILED" not in hook.detail
+        assert "3 clean run(s) since" in hook.detail and "boom" in hook.detail
+
     def test_disabled_reflect_is_dormant_not_stale(self, config):
         """Off-by-config is a healthy state and must name the key, so deliberate
         dormancy is cheap to confirm and forgotten dormancy is loud."""

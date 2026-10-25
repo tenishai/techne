@@ -632,7 +632,20 @@ def check_hooks(config) -> list[CheckResult]:
 
             if err:
                 verdict = Verdict.BROKEN
-                detail = f"last run FAILED: {err.get('stage', '?')} — {err.get('msg', '')}"[:160]
+                what = f"{err.get('stage', '?')} — {err.get('msg', '')}"
+                clean = int(err.get("clean_runs", 0) or 0)
+                if clean:
+                    # The error is kept until CLEAN_RUNS_TO_CLEAR clean runs in a row
+                    # (techne#1251), so the last run may have succeeded; say what is
+                    # true rather than "last run FAILED".
+                    from techne.hooks._liveness import CLEAN_RUNS_TO_CLEAR
+
+                    detail = (
+                        f"FAILED at {err.get('ts', '?')}: {what}; {clean} clean run(s) "
+                        f"since, clears after {CLEAN_RUNS_TO_CLEAR}"
+                    )[:200]
+                else:
+                    detail = f"last run FAILED: {what}"[:160]
             elif hook in _SESSION_SCOPED and last_settled_session:
                 # SESSION-SCOPED HOOKS ARE JUDGED AGAINST THE LAST SESSION, NOT
                 # THE CLOCK (#469 review, finding 5). For a hook that only fires

@@ -128,6 +128,19 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- **`archive_scan` no longer archives a row another session just reconfirmed** (#1269). It
+  selected candidates on one connection and archived them by id on another; the archive
+  now re-checks the selection condition per row, and only rows it archived are returned.
+- **`techne custodian run` exits non-zero when a rail's emit raised or answers failed**
+  (#1248). It failed only when a rail answered none of what it emitted, so an emit that
+  raised on a locked db, or a run that answered 1 of 10, exited 0. A rail with no model
+  bound still exits 0.
+- **A hook's recorded error survives other sessions' clean runs** (#1251). Any clean run
+  of the hook, in any session, cleared `hook:<name>:last_error`, so a session failing on
+  every call showed BROKEN in `techne doctor` only for seconds. The error now clears after
+  20 clean runs in a row with no error between them.
+- A test pins the root-password redaction anchor from #1272 (#1302): `curl -u
+  root:2024Spring!` and `curl -u root:rootpass99` stay redacted.
 - **Peer messages are capped per injection and can't forge lines** (#1252). After #1274's
   8000-character total, one post_tool_use block now also shows at most 5 messages and 1500
   characters of each body; the rest arrive on later tool calls or through `techne_inbox`,
