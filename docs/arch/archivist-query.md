@@ -1,19 +1,20 @@
 ---
 card: arch-card:techne-archivist-query
-updated: 2026-08-21
-anchor: techne/core/archivist_query.py sha=58aac2bcaadaa8e840f183ae8da077518b34bd4c
+updated: 2026-10-25
+anchor: techne/core/archivist_query.py sha=f56e2ba150f333ab5f9bcae47f7047eaf70d4c7c
 ---
 # archivist-query — guarded read-only SQL over the team store (techne#554)
 
 SEAM: `query(config, sql, limit)` + `readable_schema(config)`. The ACCESS half of team memory; techne#553 (writer provenance) is the schema half — a query surface without provenance answers "what do we know" but never "who says so".
 WHY SQL, NOT A FILTER DSL: #554's complaint is questions nobody wrote an endpoint for; a verb-per-question surface reproduces the gap it closes. The price is that it must be guarded, which is the whole module.
 
-GUARD STACK — five layers, each enforced by SQLite or by query()'s fetch loop, none load-bearing alone:
+GUARD STACK — six layers, each enforced by SQLite, by query()'s fetch loop or by the OS, none load-bearing alone:
   1. ?mode=ro (via federation._open_remote_readonly — NOT a second opener; that one carries the measured WAL-sidecar caveat)
   2. set_authorizer — the load-bearing one. Denies ATTACH, all-but-one PRAGMA, every read outside ALLOWED_TABLES. Default branch is DENY, so a future SQLite action code is refused rather than waved through.
   3. set_progress_handler (OP_BUDGET) — read-only does NOT bound cost.
-  4. size: setlimit SQLITE_LIMIT_LENGTH = MAX_VALUE_BYTES (1 MB), SQLITE_LIMIT_COLUMN = MAX_COLUMNS (64; a 400-wide row took ~1.2 GB before) and SQLITE_LIMIT_SQL_LENGTH = MAX_SQL_BYTES (100 KB), because the op budget counts VM steps and a C function runs as ONE step: length(replace(hex(zeroblob(5e7)),'0','00')) took ~590 MB (techne#1256); and query() iterates the cursor with a running total of value bytes (UTF-8 for text), refusing past MAX_RESULT_BYTES (16 MB), because up to MAX_LIMIT under-limit rows were materialised at once (~600 MB at 200 rows). NOT BOUNDED: SQLite's sorter. An ORDER BY over many large generated rows builds the whole sort before the first row (measured ~550 MB at 1000 x 1 MB rows); see techne#1313. A size refusal is a QueryDenied naming the limit.
+  4. size: setlimit SQLITE_LIMIT_LENGTH = MAX_VALUE_BYTES (1 MB), SQLITE_LIMIT_COLUMN = MAX_COLUMNS (64; a 400-wide row took ~1.2 GB before) and SQLITE_LIMIT_SQL_LENGTH = MAX_SQL_BYTES (100 KB), because the op budget counts VM steps and a C function runs as ONE step: length(replace(hex(zeroblob(5e7)),'0','00')) took ~590 MB (techne#1256); and query() iterates the cursor with a running total of value bytes (UTF-8 for text), refusing past MAX_RESULT_BYTES (16 MB), because up to MAX_LIMIT under-limit rows were materialised at once (~600 MB at 200 rows). None of these bounds SQLite's sorter (an ORDER BY over 1000 x 1 MB generated rows took ~550 MB); layer 6 does. A size refusal is a QueryDenied naming the limit.
   5. one statement only.
+  6. worker process (techne#1313) — query() runs `_execute` in `python -I -m techne.core.archivist_query_worker`, request on stdin, one JSON reply on stdout. The child sets `PRAGMA temp_store=MEMORY` and `PRAGMA hard_heap_limit` (config `archivist_query_heap_bytes`, 64 MiB) before the authorizer, so every sort, GROUP BY, DISTINCT and window counts against the cap and fails as MemoryError → QueryDenied. The parent kills it at `archivist_query_timeout_s` (10 s). WHY A PROCESS: the sorter spills to temp files but its merge holds about one record per spilled run, so spilling bounds neither memory nor disk (500 x 1 MB rows: 280 MB; temp_store=FILE no help, a smaller cache worse); the op budget lets ~2.4M generated rows through; and hard_heap_limit is process-wide, lower-only from Python, so set in the MCP server it would cap recall for life. Costs ~110 ms per query on dev04 (124 ms vs 12 ms in-process, a copy of the real store). Worker errors cross as JSON and are re-raised as the same sqlite3 class, so the QueryDenied / sqlite3.Error split below survives; a worker that dies without a reply is a RuntimeError (a server fault, neither of the two).
 NOT BY PARSING THE SQL. A parse-and-inspect allow-list is a regex that loses to the first sub-select nobody thought of; the authorizer denies `SELECT id FROM knowledge WHERE id IN (SELECT id FROM observations)` on the inner read with no parsing at all.
 
 ATTACH IS THE ONE TO UNDERSTAND: a ?mode=ro connection can still ATTACH the operator's PERSONAL techne.db and read it out through this "team" surface. mode=ro does not stop that; only the authorizer does.
