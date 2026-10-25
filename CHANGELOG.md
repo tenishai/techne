@@ -118,6 +118,15 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- **A NUL byte or a lone surrogate in a query no longer breaks search** (#1249). `search()`
+  raised `OperationalError: unterminated string` on a NUL and `UnicodeEncodeError` on a lone
+  surrogate such as `\ud800`, so `techne_search`, `techne_recall` and `techne search` errored and
+  per-turn recall injected nothing for that prompt. Query text is now cleaned where it is turned
+  into an FTS5 MATCH string and where it is embedded: NUL, DEL and the other control characters
+  except tab and line breaks become spaces, and lone surrogates become U+FFFD. The recall hooks
+  log the cleaned query, because a surrogate in the logged trigger made the injection log drop
+  that row without a word.
+
 - **The post-compaction restore now reaches the model** (#1242). Claude Code drops a
   PostCompact hook's stdout, so the restore it printed (active threads, last task, files,
   recent commands) never arrived, while the hook recorded `ok` and doctor showed it live.
