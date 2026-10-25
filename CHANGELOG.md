@@ -116,6 +116,16 @@ All notable changes to techne are documented here. Format loosely follows
   detail left to the guides they point at. `MCP_INSTRUCTIONS_BUDGET_CHARS` goes from 4400
   to 1900, and tests keep the text under it and the load-bearing lines inside the cut.
 
+### Removed
+
+- **`JsonlTranscriptSource` and the `sources.claude_code_transcripts` config section** (#1262,
+  closes #1240). The tailer in `techne/sync/jsonl_transcript.py` was never constructed outside
+  its tests; transcripts arrive through `techne import`, the hooks and
+  `techne librarian index-transcripts`. Its cursor bug (#1240: a half-written last line was
+  skipped for good) was therefore dormant. The `sources` key leaves `Config` and the
+  config-trust egress set. A `sources:` block in an existing config.yaml still loads, is
+  read by nothing, and is written back unchanged.
+
 ### Fixed
 
 - **A coord reader with no read receipts no longer gets the whole bus** (#1274). A session with no

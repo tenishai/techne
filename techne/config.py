@@ -508,24 +508,6 @@ ReflectWriteTo = Literal["candidates", "live"]
 
 
 @dataclass
-class TranscriptSourceConfig:
-    """Config for one JsonlTranscriptSource instance."""
-
-    paths: list[str] = field(default_factory=list)
-    include_globs: list[str] = field(default_factory=lambda: ["*.jsonl"])
-    exclude_globs: list[str] = field(default_factory=list)
-    debounce_ms: int = 500
-    adapter_name: str = "jsonl_transcript"
-
-
-@dataclass
-class SourcesConfig:
-    """Config for all source adapters."""
-
-    claude_code_transcripts: TranscriptSourceConfig | None = None
-
-
-@dataclass
 class HeuristicConfig:
     # Score threshold for calling a pair-boundary a real thread boundary.
     # Default matches BOUNDARY_THRESHOLD in heuristic_threads.py.
@@ -914,7 +896,6 @@ class Config:
     # Federation connections (techne#222): connection name → FederationConnectionSpec.
     # Empty dict = local-only (unchanged behavior). opt-in: no migration needed.
     connections: dict[str, FederationConnectionSpec] = field(default_factory=dict)
-    sources: SourcesConfig = field(default_factory=SourcesConfig)
     threads: ThreadConfig = field(default_factory=ThreadConfig)
     hooks: HookConfig = field(default_factory=HookConfig)
     heuristic: HeuristicConfig = field(default_factory=HeuristicConfig)
@@ -1270,20 +1251,6 @@ class Config:
                         db_path=str(spec.get("db_path", "")),
                         label=str(spec.get("label", "")),
                     )
-
-        if "sources" in raw and isinstance(raw["sources"], dict):
-            s = raw["sources"]
-            sc = SourcesConfig()
-            if "claude_code_transcripts" in s and isinstance(s["claude_code_transcripts"], dict):
-                t = s["claude_code_transcripts"]
-                sc.claude_code_transcripts = TranscriptSourceConfig(
-                    paths=list(t.get("paths", [])),
-                    include_globs=list(t.get("include_globs", ["*.jsonl"])),
-                    exclude_globs=list(t.get("exclude_globs", [])),
-                    debounce_ms=int(t.get("debounce_ms", 500)),
-                    adapter_name=str(t.get("adapter_name", "jsonl_transcript")),
-                )
-            cfg.sources = sc
 
         if "sync" in raw and isinstance(raw["sync"], dict):
             s = raw["sync"]
@@ -1785,20 +1752,6 @@ class Config:
                 "log_raw_response": self.conflict.log_raw_response,
             },
         }
-        # sources: only emit the sub-keys that are configured to avoid
-        # polluting a minimal config with empty stubs.
-        sources_data: dict[str, Any] = {}
-        if self.sources.claude_code_transcripts is not None:
-            t = self.sources.claude_code_transcripts
-            sources_data["claude_code_transcripts"] = {
-                "paths": list(t.paths),
-                "include_globs": list(t.include_globs),
-                "exclude_globs": list(t.exclude_globs),
-                "debounce_ms": t.debounce_ms,
-                "adapter_name": t.adapter_name,
-            }
-        if sources_data:
-            data["sources"] = sources_data
         if self.identity_dir:
             data["identity_dir"] = str(self.identity_dir)
         if self.llm_api_base:

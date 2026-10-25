@@ -91,7 +91,7 @@ class SourceAdapter(Protocol):
     # isinstance() on EVERY Python this project supports (measured 2026-08-29 on
     # 3.9 through 3.14; this comment previously said "3.12+", which is wrong and
     # understates the blast radius — see techne#818), which would break adapters
-    # that don't declare it (e.g. the isinstance check in test_jsonl_transcript).
+    # that don't declare it.
     # ---------------------------------------------------------------------------
 
     def initial_walk(self) -> int:

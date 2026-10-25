@@ -11,9 +11,9 @@ Platform-SPECIFIC record fields (Claude Code's ``sessionId`` / ``cwd`` /
 module — only the reusable block parsing lives here.
 
 Extracted from ``platforms/claude_code/transcript_import.py`` to close the #21
-leak: ``sync/jsonl_transcript.py`` was importing these as underscore-privates
-across the platform boundary, which a second SourceAdapter would have forced to
-be promoted or duplicated. See #57 (memory portability across clients).
+leak, where a second reader imported these as underscore-privates across the
+platform boundary. That reader, ``sync/jsonl_transcript.py``, was never wired
+in and was deleted in issue 1262. See #57 (memory portability across clients).
 """
 
 import gzip
@@ -40,13 +40,11 @@ def iter_jsonl_records(jsonl_path: Path):
     """Yield parsed JSON objects from a .jsonl (or .jsonl.gz) file, skipping
     blank/invalid lines.
 
-    Whole-file iteration from the start. Offset-based tailing (see
-    ``jsonl_transcript``) does its own seeking and does not use this — it opens the
-    file ``"rb"`` and seeks a raw byte offset, which is meaningless against a
-    compressed file, and its ``include_globs`` default of ``["*.jsonl"]`` cannot see
-    one anyway. So tailing stays uncompressed-only. That is safe only while a
-    transcript still being appended to is never archived, which is an ASSUMPTION about
-    how the archiver is operated — nothing here enforces it.
+    Whole-file iteration from the start. Offset-based reading is
+    ``iter_jsonl_records_from`` below, which seeks a raw byte offset and so is
+    uncompressed-only. That is safe only while a transcript still being appended to
+    is never archived, which is an ASSUMPTION about how the archiver is operated —
+    nothing here enforces it.
     """
     with _open_text(jsonl_path) as f:
         for line in f:
