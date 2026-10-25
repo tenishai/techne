@@ -155,6 +155,11 @@ MAX_LIMIT = 2000
 #: units. A budget, not a timeout: it bounds WORK, so it does not punish a query that
 #: is merely waiting on a busy writer.
 OP_BUDGET = 50_000
+#: Largest string or blob a guarded query may build or return (techne#1256).
+#: Archivist rows are text a few KB long; 4 MB leaves room and bounds memory.
+MAX_VALUE_BYTES = 4_000_000
+#: Longest SQL text the surface accepts.
+MAX_SQL_BYTES = 100_000
 
 #: Outcome codes. THREE, not two, and the third is the point (#554 constraint 1).
 #: An empty result must be distinguishable from an unasked question, and BOTH must be
@@ -361,6 +366,11 @@ def _connect(path: Path, denied: list[str], ops: list[str]) -> sqlite3.Connectio
         return 1 if state["n"] > OP_BUDGET else 0
 
     conn.set_progress_handler(_tick, 1000)
+    # The op budget counts VM steps, and a C function runs as one: zeroblob(5e7)
+    # or a replace() over hex() took ~590 MB in a single step (techne#1256). Cap
+    # the size of any string or blob a query can build, and of the SQL text.
+    conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, MAX_VALUE_BYTES)
+    conn.setlimit(sqlite3.SQLITE_LIMIT_SQL_LENGTH, MAX_SQL_BYTES)
     return conn
 
 
@@ -397,6 +407,14 @@ def readable_schema(config) -> dict:
         "tables": tables,
         "row_limit": {"default": DEFAULT_LIMIT, "max": MAX_LIMIT},
     }
+
+
+def _too_big(e: Exception) -> QueryDenied:
+    return QueryDenied(
+        f"A value in this query passed the {MAX_VALUE_BYTES:,}-byte limit ({e}). The "
+        "limit bounds the memory one query can take (techne#1256); select less, or a "
+        "substr() of it."
+    )
 
 
 def query(config, sql: str | None = None, limit: int | None = None) -> dict:
@@ -451,6 +469,8 @@ def query(config, sql: str | None = None, limit: int | None = None) -> dict:
             # because "you may send one statement" is a fact about this surface.
             raise QueryDenied(f"{e} This surface takes exactly one SELECT.") from e
         except sqlite3.DatabaseError as e:
+            if isinstance(e, sqlite3.DataError):
+                raise _too_big(e) from e
             if ops:
                 refused = sorted(set(ops))
                 detail = (
@@ -477,6 +497,8 @@ def query(config, sql: str | None = None, limit: int | None = None) -> dict:
             raise
         rows = [_jsonable(dict(r)) for r in cur.fetchmany(cap + 1)]
         columns = [d[0] for d in (cur.description or [])]
+    except sqlite3.DataError as e:
+        raise _too_big(e) from e
     except sqlite3.OperationalError as e:
         if "interrupted" in str(e).lower():
             raise QueryDenied(

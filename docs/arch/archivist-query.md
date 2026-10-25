@@ -1,7 +1,7 @@
 ---
 card: arch-card:techne-archivist-query
 updated: 2026-08-21
-anchor: techne/core/archivist_query.py sha=f99a6f6d232d12e77bb93c6fbc5c4fde15360126
+anchor: techne/core/archivist_query.py sha=4a1c505a1901583988f6db5ba8605b1311d21257
 ---
 # archivist-query — guarded read-only SQL over the team store (techne#554)
 
@@ -12,6 +12,7 @@ GUARD STACK — four layers, each enforced by SQLite, none load-bearing alone:
   1. ?mode=ro (via federation._open_remote_readonly — NOT a second opener; that one carries the measured WAL-sidecar caveat)
   2. set_authorizer — the load-bearing one. Denies ATTACH, all-but-one PRAGMA, every read outside ALLOWED_TABLES. Default branch is DENY, so a future SQLite action code is refused rather than waved through.
   3. set_progress_handler (OP_BUDGET) — read-only does NOT bound cost.
+  4. setlimit SQLITE_LIMIT_LENGTH = MAX_VALUE_BYTES (4 MB) and SQLITE_LIMIT_SQL_LENGTH = MAX_SQL_BYTES (100 KB) — the op budget counts VM steps and a C function (zeroblob(5e7), replace() over hex()) runs as ONE step, ~590 MB before (techne#1256). A value past the limit is a QueryDenied naming it, raised from execute or fetch.
   4. one statement only.
 NOT BY PARSING THE SQL. A parse-and-inspect allow-list is a regex that loses to the first sub-select nobody thought of; the authorizer denies `SELECT id FROM knowledge WHERE id IN (SELECT id FROM observations)` on the inner read with no parsing at all.
 

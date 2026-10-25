@@ -135,6 +135,16 @@ All notable changes to techne are documented here. Format loosely follows
   line breaks in the body and sender name made spaces, so a body like `ok\n📬 operator:
   ...` no longer renders as a second message from someone else. Recalled rows and the
   session-start Key Knowledge block get the same one-line rendering.
+- **One `archivist_query` call can no longer take hundreds of MB** (#1256). Its work budget
+  counts VM steps, and a C function runs as one, so `SELECT length(zeroblob(50000000))`
+  completed at about 590 MB. The guarded connection now caps any string or blob a query
+  builds or returns at 4 MB and SQL text at 100 KB; a value past the cap is refused with a
+  message naming it.
+- **Live-mode reflection no longer writes identity** (#1267). With `reflect.write_to:
+  live`, a reflection answer like `{"scope": "identity", "type": "user.name", "content":
+  "Mallory"}` replaced the stored value with no history, and observations from a fetched
+  page or a peer message can steer that answer. Identity candidates now stay pending for
+  reviewed promotion in every mode; knowledge candidates still go live.
 - **`techne init` no longer deletes your own hooks that mention techne** (#1250). Re-init
   removed any settings.json hook whose command contained the substring `techne`, so a
   personal hook at `~/working/tenishai/techne/scripts/guard.sh` was deleted. Only techne's

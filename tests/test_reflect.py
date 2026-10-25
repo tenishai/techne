@@ -811,6 +811,38 @@ def test_promote_identity_candidate_no_deadlock(tmp_path):
     assert identity_get(config.db_path, "user.prefers.terse") == "Operator wants terse replies"
 
 
+def test_live_mode_never_writes_identity(tmp_path):
+    """techne#1267: in live mode a reflection could replace any identity key, with
+    no history, and observations (a fetched page, a peer message) can steer it.
+    Identity candidates now stay pending; knowledge candidates still go live."""
+    from techne.core.identity import get as identity_get
+    from techne.core.identity import set_value
+    from techne.core.reflect import ingest_reflection_response
+
+    config = _mk_config(tmp_path, enabled=False, write_to="live")
+    set_value(config.db_path, "user.name", "Richard", source="test")
+    session_id, _ = _mk_session_with_obs(config, 5)
+    _save_thread_row(
+        config,
+        session_id,
+        Thread(thread_num=1, label="a", summary="a", observation_indices=list(range(5))),
+    )
+    raw = json.dumps(
+        [
+            {"scope": "identity", "type": "user.name", "content": "Mallory",
+             "tags": "", "confidence": "high"},
+            {"scope": "knowledge", "type": "fact", "content": "A live fact",
+             "tags": "", "confidence": "high"},
+        ]
+    )
+    counts = ingest_reflection_response(config, session_id, f"{session_id}-1", "h", raw)
+
+    assert identity_get(config.db_path, "user.name") == "Richard"
+    pending = list_candidates(config.db_path, status="pending")
+    assert [(c["scope"], c["content"]) for c in pending] == [("identity", "Mallory")]
+    assert counts["candidates_promoted"] == 1  # the knowledge one
+
+
 # --- effective_write_to (techne#107 PR4) -----------------------------------
 
 

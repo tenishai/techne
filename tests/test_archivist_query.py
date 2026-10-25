@@ -583,3 +583,32 @@ def test_a_non_finite_float_does_not_leave_as_invalid_json(team):
 
     payload = json.loads(text, parse_constant=reject)
     assert payload["rows"][0]["a"] == "inf"
+
+
+# ---- techne#1256: one query cannot take hundreds of MB --------------------------
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT length(zeroblob(50000000))",  # the issue's reproduction, ~590 MB before
+        "SELECT length(replace(hex(zeroblob(1500000)), '0', '00'))",
+        "SELECT length(randomblob(50000000))",
+    ],
+)
+def test_a_value_past_the_size_limit_is_refused_before_it_is_built(team, sql):
+    with pytest.raises(QueryDenied, match="byte limit"):
+        query(team, sql)
+
+
+def test_a_value_past_the_size_limit_is_refused_when_returned(team):
+    from techne.core.archivist_query import MAX_VALUE_BYTES
+
+    big = MAX_VALUE_BYTES // 2 + 1  # hex() doubles it past the limit
+    with pytest.raises(QueryDenied, match="byte limit"):
+        query(team, f"SELECT hex(printf('%{big}s', 'x')) FROM knowledge LIMIT 1")
+
+
+def test_ordinary_functions_still_work(team):
+    result = query(team, "SELECT length(content), upper(substr(content, 1, 3)) FROM knowledge")
+    assert result["outcome"]["code"] == OUTCOME_ROWS
