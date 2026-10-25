@@ -17,15 +17,16 @@ to close. The cost of SQL is that it must be GUARDED, which is the rest of this 
 
 === THE GUARD STACK ===
 
-Six independent layers. Each is enforced by SQLite itself, by query()'s fetch loop
-or by the operating system, not by convention, and none of them is load-bearing alone:
+Six independent layers. Each is enforced by SQLite itself, by the worker's fetch loop
+(`_execute`) or by the operating system, not by convention, and none of them is
+load-bearing alone:
 
   1. ?mode=ro          — writes to the db CONTENT are physically impossible.
   2. set_authorizer    — checked by SQLite during prepare. Denies ATTACH, all but one
                          PRAGMA, and every read outside ALLOWED_TABLES.
   3. progress handler  — aborts a runaway query. Read-only does not mean cheap.
   4. size limits       — SQLite caps a value (MAX_VALUE_BYTES), a row's width
-                         (MAX_COLUMNS) and the SQL text; query() caps the whole
+                         (MAX_COLUMNS) and the SQL text; _execute caps the whole
                          result (MAX_RESULT_BYTES) as it fetches (techne#1256).
                          None of these bounds the sorter; layer 6 does.
   5. single statement  — one SELECT, executed through a parameterless execute().
@@ -206,6 +207,31 @@ _OUTCOME_SUMMARY = {
         "against these tables and call again."
     ),
 }
+
+
+class WorkerFailed(RuntimeError):
+    """The query worker broke: it could not start, died without a reply, or ran a
+    different copy of techne than the caller. A server fault, so neither a denial
+    (learn the surface) nor an sqlite3.Error (your SQL is wrong)."""
+
+
+#: How the worker starts. `-I` keeps a planted `techne/` in the cwd, PYTHONPATH and
+#: the user site out of the child; argv[1] then puts back the ONE directory that
+#: matters, the one the caller's own `techne` was imported from. Without it the child
+#: imports whatever `techne` site-packages holds, which in a worktree on a shared venv
+#: is another checkout: the parent and tests would be the PR's while the guards that
+#: ran were main's (Prudence, PR 1315).
+_WORKER_BOOT = (
+    "import sys; sys.path.insert(0, sys.argv[1]); "
+    "from techne.core.archivist_query_worker import main; sys.exit(main())"
+)
+
+
+def _techne_root() -> Path:
+    """The directory the caller's `techne` package was imported from."""
+    import techne
+
+    return Path(techne.__file__).resolve().parents[1]
 
 
 class QueryDenied(Exception):
@@ -534,10 +560,11 @@ def _run_in_worker(config, path: Path, sql: str, cap: int) -> dict:
     heap = int(config.archivist_query_heap_bytes)
     timeout = float(config.archivist_query_timeout_s)
     request = json.dumps({"path": str(path), "sql": sql, "cap": cap, "heap_limit_bytes": heap})
+    root = _techne_root()
     started = time.monotonic()
     try:
         proc = subprocess.run(
-            [sys.executable, "-I", "-m", "techne.core.archivist_query_worker"],
+            [sys.executable, "-I", "-c", _WORKER_BOOT, str(root)],
             input=request,
             capture_output=True,
             text=True,
@@ -552,6 +579,10 @@ def _run_in_worker(config, path: Path, sql: str, cap: int) -> dict:
             "It is read-only, so nothing was harmed. Narrow it, or add a LIMIT inside "
             "the query."
         ) from e
+    except OSError as e:
+        # No interpreter to start (an empty or non-Python sys.executable, as some
+        # embedded hosts have): the same server fault as a worker that dies.
+        raise WorkerFailed(f"archivist_query worker could not start: {e}") from e
     elapsed = time.monotonic() - started
     log.debug(
         "archivist_query: worker exit=%s in %.3fs, %d bytes out",
@@ -568,9 +599,20 @@ def _run_in_worker(config, path: Path, sql: str, cap: int) -> dict:
     if proc.returncode != 0 or not isinstance(reply, dict):
         # Not a denial and not the caller's SQL: the worker itself broke. Said as a
         # server fault, with the tail of its stderr, rather than dressed as either.
-        raise RuntimeError(
+        raise WorkerFailed(
             f"archivist_query worker exited {proc.returncode}: "
             f"{(proc.stderr or '').strip()[-500:] or 'no output'}"
+        )
+    # Checked against the caller's own import, not against `root`, so the check
+    # still holds if the root ever stops matching it.
+    import techne
+
+    mine = Path(techne.__file__).resolve()
+    ran = Path(str(reply.get("techne") or "")).resolve()
+    if ran != mine:
+        raise WorkerFailed(
+            f"archivist_query worker ran techne from {ran}, but the caller runs it from "
+            f"{mine}; refusing a result produced by a different guard stack."
         )
     if "denied" in reply:
         raise QueryDenied(reply["denied"])

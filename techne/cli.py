@@ -1817,7 +1817,7 @@ def archivist_query(ctx, sql, limit, as_json):
     import json as _json
     import sqlite3
 
-    from techne.core.archivist_query import QueryDenied, query
+    from techne.core.archivist_query import QueryDenied, WorkerFailed, query
 
     try:
         result = query(ctx.obj["config"], sql=sql, limit=limit)
@@ -1843,6 +1843,11 @@ def archivist_query(ctx, sql, limit, as_json):
         # terminal could. (Prudence, #707 review.)
         click.echo(f"error: {e}")
         raise SystemExit(1) from e
+    except WorkerFailed as e:
+        # Exit 3: neither a denial nor bad SQL, but the query worker itself broke
+        # (techne#1313). Printed, not a traceback, for the reason above.
+        click.echo(f"error: {e}")
+        raise SystemExit(3) from e
 
     if as_json:
         click.echo(_json.dumps(result, indent=2, default=str))

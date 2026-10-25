@@ -744,9 +744,55 @@ def test_a_bad_query_still_raises_the_sqlite_class(team):
 
 
 def test_a_broken_worker_is_a_server_fault_not_a_denial(team, monkeypatch):
+    from techne.core.archivist_query import WorkerFailed
+
     monkeypatch.setattr("techne.core.archivist_query.sys.executable", "false")
-    with pytest.raises(RuntimeError, match="worker exited"):
+    with pytest.raises(WorkerFailed, match="worker exited"):
         query(team, "SELECT id FROM knowledge")
+
+
+def test_a_worker_that_cannot_start_is_a_server_fault(team, monkeypatch):
+    from techne.core.archivist_query import WorkerFailed
+
+    monkeypatch.setattr("techne.core.archivist_query.sys.executable", "/nonexistent/python")
+    with pytest.raises(WorkerFailed, match="could not start"):
+        query(team, "SELECT id FROM knowledge")
+
+
+def test_the_worker_imports_techne_from_the_callers_directory(team, monkeypatch, tmp_path):
+    """Under -I the child would otherwise import site-packages' techne, which in a
+    worktree on a shared venv is another checkout (Prudence, PR 1315). Point the root
+    at a decoy package: the child must import the DECOY (so the root is honoured) and
+    the caller must then refuse its reply (so a mismatch cannot pass silently)."""
+    from techne.core.archivist_query import WorkerFailed
+
+    core = tmp_path / "decoy" / "techne" / "core"
+    core.mkdir(parents=True)
+    (core.parent / "__init__.py").write_text("")
+    (core / "__init__.py").write_text("")
+    (core / "archivist_query_worker.py").write_text(
+        "import json, sys\n"
+        "def main():\n"
+        "    json.dump({'ok': {}, 'techne': __file__}, sys.stdout)\n"
+        "    return 0\n"
+    )
+    monkeypatch.setattr("techne.core.archivist_query._techne_root", lambda: tmp_path / "decoy")
+    with pytest.raises(WorkerFailed, match="different guard stack") as err:
+        query(team, "SELECT id FROM knowledge")
+    assert "decoy" in str(err.value), "the child did not import from the root it was given"
+
+
+def test_cli_exits_3_when_the_worker_breaks(team, monkeypatch):
+    from click.testing import CliRunner
+
+    from techne.cli import main
+
+    monkeypatch.setattr("techne.config.Config.load", lambda *a, **k: team)
+    monkeypatch.setattr("techne.core.archivist_query.sys.executable", "false")
+    result = CliRunner().invoke(main, ["archivist", "query", "SELECT id FROM knowledge"])
+    assert result.exit_code == 3, result.output
+    assert "error:" in result.output
+    assert "Traceback" not in result.output
 
 
 @pytest.mark.parametrize("key", ["archivist_query_heap_bytes", "archivist_query_timeout_s"])
