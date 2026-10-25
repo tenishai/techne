@@ -128,6 +128,17 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- **`techne init` no longer deletes your own hooks that mention techne** (#1250). Re-init
+  removed any settings.json hook whose command contained the substring `techne`, so a
+  personal hook at `~/working/tenishai/techne/scripts/guard.sh` was deleted. Only techne's
+  own command shapes count now: `-m techne.hooks.*` and `-m techne.cli`, the
+  `techne-hook.sh` launcher, the packaged preflight guard and the old
+  `techne_preflight.py` stopgap.
+- **Re-running `techne init` keeps the configured platform** (#1255). `--platform`
+  defaulted to `claude-code` and always overwrote `config.yaml`, so a bare `techne init` on
+  an opencode install switched it to Claude Code and registered Claude hooks. Without
+  `--platform`, init now uses the platform `config.yaml` names; `init` and `watch` also use
+  the CLI's shared config like every other command.
 - **A malformed MCP request no longer ends the techne server** (#1247). `"params": null`
   on a `tools/call` raised out of the stdio loop, and every techne tool in the session was
   gone until a restart; a non-string `method` did the same. Each line is now answered on its

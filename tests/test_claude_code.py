@@ -207,6 +207,52 @@ class TestRegisterHooks:
         assert foreign[0].get("command") == "/usr/bin/true"
 
 
+class TestOwnHookShapesOnly:
+    """techne#1250: only techne's own command shapes count as techne's. A personal
+    hook that merely mentions techne in its path survives register_hooks."""
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "python -m techne.hooks.session_start",
+            "/bin/sh '/home/x/.claude/techne-hook.sh' -m techne.hooks.post_tool_use",
+            "/bin/sh /home/x/.claude/techne-hook.sh -m techne.cli vectors backfill",
+            "/bin/sh /home/x/.claude/techne-hook.sh "
+            "/opt/techne/platforms/claude_code/preflight_guard.py",
+            "/old/py /home/x/.claude/techne_preflight.py",
+            "sh techne-hook.sh",
+        ],
+    )
+    def test_techne_shapes_are_recognized(self, command):
+        assert claude_code._group_contains_techne({"type": "command", "command": command})
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "/home/x/working/tenishai/techne/scripts/guard.sh",
+            "python3 ~/techne-notes/lint.py",
+            "echo techne",
+            "/usr/local/bin/my-techne-hook.sh",
+        ],
+    )
+    def test_commands_that_only_mention_techne_are_not_techne(self, command):
+        assert not claude_code._group_contains_techne({"type": "command", "command": command})
+
+    def test_register_hooks_keeps_a_personal_hook_under_a_techne_path(self, fake_home, cfg):
+        path = claude_code.SETTINGS_PATH
+        path.parent.mkdir(parents=True, exist_ok=True)
+        mine = {
+            "matcher": "Bash",
+            "hooks": [
+                {"type": "command", "command": "/home/x/working/tenishai/techne/scripts/guard.sh"}
+            ],
+        }
+        path.write_text(json.dumps({"hooks": {"PreToolUse": [mine]}}))
+        claude_code.register_hooks(cfg)
+        groups = json.loads(path.read_text())["hooks"]["PreToolUse"]
+        assert mine in groups
+
+
 class TestPreflightGuard:
     """The editable-install preflight guard is chained ahead of session_start in
     a single SessionStart command, and survives re-init (techne#261).

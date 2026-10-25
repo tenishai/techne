@@ -729,8 +729,23 @@ def _matcher_of(group: dict) -> str:
     return m if isinstance(m, str) else ""
 
 
+# What only techne's own hook commands contain (techne#1250). The bare substring
+# "techne" also matched any personal hook under a path like
+# ~/working/tenishai/techne/scripts/guard.sh, and register_hooks deleted it.
+# Every shape techne has written: `python -m techne.hooks.X` (v0.2 on), the
+# launcher `.../techne-hook.sh -m techne.hooks.X` (#276), its `-m techne.cli`
+# backfill segment, the packaged preflight guard, and the old hand-wired
+# ~/.claude/techne_preflight.py stopgap.
+_TECHNE_COMMAND = re.compile(
+    r"-m\s+techne\.(?:hooks\.|cli\b)"
+    r"|(?:^|[\s/'\"])techne-hook\.sh(?=$|[\s'\"])"
+    r"|(?:^|[\s/'\"])techne_preflight\.py(?=$|[\s'\"])"
+    r"|techne/platforms/claude_code/preflight_guard\.py"
+)
+
+
 def _group_contains_techne(group: dict) -> bool:
-    """True if a settings.json hook-group entry references techne anywhere.
+    """True if a settings.json hook-group entry holds one of techne's own commands.
 
     Handles both the wrapped shape ``{matcher, hooks: [{type, command}, ...]}``
     and the legacy flat shape ``{type, command}`` that earlier techne versions
@@ -751,7 +766,7 @@ def _group_contains_techne(group: dict) -> bool:
     # _settings_shape_error the way a parallel validator clause would.
     # (Prudence, PR #457.)
     def _mentions_techne(value: object) -> bool:
-        return isinstance(value, str) and "techne" in value
+        return isinstance(value, str) and _TECHNE_COMMAND.search(value) is not None
 
     if _mentions_techne(group.get("command")):
         return True
