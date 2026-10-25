@@ -2427,31 +2427,6 @@ def list_candidates(
         conn.close()
 
 
-def _card_type_or_fact(ktype: str, tags: str) -> str:
-    """Refuse to mint a `document_card` that has no `doc:<id>` pointer (#633).
-
-    `document_card` is a MANAGED type: the card summary pass owns it and supplies
-    the librarian pointer. Neither reflect-promote nor consolidate-merge has a
-    document in hand, so both could mint a card with nothing behind it — four such
-    rows exist (knowledge 361, 366, 624, 625), and `fsck`'s dangling_cards check has
-    been red since 2026-06-21 because of them.
-
-    Demote rather than reject: the content is real prose about a document and worth
-    keeping, it just isn't a card. This mirrors the fallback already on the same line
-    at both call sites (an unrecognized type becomes `fact`).
-    """
-    from techne.core.cards import CARD_TYPE, card_doc_id
-
-    if ktype == CARD_TYPE and card_doc_id(tags or "") is None:
-        log.warning(
-            "refusing to mint an unbacked %s (no doc: pointer in tags); storing as fact "
-            "instead — tenishai/techne#633",
-            CARD_TYPE,
-        )
-        return "fact"
-    return ktype
-
-
 def _apply_add(conn, row, db_path: Path) -> int | None:
     """Apply an additive candidate — the original reflect promotion path, verbatim.
 
@@ -2471,6 +2446,7 @@ def _apply_add(conn, row, db_path: Path) -> int | None:
         CONFIDENCE_NUMERIC,
         VALID_CONFIDENCE,
         _add_dep_in_conn,
+        card_type_or_fact,
     )
     from techne.core.knowledge import GENERIC_TYPES as VALID_TYPES  # techne#1195
 
@@ -2481,7 +2457,7 @@ def _apply_add(conn, row, db_path: Path) -> int | None:
         conf = row["confidence"] if row["confidence"] in VALID_CONFIDENCE else "medium"
         numeric = CONFIDENCE_NUMERIC[conf]
         tags = row["tags"] or ""
-        ktype = _card_type_or_fact(row["type"] if row["type"] in VALID_TYPES else "fact", tags)
+        ktype = card_type_or_fact(row["type"] if row["type"] in VALID_TYPES else "fact", tags)
         cur2 = conn.execute(
             # last_confirmed_at is set HERE (techne#938). This is promote_candidate's
             # "add" dispatch -- the main way curated knowledge grows -- and the
@@ -2569,9 +2545,7 @@ def _apply_merge(conn, row, db_path: Path) -> int | None:
             f"merge candidate {row['id']} needs at least two target_ids, got {targets}"
         )
     conf = row["confidence"] if row["confidence"] in VALID_CONFIDENCE else "medium"
-    ktype = _card_type_or_fact(
-        row["type"] if row["type"] in VALID_TYPES else "fact", row["tags"] or ""
-    )
+    ktype = row["type"] if row["type"] in VALID_TYPES else "fact"  # card guard: _merge_in_conn
     return _merge_in_conn(
         conn,
         targets,

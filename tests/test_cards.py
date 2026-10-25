@@ -136,7 +136,7 @@ def test_resolve_card_fetches_document(db, config):
 
 def test_document_card_is_pull_only_excluded_from_egress(db):
     # A high-confidence card must NOT be injected — it's recall-only reference.
-    card = store(db, "card gist", type="document_card", confidence="high", tags="document_card")
+    card = store(db, "card gist", type="document_card", confidence="high", tags="document_card,doc:1")
     fact = store(db, "a real fact", type="fact", confidence="high", tags="memory-type:user")
     injected = [r["id"] for r in select_tier0_injection(db, char_budget=4000)]
     assert fact in injected
