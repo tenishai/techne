@@ -139,7 +139,7 @@ All notable changes to techne are documented here. Format loosely follows
   counts VM steps, and a C function runs as one, so `SELECT length(zeroblob(50000000))`
   completed at about 590 MB. The guarded connection now caps any string or blob a query
   builds at 1 MB and SQL text at 100 KB, and the result is read with a running total that
-  refuses the query past 16 MB of values; each refusal names its limit. Not yet bounded:
+  refuses the query past 16 MB of values (UTF-8 bytes for text); each refusal names its limit. Not yet bounded:
   SQLite's sorter, for an `ORDER BY` over many large generated rows.
 - **Live-mode reflection no longer writes identity** (#1267). With `reflect.write_to:
   live`, a reflection answer like `{"scope": "identity", "type": "user.name", "content":

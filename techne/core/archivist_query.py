@@ -411,6 +411,17 @@ def readable_schema(config) -> dict:
     }
 
 
+def _value_bytes(v: object) -> int:
+    """A value's size in bytes, as SQLite's own length limit counts it: UTF-8 for
+    text, raw for blobs. len() of a str counts code points, which undercounts any
+    non-ASCII text (Temperance, PR 1311 round 2)."""
+    if isinstance(v, bytes):
+        return len(v)
+    if isinstance(v, str):
+        return len(v.encode("utf-8", "surrogatepass"))
+    return 0
+
+
 def _too_big(e: Exception) -> QueryDenied:
     return QueryDenied(
         f"A value in this query passed the {MAX_VALUE_BYTES:,}-byte limit ({e}). The "
@@ -503,7 +514,7 @@ def query(config, sql: str | None = None, limit: int | None = None) -> dict:
         # MAX_RESULT_BYTES, before the rows behind it are fetched.
         rows, total = [], 0
         for r in cur:
-            total += sum(len(v) for v in r if isinstance(v, (str, bytes)))
+            total += sum(_value_bytes(v) for v in r)
             if total > MAX_RESULT_BYTES:
                 raise QueryDenied(
                     f"The result passed the {MAX_RESULT_BYTES:,}-byte total limit after "

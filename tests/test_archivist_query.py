@@ -635,3 +635,18 @@ def test_a_result_under_the_budget_is_returned_whole(team):
         "SELECT printf('%1000s', n) AS s FROM r"
     )
     assert len(query(team, sql, limit=2000)["rows"]) == 10
+
+
+def test_the_result_budget_counts_utf8_bytes_not_characters(team):
+    """Temperance, PR 1311 round 2: len() of a str counts code points, so text
+    made of 4-byte characters passed four times the stated byte budget."""
+    from techne.core.archivist_query import MAX_RESULT_BYTES
+
+    chars = 200_000  # 800 KB of UTF-8 per row, under the 1 MB value cap
+    rows = MAX_RESULT_BYTES // (chars * 4) + 3
+    sql = (
+        f"WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM r WHERE n<{rows}) "
+        f"SELECT replace(printf('%{chars}s', ''), ' ', char(128512)) AS s FROM r"
+    )
+    with pytest.raises(QueryDenied, match="total limit"):
+        query(team, sql, limit=2000)
