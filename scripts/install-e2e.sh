@@ -8,8 +8,8 @@
 #   scripts/install-e2e.sh --ref v0.18.2   # a published tag over https
 #
 # Commit mode installs HEAD, not uncommitted edits. --ref needs GH_TOKEN or a
-# logged-in gh while the repo is private; the token reaches only the clone and
-# pipx install, as GIT_CONFIG_* env vars. Run by CI's `install-e2e` job.
+# logged-in gh while the repo is private; a credential helper hands it only to
+# the clone and the pipx install. Run by CI's `install-e2e` job.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -61,18 +61,13 @@ command -v python3 >/dev/null || fail "python3 not on PATH after removing uv's d
 # origin/main exactly as a clone from GitHub does (doctor's runtime:revision
 # reads it). A checkout with no .git (plain files copied into a container) is
 # committed as-is first.
-GIT_AUTH=()
+TOKEN=""
 if [ -n "$REF" ]; then
   ORIGIN="https://github.com/tenishai/techne.git"
   PIN="$REF"
-  token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
-  [ -n "$token" ] || token="$(gh auth token 2>/dev/null || true)"
-  if [ -n "$token" ]; then
-    GIT_AUTH=(GIT_CONFIG_COUNT=1
-      "GIT_CONFIG_KEY_0=url.https://x-access-token:${token}@github.com/.insteadOf"
-      GIT_CONFIG_VALUE_0=https://github.com/)
-  fi
-  unset token
+  TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+  [ -n "$TOKEN" ] || TOKEN="$(gh auth token 2>/dev/null || true)"
+  unset GH_TOKEN GITHUB_TOKEN
 else
   src="$REPO_ROOT"
   if ! git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
@@ -89,6 +84,17 @@ else
   PIN="$(git -C "$src" rev-parse HEAD)"
 fi
 echo "installing from $ORIGIN at $PIN"
+
+# Runs one fetching command with the token, if any, kept out of argv and of
+# every later process: a credential helper reads it from a variable exported
+# only in this subshell.
+with_git_auth() (
+  if [ -n "$TOKEN" ]; then
+    export E2E_GIT_TOKEN="$TOKEN" GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=credential.https://github.com.helper
+    export GIT_CONFIG_VALUE_0='!f() { echo username=x-access-token; echo "password=$E2E_GIT_TOKEN"; }; f'
+  fi
+  "$@"
+)
 
 # --- the MCP round trip --------------------------------------------------------
 # Launches the server with the exact command `init` wrote to ~/.claude.json and
@@ -150,14 +156,14 @@ PY
 # no input yet count as "not confirmed working". Until 1318 decides how a fresh
 # install should read, this pins TODAY's ?, ✗ and ! lines by name, so a check
 # that newly reads unobservable, broken or stale, or stops, breaks this test.
-# runtime:loaded joins it for a git checkout without `ps` (it reads the process
-# table); a packaged install reports it dormant.
+# runtime:loaded is left out: it reads the HOST's process table, so it reports
+# whatever techne already runs on the machine, not this install (PR 1320 r3).
 EXPECTED_UNCONFIRMED="hook:codex_grep_assist hook:post_tool_use hook:session_end hook:user_prompt_submit rail:consolidate rail:dream"
 
 check_install() {
   local label="$1"
   echo "  + techne init"
-  ! env | grep -qE '^(TECHNE_|CLAUDE_CONFIG_DIR=)' || fail "$label: a TECHNE_/CLAUDE_CONFIG_DIR variable survived; init would write outside \$HOME"
+  ! compgen -e | grep -E '^(TECHNE_|CLAUDE_CONFIG_DIR$)' >/dev/null || fail "$label: a TECHNE_/CLAUDE_CONFIG_DIR variable survived; init would write outside \$HOME"
   techne init >"$WORKDIR/init-$label.log" 2>&1 || { cat "$WORKDIR/init-$label.log"; fail "$label: techne init failed"; }
   [ -f "$HOME/.claude/settings.json" ] && grep -qF "Config saved: $HOME/.techne/config.yaml" "$WORKDIR/init-$label.log" \
     || { cat "$WORKDIR/init-$label.log"; fail "$label: techne init wrote somewhere other than the fresh \$HOME"; }
@@ -193,12 +199,11 @@ PY
   local rc=0
   techne doctor >"$WORKDIR/doctor-$label.log" 2>&1 || rc=$?
   local got
-  got="$(sed -nE 's/^  (\?|✗|!) ([a-z_:-]+) .*/\2/p' "$WORKDIR/doctor-$label.log" | sort | tr '\n' ' ' | sed 's/ $//')"
+  got="$(sed -nE 's/^  (\?|✗|!) ([a-z_:-]+) .*/\2/p' "$WORKDIR/doctor-$label.log" | { grep -vx 'runtime:loaded' || true; } | sort | tr '\n' ' ' | sed 's/ $//')"
   echo "    -> exit $rc; not confirmed: ${got:-none}"
   if [ -z "$REF" ]; then
-    local want="$EXPECTED_UNCONFIRMED"
-    [ "$label" != source ] || command -v ps >/dev/null || want="$want runtime:loaded"
-    want="$(tr ' ' '\n' <<<"$want" | sort | tr '\n' ' ' | sed 's/ $//')"
+    local want
+    want="$(tr ' ' '\n' <<<"$EXPECTED_UNCONFIRMED" | sort | tr '\n' ' ' | sed 's/ $//')"
     if [ "$got" != "$want" ]; then
       cat "$WORKDIR/doctor-$label.log"
       fail "$label: doctor's unconfirmed set changed (techne#1318). expected: $want; got: ${got:-none}"
@@ -213,7 +218,7 @@ run_source() {
   mkdir -p "$HOME"
   (
     cd "$HOME"
-    env ${GIT_AUTH[@]+"${GIT_AUTH[@]}"} git clone -q "$ORIGIN" techne
+    with_git_auth git clone -q "$ORIGIN" techne
     cd techne
     [ -z "$REF" ] || git -c advice.detachedHead=false checkout -q "$PIN"
     python3 -m venv .venv
@@ -244,7 +249,7 @@ run_pipx() {
     fi
     local url="$ORIGIN"
     [ -n "$REF" ] || url="file://$ORIGIN"
-    env ${GIT_AUTH[@]+"${GIT_AUTH[@]}"} "$pipx" install "tenish-techne[recommended] @ git+$url@$PIN" >"$WORKDIR/pipx.log" 2>&1 \
+    with_git_auth "$pipx" install "tenish-techne[recommended] @ git+$url@$PIN" >"$WORKDIR/pipx.log" 2>&1 \
       || { tail -20 "$WORKDIR/pipx.log"; fail "pipx: install failed"; }
     "$pipx" ensurepath >/dev/null 2>&1 || true
     # "Now open a new shell": what ensurepath adds, ~/.local/bin, is on PATH there.
@@ -252,7 +257,9 @@ run_pipx() {
     [ "$(command -v techne)" = "$HOME/.local/bin/techne" ] || fail "pipx: techne on PATH is $(command -v techne)"
     check_install pipx
 
-    echo "  + techne vectors backfill (downloads the model, as a user's first run does)"
+    # init already downloaded the model cold (it defaults to --vectors, and never
+    # fails on a failed download); backfill is the step that proves it worked.
+    echo "  + techne vectors backfill"
     techne vectors backfill >"$WORKDIR/backfill.log" 2>&1 || { tail -20 "$WORKDIR/backfill.log"; fail "pipx: vectors backfill failed"; }
     tail -3 "$WORKDIR/backfill.log" | sed 's/^/    /'
     techne vectors status >"$WORKDIR/vstatus.log" 2>&1 || { cat "$WORKDIR/vstatus.log"; fail "pipx: vectors status failed"; }
