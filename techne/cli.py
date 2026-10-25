@@ -2138,7 +2138,14 @@ def custodian_run(ctx, rail_names, limit, dry_run, as_json):
         # success while producing nothing is the exact #555 failure, one layer up.
         if run["error"]:
             click.echo(f"  error: {run['error']}")
-        if run["emitted"] and run["answered"] == 0:
+        # An emit that raised, or any answer that failed, is a failure too
+        # (techne#1248). The one error that is not: a rail with no model bound,
+        # which stays resident by design.
+        if (
+            (run["emitted"] and run["answered"] == 0)
+            or (run["error"] and not str(run["error"]).startswith("no model bound"))
+            or run["failed"] > 0
+        ):
             failures += 1
 
     if failures:

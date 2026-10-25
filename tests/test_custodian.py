@@ -1679,3 +1679,27 @@ def test_status_header_does_not_claim_resident_when_a_rail_override_binds(config
 
     assert "rails stay resident" not in out, out
     assert "vertex_ai/MODEL-B" in out
+
+
+@pytest.mark.parametrize(
+    "rail,code",
+    [
+        ({"error": "emit failed: database is locked", "emitted": 0, "answered": 0, "failed": 0}, 1),
+        ({"error": None, "emitted": 10, "answered": 1, "failed": 9}, 1),
+        ({"error": "no model bound — rail stays resident (set custodian.model)",
+          "emitted": 0, "answered": 0, "failed": 0}, 0),
+        ({"error": None, "emitted": 3, "answered": 3, "failed": 0}, 0),
+    ],
+    ids=["emit-raised", "some-answers-failed", "no-model-bound", "clean"],
+)
+def test_cli_run_exit_status_counts_emit_errors_and_failed_answers(config, monkeypatch, rail, code):
+    """techne#1248: an emit that raised, or a run that answered 1 of 10, exited 0."""
+    from click.testing import CliRunner
+
+    from techne.cli import main
+
+    report = {"bound": True, "rails": [{"rail": "consolidate", "counts": {}, **rail}]}
+    monkeypatch.setattr("techne.config.Config.load", lambda *a, **k: config)
+    monkeypatch.setattr("techne.core.custodian.run_custodian", lambda *a, **k: report)
+    result = CliRunner().invoke(main, ["custodian", "run", "--rail", "consolidate"])
+    assert result.exit_code == code, result.output
