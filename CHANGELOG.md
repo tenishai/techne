@@ -118,6 +118,14 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- **A NUL byte or a lone surrogate in a query no longer breaks search** (#1249). `search()`
+  raised `OperationalError: unterminated string` on a NUL and `UnicodeEncodeError` on a lone
+  surrogate such as `\ud800`, so `techne_search`, `techne_recall` and `techne search` errored and
+  per-turn recall injected nothing for that prompt. Query text is now cleaned where it is turned
+  into an FTS5 MATCH string and where it is embedded: NUL, DEL and the other control characters
+  except tab and line breaks become spaces, and lone surrogates become U+FFFD. The recall hooks
+  log the cleaned query, because a surrogate in the logged trigger made the injection log drop
+  that row without a word.
 - **A coord reader with no read receipts no longer gets the whole bus** (#1274). A session with no
   `-n` name, one sharing its name with another live session, or a replayed hook whose sidecar was
   gone had no receipts, so its first tool call injected every message back to the first: 832
