@@ -622,6 +622,17 @@ def test_a_root_password_is_still_redacted(text):
     assert "S3cr3tPassw0rd" not in redact_credentials(text)
 
 
+@pytest.mark.parametrize(
+    "text,secret",
+    [("curl -u root:2024Spring! https://x", "2024Spring!"),
+     ("curl -u root:rootpass99 https://x", "rootpass99")],
+)
+def test_a_root_password_that_starts_like_the_exemption_is_redacted(text, secret):
+    r"""techne#1302: the exemption skips `root:root` and `root:<gid>` only as a whole
+    token. Without its trailing (?!\S) anchor these two were stored in the clear."""
+    assert secret not in redact_credentials(text)
+
+
 def test_safe_cut_repeats_until_no_match_straddles():
     """Prudence round 2 on PR 1272: picking the earliest match is not enough on
     its own: when two matches overlap, one pull-back can land inside the other,

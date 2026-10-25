@@ -75,6 +75,11 @@ def now_iso() -> str:
     return datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
 
 
+#: Clean runs, with no error between them, before a recorded hook error clears
+#: (techne#1251).
+CLEAN_RUNS_TO_CLEAR = 20
+
+
 def record_hook_run(
     db_path,
     hook: str,
@@ -98,7 +103,8 @@ def record_hook_run(
             fact.
         detail: optional short human-readable extra (counts, a path).
         error: ``{"stage": ..., "msg": ...}`` when the run failed. ``None`` on a
-            clean run, which CLEARS any previously recorded error.
+            clean run; CLEAN_RUNS_TO_CLEAR of those in a row clear a recorded
+            error (techne#1251).
         ts: override the timestamp (tests); defaults to now.
     """
     from techne.hooks._timeout import HookTimeout
@@ -146,11 +152,21 @@ def record_hook_run(
                 stamped = dict(error)
                 stamped.setdefault("ts", stamp)
                 set_state(conn, error_key, stamped, commit=False)
-            elif get_state(conn, error_key):
-                # Clear a stale error so a hook that has been fixed stops
-                # reporting a failure it no longer has. Guarded by a read so the
-                # common (never-failed) case does not write on every run.
-                set_state(conn, error_key, {}, commit=False)
+            else:
+                prior = get_state(conn, error_key)
+                if prior:
+                    # Clear only after CLEAN_RUNS_TO_CLEAR clean runs with no new
+                    # error between them (techne#1251). The key is shared by every
+                    # session, so clearing on ANY clean run let a healthy session
+                    # erase a failing one's error within seconds, and doctor read
+                    # green. A session failing on every call resets the count, so
+                    # BROKEN stays; a fixed hook clears once the count is reached.
+                    # Guarded by the read, so the never-failed case writes nothing.
+                    clean = int(prior.get("clean_runs", 0)) + 1
+                    if clean >= CLEAN_RUNS_TO_CLEAR:
+                        set_state(conn, error_key, {}, commit=False)
+                    else:
+                        set_state(conn, error_key, {**prior, "clean_runs": clean}, commit=False)
             # One transaction for all of it: one commit, and no reader ever sees
             # a last_run whose ms is missing from the ring.
             conn.commit()
