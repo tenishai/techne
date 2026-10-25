@@ -143,7 +143,10 @@ def test_every_job_still_lives_in_this_one_workflow():
     # `acceptance` added 2026-09-29 (techne#1059): self-hosted, and carries
     # `TRUSTED_POOL`'s exact guard expression, per
     # test_no_fork_reachable_job_runs_on_self_hosted.
-    expected = {"test", "eval-vec", "arch-cards", "crash-recovery", "acceptance", "fork-pr"}
+    # `install-e2e` added 2026-10-25 (techne#1319): self-hosted, same guard.
+    expected = {
+        "test", "eval-vec", "arch-cards", "crash-recovery", "acceptance", "install-e2e", "fork-pr",
+    }
     assert set(jobs) == expected, (
         f"job set changed: {sorted(jobs)}. All of them ride this one trigger — and "
         "a new job must also pick a side of the techne#556 trust split."
