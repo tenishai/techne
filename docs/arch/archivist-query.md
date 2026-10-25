@@ -1,7 +1,7 @@
 ---
 card: arch-card:techne-archivist-query
 updated: 2026-08-21
-anchor: techne/core/archivist_query.py sha=7af70f73fbffaf640ea406f99b2516020d034499
+anchor: techne/core/archivist_query.py sha=58aac2bcaadaa8e840f183ae8da077518b34bd4c
 ---
 # archivist-query — guarded read-only SQL over the team store (techne#554)
 

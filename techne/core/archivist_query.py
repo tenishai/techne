@@ -496,10 +496,11 @@ def query(config, sql: str | None = None, limit: int | None = None) -> dict:
         except sqlite3.DatabaseError as e:
             if isinstance(e, sqlite3.DataError):
                 raise _too_big(e) from e
-            if "too many columns" in str(e):
+            if "too many columns" in str(e) or "too many terms" in str(e):
+                # SQLITE_LIMIT_COLUMN also caps ORDER BY / GROUP BY terms.
                 raise QueryDenied(
-                    f"The query selects more than {MAX_COLUMNS} columns ({e}). The "
-                    "limit bounds the size of one row (techne#1256); select fewer."
+                    f"The query has more than {MAX_COLUMNS} columns or sort terms ({e}). "
+                    "The limit bounds the size of one row (techne#1256); use fewer."
                 ) from e
             if ops:
                 refused = sorted(set(ops))

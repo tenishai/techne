@@ -659,9 +659,19 @@ def test_a_query_wider_than_the_column_cap_is_refused_before_it_runs(team):
     columns were built (~1.2 GB) before it saw them."""
     from techne.core.archivist_query import MAX_COLUMNS
 
-    cols = ", ".join(f"printf('%999000s', {i}) AS c{i}" for i in range(MAX_COLUMNS + 1))
-    with pytest.raises(QueryDenied, match="columns"):
+    # Tiny columns, so only the column cap can refuse it: with wide ones the result
+    # budget refused it too, and the test passed with the cap removed (PR 1311 r6).
+    cols = ", ".join(f"{i} AS c{i}" for i in range(MAX_COLUMNS + 1))
+    with pytest.raises(QueryDenied, match=f"more than {MAX_COLUMNS} columns"):
         query(team, f"SELECT {cols}", limit=1)
+
+
+def test_too_many_sort_terms_is_a_named_refusal(team):
+    from techne.core.archivist_query import MAX_COLUMNS
+
+    terms = ", ".join(f"id+{i}" for i in range(MAX_COLUMNS + 1))
+    with pytest.raises(QueryDenied, match=f"more than {MAX_COLUMNS}"):
+        query(team, f"SELECT id FROM knowledge ORDER BY {terms}")
 
 
 def test_the_widest_real_join_still_fits_the_column_cap(team):
