@@ -371,8 +371,6 @@ def guarded_migrate(
     outer transaction. Per-machine locking is sufficient — each machine has its
     own db file. ``run_steps(conn, current, target)`` owns version-writing.
     """
-    lock_path = db_path.with_suffix(db_path.suffix + ".migrate.lock")
-
     def _do() -> None:
         # Double-checked: a process we raced may have migrated while we waited.
         current = read_version(conn)
@@ -419,13 +417,22 @@ def guarded_migrate(
         print(f"[techne] migrating {label} v{current} → v{target_version}{note}", file=sys.stderr)
         run_steps(conn, current, target_version)
 
+    with_migration_lock(db_path, _do)
+
+
+def with_migration_lock(db_path: Path, fn: Callable[[], None]) -> None:
+    """Run fn under the per-db cross-process migration flock (``<db>.migrate.lock``).
+
+    Shared by guarded_migrate and core's first init (techne#1241), so creating a
+    store and migrating it are serialised against each other."""
+    lock_path = db_path.with_suffix(db_path.suffix + ".migrate.lock")
     if fcntl is None:  # no file locking available — run unguarded (legacy behaviour)
-        _do()
+        fn()
         return
     with open(lock_path, "w") as lock_file:
         fcntl.flock(lock_file, fcntl.LOCK_EX)
         try:
-            _do()
+            fn()
         finally:
             fcntl.flock(lock_file, fcntl.LOCK_UN)
 

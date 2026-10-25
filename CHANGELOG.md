@@ -128,6 +128,20 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- **A malformed MCP request no longer ends the techne server** (#1247). `"params": null`
+  on a `tools/call` raised out of the stdio loop, and every techne tool in the session was
+  gone until a restart; a non-string `method` did the same. Each line is now answered on its
+  own: a parse error gets -32700, a batch or a non-object line -32600, bad `params` -32602,
+  and any exception during dispatch -32603. A request without an `id` is a notification and
+  is no longer executed (a `tools/call` notification used to run its write and reply with
+  `"id": null`).
+- **An empty `schema_version` table no longer breaks every connection** (#1241). First init
+  commits the schema before it writes the version row, so a kill or two hooks racing on a
+  fresh `TECHNE_HOME` could leave the table empty, and every hook, CLI command and the MCP
+  server then failed on open with `TypeError`. Such a store is now treated as an unfinished
+  first init: the schema is completed, the version stamped and the reconcile passes run.
+  First init takes the same `<db>.migrate.lock` as migrations, so it runs once across
+  processes, and `connect()` closes its connection when initialization fails.
 - **A NUL byte or a lone surrogate in a query no longer breaks search** (#1249). `search()`
   raised `OperationalError: unterminated string` on a NUL and `UnicodeEncodeError` on a lone
   surrogate such as `\ud800`, so `techne_search`, `techne_recall` and `techne search` errored and
