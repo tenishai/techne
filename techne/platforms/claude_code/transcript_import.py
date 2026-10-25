@@ -606,8 +606,9 @@ def backfill_uncaptured(
         if resumable:
             cursor = {**ident, "offset": offset, "pending": pending}
             if cursor != prior:
-                # In the SAME transaction as the inserts (techne#170): a crash between them would otherwise leave rows
-                # committed behind a stale cursor, or a cursor past uncommitted rows.
+                # In the SAME transaction as the inserts (techne#170): a crash between
+                # them would otherwise leave rows committed behind a stale cursor, or a
+                # cursor past uncommitted rows.
                 set_state(conn, cursor_key, cursor, commit=False)
                 if prior is None:
                     # One key per session; nothing else removes them (techne#1073).

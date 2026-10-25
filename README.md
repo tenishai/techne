@@ -903,7 +903,7 @@ The keys that choose **where memory can go**, or what reaches the model's contex
 `sync.allow_unlisted_sinks` ride with it), `connections`, `llm_api_base`, `llm_api_key`,
 `model`, `model_engine`, `reflect.model`, `conflict.model`, `custodian.model`,
 `custodian.rail_models`, `archivist_db_path`, `standalone`, `archivist`, `archivist_publish_tags`, `recall.allowed_sources`,
-`recall.allow_unlisted_sources`, `stores`, `sources` — can be pinned in a `config.operator.yaml` that techne honors **only
+`recall.allow_unlisted_sources`, `stores` — can be pinned in a `config.operator.yaml` that techne honors **only
 while the file is provably not writable by the process reading it**. Resolved in order:
 
 ```
@@ -927,6 +927,9 @@ deliberately not governed: they only rank and bound sources that are already adm
 
 **Removed (#1074):** `search.expansion_ratio`, and the `sync.auth` / `sync.audience` fields.
 None of them reached any code. Configs carrying them still load.
+
+**Removed (#1262):** `sources` (`sources.claude_code_transcripts`). Nothing read it. Configs
+carrying it still load, and the block is written back unchanged.
 
 **Removed in 0.13.0:** `search.mmr_lambda`. It round-tripped through `config.yaml` and was
 never passed to any search function, so setting it was a silent no-op. Existing configs
