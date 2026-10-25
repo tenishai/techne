@@ -105,8 +105,11 @@ def test_search_vec_direct(home, q):
     assert isinstance(search_vec(home.db_path, q), list)
 
 
-def test_has_direct_match_on_surrogate(home):
-    assert has_direct_match(home.db_path, LONE, table="knowledge") is True
+# AND semantics: the NUL splits "hello" into "hel lo", and the escape glues
+# "31m" onto "hello", so only LONE names terms the stored row has.
+@pytest.mark.parametrize("q,expected", [(NUL, False), (LONE, True), (MIXED, False)])
+def test_has_direct_match(home, q, expected):
+    assert has_direct_match(home.db_path, q, table="knowledge") is expected
 
 
 @pytest.mark.parametrize("q", HOSTILE)
