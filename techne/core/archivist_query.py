@@ -162,6 +162,8 @@ MAX_VALUE_BYTES = 1_000_000
 MAX_RESULT_BYTES = 16_000_000
 #: Longest SQL text the surface accepts.
 MAX_SQL_BYTES = 100_000
+#: Widest row a query may return, so one row is at most MAX_COLUMNS x MAX_VALUE_BYTES.
+MAX_COLUMNS = 64
 
 #: Outcome codes. THREE, not two, and the third is the point (#554 constraint 1).
 #: An empty result must be distinguishable from an unasked question, and BOTH must be
@@ -374,6 +376,11 @@ def _connect(path: Path, denied: list[str], ops: list[str]) -> sqlite3.Connectio
     # the SQL text.
     conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, MAX_VALUE_BYTES)
     conn.setlimit(sqlite3.SQLITE_LIMIT_SQL_LENGTH, MAX_SQL_BYTES)
+    # And the width of a row: the result budget runs per row, after SQLite and
+    # Python hold the whole row, so 400 one-MB columns took ~1.2 GB before the
+    # budget saw them (Prudence, PR 1311 round 4). The widest real read,
+    # knowledge JOIN knowledge_deps, is 25 columns.
+    conn.setlimit(sqlite3.SQLITE_LIMIT_COLUMN, MAX_COLUMNS)
     return conn
 
 
@@ -485,6 +492,11 @@ def query(config, sql: str | None = None, limit: int | None = None) -> dict:
         except sqlite3.DatabaseError as e:
             if isinstance(e, sqlite3.DataError):
                 raise _too_big(e) from e
+            if "too many columns" in str(e):
+                raise QueryDenied(
+                    f"The query selects more than {MAX_COLUMNS} columns ({e}). The "
+                    "limit bounds the size of one row (techne#1256); select fewer."
+                ) from e
             if ops:
                 refused = sorted(set(ops))
                 detail = (
@@ -524,6 +536,9 @@ def query(config, sql: str | None = None, limit: int | None = None) -> dict:
                 )
             rows.append(_jsonable(dict(r)))
             if len(rows) > cap:
+                # The row past the cap only signals truncation, but its bytes were
+                # counted above, so a result whose returned rows fit can still be
+                # refused. Refusing is the safe direction; keep it.
                 break
         columns = [d[0] for d in (cur.description or [])]
     except sqlite3.DataError as e:

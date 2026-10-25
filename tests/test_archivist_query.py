@@ -652,3 +652,18 @@ def test_the_result_budget_counts_utf8_bytes_not_characters(team):
     )
     with pytest.raises(QueryDenied, match="total limit"):
         query(team, sql, limit=2000)
+
+
+def test_a_query_wider_than_the_column_cap_is_refused_before_it_runs(team):
+    """Prudence, PR 1311 round 4: the result budget runs per row, so 400 wide
+    columns were built (~1.2 GB) before it saw them."""
+    from techne.core.archivist_query import MAX_COLUMNS
+
+    cols = ", ".join(f"printf('%999000s', {i}) AS c{i}" for i in range(MAX_COLUMNS + 1))
+    with pytest.raises(QueryDenied, match="columns"):
+        query(team, f"SELECT {cols}", limit=1)
+
+
+def test_the_widest_real_join_still_fits_the_column_cap(team):
+    result = query(team, "SELECT * FROM knowledge JOIN knowledge_deps LIMIT 1")
+    assert result["outcome"]["code"] in (OUTCOME_ROWS, OUTCOME_NO_ROWS)
