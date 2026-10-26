@@ -120,11 +120,11 @@ class TestVectorsBackfill:
         monkeypatch.setattr(E, "backend_available", lambda: True)
         monkeypatch.setattr(
             "techne.core.inference.backfill_tags",
-            lambda db, config, **kw: calls.append(kw) or 4,
+            lambda db, config, **kw: calls.append(kw) or {"scanned": 4, "tagged": 3},
         )
         result = CliRunner().invoke(main, ["vectors", "backfill", "--no-download"])
         assert result.exit_code == 1, result.output
-        assert json.loads(result.stdout) == {"tags": 4}
+        assert json.loads(result.stdout) == {"tags": {"scanned": 4, "tagged": 3}}
         assert calls == [{"pending_only": True}]
         assert "cannot load extensions" in result.stderr
 
