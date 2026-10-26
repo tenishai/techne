@@ -5,7 +5,7 @@
 #
 #   scripts/install-e2e.sh                 # both paths, this checkout's HEAD
 #   scripts/install-e2e.sh --path source   # source | pipx
-#   scripts/install-e2e.sh --ref v0.18.2   # a published tag over https
+#   scripts/install-e2e.sh --ref v0.19.0   # a published tag over https
 #
 # Commit mode installs HEAD, not uncommitted edits. --ref needs GH_TOKEN or a
 # logged-in gh while the repo is private; a credential helper hands it only to

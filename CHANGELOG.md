@@ -5,6 +5,8 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.19.0] — 2026-10-26
+
 ### Added
 
 - **`est_tokens` on every `techne_search` and `techne_recall` row, and `row_chars` to open a cut one**
@@ -323,6 +325,9 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Upgrading
 
+- **On a `uv tool install`, re-run `techne init`** so `~/.claude/techne-hook.sh` picks up
+  the new heal command (PR 1297). The launcher is written only by `init`, so an existing one
+  keeps the 0.18.2 heal, which can't recover a uv tool install whose Python is gone.
 - **Restart the MCP server.** Schema v30 (the per-session token columns on `sessions`) is
   applied when the store is next opened; the columns are nullable and existing rows read
   NULL until `techne usage-backfill`.
