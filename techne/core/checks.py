@@ -3154,7 +3154,17 @@ def check_vector_coverage(config) -> CheckResult:
                 #
                 # `backend_available()` is the honest expression of "the operator
                 # turned this on"; `model_cached()` is only the REASON it is idle.
-                if _emb.backend_available():
+                from techne.core.search import no_extension_loading_lines
+                from techne.core.search import sqlite_loads_extensions
+
+                if _emb.backend_available() and not sqlite_loads_extensions():
+                    # THE BACKFILL REMEDY DOES NOTHING HERE (techne#1321): this
+                    # interpreter's sqlite3 cannot load sqlite-vec, so name the
+                    # cause and hand over the reinstall instead.
+                    why = no_extension_loading_lines()
+                    detail = why[0]
+                    remedy = why[2].strip()
+                elif _emb.backend_available():
                     cached = _emb.model_cached(config)
                     if cached is False:
                         detail = (
