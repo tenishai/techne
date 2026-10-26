@@ -624,7 +624,10 @@ techne probe [--runtime claude-code|opencode|pi] [--mode off-test|pull|different
 # Archivist — read-only SQL over the team (or local) knowledge store
 techne archivist schema                    # tables and columns `archivist query` can read
 techne archivist query SQL [--limit N] [--json]
-                                           # one guarded read-only SELECT
+                                           # one guarded read-only SELECT, run in a worker
+                                           # process with a capped heap and a timeout.
+                                           # Exit 1 = bad SQL, 2 = denied by a guard,
+                                           # 3 = the worker failed to start or died
 # Librarian (librarian.db) — documents: transcripts + markdown; recall the gist, fetch full on demand
 techne librarian                           # document + card counts
 techne librarian index-transcripts [--platform claude-code] [--dir DIR]
