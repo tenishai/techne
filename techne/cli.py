@@ -2922,7 +2922,14 @@ def _vector_next_steps(db_path: Path) -> list[str]:
     """
     from techne.core.capabilities import vectors_install_command
     from techne.core.embeddings import backend_available
+    from techne.core.search import no_extension_loading_lines, sqlite_loads_extensions
 
+    # FIRST, because both hints below end in `techne vectors backfill`, which
+    # exits 1 on this interpreter (techne#1321).
+    if not sqlite_loads_extensions():
+        return ["  Semantic recall is NOT available on this Python."] + [
+            f"  {line}" for line in no_extension_loading_lines()
+        ]
     if not backend_available():
         return [
             "  Semantic recall is OFF: no embedding backend is installed, so search is",

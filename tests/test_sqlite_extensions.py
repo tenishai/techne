@@ -150,3 +150,26 @@ class TestVectorsCoverage:
         assert "cannot load extensions" in res.detail
         assert res.remedy.startswith("uv tool install --force --managed-python")
         assert res.remedy != "techne vectors backfill"
+
+
+class TestEverySurfaceDropsTheBackfillHint:
+    """PR 1324 review, Important 1: `capabilities` and `init --no-vectors` still
+    said `techne vectors backfill`, which exits 1 on this interpreter."""
+
+    def test_capabilities_lists_neither_vectors_entry(self, no_ext, monkeypatch):
+        from techne.core.capabilities import _probe_vectors_backend, _probe_vectors_model
+
+        monkeypatch.setattr(E, "backend_available", lambda: True)
+        monkeypatch.setattr(E, "model_cached", lambda config=None: False)
+
+        assert _probe_vectors_model(Config()) is None
+        assert _probe_vectors_backend(Config()) is None
+
+    def test_init_without_the_warm_step_names_the_cause(self, tmp_path, no_ext, monkeypatch):
+        from techne.cli import _vector_next_steps
+
+        monkeypatch.setattr(E, "backend_available", lambda: True)
+        out = "\n".join(_vector_next_steps(tmp_path / "techne.db"))
+
+        assert "cannot load extensions" in out
+        assert "techne vectors backfill" not in out

@@ -3160,7 +3160,9 @@ def check_vector_coverage(config) -> CheckResult:
                 if _emb.backend_available() and not sqlite_loads_extensions():
                     # THE BACKFILL REMEDY DOES NOTHING HERE (techne#1321): this
                     # interpreter's sqlite3 cannot load sqlite-vec, so name the
-                    # cause and hand over the reinstall instead.
+                    # cause and hand over the reinstall instead. Still gated on the
+                    # backend, so an operator who never installed the extra gets no
+                    # remedy, as #728 decided.
                     why = no_extension_loading_lines()
                     detail = why[0]
                     remedy = why[2].strip()
