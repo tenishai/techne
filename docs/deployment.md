@@ -301,13 +301,14 @@ the resolved state rather than announcing a change.
 `techne init` reports success as `Semantic recall ready: embedded N stored row(s).`
 `techne vectors backfill` embedded rows only if it printed a JSON object with counts; a
 JSON object holding only `tags` (the pending tags it inferred) means it embedded nothing,
-and some paths print a plain line and no JSON at all. Check stderr and the exit code too. On a Python whose `sqlite3` can't load extensions it exits 1 and says so on
-stderr (#1321); reinstall techne with a uv-managed, distro or Homebrew Python. A
-`vector search unavailable: no embedding backend installed` line means it embedded nothing
-and exited 0 — and that line appears for two different causes: the `vectors` extra absent, or the extra present but the embedding
-backend unable to load. `cli.py` deliberately avoids naming sqlite-vec in the second case,
-because blaming it sends an operator to re-check what they have already ruled out — so
-diagnose from whether you got counts, not from the cause.
+and some paths print a plain line and no JSON at all. Check stderr and the exit code too.
+On a Python whose `sqlite3` can't load extensions it exits 1 and says so on stderr
+(#1321); reinstall techne with a uv-managed, distro or Homebrew Python. A `vector search
+unavailable: no embedding backend installed` line means it embedded nothing and exited 0 —
+and that line appears for two different causes: the `vectors` extra absent, or the extra
+present but the embedding backend unable to load. `cli.py` deliberately avoids naming
+sqlite-vec in the second case, because blaming it sends an operator to re-check what they
+have already ruled out — so diagnose from whether you got counts, not from the cause.
 
 If you did not get counts: `techne vectors status` reports whether a backend resolved, and
 re-running `techne vectors backfill` somewhere the model cache can be fetched fixes the

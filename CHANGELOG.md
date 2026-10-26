@@ -158,8 +158,10 @@ All notable changes to techne are documented here. Format loosely follows
   "embedded N" count no longer includes swept orphans. `techne vectors backfill` exits 1
   with the same message on stderr (pending tags are still inferred), and doctor's
   `vectors:coverage` names the cause and the reinstall instead of the backfill. `techne
-  capabilities` drops both vectors entries there, and `init --no-vectors` names the cause
-  instead of suggesting the backfill.
+  capabilities` drops both vectors entries there, and `init --no-vectors` and `techne vectors
+  status` (#1325) name the cause instead of suggesting the backfill.
+- **`techne reflect drain` no longer says live mode promotes to identity** (#1267). Under
+  `write_to: live` it now says identity candidates stay pending for `techne reflect review`.
 - **`techne doctor` passes on a fresh install** (#1318). On a store under 7 days old where
   no session has finished yet, a hook that has never fired reads `dormant` ("not yet fired;
   no session has finished since install") instead of `unobservable`, so it no longer
