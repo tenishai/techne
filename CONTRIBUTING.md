@@ -24,7 +24,7 @@ run `bash scripts/acceptance.sh` locally when you add either.
 CI's `install-e2e` job follows the README's source and pipx installs from a fresh
 `$HOME` and checks init, the hooks, MCP, store and recall, doctor and the vector
 backfill. If you change the install path, `init` or doctor, run
-`scripts/install-e2e.sh --path source` locally; the pipx path takes about 9 minutes.
+`scripts/install-e2e.sh --path source` locally; the pipx path takes about 11 minutes.
 
 To see how long CI jobs queue for the self-hosted runners, run `python3 scripts/ci_queue_wait.py` (read-only, needs an authenticated `gh`; see its docstring).
 

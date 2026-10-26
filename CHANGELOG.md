@@ -51,7 +51,7 @@ All notable changes to techne are documented here. Format loosely follows
   (#1319). Both the source and pipx paths start from a fresh `$HOME` and check init, all
   8 hook events, MCP `initialize` and `tools/list`, store and recall, the SessionStart
   hook, `techne doctor` exiting 0, and (pipx) the vector backfill. `--ref vX.Y.Z` tests a
-  published tag; `docs/releasing.md` runs it after tagging. The job takes about 9 minutes,
+  published tag; `docs/releasing.md` runs it after tagging. The job takes 10 to 12 minutes,
   almost all of it the pipx `[recommended]` install.
 
 ### Changed
@@ -331,19 +331,31 @@ All notable changes to techne are documented here. Format loosely follows
   recall is ready. The SessionStart chain joins its steps with `;`, so the hook is
   unaffected. To get semantic recall, reinstall with a Python whose `sqlite3` can load
   extensions (see the README's install section).
-- **Scripts that gate on `techne doctor`** now see exit 0 on a store under 7 days old where
-  hooks and rails haven't had their first run; they read DORMANT instead of UNOBSERVABLE.
+- **Scripts that gate on `techne doctor`** now see exit 0 straight after install. A hook that
+  hasn't fired before any session has finished, on a store under 7 days old, and a rail
+  that hasn't produced while the store is younger than that rail's interval (3 days for
+  reflect, 14 for consolidate and dream), read DORMANT instead of UNOBSERVABLE. Once a session has finished, a hook with
+  no record fails again.
+- **`techne custodian run`** now exits non-zero when a rail's emit raised or only some
+  answers came back (#1248). A scheduled custodian job that ignored partial failures will
+  start reporting them.
+- **A bare `techne_mark_read`** marks only messages the reader was shown (#1243), so call
+  `techne_inbox` first in that session; an agent that marks read without listing leaves
+  messages unread.
+- **`techne vectors backfill --tags`** prints one JSON document with a `tags` key, not two
+  (#1215).
 - **`techne archivist query`** runs each query in a worker process: about 110 ms more per
   query, `archivist_query_heap_bytes` (64 MiB) and `archivist_query_timeout_s` (10 s) as the
   limits, and exit 3 when the worker can't start or dies. Scripts that treated any non-zero
   exit as "bad SQL" should tell 1, 2 and 3 apart.
 - **Peer messages and recalled rows render as one line each,** with at most 5 messages and
   1500 characters per body in one post_tool_use block. Anything that parsed the old
-  multi-line injection needs to follow the `📬 name (#id): «body»` shape.
+  multi-line injection needs to follow the `📬 name (#id): «body»` shape, or
+  `📬 name [coord] (#id): «body»` for a broadcast.
 - **The `sources` config section is retired** (#1262). Nothing ever read it; configs that
   carry it still load and keep the block.
-- **Contributors:** PR pushes run the `test` job on Python 3.12 only (#1233), and every PR
-  also runs `install-e2e`, which adds about 9 minutes.
+- **Contributors:** PR pushes run the `test` job on Python 3.12 only (#1233), and PRs from
+  branches in this repo also run `install-e2e`, which takes 10 to 12 minutes.
 
 ## [0.18.2] — 2026-10-07
 
