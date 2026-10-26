@@ -423,7 +423,9 @@ class TestNoPsFallsBackToProc:
     a fresh install. A missing `ps` is not a failed read; /proc holds the table."""
 
     @staticmethod
-    def _fake_proc(root: pathlib.Path, pid: int, cmdline: bytes, stat_tail: str, btime=1_700_000_000):
+    def _fake_proc(
+        root: pathlib.Path, pid: int, cmdline: bytes, stat_tail: str, btime=1_700_000_000
+    ):
         root.mkdir(exist_ok=True)
         (root / "stat").write_text(f"cpu  1 2 3\nbtime {btime}\nprocesses 9\n")
         d = root / str(pid)

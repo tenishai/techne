@@ -3212,7 +3212,9 @@ class TestFreshInstallIsDormantNotFailing:
         conn = connect(db)
         try:
             conn.execute("UPDATE schema_version SET applied_at = ?", (_iso(store_age),))
-            conn.executemany("INSERT INTO sessions (id, started_at, ended_at) VALUES (?, ?, ?)", sessions)
+            conn.executemany(
+                "INSERT INTO sessions (id, started_at, ended_at) VALUES (?, ?, ?)", sessions
+            )
             conn.commit()
         finally:
             conn.close()
@@ -3231,11 +3233,17 @@ class TestFreshInstallIsDormantNotFailing:
 
     _FIRST = [("first", _iso(timedelta(minutes=5)), None)]
 
-    def test_hooks_that_never_fired_during_the_first_session_are_dormant(self, tmp_path, monkeypatch):
+    def test_hooks_that_never_fired_during_the_first_session_are_dormant(
+        self, tmp_path, monkeypatch
+    ):
         hooks = self._hooks(self._store(tmp_path, monkeypatch, self._FIRST))
 
-        for name in ("hook:post_tool_use", "hook:session_end", "hook:user_prompt_submit",
-                     "hook:codex_grep_assist"):
+        for name in (
+            "hook:post_tool_use",
+            "hook:session_end",
+            "hook:user_prompt_submit",
+            "hook:codex_grep_assist",
+        ):
             r = hooks[name]
             assert r.verdict is Verdict.DORMANT, (name, r.verdict, r.detail)
             assert r.ok and r.remedy is None
