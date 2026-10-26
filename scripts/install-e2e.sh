@@ -151,14 +151,11 @@ proc.wait(timeout=30)
 PY
 
 # --- doctor on a fresh install -------------------------------------------------
-# PINNED, NOT ASSERTED CLEAN (techne#1318). On a fresh install, before any
-# session, doctor exits 1: registered hooks that have never fired and rails with
-# no input yet count as "not confirmed working". Until 1318 decides how a fresh
-# install should read, this pins TODAY's ?, ✗ and ! lines by name, so a check
-# that newly reads unobservable, broken or stale, or stops, breaks this test.
-# runtime:loaded is left out: it reads the HOST's process table, so it reports
-# whatever techne already runs on the machine, not this install (PR 1320 r3).
-EXPECTED_UNCONFIRMED="hook:codex_grep_assist hook:post_tool_use hook:session_end hook:user_prompt_submit rail:consolidate rail:dream"
+# A fresh install must pass doctor (techne#1318): hooks that have not fired yet
+# and rails not yet due read dormant, not failing. runtime:loaded is the one
+# exception: it reads the HOST's process table, so it reports whatever techne
+# already runs on the machine, not this install (PR 1320 r3). It may fail, and
+# then doctor's exit 1 is accepted, only when it is the sole failing line.
 
 check_install() {
   local label="$1"
@@ -198,17 +195,15 @@ PY
   echo "  + techne doctor"
   local rc=0
   techne doctor >"$WORKDIR/doctor-$label.log" 2>&1 || rc=$?
-  local got
-  got="$(sed -nE 's/^  (\?|✗|!) ([a-z_:-]+) .*/\2/p' "$WORKDIR/doctor-$label.log" | { grep -vx 'runtime:loaded' || true; } | sort | tr '\n' ' ' | sed 's/ $//')"
-  echo "    -> exit $rc; not confirmed: ${got:-none}"
+  local all got
+  all="$(sed -nE 's/^  (\?|✗|!) ([a-z_:-]+) .*/\2/p' "$WORKDIR/doctor-$label.log" | sort | tr '\n' ' ' | sed 's/ $//')"
+  got="$(tr ' ' '\n' <<<"$all" | { grep -vx -e 'runtime:loaded' -e '' || true; } | tr '\n' ' ' | sed 's/ $//')"
+  echo "    -> exit $rc; not confirmed: ${all:-none}"
   if [ -z "$REF" ]; then
-    local want
-    want="$(tr ' ' '\n' <<<"$EXPECTED_UNCONFIRMED" | sort | tr '\n' ' ' | sed 's/ $//')"
-    if [ "$got" != "$want" ]; then
+    if [ -n "$got" ] || { [ "$rc" -ne 0 ] && [ "$all" != "runtime:loaded" ]; }; then
       cat "$WORKDIR/doctor-$label.log"
-      fail "$label: doctor's unconfirmed set changed (techne#1318). expected: $want; got: ${got:-none}"
+      fail "$label: doctor failed on a fresh install (techne#1318): exit $rc; not confirmed: ${got:-none}"
     fi
-    [ "$rc" -ne 0 ] || fail "$label: doctor exited 0 — if techne#1318 landed, drop the pin above"
   fi
 }
 

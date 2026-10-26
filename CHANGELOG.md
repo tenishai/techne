@@ -128,6 +128,13 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- **`techne doctor` passes on a fresh install** (#1318). On a store under 7 days old where
+  no session has finished yet, a hook that has never fired reads `dormant` ("not yet fired;
+  it will after your first Claude Code session") instead of `unobservable`, so it no longer
+  counts toward the exit code or tells you to rerun `techne init`. A rail that has never
+  produced reads `dormant` until the store is older than that rail's interval. Without
+  `ps`, `runtime:loaded` reads `/proc` on Linux, and reports `dormant` with the reason when
+  neither exists. Hooks and rails that ran before and then went quiet fail as before.
 - **`archive_scan` no longer archives a row another session just reconfirmed** (#1269). It
   selected candidates on one connection and archived them by id on another; the archive
   now re-checks the selection condition per row, and only rows it archived are returned.

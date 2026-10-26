@@ -704,9 +704,21 @@ def check_hooks(config) -> list[CheckResult]:
                 else:
                     verdict = Verdict.LIVE
                     detail = f"{note}; last outcome: {outcome or 'unknown'}"
-            elif not last and sessions == 0 and store_is_new:
+            elif not last and last_settled_session is None and store_is_new:
+                # NOT YET FIRED IS NOT A FAILURE ON A NEW STORE (techne#1318).
+                # This used to require zero sessions, so a fresh install whose
+                # first SessionStart had run read every other hook UNOBSERVABLE
+                # and doctor exited 1 before the user's first real session, with
+                # a remedy to rerun the init they had just run. No SETTLED
+                # session means none has had its chance to fire these, and the
+                # store-age bound keeps finding 1 above closed: a store past the
+                # grace with no marker still falls through to UNOBSERVABLE.
                 verdict = Verdict.DORMANT
-                detail = "store created <7d ago, no sessions yet — nothing has run"
+                detail = (
+                    "not yet fired; it will after your first Claude Code session"
+                    if sessions
+                    else "store created <7d ago, no sessions yet — nothing has run"
+                )
             elif not last and sessions == 0:
                 # Old store, still no sessions: the absence IS the finding.
                 verdict = Verdict.UNOBSERVABLE
@@ -1159,6 +1171,11 @@ def _running_techne_processes() -> list[tuple[int, float, str]] | None:
         out = subprocess.run(
             ["ps", "-eo", "pid=,lstart=,args="], capture_output=True, text=True, timeout=5
         )
+    except FileNotFoundError:
+        # NO `ps` IS NOT A FAILED PROBE (techne#1318). Debian slim images and
+        # plenty of minimal hosts ship without procps; on Linux /proc holds the
+        # same table. Only a `ps` that exists and fails is UNKNOWN.
+        return _proc_table_processes()
     except (OSError, subprocess.SubprocessError):
         return None
     if out.returncode != 0:
@@ -1190,6 +1207,59 @@ def _running_techne_processes() -> list[tuple[int, float, str]] | None:
     # job is to stop silent greens. A parser that matched processes and understood
     # none of them has FAILED, not observed an empty machine.
     # (Prudence, PR #510 — demonstrated, and the fix prototyped, before I took it.)
+    if matched and not found:
+        return None
+    return found
+
+
+class _NoProcessTable(Exception):
+    """Neither `ps` nor /proc exists: there is no table to read (techne#1318).
+
+    Distinct from a failed read (None, UNKNOWN). Nothing here is broken; the
+    check just has no way to look, and says so as DORMANT with this reason.
+    """
+
+
+def _proc_table_processes(proc: Path = Path("/proc")) -> list[tuple[int, float, str]] | None:
+    """`_running_techne_processes` read from Linux /proc, for hosts without `ps`.
+
+    Same contract: None when every matching row failed to parse. Raises
+    `_NoProcessTable` when there is no /proc either.
+
+    Start time is `btime` (boot, epoch seconds, from /proc/stat) plus field 22 of
+    /proc/<pid>/stat (clock ticks since boot). That field is counted from AFTER
+    the last ")" because the command name in field 2 may hold spaces or parens.
+    """
+    try:
+        stat = (proc / "stat").read_text()
+    except OSError:
+        raise _NoProcessTable("ps is not installed and there is no /proc to read instead")
+    btime = next((int(ln.split()[1]) for ln in stat.splitlines() if ln.startswith("btime ")), None)
+    if btime is None:
+        return None
+    hz = os.sysconf("SC_CLK_TCK")
+
+    found: list[tuple[int, float, str]] = []
+    matched = 0
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            raw = (entry / "cmdline").read_bytes()
+        except OSError:
+            continue  # exited between listing and reading
+        cmd = raw.replace(b"\0", b" ").decode(errors="replace").strip()
+        if not any(pat in cmd for pat in _LONG_LIVED_PROCESSES):
+            continue
+        matched += 1
+        try:
+            line = (entry / "stat").read_text()
+            start = btime + int(line[line.rindex(")") + 2 :].split()[19]) / hz
+        except (OSError, ValueError, IndexError):
+            continue
+        found.append((int(entry.name), start, cmd))
+    # Same reasoning as the `ps` parser: matched rows none of which parsed is a
+    # broken probe, not an empty machine.
     if matched and not found:
         return None
     return found
@@ -1763,7 +1833,17 @@ def check_runtime_loaded(config) -> CheckResult | None:
         )
     deployed_at, how = landed
 
-    procs = _running_techne_processes()
+    try:
+        procs = _running_techne_processes()
+    except _NoProcessTable as exc:
+        return CheckResult(
+            name="runtime:loaded",
+            subsystem="runtime",
+            kind=Kind.FRESHNESS,
+            verdict=Verdict.DORMANT,
+            detail=f"cannot list processes: {exc}",
+            evidence="ps not found on PATH; /proc/stat unreadable",
+        )
     if procs is None:
         return CheckResult(
             name="runtime:loaded",
@@ -1843,6 +1923,8 @@ def check_maintenance_rails(config) -> list[CheckResult]:
         # nothing for these rails to chew on, so their silence is explained
         # rather than undecidable.
         has_material = conn.execute("SELECT COUNT(*) FROM knowledge").fetchone()[0] > 0
+        row = conn.execute("SELECT MIN(applied_at) FROM schema_version").fetchone()
+        store_age = _age(row[0] if row else None)
 
         for rail, (interval, note, rail_remedy) in _RAIL_EXPECTATIONS.items():
             row = conn.execute(
@@ -1857,6 +1939,17 @@ def check_maintenance_rails(config) -> list[CheckResult]:
             elif not last and not has_material:
                 verdict, remedy = Verdict.DORMANT, None
                 detail = "no knowledge stored yet — nothing to process"
+            elif not last and store_age is not None and store_age < interval:
+                # A RAIL CANNOT BE LATE BEFORE ITS FIRST INTERVAL HAS PASSED
+                # (techne#1318). Without this a fresh install that stored one row
+                # read consolidate and dream UNOBSERVABLE on day one and doctor
+                # exited 1. Bounded by the rail's own interval, so a rail that
+                # has never produced on an older store still fails as before.
+                verdict, remedy = Verdict.DORMANT, None
+                detail = (
+                    f"no output yet; store is {store_age.days}d old and the first run "
+                    f"is due within {interval.days}d"
+                )
             else:
                 verdict = temporal_verdict(last, interval)
                 detail = f"{note}; {count} candidates all-time"

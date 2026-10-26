@@ -415,3 +415,70 @@ class TestTheFormatAssumptionAgainstThisHostsRealPs:
 
         assert pid.isdigit()
         time.strptime(lstart, "%a %b %d %H:%M:%S %Y")
+
+
+class TestNoPsFallsBackToProc:
+    """techne#1318: Debian slim and other minimal hosts ship without `ps`, and
+    `runtime:loaded` read that as a failed probe (UNKNOWN), so doctor exited 1 on
+    a fresh install. A missing `ps` is not a failed read; /proc holds the table."""
+
+    @staticmethod
+    def _fake_proc(root: pathlib.Path, pid: int, cmdline: bytes, stat_tail: str, btime=1_700_000_000):
+        root.mkdir(exist_ok=True)
+        (root / "stat").write_text(f"cpu  1 2 3\nbtime {btime}\nprocesses 9\n")
+        d = root / str(pid)
+        d.mkdir()
+        (d / "cmdline").write_bytes(cmdline)
+        (d / "stat").write_text(f"{pid} {stat_tail}\n")
+
+    def test_reads_start_time_after_the_last_paren(self, tmp_path):
+        """Field 2 is the command name in parens and may itself hold ") ", so
+        fields are counted after the LAST ")"; starttime is field 22."""
+        hz = os.sysconf("SC_CLK_TCK")
+        after = " ".join(["S"] + ["0"] * 18 + [str(500 * hz)] + ["0"] * 5)
+        self._fake_proc(tmp_path, 912, b"python3\0-m\0techne.mcp_server\0", f"(py) x) {after}")
+        (tmp_path / "self").mkdir()  # non-numeric entries are skipped
+
+        procs = checks_mod._proc_table_processes(tmp_path)
+
+        assert procs == [(912, 1_700_000_500.0, "python3 -m techne.mcp_server")]
+
+    def test_non_techne_processes_are_ignored(self, tmp_path):
+        self._fake_proc(tmp_path, 1, b"/sbin/init\0", "(init) S 0")
+
+        assert checks_mod._proc_table_processes(tmp_path) == []
+
+    def test_matched_rows_that_all_fail_to_parse_are_None(self, tmp_path):
+        """The same rule as the `ps` parser: a broken probe is not an empty machine."""
+        self._fake_proc(tmp_path, 912, b"python3\0-m\0techne.mcp_server\0", "(py) S 0")
+
+        assert checks_mod._proc_table_processes(tmp_path) is None
+
+    def test_missing_ps_reads_proc(self, monkeypatch):
+        def no_ps(cmd, **kwargs):
+            raise FileNotFoundError(cmd[0])
+
+        monkeypatch.setattr(subprocess, "run", no_ps)
+        monkeypatch.setattr(checks_mod, "_proc_table_processes", lambda: [])
+
+        assert _real_scan() == []
+
+    def test_a_ps_that_exists_and_fails_is_still_unknown(self, monkeypatch):
+        def broken_ps(cmd, **kwargs):
+            raise PermissionError(cmd[0])
+
+        monkeypatch.setattr(subprocess, "run", broken_ps)
+
+        assert _real_scan() is None
+
+    def test_no_ps_and_no_proc_is_dormant_with_the_reason(self, monkeypatch, tmp_path):
+        missing = tmp_path / "no-proc"
+        real = checks_mod._proc_table_processes
+        monkeypatch.setattr(checks_mod, "_running_techne_processes", lambda: real(missing))
+        monkeypatch.setattr(checks_mod, "_runtime_deployed_at", lambda _r: (1_700_000_000, "x"))
+
+        r = check_runtime_loaded(Config())
+
+        assert r.verdict is Verdict.DORMANT
+        assert r.ok
+        assert "ps is not installed" in r.detail
