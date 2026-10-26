@@ -3247,7 +3247,7 @@ class TestFreshInstallIsDormantNotFailing:
             r = hooks[name]
             assert r.verdict is Verdict.DORMANT, (name, r.verdict, r.detail)
             assert r.ok and r.remedy is None
-            assert "after your first Claude Code session" in r.detail
+            assert "no session has finished since install" in r.detail
 
     def test_a_settled_session_that_left_no_marker_still_fails(self, tmp_path, monkeypatch):
         """Once one session has had its chance, never-fired is a finding again."""
@@ -3293,3 +3293,23 @@ class TestFreshInstallIsDormantNotFailing:
 
         for name in ("rail:consolidate", "rail:dream"):
             assert rails[name].verdict is Verdict.UNOBSERVABLE, (name, rails[name].detail)
+
+    def test_session_start_missing_after_the_session_moved_on_still_fails(
+        self, tmp_path, monkeypatch
+    ):
+        """PR 1322 review, Important 1: one session, two days old, whose
+        post_tool_use and user_prompt_submit marked yesterday, and no
+        session_start marker. That session got past startup, so the missing
+        marker is the Phase 3 / Phase 8 partial death, not "not yet fired"."""
+        from techne.hooks._liveness import record_hook_run
+
+        rows = [("only", _iso(timedelta(days=2)), None)]
+        cfg = self._store(tmp_path, monkeypatch, rows, store_age=timedelta(days=2))
+        for hook in ("post_tool_use", "user_prompt_submit"):
+            record_hook_run(cfg.db_path, hook, ts=_iso(timedelta(days=1)))
+
+        hooks = self._hooks(cfg)
+
+        assert hooks["hook:session_start"].verdict is Verdict.UNOBSERVABLE
+        # session_end has not had its chance: the only session has not ended.
+        assert hooks["hook:session_end"].verdict is Verdict.DORMANT

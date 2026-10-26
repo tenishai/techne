@@ -603,6 +603,19 @@ def check_hooks(config) -> list[CheckResult]:
         row = conn.execute("SELECT MIN(applied_at) FROM schema_version").fetchone()
         store_age = _age(row[0] if row else None)
         store_is_new = store_age is not None and store_age < _NEW_STORE_GRACE
+        # HAS THE UNSETTLED SESSION MOVED PAST STARTUP? (PR 1322 review.) With
+        # no settled session, a missing session_start marker is excused below,
+        # but not once any hook has marked since the newest session began: that
+        # session got through startup, so session_start had its chance, and a
+        # missing marker is the Phase 3 / Phase 8 partial death described above.
+        newest = _parse_ts(conn.execute("SELECT MAX(started_at) FROM sessions").fetchone()[0])
+        session_progressed = newest is not None and any(
+            m is not None and m >= newest
+            for m in (
+                _parse_ts((get_state(conn, f"hook:{h}:last_run") or {}).get("ts"))
+                for h in _HOOK_EXPECTATIONS
+            )
+        )
 
         for hook, (interval, note) in _HOOK_EXPECTATIONS.items():
             run = get_state(conn, f"hook:{hook}:last_run") or {}
@@ -709,7 +722,11 @@ def check_hooks(config) -> list[CheckResult]:
                 and store_is_new
                 and (
                     sessions == 0
-                    or (last_settled_session is None and hook not in _EVENT_DRIVEN_NO_SIGNAL)
+                    or (
+                        last_settled_session is None
+                        and hook not in _EVENT_DRIVEN_NO_SIGNAL
+                        and not (hook == "session_start" and session_progressed)
+                    )
                 )
             ):
                 # NOT YET FIRED IS NOT A FAILURE ON A NEW STORE (techne#1318).
@@ -723,7 +740,7 @@ def check_hooks(config) -> list[CheckResult]:
                 # compaction hooks keep their own "idle" wording below.
                 verdict = Verdict.DORMANT
                 detail = (
-                    "not yet fired; it will after your first Claude Code session"
+                    "not yet fired; no session has finished since install"
                     if sessions
                     else "store created <7d ago, no sessions yet — nothing has run"
                 )
