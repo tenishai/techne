@@ -3311,5 +3311,6 @@ class TestFreshInstallIsDormantNotFailing:
         hooks = self._hooks(cfg)
 
         assert hooks["hook:session_start"].verdict is Verdict.UNOBSERVABLE
-        # session_end has not had its chance: the only session has not ended.
+        # session_end stays DORMANT: with one session row there is no settled
+        # session (OFFSET 1), whatever that row's ended_at says.
         assert hooks["hook:session_end"].verdict is Verdict.DORMANT
