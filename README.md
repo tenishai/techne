@@ -84,6 +84,11 @@ techne init
 > Drop it for a **core-only** install, or swap in any other set — see the
 > [extras matrix](#extras--what-to-install) for the full possibility space.
 >
+> **Semantic recall needs a Python whose `sqlite3` can load extensions.** The python.org
+> and Apple system builds can't, and pipx uses the Python it was installed with. Pick
+> another with `pipx install --python <path-to-python> ...`, or use
+> `uv tool install --managed-python ...`; `techne init` says which case you are in.
+>
 > Upgrade later with `pipx install --force "tenish-techne[recommended] @ git+https://github.com/tenishai/techne.git@<newer-tag>"`
 > (a plain `pipx install` on an already-installed techne refuses without `--force`).
 >

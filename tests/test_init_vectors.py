@@ -31,7 +31,16 @@ def real_warm(monkeypatch):
     monkeypatch.setattr(
         "techne.core.embeddings._select_backend", lambda c: ("model2vec", "stub/model")
     )
-    monkeypatch.setattr("techne.core.search.backfill_vectors", lambda db, **kw: {"knowledge": 3})
+    monkeypatch.setattr(
+        "techne.core.search.backfill_vectors",
+        lambda db, **kw: {
+            "orphans_swept": 2,
+            "sweep_errors": 0,
+            "threads": 0,
+            "observations": 0,
+            "knowledge": 3,
+        },
+    )
     calls: list[bool] = []
     return calls
 

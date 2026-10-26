@@ -2922,7 +2922,14 @@ def _vector_next_steps(db_path: Path) -> list[str]:
     """
     from techne.core.capabilities import vectors_install_command
     from techne.core.embeddings import backend_available
+    from techne.core.search import no_extension_loading_lines, sqlite_loads_extensions
 
+    # FIRST, because both hints below end in `techne vectors backfill`, which
+    # exits 1 on this interpreter (techne#1321).
+    if not sqlite_loads_extensions():
+        return ["  Semantic recall is NOT available on this Python."] + [
+            f"  {line}" for line in no_extension_loading_lines()
+        ]
     if not backend_available():
         return [
             "  Semantic recall is OFF: no embedding backend is installed, so search is",
@@ -3035,6 +3042,15 @@ def _warm_vectors(config) -> list[str] | None:
 
     if not backend_available():
         return None
+    from techne.core.search import backfill_vectors, no_extension_loading_lines
+    from techne.core.search import sqlite_loads_extensions
+
+    # BEFORE THE DOWNLOAD (techne#1321): weights this interpreter can never use
+    # are tens of MB of waiting for nothing.
+    if not sqlite_loads_extensions():
+        return ["  Semantic recall is NOT ready."] + [
+            f"  {line}" for line in no_extension_loading_lines()
+        ]
     # ONE LOAD, NEVER AN OFFLINE PROBE FIRST (#1029 r1, Critical). Probing with
     # allow_download=False sets HF_HUB_OFFLINE for model2vec, and huggingface_hub
     # keeps its offline state for the life of the process after the env var is
@@ -3052,8 +3068,6 @@ def _warm_vectors(config) -> list[str] | None:
             "  Search is keyword-only until you run, with network access:",
             "    techne vectors backfill",
         ]
-    from techne.core.search import backfill_vectors
-
     try:
         counts = backfill_vectors(config.db_path, allow_download=False)
     except Exception as e:
@@ -3061,7 +3075,16 @@ def _warm_vectors(config) -> list[str] | None:
             f"  Semantic recall: the model is ready but embedding failed ({e}). Run:",
             "    techne vectors backfill",
         ]
-    click.echo(f"Semantic recall ready: embedded {sum(counts.values())} stored row(s).")
+    # NO `orphans_swept`, NO VECTOR INDEX (#408's discriminator). backfill_vectors
+    # returned before its sweep, so nothing was embedded and "ready: embedded 0"
+    # would be the false claim techne#1321 found.
+    if "orphans_swept" not in counts:
+        return [
+            "  Semantic recall is NOT ready: sqlite-vec could not be loaded, so no vector",
+            "  index was built. Check with: techne vectors status",
+        ]
+    embedded = sum(counts.get(k, 0) for k in ("threads", "observations", "knowledge"))
+    click.echo(f"Semantic recall ready: embedded {embedded} stored row(s).")
     return []
 
 
@@ -5800,7 +5823,29 @@ def vectors_backfill(ctx, do_tags, all_tags, no_download):
     # extension not a model) and then returns {} if it cannot embed. The CLI keeps
     # only the sqlite_vec import guard above, which is the one thing it genuinely
     # has to check to print a useful message.
-    from techne.core.search import backfill_vectors
+    from techne.core.search import (
+        backfill_vectors,
+        no_extension_loading_lines,
+        sqlite_loads_extensions,
+    )
+
+    if not sqlite_loads_extensions():
+        # NON-ZERO, NOT A QUIET {} (techne#1321). This interpreter can never load
+        # sqlite-vec, so no rerun of this command helps. Pending tags still get
+        # inferred (they need the model, not the extension) and stdout stays one
+        # JSON document; the reason goes to stderr, which the SessionStart chain
+        # leaves open for its debug log.
+        if embeddings_mod.backend_available():
+            from techne.core.inference import backfill_tags
+
+            if do_tags:
+                tags = backfill_tags(config.db_path, config, only_missing=not all_tags)
+            else:
+                tags = backfill_tags(config.db_path, config, pending_only=True)
+            click.echo(json.dumps({"tags": tags}, indent=2))
+        for line in no_extension_loading_lines():
+            click.echo(line, err=True)
+        ctx.exit(1)
 
     counts = backfill_vectors(config.db_path, allow_download=not no_download)
 

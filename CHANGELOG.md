@@ -128,6 +128,17 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- **A Python whose `sqlite3` can't load extensions no longer reports semantic recall as
+  ready** (#1321). python.org and Apple's system builds lack `enable_load_extension`, so
+  sqlite-vec never loads. `techne init` now checks first, skips the model download, and
+  names the cause and the fix (reinstall with a uv-managed, distro or Homebrew Python:
+  `uv tool install --managed-python`, or `pipx install --python <path>`). It also reports
+  "not ready" whenever the backfill returns without its `orphans_swept` key, and the
+  "embedded N" count no longer includes swept orphans. `techne vectors backfill` exits 1
+  with the same message on stderr (pending tags are still inferred), and doctor's
+  `vectors:coverage` names the cause and the reinstall instead of the backfill. `techne
+  capabilities` drops both vectors entries there, and `init --no-vectors` names the cause
+  instead of suggesting the backfill.
 - **`techne doctor` passes on a fresh install** (#1318). On a store under 7 days old where
   no session has finished yet, a hook that has never fired reads `dormant` ("not yet fired;
   no session has finished since install") instead of `unobservable`, so it no longer

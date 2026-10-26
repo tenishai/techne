@@ -2788,6 +2788,35 @@ def _search_on_conn(
     )
 
 
+def sqlite_loads_extensions() -> bool:
+    """Can this interpreter's sqlite3 load sqlite-vec at all? (techne#1321)
+
+    Decided by how Python was built (`--enable-loadable-sqlite-extensions`), not
+    by the SQLite version. python.org and Apple's system builds lack it, and on
+    them `backfill_vectors` returns {} however often it is run.
+    """
+    return hasattr(sqlite3.Connection, "enable_load_extension")
+
+
+def no_extension_loading_lines() -> list[str]:
+    """Why semantic recall cannot work on this Python, and how to fix it.
+
+    One wording for `init`, `vectors backfill` and `vectors:coverage`. The fix is
+    another interpreter, not another driver: the stdlib sqlite3 stays (#1321).
+    """
+    from techne import install_spec
+
+    spec = install_spec("recommended")
+    return [
+        f"This Python's sqlite3 cannot load extensions ({sys.executable}), so sqlite-vec "
+        "cannot load and recall stays keyword-only.",
+        "python.org and Apple's system Pythons are built this way. Reinstall techne with "
+        "a uv-managed, distro or Homebrew Python, for example:",
+        f'  uv tool install --force --managed-python "{spec}"',
+        f'  pipx install --force --python <path-to-python> "{spec}"',
+    ]
+
+
 def backfill_vectors(
     db_path: Path, batch_size: int = 100, *, allow_download: bool = True
 ) -> dict[str, int]:
