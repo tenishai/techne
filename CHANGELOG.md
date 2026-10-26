@@ -5,6 +5,8 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.19.0] — 2026-10-26
+
 ### Added
 
 - **`est_tokens` on every `techne_search` and `techne_recall` row, and `row_chars` to open a cut one**
