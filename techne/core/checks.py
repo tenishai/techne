@@ -704,7 +704,14 @@ def check_hooks(config) -> list[CheckResult]:
                 else:
                     verdict = Verdict.LIVE
                     detail = f"{note}; last outcome: {outcome or 'unknown'}"
-            elif not last and last_settled_session is None and store_is_new:
+            elif (
+                not last
+                and store_is_new
+                and (
+                    sessions == 0
+                    or (last_settled_session is None and hook not in _EVENT_DRIVEN_NO_SIGNAL)
+                )
+            ):
                 # NOT YET FIRED IS NOT A FAILURE ON A NEW STORE (techne#1318).
                 # This used to require zero sessions, so a fresh install whose
                 # first SessionStart had run read every other hook UNOBSERVABLE
@@ -712,7 +719,8 @@ def check_hooks(config) -> list[CheckResult]:
                 # a remedy to rerun the init they had just run. No SETTLED
                 # session means none has had its chance to fire these, and the
                 # store-age bound keeps finding 1 above closed: a store past the
-                # grace with no marker still falls through to UNOBSERVABLE.
+                # grace with no marker still falls through to UNOBSERVABLE. The
+                # compaction hooks keep their own "idle" wording below.
                 verdict = Verdict.DORMANT
                 detail = (
                     "not yet fired; it will after your first Claude Code session"

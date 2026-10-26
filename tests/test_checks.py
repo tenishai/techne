@@ -155,11 +155,15 @@ class TestBuiltinChecks:
         # assertion (see TestConfigGateBeatsMarker).
         _enable_all_config_gated_hooks(config)
 
+        # TWO SESSIONS, so one has SETTLED. Since techne#1318 a new store whose
+        # only session is the one in flight reads never-fired hooks DORMANT
+        # (TestFreshInstallIsDormantNotFailing); activity that should have left
+        # a marker means a session that has had its chance to.
         conn = connect(config.db_path)
         try:
-            conn.execute(
+            conn.executemany(
                 "INSERT INTO sessions (id, started_at) VALUES (?, ?)",
-                ("s1", "2026-08-01 00:00:00"),
+                [("s1", "2026-08-01 00:00:00"), ("s2", "2026-08-02 00:00:00")],
             )
             conn.commit()
         finally:
