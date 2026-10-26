@@ -4255,7 +4255,10 @@ def reflect_ingest(ctx, responses_file):
         click.echo(f"skipped {skipped} thread(s) with empty raw_response")
     click.echo(f"reflection debt drained: {drained} thread(s)")
     if config.reflect.write_to == "live":
-        click.echo("write_to=live — candidates promoted straight to knowledge/identity.")
+        click.echo(
+            "write_to=live — candidates promoted straight to knowledge; "
+            "identity candidates stay pending for techne reflect review."
+        )
     else:
         click.echo("write_to=candidates — review with: techne reflect review")
 
@@ -5956,7 +5959,15 @@ def vectors_status(ctx):
             "run `techne vectors backfill` to restore it."
         )
     elif status["backfill_needed"]:
-        click.echo("rows are missing vectors — run `techne vectors backfill` to embed them.")
+        from techne.core import search
+
+        # Without extension loading the vec tables never exist, so every row
+        # counts as unembedded and backfill would only exit 1 (#1325).
+        if not search.sqlite_loads_extensions():
+            for line in search.no_extension_loading_lines():
+                click.echo(line)
+        else:
+            click.echo("rows are missing vectors — run `techne vectors backfill` to embed them.")
 
 
 def _active_codex_db(config, repo, *, require_indexed: bool = True):

@@ -77,6 +77,8 @@ reflect:
 - `candidates` (default) — proposals wait for you in `techne reflect review`. The live
   knowledge and identity tables are never touched.
 - `live` — accepted proposals are promoted straight into knowledge as they are ingested.
+  Identity candidates are the exception: they stay pending for `techne reflect review`,
+  because live mode never writes identity (#1267).
   (One exception: under `posture.mode: spool-primary` reflect is advisory and `effective_write_to`
   forces `candidates` regardless. The default posture is `observe`, so this rarely bites.)
 

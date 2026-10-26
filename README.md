@@ -45,6 +45,11 @@ want.
 
 ---
 
+The tenishai repos are private for now. The clone and the `pipx install` from git below
+need a GitHub account with read access to the tenishai organization, with git set up to
+use it (an SSH key, or a token through a credential helper); without that, the install
+fails at the git clone step.
+
 On Debian/Ubuntu, `venv` isn't preinstalled: `sudo apt update && sudo apt install python3-venv`.
 
 ```bash

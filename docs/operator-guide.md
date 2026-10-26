@@ -140,7 +140,9 @@ config also exits 1; elsewhere drift is reported but not counted. Dormant means
 off by config, or not run yet: a hook that has never fired before any session has
 finished, on a store under 7 days old, and a rail that has never produced while the
 store is younger than that rail's interval (#1318). So doctor exits 0 straight after
-install. A hook or rail that ran before and then went quiet still fails. Dormant is
+install. A hook or rail that ran before and then went quiet still fails, and so does a hook
+other than the compaction hooks that has no record once a session has finished;
+`session_start` fails as soon as its session moves on without it. Dormant is
 healthy; unobservable is a failure by decision (techne#468: a rail that cannot
 report is unfinished). So a non-zero exit on a working install names a real
 finding, and `techne doctor` can gate CI as-is (techne#877). Its advisory

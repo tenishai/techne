@@ -173,3 +173,21 @@ class TestEverySurfaceDropsTheBackfillHint:
 
         assert "cannot load extensions" in out
         assert "techne vectors backfill" not in out
+
+    def test_vectors_status_names_the_cause_not_the_backfill(self, tmp_path, no_ext, monkeypatch):
+        """Issue 1325: no vec tables means every row reads unembedded."""
+        from techne.core.knowledge import store
+
+        cfg = Config()
+        cfg.db_path = tmp_path / "techne.db"
+        cfg.data_dir = tmp_path
+        init_db(cfg.db_path).close()
+        monkeypatch.setattr(Config, "load", classmethod(lambda cls: cfg))
+        store(cfg.db_path, "a promoted fact", type="fact")
+
+        result = CliRunner().invoke(main, ["vectors", "status"], catch_exceptions=False)
+
+        assert result.exit_code == 0, result.output
+        assert "backfill needed: True" in result.output
+        assert "cannot load extensions" in result.output
+        assert "techne vectors backfill" not in result.output
