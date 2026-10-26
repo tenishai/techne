@@ -261,7 +261,9 @@ holds and prints the line to paste. Nothing already stored is lost, and
 `techne architect backfill` recovers any tags missed in between.
 
 **`techne init` owns the hook chain, and only `init` rewrites it.** `register_hooks` strips
-every hook group whose command mentions techne and re-appends its own template, so the
+every hook group that runs one of techne's own hook commands (`-m techne.hooks.*`,
+`techne-hook.sh`, the preflight guard) and re-appends its own template; a hook of your
+own stays, even under a path that contains "techne" (#1250), so the
 SessionStart chain an install is running is the one written the last time `init` ran. An
 install that predates a change to that template keeps the old chain indefinitely, looking
 healthy the whole time — `doctor`'s hook-drift check compares `(event, matcher)` and never
@@ -297,10 +299,12 @@ techne vectors backfill  # bare — warms the model cache and catches up the bac
 the resolved state rather than announcing a change.
 
 `techne init` reports success as `Semantic recall ready: embedded N stored row(s).`
-`techne vectors backfill` is silent when it does nothing, so check its OUTPUT, not its
-exit code. It worked only if it printed a JSON counts block. A `vector search unavailable: no embedding
-backend installed` line means it embedded nothing and exited 0 — and that line appears for
-two different causes: the `vectors` extra absent, or the extra present but the embedding
+`techne vectors backfill` always prints one JSON object with a `tags` key (pending tags
+it inferred); it embedded rows only if that object also holds counts. Check stderr and the
+exit code too. On a Python whose `sqlite3` can't load extensions it exits 1 and says so on
+stderr (#1321); reinstall techne with a uv-managed, distro or Homebrew Python. A
+`vector search unavailable: no embedding backend installed` line means it embedded nothing
+and exited 0 — and that line appears for two different causes: the `vectors` extra absent, or the extra present but the embedding
 backend unable to load. `cli.py` deliberately avoids naming sqlite-vec in the second case,
 because blaming it sends an operator to re-check what they have already ruled out — so
 diagnose from whether you got counts, not from the cause.

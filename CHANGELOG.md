@@ -335,7 +335,8 @@ All notable changes to techne are documented here. Format loosely follows
   hasn't fired before any session has finished, on a store under 7 days old, and a rail
   that hasn't produced while the store is younger than that rail's interval (3 days for
   reflect, 14 for consolidate and dream), read DORMANT instead of UNOBSERVABLE. Once a session has finished, a hook with
-  no record fails again.
+  no record fails again, except the compaction hooks, which stay DORMANT until a session
+  compacts; `session_start` fails as soon as its session has moved on without it.
 - **`techne custodian run`** now exits non-zero when a rail's emit raised or only some
   answers came back (#1248). A scheduled custodian job that ignored partial failures will
   start reporting them.

@@ -67,7 +67,7 @@ second rendering path to drift.
 
 Call this to INTERROGATE team memory — ask the Archivist a question nobody wrote an endpoint for, as read-only SQL. techne_recall pushes results at you for a topic string; this lets you ask precisely: which decisions touch a project, what was written last week that superseded something, how many procedures are anchored to files that moved, who wrote what (written_by, techne#553). Call with NO…
 
-Read-only and guarded (techne#554): one `SELECT`, over the distilled knowledge tables only — `knowledge`, `knowledge_deps`, `knowledge_fts`. The raw observation tier and the personal store are out of reach, writes and `ATTACH` are denied, and a runaway query is stopped by a work budget. Three outcomes are distinguishable on purpose: `rows`, `no-rows` (the query ran and matched nothing — an ANSWER), and `store-absent` (no team store is bound here — NOT "the team knows nothing").
+Read-only and guarded (techne#554): one `SELECT`, over the distilled knowledge tables only — `knowledge`, `knowledge_deps`, `knowledge_fts`. The raw observation tier and the personal store are out of reach, writes and `ATTACH` are denied, a work budget stops a runaway query, and the query runs in a worker process with limits: 100 KB of SQL, 64 columns a row, 1 MB a value, 16 MB a result, a 64 MiB SQLite heap (`archivist_query_heap_bytes`) and a 10 s deadline (`archivist_query_timeout_s`). A query past a limit fails with an error naming it; `techne archivist query` exits 3 when the worker fails. Three outcomes are distinguishable on purpose: `rows`, `no-rows` (the query ran and matched nothing — an ANSWER), and `store-absent` (no team store is bound here — NOT "the team knows nothing").
 
 ## Store — write the conclusion, not the transcript
 

@@ -283,8 +283,11 @@ def test_status_on_a_fresh_db_needs_no_backfill(cfg):
     assert status["backfill_needed"] is False
 
 
-def test_cli_prints_backfill_needed_separately_from_reembed(cfg):
+def test_cli_prints_backfill_needed_separately_from_reembed(cfg, monkeypatch):
+    from techne.core import search
     from techne.core.knowledge import store
+
+    monkeypatch.setattr(search, "sqlite_loads_extensions", lambda: True)
 
     for i in range(2):
         store(cfg.db_path, f"promoted fact {i}", type="fact")
