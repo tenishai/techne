@@ -30,18 +30,24 @@ def publish(*, config: Config | None = None) -> dict:
     pending outbox rows through the registered sinks, as session end does.
 
     Returns `{"enqueued", "synced", "failed"}` counts, plus `"error"` when a step
-    failed. Never raises: a broken publish lane must not fail the caller's task.
+    failed. As at session end, a failed enqueue doesn't stop the flush, so rows
+    already pending for any sink still go out. Never raises: a broken publish lane
+    must not fail the caller's task.
     """
     result: dict = {"enqueued": 0, "synced": 0, "failed": 0}
+    errors = []
+    try:
+        config = config or Config.load()
+    except Exception as e:  # noqa: BLE001 — see docstring
+        log.warning("publish: config failed to load", exc_info=True)
+        return {**result, "error": f"{type(e).__name__}: {e}"}
     try:
         from techne.core.archivist import publish_tagged_knowledge
 
-        config = config or Config.load()
         result["enqueued"] = publish_tagged_knowledge(config)
-    except Exception as e:  # noqa: BLE001 — see docstring
+    except Exception as e:  # noqa: BLE001
         log.warning("publish: enqueue failed", exc_info=True)
-        result["error"] = f"{type(e).__name__}: {e}"
-        return result
+        errors.append(f"{type(e).__name__}: {e}")
     try:
         from techne.sync.outbox import flush_sinks
         from techne.sync.sinks import ensure_sinks_registered
@@ -50,8 +56,10 @@ def publish(*, config: Config | None = None) -> dict:
         summary = flush_sinks(config.db_path, budget_s=config.sync.flush_budget_s or None)
     except Exception as e:  # noqa: BLE001
         log.warning("publish: flush failed", exc_info=True)
-        result["error"] = f"{type(e).__name__}: {e}"
-        return result
+        errors.append(f"{type(e).__name__}: {e}")
+        summary = {}
+    if errors:
+        result["error"] = "; ".join(errors)
     result["synced"] = sum(s for s, _ in summary.values())
     result["failed"] = sum(f for _, f in summary.values())
     log.debug("publish: %s", result)

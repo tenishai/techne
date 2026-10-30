@@ -125,6 +125,30 @@ def test_publish_never_raises_when_the_lane_has_no_sink(config):
     assert result["error"].startswith("PublishSinkMissing")
 
 
+def test_a_failed_enqueue_still_flushes_other_sinks(config):
+    """Session end flushes even when the publish lane can't enqueue, so publish() does too."""
+    from techne.core.knowledge import store
+    from techne.sync.outbox import enqueue
+
+    store(config.db_path, "the gateway runs traefik", tags="team")
+    config.archivist_publish_tags = ["team"]  # lane on, but its sink is missing
+    delivered = []
+    other = OutboxSink(
+        name="sink:other",
+        payload_schema=PublishPayload,
+        handler=lambda p: delivered.append(p) or DeliveryResult(ok=True),
+    )
+
+    with use_registry({"sink:other": other}):
+        payload = {"content": "pending elsewhere", "knowledge_id": 1, "chain_id": 1}
+        enqueue(config.db_path, "sink:other", payload, deliver=False)
+        result = api.publish(config=config)
+
+    assert [p["content"] for p in delivered] == ["pending elsewhere"]
+    assert (result["enqueued"], result["synced"]) == (0, 1)
+    assert result["error"].startswith("PublishSinkMissing")
+
+
 def test_publish_never_raises_when_the_flush_fails(config, monkeypatch):
     import techne.sync.outbox as outbox
 

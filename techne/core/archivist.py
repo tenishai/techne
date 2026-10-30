@@ -330,7 +330,7 @@ def ensure_registered_for(config) -> None:
     Idempotent and cheap. The drains and the lifecycle's enqueue sites reach it
     through ``sync.sinks.ensure_sinks_registered`` (techne#1172), which also registers
     installed packages' sinks. The drains are the session-end hook's ``flush_sinks``,
-    ``techne outbox flush-sinks`` and ``prune-orphans``; the lifecycle's session-end
+    ``techne.api.publish``, ``techne outbox flush-sinks`` and ``prune-orphans``; the lifecycle's session-end
     sites (``run_session_end``, ``redetect_threads``) register and then enqueue.
     ``push_knowledge_to_archivist`` calls it directly, which suffices for its built-in
     lane. So a row that
