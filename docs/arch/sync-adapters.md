@@ -1,12 +1,12 @@
 ---
 card: arch-card:techne-sync-adapters
-updated: 2026-10-25
-anchor: techne/sync/adapter.py sha=d95b830f2c24ecea2e2357a5188cb72cad4365dc
+updated: 2026-10-30
+anchor: techne/sync/adapter.py sha=b7c0046600df42424c2323707fbf7024c9a2ed26
 ---
 # sync-adapters — egress + ingest protocols
 
 SEAM: two runtime_checkable Protocols:
-- SyncAdapter: push(entries)→PushResult, pull(query)→list[KnowledgeEntry], health() — OUTBOUND team-backend sync.
+- SyncAdapter: push(entries)→PushResult, pull(query)→list[KnowledgeEntry], health() — OUTBOUND team-backend sync. KnowledgeEntry's optional `id`, `written_by`, `updated_at`, `supersedes`, `entities` and `relations` (issue #1335) default to None; recall's `team` source copies only the ones an adapter set, so a recalled row can be cited and superseded.
 - SourceAdapter: initial_walk(), start_watch(), stop_watch(), health() — INBOUND ingest (observations; CCMemorySource drains curated_memory). Optional `provides:{'curated','raw'}` attr for the #107 reconciler.
 IMPLS: built-in noop (sync/noop.py), filesystem (sync/filesystem.py). Also: cc_memory, github_issues, jsonl_records, sinks, outbox.
 OPS: load_adapter(name, *, allow_unlisted=False, **kwargs) — built-ins first, then 3rd-party via `techne.sync_adapters` entry-point group (pyproject registers noop, filesystem); unset kwargs dropped so minimal adapters keep a no-arg __init__. SPLIT FOR RECALL (techne#1171): `adapter_class(name, *, allow_unlisted)` is the gated class lookup (the #389 check still runs before `ep.load()`), and `load_adapter` is that plus construction. Recall reads `supports_pull` off the CLASS and builds the instance inside its bounded call, because a sync adapter's constructor never had to be cheap and must not block the recall thread.

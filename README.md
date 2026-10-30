@@ -342,6 +342,18 @@ result = techne.run_session_end(config, session_id)
 # {'threads': 2, 'linked': 1, 'aged_completed': 0, 'aged_stale': 0, 'queued': 2}
 ```
 
+### Recall and publish
+
+`techne.api` gives an embedded agent the recall the `techne_recall` tool runs, installed recall sources included, and the publish lane session end runs:
+
+```python
+rows = techne.api.recall("deploy runbook", limit=10, config=config)
+# A team-pool row names its source: row["recall_source"] == "liminal_archivist"
+
+techne.api.publish(config=config)
+# {'enqueued': 1, 'synced': 1, 'failed': 0}; never raises, adds 'error' if a step failed
+```
+
 ### Knowledge store
 
 Knowledge entries are first-class — curated facts, decisions, patterns, evaluations, and procedures that survive across sessions. With supersession, you keep revision history without losing the original.
@@ -887,7 +899,8 @@ sync:
   allow_unlisted_sinks: false # true loads every installed sink
   flush_budget_s: 0           # seconds the session-end hook may spend delivering to sinks;
                               #   0 = unbounded. Set it (e.g. 2) when a sink makes a network
-                              #   call per row; undelivered rows wait for the next session end.
+                              #   call per row; undelivered rows wait for the next session end
+                              #   (or techne.api.publish()).
 
 archivist_publish_tags: []    # publish lane (#1298): live knowledge with any of these tags is
                               #   enqueued to `sink:archivist_publish` for a network archivist.

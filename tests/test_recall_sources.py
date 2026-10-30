@@ -606,6 +606,35 @@ def test_a_pull_capable_adapter_feeds_recall_as_team(cfg, monkeypatch):
     assert backend.queries[0].limit == cfg.recall.source_limit
 
 
+def test_a_team_row_carries_the_optional_entry_fields_the_adapter_set(cfg, monkeypatch):
+    """Issue #1335: enough to cite and supersede a recalled team row; unset fields stay off."""
+    from techne.sync.adapter import KnowledgeEntry
+
+    class CitingAdapter(PullAdapter):
+        def pull(self, query):
+            return [
+                KnowledgeEntry(
+                    content=f"team note on {query.query}",
+                    type="fact",
+                    tags="t",
+                    confidence="high",
+                    source="team-backend",
+                    id="k-17",
+                    written_by="agent-a",
+                    supersedes="k-9",
+                )
+            ]
+
+    _install(monkeypatch)
+    _adapter(monkeypatch, CitingAdapter())
+    cfg.sync.adapter = "teamstore"
+
+    row = next(r for r in _recall(cfg)["search_results"] if r.get("origin") == "team")
+
+    assert (row["id"], row["written_by"], row["supersedes"]) == ("k-17", "agent-a", "k-9")
+    assert not {"updated_at", "entities", "relations"} & row.keys()
+
+
 def test_team_takes_its_place_in_the_order(cfg, monkeypatch):
     _install(monkeypatch)
     _adapter(monkeypatch, PullAdapter())
