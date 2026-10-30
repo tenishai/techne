@@ -5,6 +5,18 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Added
+
+- **`techne.api.recall` and `techne.api.publish` for a runtime that embeds techne** (#1335).
+  `recall(topic, limit=10)` returns the rows `techne_recall` returns, installed recall
+  sources included; a team-pool row names its source in `recall_source` (for example
+  `liminal_archivist`), a local row has `store == "local"`. `publish()` runs session end's
+  two publish steps, enqueueing knowledge tagged with an `archivist_publish_tags` tag and
+  flushing the outbox through the registered sinks, and returns `enqueued`, `synced` and
+  `failed` counts. It never raises; a failed step adds `error`. `KnowledgeEntry` gains
+  optional `id`, `written_by`, `updated_at`, `supersedes`, `entities` and `relations`, which
+  the `team` recall source copies onto a row when an adapter sets them.
+
 ## [0.19.0] — 2026-10-26
 
 ### Added

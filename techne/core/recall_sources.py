@@ -137,6 +137,10 @@ def discover_sources(config: Config, *, scan_refused: bool = True) -> SourceDisc
     return found
 
 
+#: KnowledgeEntry fields a row carries only when the adapter set them (issue #1335).
+_OPTIONAL_ENTRY_FIELDS = ("id", "written_by", "updated_at", "supersedes", "entities", "relations")
+
+
 class AdapterSource:
     """The configured sync adapter's `pull`, as the recall source `team` (techne#1171).
 
@@ -183,6 +187,11 @@ class AdapterSource:
                     "confidence": e.confidence,
                     "source": e.source,
                     "target": e.target,
+                    **{
+                        k: v
+                        for k in _OPTIONAL_ENTRY_FIELDS
+                        if (v := getattr(e, k, None)) is not None
+                    },
                 }
             )
         return rows

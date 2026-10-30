@@ -46,6 +46,14 @@ class KnowledgeEntry:
     confidence: str
     source: str
     target: str = ""
+    # Optional, so a recalled team row carries enough to cite and to supersede
+    # (issue #1335). An adapter that doesn't know them leaves them None.
+    id: str | None = None
+    written_by: str | None = None
+    updated_at: str | None = None
+    supersedes: str | None = None
+    entities: list[str] | None = None
+    relations: list[dict] | None = None
 
 
 @dataclass
