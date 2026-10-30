@@ -5,6 +5,14 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.19.1] — 2026-10-30
+
+### Upgrading
+
+- **Nothing to run.** No schema change and no new config. Code that embeds techne can now
+  call `techne.api.recall` and `techne.api.publish` (below); hooks and the MCP server
+  behave as in 0.19.0.
+
 ### Added
 
 - **`techne.api.recall` and `techne.api.publish` for a runtime that embeds techne** (#1335).
