@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tenish-techne"
-version = "0.19.0"
+version = "0.19.1"
 description = "Agentic memory and knowledge system for AI coding agents"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
