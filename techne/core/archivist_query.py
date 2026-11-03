@@ -17,14 +17,22 @@ to close. The cost of SQL is that it must be GUARDED, which is the rest of this 
 
 === THE GUARD STACK ===
 
-Four independent layers. Each is enforced by SQLite itself, not by convention, and
-none of them is load-bearing alone:
+Six independent layers. Each is enforced by SQLite itself, by the worker's fetch loop
+(`_execute`) or by the operating system, not by convention, and none of them is
+load-bearing alone:
 
   1. ?mode=ro          — writes to the db CONTENT are physically impossible.
   2. set_authorizer    — checked by SQLite during prepare. Denies ATTACH, all but one
                          PRAGMA, and every read outside ALLOWED_TABLES.
   3. progress handler  — aborts a runaway query. Read-only does not mean cheap.
-  4. single statement  — one SELECT, executed through a parameterless execute().
+  4. size limits       — SQLite caps a value (MAX_VALUE_BYTES), a row's width
+                         (MAX_COLUMNS) and the SQL text; _execute caps the whole
+                         result (MAX_RESULT_BYTES) as it fetches (techne#1256).
+                         None of these bounds the sorter; layer 6 does.
+  5. single statement  — one SELECT, executed through a parameterless execute().
+  6. worker process    — the query runs in a short-lived child process with SQLite's
+                         heap capped and its temp store in memory, killed at a
+                         wall-clock deadline (techne#1313). See `_run_in_worker`.
 
 THE AUTHORIZER IS THE LOAD-BEARING ONE, and it is why this file does not "parse the
 SQL and check the table names". A parse-and-inspect allow-list is a regex over SQL
@@ -88,8 +96,12 @@ query surface that happened to ship first.
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -155,6 +167,15 @@ MAX_LIMIT = 2000
 #: units. A budget, not a timeout: it bounds WORK, so it does not punish a query that
 #: is merely waiting on a busy writer.
 OP_BUDGET = 50_000
+#: Largest string or blob a guarded query may build or return (techne#1256).
+#: Archivist rows are text a few KB long; 1 MB, the issue's figure, leaves room.
+MAX_VALUE_BYTES = 1_000_000
+#: Total size of the string and blob values one query may return.
+MAX_RESULT_BYTES = 16_000_000
+#: Longest SQL text the surface accepts.
+MAX_SQL_BYTES = 100_000
+#: Widest row a query may return, so one row is at most MAX_COLUMNS x MAX_VALUE_BYTES.
+MAX_COLUMNS = 64
 
 #: Outcome codes. THREE, not two, and the third is the point (#554 constraint 1).
 #: An empty result must be distinguishable from an unasked question, and BOTH must be
@@ -186,6 +207,31 @@ _OUTCOME_SUMMARY = {
         "against these tables and call again."
     ),
 }
+
+
+class WorkerFailed(RuntimeError):
+    """The query worker broke: it could not start, died without a reply, or ran a
+    different copy of techne than the caller. A server fault, so neither a denial
+    (learn the surface) nor an sqlite3.Error (your SQL is wrong)."""
+
+
+#: How the worker starts. `-I` keeps a planted `techne/` in the cwd, PYTHONPATH and
+#: the user site out of the child; argv[1] then puts back the ONE directory that
+#: matters, the one the caller's own `techne` was imported from. Without it the child
+#: imports whatever `techne` site-packages holds, which in a worktree on a shared venv
+#: is another checkout: the parent and tests would be the PR's while the guards that
+#: ran were main's (Prudence, PR 1315).
+_WORKER_BOOT = (
+    "import sys; sys.path.insert(0, sys.argv[1]); "
+    "from techne.core.archivist_query_worker import main; sys.exit(main())"
+)
+
+
+def _techne_root() -> Path:
+    """The directory the caller's `techne` package was imported from."""
+    import techne
+
+    return Path(techne.__file__).resolve().parents[1]
 
 
 class QueryDenied(Exception):
@@ -340,17 +386,32 @@ def _authorizer(denied: list[str], ops: list[str]):
     return authorize
 
 
-def _connect(path: Path, denied: list[str], ops: list[str]) -> sqlite3.Connection:
+def _connect(
+    path: Path, denied: list[str], ops: list[str], *, heap_limit_bytes: int | None = None
+) -> sqlite3.Connection:
     """A guarded read-only connection to the Archivist.
 
     Opened via federation's `_open_remote_readonly` rather than a second ?mode=ro
     opener of our own. That function carries the measured WAL-sidecar caveat in its
     docstring, and a parallel opener drifts from it the moment either side learns
     something — the same copy-not-mechanism shape #518 found five times.
+
+    *heap_limit_bytes* is for the worker process only. `PRAGMA hard_heap_limit` caps
+    EVERY SQLite allocation in the process, for the life of the process, and the
+    pragma can only lower it — Python's sqlite3 has no call that raises it again. Set
+    in a long-lived process it would cap recall and everything else there too.
     """
     from techne.core.federation import _open_remote_readonly
 
     conn = _open_remote_readonly(path)
+    if heap_limit_bytes is not None:
+        # Before the authorizer, which denies these pragmas. The sorter spills to
+        # temp files but its merge still holds about one record per spilled run, so
+        # spilling bounds neither memory nor disk (techne#1313, measured: 500 rows of
+        # 1 MB took 280 MB). With the temp store in memory every sort, group and
+        # DISTINCT counts against the heap cap and fails as MemoryError instead.
+        conn.execute("PRAGMA temp_store=MEMORY")
+        conn.execute(f"PRAGMA hard_heap_limit={int(heap_limit_bytes)}")
     conn.set_authorizer(_authorizer(denied, ops))
     # Set AFTER the authorizer: both are per-connection, but the ordering makes the
     # read obvious — nothing may run before both guards are installed.
@@ -361,6 +422,17 @@ def _connect(path: Path, denied: list[str], ops: list[str]) -> sqlite3.Connectio
         return 1 if state["n"] > OP_BUDGET else 0
 
     conn.set_progress_handler(_tick, 1000)
+    # The op budget counts VM steps, and a C function runs as one:
+    # length(replace(hex(zeroblob(5e7)), '0', '00')) took ~590 MB in a few steps
+    # (techne#1256). Cap the size of any string or blob a query can build, and of
+    # the SQL text.
+    conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, MAX_VALUE_BYTES)
+    conn.setlimit(sqlite3.SQLITE_LIMIT_SQL_LENGTH, MAX_SQL_BYTES)
+    # And the width of a row: the result budget runs per row, after SQLite and
+    # Python hold the whole row, so 400 one-MB columns took ~1.2 GB before the
+    # budget saw them (Prudence, PR 1311 round 4). The widest real read,
+    # knowledge JOIN knowledge_deps, is 25 columns.
+    conn.setlimit(sqlite3.SQLITE_LIMIT_COLUMN, MAX_COLUMNS)
     return conn
 
 
@@ -397,6 +469,34 @@ def readable_schema(config) -> dict:
         "tables": tables,
         "row_limit": {"default": DEFAULT_LIMIT, "max": MAX_LIMIT},
     }
+
+
+def _value_bytes(v: object) -> int:
+    """A value's size in bytes, as SQLite's own length limit counts it: UTF-8 for
+    text, raw for blobs. len() of a str counts code points, which undercounts any
+    non-ASCII text (Temperance, PR 1311 round 2)."""
+    if isinstance(v, bytes):
+        return len(v)
+    if isinstance(v, str):
+        return len(v.encode("utf-8", "surrogatepass"))
+    return 0
+
+
+def _heap_denied(heap_limit_bytes: int) -> QueryDenied:
+    return QueryDenied(
+        f"The query passed the {heap_limit_bytes:,}-byte SQLite memory limit "
+        "(techne#1313). ORDER BY, GROUP BY, DISTINCT and window functions build the "
+        "whole set before the first row comes back; sort fewer or smaller values, or "
+        "put a LIMIT inside the query."
+    )
+
+
+def _too_big(e: Exception) -> QueryDenied:
+    return QueryDenied(
+        f"A value in this query passed the {MAX_VALUE_BYTES:,}-byte limit ({e}). The "
+        "limit bounds the size of any one value a query builds (techne#1256); select "
+        "less, or a substr() of it."
+    )
 
 
 def query(config, sql: str | None = None, limit: int | None = None) -> dict:
@@ -440,9 +540,98 @@ def query(config, sql: str | None = None, limit: int | None = None) -> dict:
             f"limit must be a whole number, got {limit!r}. "
             f"Omit it for {DEFAULT_LIMIT}, or pass 1-{MAX_LIMIT}."
         ) from e
+    return _run_in_worker(config, path, sql, cap)
+
+
+def _run_in_worker(config, path: Path, sql: str, cap: int) -> dict:
+    """Run `_execute` in a child process and return its result (techne#1313).
+
+    WHY A PROCESS. SQLite's sorter is bounded by nothing on the connection: the op
+    budget counts VM steps and a generated row costs about 1/48 of a tick, so ~2.4M
+    rows fit inside it, and the merge holds roughly rows x value^2 / run-size bytes.
+    The only cap that holds is `hard_heap_limit`, and that is process-wide and can
+    only be lowered — so it goes in a process that exists for one query. The parent
+    keeps the deadline: a killed child takes its memory and temp files with it.
+
+    The request goes over stdin and the reply comes back as one JSON object on
+    stdout, so the SQL never appears in a process listing. Measured overhead is in
+    the PR for #1313 (interpreter start plus importing this module).
+    """
+    heap = int(config.archivist_query_heap_bytes)
+    timeout = float(config.archivist_query_timeout_s)
+    request = json.dumps({"path": str(path), "sql": sql, "cap": cap, "heap_limit_bytes": heap})
+    root = _techne_root()
+    started = time.monotonic()
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-I", "-c", _WORKER_BOOT, str(root)],
+            input=request,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as e:
+        log.debug("archivist_query: worker killed at the %.1fs deadline", timeout)
+        raise QueryDenied(
+            f"Query passed the {timeout:g}-second deadline and was stopped (techne#1313). "
+            "It is read-only, so nothing was harmed. Narrow it, or add a LIMIT inside "
+            "the query."
+        ) from e
+    except OSError as e:
+        # No interpreter to start (an empty or non-Python sys.executable, as some
+        # embedded hosts have): the same server fault as a worker that dies.
+        raise WorkerFailed(f"archivist_query worker could not start: {e}") from e
+    elapsed = time.monotonic() - started
+    log.debug(
+        "archivist_query: worker exit=%s in %.3fs, %d bytes out",
+        proc.returncode,
+        elapsed,
+        len(proc.stdout),
+    )
+    if proc.stderr:
+        log.debug("archivist_query: worker stderr: %s", proc.stderr[-2000:])
+    try:
+        reply = json.loads(proc.stdout)
+    except ValueError:
+        reply = None
+    if proc.returncode != 0 or not isinstance(reply, dict):
+        # Not a denial and not the caller's SQL: the worker itself broke. Said as a
+        # server fault, with the tail of its stderr, rather than dressed as either.
+        raise WorkerFailed(
+            f"archivist_query worker exited {proc.returncode}: "
+            f"{(proc.stderr or '').strip()[-500:] or 'no output'}"
+        )
+    # Checked against the caller's own import, not against `root`, so the check
+    # still holds if the root ever stops matching it.
+    import techne
+
+    mine = Path(techne.__file__).resolve()
+    ran = Path(str(reply.get("techne") or "")).resolve()
+    if ran != mine:
+        raise WorkerFailed(
+            f"archivist_query worker ran techne from {ran}, but the caller runs it from "
+            f"{mine}; refusing a result produced by a different guard stack."
+        )
+    if "denied" in reply:
+        raise QueryDenied(reply["denied"])
+    if "sqlite_error" in reply:
+        # Re-raised as the same sqlite3 class, so a caller still tells "your SQL is
+        # wrong" (sqlite3.Error) from "the surface refused it" (QueryDenied).
+        cls = getattr(sqlite3, str(reply["sqlite_error"]), None)
+        if not (isinstance(cls, type) and issubclass(cls, sqlite3.Error)):
+            cls = sqlite3.Error
+        raise cls(reply.get("message", ""))
+    return reply["ok"]
+
+
+def _execute(path: Path, sql: str, cap: int, heap_limit_bytes: int | None = None) -> dict:
+    """The guarded query itself. Runs inside the worker (`archivist_query_worker`);
+    query() never calls it in its own process."""
     denied: list[str] = []
     ops: list[str] = []
-    conn = _connect(path, denied, ops)
+    conn = _connect(path, denied, ops, heap_limit_bytes=heap_limit_bytes)
     try:
         try:
             cur = conn.execute(sql)
@@ -451,6 +640,14 @@ def query(config, sql: str | None = None, limit: int | None = None) -> dict:
             # because "you may send one statement" is a fact about this surface.
             raise QueryDenied(f"{e} This surface takes exactly one SELECT.") from e
         except sqlite3.DatabaseError as e:
+            if isinstance(e, sqlite3.DataError):
+                raise _too_big(e) from e
+            if "too many columns" in str(e) or "too many terms" in str(e):
+                # SQLITE_LIMIT_COLUMN also caps ORDER BY / GROUP BY terms.
+                raise QueryDenied(
+                    f"The query has more than {MAX_COLUMNS} columns or sort terms ({e}). "
+                    "The limit bounds the size of one row (techne#1256); use fewer."
+                ) from e
             if ops:
                 refused = sorted(set(ops))
                 detail = (
@@ -475,8 +672,33 @@ def query(config, sql: str | None = None, limit: int | None = None) -> dict:
                     "out of reach (techne#554)."
                 ) from e
             raise
-        rows = [_jsonable(dict(r)) for r in cur.fetchmany(cap + 1)]
+        # Iterate rather than fetchmany: each value is capped by MAX_VALUE_BYTES,
+        # but up to MAX_LIMIT rows of them were materialised at once, ~600 MB at
+        # 200 rows (Prudence, PR 1311). The running total stops a query at
+        # MAX_RESULT_BYTES, before the rows behind it are fetched.
+        rows, total = [], 0
+        for r in cur:
+            total += sum(_value_bytes(v) for v in r)
+            if total > MAX_RESULT_BYTES:
+                raise QueryDenied(
+                    f"The result passed the {MAX_RESULT_BYTES:,}-byte total limit after "
+                    f"{len(rows)} row(s) (techne#1256). Select fewer rows or columns, "
+                    "or a substr() of the large ones."
+                )
+            rows.append(_jsonable(dict(r)))
+            if len(rows) > cap:
+                # The row past the cap only signals truncation, but its bytes were
+                # counted above, so a result whose returned rows fit can still be
+                # refused. Refusing is the safe direction; keep it.
+                break
         columns = [d[0] for d in (cur.description or [])]
+    except sqlite3.DataError as e:
+        raise _too_big(e) from e
+    except MemoryError as e:
+        # SQLITE_NOMEM: the heap cap above, the only thing that stops the sorter.
+        if heap_limit_bytes is None:
+            raise
+        raise _heap_denied(heap_limit_bytes) from e
     except sqlite3.OperationalError as e:
         if "interrupted" in str(e).lower():
             raise QueryDenied(

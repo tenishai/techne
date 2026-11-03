@@ -1817,7 +1817,7 @@ def archivist_query(ctx, sql, limit, as_json):
     import json as _json
     import sqlite3
 
-    from techne.core.archivist_query import QueryDenied, query
+    from techne.core.archivist_query import QueryDenied, WorkerFailed, query
 
     try:
         result = query(ctx.obj["config"], sql=sql, limit=limit)
@@ -1843,6 +1843,11 @@ def archivist_query(ctx, sql, limit, as_json):
         # terminal could. (Prudence, #707 review.)
         click.echo(f"error: {e}")
         raise SystemExit(1) from e
+    except WorkerFailed as e:
+        # Exit 3: neither a denial nor bad SQL, but the query worker itself broke
+        # (techne#1313). Printed, not a traceback, for the reason above.
+        click.echo(f"error: {e}")
+        raise SystemExit(3) from e
 
     if as_json:
         click.echo(_json.dumps(result, indent=2, default=str))
@@ -2020,6 +2025,19 @@ def custodian_status(ctx):
         conn.close()
 
 
+def _rail_failed(run: dict) -> bool:
+    """Whether one rail's run is a failure for `custodian run`'s exit status.
+
+    Answered none of what it emitted (#555), an emit that raised, or any answer
+    that failed (techne#1248). The one error that is not: a rail with no model
+    bound, which stays resident by design."""
+    return bool(
+        (run["emitted"] and run["answered"] == 0)
+        or (run["error"] and not str(run["error"]).startswith("no model bound"))
+        or run["failed"] > 0
+    )
+
+
 @custodian.command("run")
 @click.option("--rail", "rail_names", multiple=True, help="Rail to run (repeatable). Default: all.")
 @click.option("--limit", type=int, default=None, help="Max prompts per rail this run.")
@@ -2114,6 +2132,10 @@ def custodian_run(ctx, rail_names, limit, dry_run, as_json):
 
     if as_json:
         click.echo(_json.dumps(report, indent=2, default=str))
+        # --json used to return here, exiting 0 whatever happened (PR 1312 review):
+        # a cron job reading the JSON still needs the exit status.
+        if report["bound"] and any(_rail_failed(run) for run in report["rails"]):
+            raise SystemExit(1)
         return
 
     if not report["bound"]:
@@ -2138,7 +2160,7 @@ def custodian_run(ctx, rail_names, limit, dry_run, as_json):
         # success while producing nothing is the exact #555 failure, one layer up.
         if run["error"]:
             click.echo(f"  error: {run['error']}")
-        if run["emitted"] and run["answered"] == 0:
+        if _rail_failed(run):
             failures += 1
 
     if failures:
@@ -2900,7 +2922,14 @@ def _vector_next_steps(db_path: Path) -> list[str]:
     """
     from techne.core.capabilities import vectors_install_command
     from techne.core.embeddings import backend_available
+    from techne.core.search import no_extension_loading_lines, sqlite_loads_extensions
 
+    # FIRST, because both hints below end in `techne vectors backfill`, which
+    # exits 1 on this interpreter (techne#1321).
+    if not sqlite_loads_extensions():
+        return ["  Semantic recall is NOT available on this Python."] + [
+            f"  {line}" for line in no_extension_loading_lines()
+        ]
     if not backend_available():
         return [
             "  Semantic recall is OFF: no embedding backend is installed, so search is",
@@ -3013,6 +3042,15 @@ def _warm_vectors(config) -> list[str] | None:
 
     if not backend_available():
         return None
+    from techne.core.search import backfill_vectors, no_extension_loading_lines
+    from techne.core.search import sqlite_loads_extensions
+
+    # BEFORE THE DOWNLOAD (techne#1321): weights this interpreter can never use
+    # are tens of MB of waiting for nothing.
+    if not sqlite_loads_extensions():
+        return ["  Semantic recall is NOT ready."] + [
+            f"  {line}" for line in no_extension_loading_lines()
+        ]
     # ONE LOAD, NEVER AN OFFLINE PROBE FIRST (#1029 r1, Critical). Probing with
     # allow_download=False sets HF_HUB_OFFLINE for model2vec, and huggingface_hub
     # keeps its offline state for the life of the process after the env var is
@@ -3030,8 +3068,6 @@ def _warm_vectors(config) -> list[str] | None:
             "  Search is keyword-only until you run, with network access:",
             "    techne vectors backfill",
         ]
-    from techne.core.search import backfill_vectors
-
     try:
         counts = backfill_vectors(config.db_path, allow_download=False)
     except Exception as e:
@@ -3039,7 +3075,16 @@ def _warm_vectors(config) -> list[str] | None:
             f"  Semantic recall: the model is ready but embedding failed ({e}). Run:",
             "    techne vectors backfill",
         ]
-    click.echo(f"Semantic recall ready: embedded {sum(counts.values())} stored row(s).")
+    # NO `orphans_swept`, NO VECTOR INDEX (#408's discriminator). backfill_vectors
+    # returned before its sweep, so nothing was embedded and "ready: embedded 0"
+    # would be the false claim techne#1321 found.
+    if "orphans_swept" not in counts:
+        return [
+            "  Semantic recall is NOT ready: sqlite-vec could not be loaded, so no vector",
+            "  index was built. Check with: techne vectors status",
+        ]
+    embedded = sum(counts.get(k, 0) for k in ("threads", "observations", "knowledge"))
+    click.echo(f"Semantic recall ready: embedded {embedded} stored row(s).")
     return []
 
 
@@ -3052,7 +3097,13 @@ def _vector_lines(config, setup_vectors: bool) -> list[str]:
 
 
 @main.command("init")
-@click.option("--platform", type=click.Choice(list(PLATFORMS)), default="claude-code")
+@click.option(
+    "--platform",
+    type=click.Choice(list(PLATFORMS)),
+    default=None,
+    help="Platform to register for. Default: the one config.yaml names (claude-code on a "
+    "fresh install). Re-running init no longer resets it (techne#1255).",
+)
 @click.option(
     "--identity-dir",
     type=click.Path(exists=True),
@@ -3121,8 +3172,11 @@ def init(
     from techne.core.database import init_db
     from techne.core.memory_doctor import find_curated_memory_files
 
-    config = Config.load()
-    config.platform = platform
+    # ctx.obj's config, like every other command: a Config injected by the group or a
+    # test is the one init writes (techne#1255).
+    config = ctx.obj["config"]
+    if platform is not None:
+        config.platform = platform
     if identity_dir:
         config.identity_dir = Path(identity_dir)
 
@@ -3144,7 +3198,7 @@ def init(
     # first would claim Claude Code is here (#1123, #1137). `claude` on PATH or its
     # projects/ dir (techne never creates it) says it has actually run.
     cc_present = False
-    if platform == "claude-code":
+    if config.platform == "claude-code":
         from techne.platforms.claude_code import register_hooks, register_mcp
         from techne.platforms.claude_code.paths import claude_code_has_run
 
@@ -3254,11 +3308,11 @@ def init(
     # registered install with no config.yaml (#1030 r1).
     # Not when Claude Code is absent: its auto-memory "defaults on" only in the
     # sense that no settings file says otherwise, and there is nothing to turn off.
-    if platform == "claude-code" and cc_present:
+    if config.platform == "claude-code" and cc_present:
         _offer_auto_memory_off(spool_primary=resolved_mode == "spool-primary")
 
     # Platform-specific next-steps so the operator isn't left guessing.
-    if platform == "standalone":
+    if config.platform == "standalone":
         click.echo("")
         click.echo("Standalone init complete. Next steps:")
         click.echo("")
@@ -3344,7 +3398,7 @@ def watch_cmd(ctx, paths, include, exclude, debounce_ms, resync_hours):
     from techne.watch import WatchConfig
     from techne.watch import watch as run_watch
 
-    config = Config.load()
+    config = ctx.obj["config"]
     resolved_paths = [Path(p).resolve() for p in paths]
     session_id = start_session(
         config.db_path,
@@ -4201,7 +4255,10 @@ def reflect_ingest(ctx, responses_file):
         click.echo(f"skipped {skipped} thread(s) with empty raw_response")
     click.echo(f"reflection debt drained: {drained} thread(s)")
     if config.reflect.write_to == "live":
-        click.echo("write_to=live — candidates promoted straight to knowledge/identity.")
+        click.echo(
+            "write_to=live — candidates promoted straight to knowledge; "
+            "identity candidates stay pending for techne reflect review."
+        )
     else:
         click.echo("write_to=candidates — review with: techne reflect review")
 
@@ -5769,7 +5826,29 @@ def vectors_backfill(ctx, do_tags, all_tags, no_download):
     # extension not a model) and then returns {} if it cannot embed. The CLI keeps
     # only the sqlite_vec import guard above, which is the one thing it genuinely
     # has to check to print a useful message.
-    from techne.core.search import backfill_vectors
+    from techne.core.search import (
+        backfill_vectors,
+        no_extension_loading_lines,
+        sqlite_loads_extensions,
+    )
+
+    if not sqlite_loads_extensions():
+        # NON-ZERO, NOT A QUIET {} (techne#1321). This interpreter can never load
+        # sqlite-vec, so no rerun of this command helps. Pending tags still get
+        # inferred (they need the model, not the extension) and stdout stays one
+        # JSON document; the reason goes to stderr, which the SessionStart chain
+        # leaves open for its debug log.
+        if embeddings_mod.backend_available():
+            from techne.core.inference import backfill_tags
+
+            if do_tags:
+                tags = backfill_tags(config.db_path, config, only_missing=not all_tags)
+            else:
+                tags = backfill_tags(config.db_path, config, pending_only=True)
+            click.echo(json.dumps({"tags": tags}, indent=2))
+        for line in no_extension_loading_lines():
+            click.echo(line, err=True)
+        ctx.exit(1)
 
     counts = backfill_vectors(config.db_path, allow_download=not no_download)
 
@@ -5880,7 +5959,15 @@ def vectors_status(ctx):
             "run `techne vectors backfill` to restore it."
         )
     elif status["backfill_needed"]:
-        click.echo("rows are missing vectors — run `techne vectors backfill` to embed them.")
+        from techne.core import search
+
+        # Without extension loading the vec tables never exist, so every row
+        # counts as unembedded and backfill would only exit 1 (#1325).
+        if not search.sqlite_loads_extensions():
+            for line in search.no_extension_loading_lines():
+                click.echo(line)
+        else:
+            click.echo("rows are missing vectors — run `techne vectors backfill` to embed them.")
 
 
 def _active_codex_db(config, repo, *, require_indexed: bool = True):
@@ -6497,6 +6584,33 @@ def evidence_cmd(ctx, session_id, since):
 # ---------------------------------------------------------------------------
 # Cross-DB maintenance: fsck + all-DBs-together backup/restore (techne#139)
 # ---------------------------------------------------------------------------
+
+
+@main.command("scrub-credentials")
+@click.option("--apply", is_flag=True, help="Rewrite the rows. Without it, only count them.")
+@click.option("--json", "as_json", is_flag=True, help="Emit the counts as JSON.")
+@click.pass_context
+def scrub_credentials_cmd(ctx, apply, as_json):
+    """Re-apply credential redaction to rows already stored (techne#1245).
+
+    Redaction runs at write time, so a widened pattern set protects new rows
+    only. Dry run by default: counts per column, never the matched text. Take a
+    `techne backup` first if you want a way back, and note that existing
+    backups and exports still hold whatever they held.
+    """
+    config = ctx.obj["config"]
+    from techne.core.scrub import scrub
+
+    counts = scrub(config.db_path, apply=apply)
+    total = sum(counts.values())
+    if as_json:
+        click.echo(json.dumps({"applied": apply, "rows": counts, "total": total}, indent=2))
+        return
+    verb = "redacted" if apply else "would redact"
+    for name, n in counts.items():
+        if n:
+            click.echo(f"  {name}: {n}")
+    click.echo(f"{verb} {total} row(s)" + ("" if apply or not total else "; rerun with --apply"))
 
 
 @main.command("fsck")

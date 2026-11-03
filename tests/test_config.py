@@ -285,6 +285,23 @@ def test_reflect_emit_bounds_round_trip(tmp_path):
     assert reloaded.reflect.emit_max_chars == 12345
 
 
+def test_a_retired_sources_block_loads_and_survives_a_save(tmp_path):
+    """Issue 1262 deleted `sources.claude_code_transcripts` and the tailer it
+    configured, which nothing ever constructed. A config.yaml that still sets it
+    must load without error and keep the block on save, like any key this version
+    does not recognise: removing a dead key is no reason to rewrite an operator's
+    file."""
+    f = tmp_path / "config.yaml"
+    sources = {"claude_code_transcripts": {"paths": ["/tmp/projects"], "debounce_ms": 500}}
+    f.write_text(yaml.dump({"sources": sources}))
+    cfg = Config.load(f)
+    assert not hasattr(cfg, "sources")
+
+    out = tmp_path / "out.yaml"
+    cfg.save(out)
+    assert yaml.safe_load(out.read_text())["sources"] == sources
+
+
 def test_sync_round_trip_preserves_all_fields(tmp_path):
     """Config.save() once wrote only sync.adapter (plus url/auth/path if truthy),
     silently dropping sync.audience and adapter-specific keys. techne#1074 removed

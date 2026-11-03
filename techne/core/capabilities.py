@@ -320,13 +320,22 @@ def install_command_for(
 
 def _probe_vectors_backend(config: Config) -> bool | None:
     from techne.core.embeddings import backend_available
+    from techne.core.search import sqlite_loads_extensions
 
+    # NEITHER VECTORS ENTRY APPLIES ON A PYTHON THAT CANNOT LOAD sqlite-vec
+    # (techne#1321): both end in `techne vectors backfill`, which exits 1 there.
+    # The `vectors` fact (vectors:coverage) names the cause and the reinstall.
+    if not sqlite_loads_extensions():
+        return None
     return backend_available()
 
 
 def _probe_vectors_model(config: Config) -> bool | None:
     from techne.core.embeddings import backend_available, model_cached
+    from techne.core.search import sqlite_loads_extensions
 
+    if not sqlite_loads_extensions():
+        return None  # see _probe_vectors_backend
     if not backend_available():
         return None  # vectors_backend already says so; one gap, one entry
     return model_cached(config)

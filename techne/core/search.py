@@ -980,6 +980,7 @@ def _query_embedding(query: str):
     """
     from techne.core import vec_ext
 
+    query = clean_query_text(query)  # techne#1249: search_vec can be called directly
     # find_spec, not `import sqlite_vec`: the package's __init__ imports numpy.
     if not vec_ext.available():
         return None
@@ -2787,6 +2788,35 @@ def _search_on_conn(
     )
 
 
+def sqlite_loads_extensions() -> bool:
+    """Can this interpreter's sqlite3 load sqlite-vec at all? (techne#1321)
+
+    Decided by how Python was built (`--enable-loadable-sqlite-extensions`), not
+    by the SQLite version. python.org and Apple's system builds lack it, and on
+    them `backfill_vectors` returns {} however often it is run.
+    """
+    return hasattr(sqlite3.Connection, "enable_load_extension")
+
+
+def no_extension_loading_lines() -> list[str]:
+    """Why semantic recall cannot work on this Python, and how to fix it.
+
+    One wording for `init`, `vectors backfill` and `vectors:coverage`. The fix is
+    another interpreter, not another driver: the stdlib sqlite3 stays (#1321).
+    """
+    from techne import install_spec
+
+    spec = install_spec("recommended")
+    return [
+        f"This Python's sqlite3 cannot load extensions ({sys.executable}), so sqlite-vec "
+        "cannot load and recall stays keyword-only.",
+        "python.org and Apple's system Pythons are built this way. Reinstall techne with "
+        "a uv-managed, distro or Homebrew Python, for example:",
+        f'  uv tool install --force --managed-python "{spec}"',
+        f'  pipx install --force --python <path-to-python> "{spec}"',
+    ]
+
+
 def backfill_vectors(
     db_path: Path, batch_size: int = 100, *, allow_download: bool = True
 ) -> dict[str, int]:
@@ -3194,6 +3224,36 @@ def _ensure_vec_backend_identity(conn: sqlite3.Connection, backend) -> bool:
     return True
 
 
+#: C0 control characters and DEL, each mapped to a space (techne#1249). Tab, LF
+#: and CR are left alone: they are ordinary whitespace to SQLite, FTS5 and the
+#: embedder, and the recall hooks log the query with its line breaks intact.
+_CONTROL_TO_SPACE = {c: " " for c in (*range(0x20), 0x7F) if chr(c) not in "\t\n\r"}
+
+
+def clean_query_text(query: str) -> str:
+    """Make raw query text safe for SQLite and the embedder (techne#1249).
+
+    Two inputs used to raise out of ``search()``. A NUL byte ends the string at
+    SQLite's C boundary, so an FTS5 phrase literal containing one reads as
+    ``unterminated string``. A lone surrogate (``"\\ud800"``, which JSON can carry
+    and Python will hold) cannot be encoded as UTF-8, so binding it raises
+    ``UnicodeEncodeError`` before SQLite sees it.
+
+    NUL, the other C0 controls (tab, LF and CR excepted) and DEL become spaces,
+    so they separate terms
+    rather than glue two words together. Surrogates go through a UTF-16
+    round trip: a valid high/low pair becomes the character it encodes, and a
+    lone one becomes U+FFFD, which FTS5's tokenizer treats as a separator.
+    Everything else passes through unchanged.
+    """
+    if not query:
+        return query
+    cleaned = query.translate(_CONTROL_TO_SPACE)
+    if any("\ud800" <= ch <= "\udfff" for ch in cleaned):
+        cleaned = cleaned.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace")
+    return cleaned
+
+
 def _fts_terms(query: str) -> list[str]:
     """Split ``query`` into FTS5-safe phrase-literal bodies (#74).
 
@@ -3201,9 +3261,11 @@ def _fts_terms(query: str) -> list[str]:
     literal: embedded double-quotes are doubled (FTS5's only escape), and
     backslashes are turned into separators (FTS5 has no backslash escape — a
     lone ``\\`` raises ``fts5: syntax error`` even inside a phrase). Empty
-    fragments are dropped.
+    fragments are dropped. NUL, other control characters and lone surrogates are
+    cleaned first (`clean_query_text`, techne#1249); every MATCH string built
+    from a query comes through here.
     """
-    cleaned = query.replace("\\", " ")
+    cleaned = clean_query_text(query).replace("\\", " ")
     return [t.replace('"', '""') for t in cleaned.split() if t.strip()]
 
 

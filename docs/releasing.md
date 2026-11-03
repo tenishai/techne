@@ -103,6 +103,17 @@ gh release view vX.Y.Z --json body --jq .body | grep -c "Upgrading"
 Zero means the release is published and the upgrade steps are not on it. Fix it with
 `gh release edit` before telling anyone the release is out.
 
+**Then install the tag as a user would** (techne#1319): both README paths, from the tag
+over https, through `techne init`, the hooks, MCP and a store and recall:
+
+```sh
+scripts/install-e2e.sh --ref vX.Y.Z
+```
+
+Run it on the build host, not a workstation (it reads `GH_TOKEN` while the repo is
+private). CI's `install-e2e` job already ran the same steps against the PR's commit; this
+run checks the tag as published.
+
 ## Repairing a release already published
 
 Release bodies are editable and editing one is not rewriting history — the tag and the

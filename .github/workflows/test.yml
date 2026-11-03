@@ -1084,6 +1084,28 @@ jobs:
         working-directory: techne
         run: bash scripts/acceptance.sh
 
+  # (#1319) PROVE THE INSTALL, NOT JUST THE WHEEL. `acceptance` builds the wheel
+  # with uv; this follows the README as a user does (clone + pip -e, and pipx
+  # [recommended]), runs `techne init`, then the hooks, the MCP server, a store
+  # and a recall, in a fresh $HOME with uv off PATH. The runner has no docker
+  # socket, so it runs on the runner's own python3, not
+  # a stock image; the script is also run by hand in python:3.12-slim.
+  # The embedding model downloads cold on every run, on purpose: a user's
+  # `techne init` does that, so no model cache is warmed here (unlike #535).
+  install-e2e:
+    runs-on: [self-hosted, linux, x64, techne-ci]
+    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
+    timeout-minutes: 20
+    steps:
+      - name: Checkout techne
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: techne
+
+      - name: README install paths, end to end (source + pipx)
+        working-directory: techne
+        run: bash scripts/install-e2e.sh
+
   # THE OTHER HALF OF THE TRUST SPLIT (#556). Fork PRs are skipped by every
   # self-hosted job above, so without this they would get an EMPTY Checks tab —
   # which is the exact failure #530 fought: nothing in CI can report a run that

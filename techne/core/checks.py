@@ -603,6 +603,19 @@ def check_hooks(config) -> list[CheckResult]:
         row = conn.execute("SELECT MIN(applied_at) FROM schema_version").fetchone()
         store_age = _age(row[0] if row else None)
         store_is_new = store_age is not None and store_age < _NEW_STORE_GRACE
+        # HAS THE UNSETTLED SESSION MOVED PAST STARTUP? (PR 1322 review.) With
+        # no settled session, a missing session_start marker is excused below,
+        # but not once any hook has marked since the newest session began: that
+        # session got through startup, so session_start had its chance, and a
+        # missing marker is the Phase 3 / Phase 8 partial death described above.
+        newest = _parse_ts(conn.execute("SELECT MAX(started_at) FROM sessions").fetchone()[0])
+        session_progressed = newest is not None and any(
+            m is not None and m >= newest
+            for m in (
+                _parse_ts((get_state(conn, f"hook:{h}:last_run") or {}).get("ts"))
+                for h in _HOOK_EXPECTATIONS
+            )
+        )
 
         for hook, (interval, note) in _HOOK_EXPECTATIONS.items():
             run = get_state(conn, f"hook:{hook}:last_run") or {}
@@ -632,7 +645,20 @@ def check_hooks(config) -> list[CheckResult]:
 
             if err:
                 verdict = Verdict.BROKEN
-                detail = f"last run FAILED: {err.get('stage', '?')} — {err.get('msg', '')}"[:160]
+                what = f"{err.get('stage', '?')} — {err.get('msg', '')}"
+                clean = int(err.get("clean_runs", 0) or 0)
+                if clean:
+                    # The error is kept until CLEAN_RUNS_TO_CLEAR clean runs in a row
+                    # (techne#1251), so the last run may have succeeded; say what is
+                    # true rather than "last run FAILED".
+                    from techne.hooks._liveness import CLEAN_RUNS_TO_CLEAR
+
+                    detail = (
+                        f"FAILED at {err.get('ts', '?')}: {what}; {clean} clean run(s) "
+                        f"since, clears after {CLEAN_RUNS_TO_CLEAR}"
+                    )[:200]
+                else:
+                    detail = f"last run FAILED: {what}"[:160]
             elif hook in _SESSION_SCOPED and last_settled_session:
                 # SESSION-SCOPED HOOKS ARE JUDGED AGAINST THE LAST SESSION, NOT
                 # THE CLOCK (#469 review, finding 5). For a hook that only fires
@@ -691,9 +717,33 @@ def check_hooks(config) -> list[CheckResult]:
                 else:
                     verdict = Verdict.LIVE
                     detail = f"{note}; last outcome: {outcome or 'unknown'}"
-            elif not last and sessions == 0 and store_is_new:
+            elif (
+                not last
+                and store_is_new
+                and (
+                    sessions == 0
+                    or (
+                        last_settled_session is None
+                        and hook not in _EVENT_DRIVEN_NO_SIGNAL
+                        and not (hook == "session_start" and session_progressed)
+                    )
+                )
+            ):
+                # NOT YET FIRED IS NOT A FAILURE ON A NEW STORE (techne#1318).
+                # This used to require zero sessions, so a fresh install whose
+                # first SessionStart had run read every other hook UNOBSERVABLE
+                # and doctor exited 1 before the user's first real session, with
+                # a remedy to rerun the init they had just run. No SETTLED
+                # session means none has had its chance to fire these, and the
+                # store-age bound keeps finding 1 above closed: a store past the
+                # grace with no marker still falls through to UNOBSERVABLE. The
+                # compaction hooks keep their own "idle" wording below.
                 verdict = Verdict.DORMANT
-                detail = "store created <7d ago, no sessions yet — nothing has run"
+                detail = (
+                    "not yet fired; no session has finished since install"
+                    if sessions
+                    else "store created <7d ago, no sessions yet — nothing has run"
+                )
             elif not last and sessions == 0:
                 # Old store, still no sessions: the absence IS the finding.
                 verdict = Verdict.UNOBSERVABLE
@@ -1146,6 +1196,11 @@ def _running_techne_processes() -> list[tuple[int, float, str]] | None:
         out = subprocess.run(
             ["ps", "-eo", "pid=,lstart=,args="], capture_output=True, text=True, timeout=5
         )
+    except FileNotFoundError:
+        # NO `ps` IS NOT A FAILED PROBE (techne#1318). Debian slim images and
+        # plenty of minimal hosts ship without procps; on Linux /proc holds the
+        # same table. Only a `ps` that exists and fails is UNKNOWN.
+        return _proc_table_processes()
     except (OSError, subprocess.SubprocessError):
         return None
     if out.returncode != 0:
@@ -1177,6 +1232,59 @@ def _running_techne_processes() -> list[tuple[int, float, str]] | None:
     # job is to stop silent greens. A parser that matched processes and understood
     # none of them has FAILED, not observed an empty machine.
     # (Prudence, PR #510 — demonstrated, and the fix prototyped, before I took it.)
+    if matched and not found:
+        return None
+    return found
+
+
+class _NoProcessTable(Exception):
+    """Neither `ps` nor /proc exists: there is no table to read (techne#1318).
+
+    Distinct from a failed read (None, UNKNOWN). Nothing here is broken; the
+    check just has no way to look, and says so as DORMANT with this reason.
+    """
+
+
+def _proc_table_processes(proc: Path = Path("/proc")) -> list[tuple[int, float, str]] | None:
+    """`_running_techne_processes` read from Linux /proc, for hosts without `ps`.
+
+    Same contract: None when every matching row failed to parse. Raises
+    `_NoProcessTable` when there is no /proc either.
+
+    Start time is `btime` (boot, epoch seconds, from /proc/stat) plus field 22 of
+    /proc/<pid>/stat (clock ticks since boot). That field is counted from AFTER
+    the last ")" because the command name in field 2 may hold spaces or parens.
+    """
+    try:
+        stat = (proc / "stat").read_text()
+    except OSError:
+        raise _NoProcessTable("ps is not installed and there is no /proc to read instead")
+    btime = next((int(ln.split()[1]) for ln in stat.splitlines() if ln.startswith("btime ")), None)
+    if btime is None:
+        return None
+    hz = os.sysconf("SC_CLK_TCK")
+
+    found: list[tuple[int, float, str]] = []
+    matched = 0
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            raw = (entry / "cmdline").read_bytes()
+        except OSError:
+            continue  # exited between listing and reading
+        cmd = raw.replace(b"\0", b" ").decode(errors="replace").strip()
+        if not any(pat in cmd for pat in _LONG_LIVED_PROCESSES):
+            continue
+        matched += 1
+        try:
+            line = (entry / "stat").read_text()
+            start = btime + int(line[line.rindex(")") + 2 :].split()[19]) / hz
+        except (OSError, ValueError, IndexError):
+            continue
+        found.append((int(entry.name), start, cmd))
+    # Same reasoning as the `ps` parser: matched rows none of which parsed is a
+    # broken probe, not an empty machine.
     if matched and not found:
         return None
     return found
@@ -1750,7 +1858,17 @@ def check_runtime_loaded(config) -> CheckResult | None:
         )
     deployed_at, how = landed
 
-    procs = _running_techne_processes()
+    try:
+        procs = _running_techne_processes()
+    except _NoProcessTable as exc:
+        return CheckResult(
+            name="runtime:loaded",
+            subsystem="runtime",
+            kind=Kind.FRESHNESS,
+            verdict=Verdict.DORMANT,
+            detail=f"cannot list processes: {exc}",
+            evidence="ps not found on PATH; /proc/stat unreadable",
+        )
     if procs is None:
         return CheckResult(
             name="runtime:loaded",
@@ -1830,6 +1948,8 @@ def check_maintenance_rails(config) -> list[CheckResult]:
         # nothing for these rails to chew on, so their silence is explained
         # rather than undecidable.
         has_material = conn.execute("SELECT COUNT(*) FROM knowledge").fetchone()[0] > 0
+        row = conn.execute("SELECT MIN(applied_at) FROM schema_version").fetchone()
+        store_age = _age(row[0] if row else None)
 
         for rail, (interval, note, rail_remedy) in _RAIL_EXPECTATIONS.items():
             row = conn.execute(
@@ -1844,6 +1964,17 @@ def check_maintenance_rails(config) -> list[CheckResult]:
             elif not last and not has_material:
                 verdict, remedy = Verdict.DORMANT, None
                 detail = "no knowledge stored yet — nothing to process"
+            elif not last and store_age is not None and store_age < interval:
+                # A RAIL CANNOT BE LATE BEFORE ITS FIRST INTERVAL HAS PASSED
+                # (techne#1318). Without this a fresh install that stored one row
+                # read consolidate and dream UNOBSERVABLE on day one and doctor
+                # exited 1. Bounded by the rail's own interval, so a rail that
+                # has never produced on an older store still fails as before.
+                verdict, remedy = Verdict.DORMANT, None
+                detail = (
+                    f"no output yet; store is {store_age.days}d old and the first run "
+                    f"is due within {interval.days}d"
+                )
             else:
                 verdict = temporal_verdict(last, interval)
                 detail = f"{note}; {count} candidates all-time"
@@ -3023,7 +3154,19 @@ def check_vector_coverage(config) -> CheckResult:
                 #
                 # `backend_available()` is the honest expression of "the operator
                 # turned this on"; `model_cached()` is only the REASON it is idle.
-                if _emb.backend_available():
+                from techne.core.search import no_extension_loading_lines
+                from techne.core.search import sqlite_loads_extensions
+
+                if _emb.backend_available() and not sqlite_loads_extensions():
+                    # THE BACKFILL REMEDY DOES NOTHING HERE (techne#1321): this
+                    # interpreter's sqlite3 cannot load sqlite-vec, so name the
+                    # cause and hand over the reinstall instead. Still gated on the
+                    # backend, so an operator who never installed the extra gets no
+                    # remedy, as #728 decided.
+                    why = no_extension_loading_lines()
+                    detail = why[0]
+                    remedy = why[2].strip()
+                elif _emb.backend_available():
                     cached = _emb.model_cached(config)
                     if cached is False:
                         detail = (

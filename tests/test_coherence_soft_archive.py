@@ -719,3 +719,36 @@ class TestUncertainIsAStateNotARankPenalty:
 
         rows = search(db, "unique_current_term_zz503", table="knowledge")
         assert entry_id in [r["id"] for r in rows], "a `current` row must still recall"
+
+
+def test_a_row_reconfirmed_mid_scan_is_not_archived(tmp_path, monkeypatch):
+    """techne#1269: candidates are selected on one connection and archived on
+    another. A reconfirm from another session between the two used to be
+    overwritten, and the row archived anyway."""
+    from techne.core import knowledge
+
+    db = _make_db(tmp_path)
+    racer = _insert(db, "reconfirmed mid-scan", confidence="low", status="uncertain",
+                    confirmed_days_ago=400)
+    other = _insert(db, "still stale", confidence="low", status="uncertain",
+                    confirmed_days_ago=400)
+    real_score = knowledge.decay_score
+    fired = []
+
+    def score_and_race(*a, **k):
+        if not fired:  # another session reconfirms between the SELECT and the UPDATE
+            fired.append(knowledge.reconfirm(db, racer))
+        return real_score(*a, **k)
+
+    monkeypatch.setattr(knowledge, "decay_score", score_and_race)
+    archived = archive_scan(db)
+
+    assert fired == [True]
+    assert [r["id"] for r in archived] == [other]
+    conn = connect(db)
+    try:
+        status = dict(conn.execute("SELECT id, status FROM knowledge").fetchall())
+    finally:
+        conn.close()
+    assert status[racer] != "archived"
+    assert status[other] == "archived"

@@ -28,7 +28,6 @@ CONDITIONAL_KEYS = frozenset(
         "identity_dir",
         "llm_api_base",
         "llm_api_key",
-        "sources",
         "stores",
         "connections",
         "db_path",
@@ -95,15 +94,6 @@ def test_a_populated_config_loses_no_top_level_key():
         "identity_dir": "/tmp/identity",
         "llm_api_base": "http://localhost:11434",
         "llm_api_key": "sk-test",
-        "sources": {
-            "claude_code_transcripts": {
-                "paths": ["/tmp/projects"],
-                "include_globs": ["*.jsonl"],
-                "exclude_globs": [],
-                "debounce_ms": 500,
-                "adapter_name": "claude-code",
-            }
-        },
         "conflict": {"max_items_per_emit": 9},
     }
 
@@ -115,7 +105,6 @@ def test_a_populated_config_loses_no_top_level_key():
 
     assert out["identity_dir"] == str(Path("/tmp/identity"))
     assert out["llm_api_base"] == "http://localhost:11434"
-    assert out["sources"]["claude_code_transcripts"]["paths"] == ["/tmp/projects"]
     assert out["conflict"]["max_items_per_emit"] == 9
 
 

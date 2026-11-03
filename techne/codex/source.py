@@ -26,7 +26,7 @@ Key design decisions
   optional extras (tenish-techne[codex]).  Missing grammars degrade gracefully:
   files for that language are silently skipped.
 
-* Watch mode:  mirrors JsonlTranscriptSource — a watchdog Observer calls
+* Watch mode:  a watchdog Observer calls
   _index_file() on each changed file through a Debouncer.
 """
 

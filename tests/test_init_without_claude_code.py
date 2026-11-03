@@ -118,3 +118,37 @@ def test_presence_is_measured_before_registration_creates_the_dir(isolated, monk
     out = _init()
     assert paths.claude_config_dir().is_dir()
     assert NOT_FOUND in out
+
+
+
+def test_reinit_keeps_a_non_claude_platform(isolated, monkeypatch):
+    """techne#1255: bare `techne init` used to reset platform to claude-code and
+    register Claude hooks on an opencode install."""
+    import yaml
+
+    from techne.config import Config
+
+    monkeypatch.setattr(paths, "_claude_on_path", lambda: True)
+    cfg = Config.load()
+    cfg.platform = "opencode"
+    cfg.data_dir.mkdir(parents=True, exist_ok=True)
+    cfg.save(cfg.data_dir / "config.yaml")
+    called = []
+    monkeypatch.setattr(
+        "techne.platforms.claude_code.register_hooks", lambda *a, **k: called.append(a)
+    )
+    _init()
+    assert called == []
+    assert Config.load().platform == "opencode"
+    assert yaml.safe_load((cfg.data_dir / "config.yaml").read_text())["platform"] == "opencode"
+
+
+def test_explicit_platform_still_wins(isolated, monkeypatch):
+    from techne.config import Config
+
+    monkeypatch.setattr(paths, "_claude_on_path", lambda: True)
+    result = CliRunner().invoke(
+        main, ["init", "--platform", "standalone", "--no-skills", "--no-vectors"], input="y\n"
+    )
+    assert result.exit_code == 0, result.output
+    assert Config.load().platform == "standalone"

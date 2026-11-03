@@ -113,6 +113,10 @@ EGRESS_KEYS: tuple[str, ...] = (
     # an unpinned way to repoint what the old spelling cannot — the exact gap the
     # reflect.model/conflict.model pair exists to close.
     "archivist",
+    # techne#1298. Turns on the publish lane and decides which knowledge leaves for a
+    # network archivist, so it is a destination choice like `archivist` above. The
+    # sink that delivers it is admitted separately through `sync.allowed_sinks`.
+    "archivist_publish_tags",
     # techne#1170. Which installed packages may feed recall. Recall output goes straight
     # into the model's context, so admitting a source is an INGRESS trust decision, the
     # same reasoning as `connections` above. `recall.order` is not listed: it orders
@@ -126,23 +130,6 @@ EGRESS_KEYS: tuple[str, ...] = (
     # SQLite-only, but a world-readable DSN is already a cross-agent leak in the
     # one-install-per-agent deployment where this gate is meant to be a wall.
     "stores",
-    # `sources.claude_code_transcripts.paths` is a list of arbitrary filesystem
-    # paths whose CONTENTS are ingested into the observation ledger. ADMITTED
-    # 2026-08-17 (techne#585, Richard's call) on the consistency argument: the
-    # rationale that admits `connections` above — "opened read-only, so this is
-    # ingestion rather than exfiltration — included anyway because a chosen input
-    # is a chosen trust source" — applies to it word for word, and keeping the
-    # two apart made the gate's own reasoning contradict itself.
-    #
-    # THIS CHANGED ENFORCEMENT, which is why it needed a decision rather than a
-    # test: under a LOCKED operator layer, EGRESS_KEYS entries in config.yaml are
-    # DROPPED, so a locked deployment now discards agent-supplied source paths
-    # instead of honouring them. That is the intended behaviour of locking — an
-    # agent choosing what gets read into its own memory is the thing being
-    # prevented — but it is a live behaviour change for any locked install that
-    # set `sources` in config.yaml, not a no-op. Pinned by
-    # TestKeySurgery::test_strip_removes_sources_now_that_it_is_governed.
-    "sources",
 )
 
 # The other half of the partition (techne#509). EGRESS_KEYS cannot be DERIVED —
@@ -230,6 +217,10 @@ _NOT_A_DESTINATION: tuple[str, ...] = (
     "staleness_hours",
     "tag_threshold",
     "knowledge_confidence_half_life_days",
+    # Resource caps on the archivist_query worker (#1313): how much memory and time a
+    # query may use, not where any result goes.
+    "archivist_query_heap_bytes",
+    "archivist_query_timeout_s",
     # Which client's transcripts are read. Not a network target.
     "platform",
     # OUTPUTS of the trust gate, not inputs to it — set by config loading itself

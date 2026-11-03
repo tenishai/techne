@@ -583,3 +583,221 @@ def test_a_non_finite_float_does_not_leave_as_invalid_json(team):
 
     payload = json.loads(text, parse_constant=reject)
     assert payload["rows"][0]["a"] == "inf"
+
+
+# ---- techne#1256: one query cannot take hundreds of MB --------------------------
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # the issue's reproduction, ~590 MB before:
+        "SELECT length(replace(hex(zeroblob(50000000)), '0', '00'))",
+        "SELECT length(zeroblob(50000000))",
+        "SELECT length(replace(hex(zeroblob(1500000)), '0', '00'))",
+        "SELECT length(randomblob(50000000))",
+    ],
+)
+def test_a_value_past_the_size_limit_is_refused_before_it_is_built(team, sql):
+    with pytest.raises(QueryDenied, match="byte limit"):
+        query(team, sql)
+
+
+def test_a_value_past_the_size_limit_is_refused_when_returned(team):
+    from techne.core.archivist_query import MAX_VALUE_BYTES
+
+    big = MAX_VALUE_BYTES // 2 + 1  # hex() doubles it past the limit
+    with pytest.raises(QueryDenied, match="byte limit"):
+        query(team, f"SELECT hex(printf('%{big}s', 'x')) FROM knowledge LIMIT 1")
+
+
+def test_ordinary_functions_still_work(team):
+    result = query(team, "SELECT length(content), upper(substr(content, 1, 3)) FROM knowledge")
+    assert result["outcome"]["code"] == OUTCOME_ROWS
+
+
+def test_many_rows_of_under_limit_values_stop_at_the_result_budget(team):
+    """Prudence, PR 1311: each value under MAX_VALUE_BYTES, but 200 of them took
+    ~600 MB when fetched at once."""
+    from techne.core.archivist_query import MAX_RESULT_BYTES, MAX_VALUE_BYTES
+
+    width = MAX_VALUE_BYTES - 1000
+    rows = MAX_RESULT_BYTES // width + 5
+    sql = (
+        f"WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM r WHERE n<{rows}) "
+        f"SELECT printf('%{width}s', 'x') AS s FROM r"
+    )
+    with pytest.raises(QueryDenied, match="total limit"):
+        query(team, sql, limit=2000)
+
+
+def test_a_result_under_the_budget_is_returned_whole(team):
+    sql = (
+        "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM r WHERE n<10) "
+        "SELECT printf('%1000s', n) AS s FROM r"
+    )
+    assert len(query(team, sql, limit=2000)["rows"]) == 10
+
+
+def test_the_result_budget_counts_utf8_bytes_not_characters(team):
+    """Temperance, PR 1311 round 2: len() of a str counts code points, so text
+    made of 4-byte characters passed four times the stated byte budget."""
+    from techne.core.archivist_query import MAX_RESULT_BYTES
+
+    chars = 200_000  # 800 KB of UTF-8 per row, under the 1 MB value cap
+    rows = MAX_RESULT_BYTES // (chars * 4) + 3
+    sql = (
+        f"WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM r WHERE n<{rows}) "
+        f"SELECT replace(printf('%{chars}s', ''), ' ', char(128512)) AS s FROM r"
+    )
+    with pytest.raises(QueryDenied, match="total limit"):
+        query(team, sql, limit=2000)
+
+
+def test_a_query_wider_than_the_column_cap_is_refused_before_it_runs(team):
+    """Prudence, PR 1311 round 4: the result budget runs per row, so 400 wide
+    columns were built (~1.2 GB) before it saw them."""
+    from techne.core.archivist_query import MAX_COLUMNS
+
+    # Tiny columns, so only the column cap can refuse it: with wide ones the result
+    # budget refused it too, and the test passed with the cap removed (PR 1311 r6).
+    cols = ", ".join(f"{i} AS c{i}" for i in range(MAX_COLUMNS + 1))
+    with pytest.raises(QueryDenied, match=f"more than {MAX_COLUMNS} columns"):
+        query(team, f"SELECT {cols}", limit=1)
+
+
+def test_too_many_sort_terms_is_a_named_refusal(team):
+    from techne.core.archivist_query import MAX_COLUMNS
+
+    terms = ", ".join(f"id+{i}" for i in range(MAX_COLUMNS + 1))
+    with pytest.raises(QueryDenied, match=f"more than {MAX_COLUMNS}"):
+        query(team, f"SELECT id FROM knowledge ORDER BY {terms}")
+
+
+def test_the_widest_real_join_still_fits_the_column_cap(team):
+    result = query(team, "SELECT * FROM knowledge JOIN knowledge_deps LIMIT 1")
+    assert result["outcome"]["code"] in (OUTCOME_ROWS, OUTCOME_NO_ROWS)
+
+
+# ---- the sorter is bounded by the worker's heap cap (techne#1313) -----------------
+
+_GEN = "WITH RECURSIVE g(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM g WHERE n<500) "
+_BIG = "printf('%999000s', 'x') || n"
+
+
+def _parent_peak_bytes() -> int:
+    import resource
+    import sys
+
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return peak if sys.platform == "darwin" else peak * 1024
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        _GEN + f"SELECT {_BIG} AS s FROM g ORDER BY s DESC",
+        _GEN + f"SELECT {_BIG} AS s, count(*) FROM g GROUP BY s",
+        _GEN + f"SELECT row_number() OVER (ORDER BY {_BIG}) FROM g",
+    ],
+    ids=["order-by", "group-by", "window"],
+)
+def test_a_sort_over_large_generated_rows_is_refused_at_the_heap_cap(team, sql):
+    """500 one-MB rows: ~280 MB in-process before #1313, and spilling to disk did
+    not bound it. The worker's heap cap must refuse it, and the parent must not
+    grow by the sort's size — that is the point of running it elsewhere."""
+    before = _parent_peak_bytes()
+    with pytest.raises(QueryDenied, match="SQLite memory limit"):
+        query(team, sql, limit=1)
+    grown = _parent_peak_bytes() - before
+    assert grown < 100 * 1024 * 1024, f"the parent grew by {grown:,} bytes"
+
+
+def test_the_heap_cap_does_not_leak_into_the_calling_process(team):
+    """`hard_heap_limit` is process-wide and can only be lowered. Set in the caller
+    it would cap every SQLite connection there for life."""
+    query(team, "SELECT id FROM knowledge")
+    conn = sqlite3.connect(":memory:")
+    try:
+        assert conn.execute("PRAGMA hard_heap_limit").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_a_real_table_sort_still_works_under_the_cap(team):
+    result = query(team, "SELECT * FROM knowledge ORDER BY content DESC")
+    assert result["outcome"]["code"] == OUTCOME_ROWS
+    assert result["row_count"] == 3
+
+
+def test_the_worker_is_killed_at_the_deadline(team):
+    team.archivist_query_timeout_s = 0.001  # shorter than interpreter start
+    with pytest.raises(QueryDenied, match="deadline"):
+        query(team, "SELECT id FROM knowledge")
+
+
+def test_a_bad_query_still_raises_the_sqlite_class(team):
+    """The worker reports errors as JSON; the caller must still get sqlite3's own
+    class, or the denial-vs-bad-SQL split this surface depends on is gone."""
+    with pytest.raises(sqlite3.OperationalError, match="no such column"):
+        query(team, "SELECT nope FROM knowledge")
+
+
+def test_a_broken_worker_is_a_server_fault_not_a_denial(team, monkeypatch):
+    from techne.core.archivist_query import WorkerFailed
+
+    monkeypatch.setattr("techne.core.archivist_query.sys.executable", "false")
+    with pytest.raises(WorkerFailed, match="worker exited"):
+        query(team, "SELECT id FROM knowledge")
+
+
+def test_a_worker_that_cannot_start_is_a_server_fault(team, monkeypatch):
+    from techne.core.archivist_query import WorkerFailed
+
+    monkeypatch.setattr("techne.core.archivist_query.sys.executable", "/nonexistent/python")
+    with pytest.raises(WorkerFailed, match="could not start"):
+        query(team, "SELECT id FROM knowledge")
+
+
+def test_the_worker_imports_techne_from_the_callers_directory(team, monkeypatch, tmp_path):
+    """Under -I the child would otherwise import site-packages' techne, which in a
+    worktree on a shared venv is another checkout (Prudence, PR 1315). Point the root
+    at a decoy package: the child must import the DECOY (so the root is honoured) and
+    the caller must then refuse its reply (so a mismatch cannot pass silently)."""
+    from techne.core.archivist_query import WorkerFailed
+
+    core = tmp_path / "decoy" / "techne" / "core"
+    core.mkdir(parents=True)
+    (core.parent / "__init__.py").write_text("")
+    (core / "__init__.py").write_text("")
+    (core / "archivist_query_worker.py").write_text(
+        "import json, sys\n"
+        "def main():\n"
+        "    json.dump({'ok': {}, 'techne': __file__}, sys.stdout)\n"
+        "    return 0\n"
+    )
+    monkeypatch.setattr("techne.core.archivist_query._techne_root", lambda: tmp_path / "decoy")
+    with pytest.raises(WorkerFailed, match="different guard stack") as err:
+        query(team, "SELECT id FROM knowledge")
+    assert "decoy" in str(err.value), "the child did not import from the root it was given"
+
+
+def test_cli_exits_3_when_the_worker_breaks(team, monkeypatch):
+    from click.testing import CliRunner
+
+    from techne.cli import main
+
+    monkeypatch.setattr("techne.config.Config.load", lambda *a, **k: team)
+    monkeypatch.setattr("techne.core.archivist_query.sys.executable", "false")
+    result = CliRunner().invoke(main, ["archivist", "query", "SELECT id FROM knowledge"])
+    assert result.exit_code == 3, result.output
+    assert "error:" in result.output
+    assert "Traceback" not in result.output
+
+
+@pytest.mark.parametrize("key", ["archivist_query_heap_bytes", "archivist_query_timeout_s"])
+def test_worker_limits_must_be_positive(key):
+    from techne.config import Config
+
+    with pytest.raises(ValueError, match=key):
+        Config._from_dict({key: 0})

@@ -213,7 +213,13 @@ ARCHIVIST_KNOWLEDGE_TARGET = "sink:archivist_knowledge"
 # that queries the table directly, without the accessor, is NOT prevented by
 # anything here (see delivered_hashes' docstring for what it does and does not
 # guarantee).
-LEDGER_TARGETS = frozenset({ARCHIVIST_KNOWLEDGE_TARGET})
+#: The publish lane (#1298): tagged knowledge for a NETWORK archivist. Core owns the
+#: target and the payload; an installed package supplies the sink that delivers it.
+#: Fixed rather than configurable so it can sit in LEDGER_TARGETS, which the sweep
+#: reads without a config.
+ARCHIVIST_PUBLISH_TARGET = "sink:archivist_publish"
+
+LEDGER_TARGETS = frozenset({ARCHIVIST_KNOWLEDGE_TARGET, ARCHIVIST_PUBLISH_TARGET})
 
 
 @dataclass
@@ -324,7 +330,7 @@ def ensure_registered_for(config) -> None:
     Idempotent and cheap. The drains and the lifecycle's enqueue sites reach it
     through ``sync.sinks.ensure_sinks_registered`` (techne#1172), which also registers
     installed packages' sinks. The drains are the session-end hook's ``flush_sinks``,
-    ``techne outbox flush-sinks`` and ``prune-orphans``; the lifecycle's session-end
+    ``techne.api.publish``, ``techne outbox flush-sinks`` and ``prune-orphans``; the lifecycle's session-end
     sites (``run_session_end``, ``redetect_threads``) register and then enqueue.
     ``push_knowledge_to_archivist`` calls it directly, which suffices for its built-in
     lane. So a row that
@@ -513,6 +519,128 @@ def push_knowledge_to_archivist(config) -> int:
         # count — without it, a shrinking `knowledge_pushed` is unanswerable
         # from outside.
         log.debug("archivist push: skipped %d redirected-type row(s)", skipped)
+    return pushed
+
+
+@dataclass
+class PublishPayload:
+    """What the publish lane hands a sink (#1298). A sink package declares this as
+    its ``payload_schema`` so producer and consumer share one contract.
+
+    ``chain_id`` is the oldest row in this fact's local supersede chain, so it stays
+    the same across revisions: a sink can key the remote entry on it and replace the
+    previous revision instead of adding beside it."""
+
+    content: str
+    knowledge_id: int
+    chain_id: int
+    type: str = "fact"
+    tags: str = ""
+    confidence: str = "medium"
+    written_by: str = ""
+
+
+class PublishSinkMissing(RuntimeError):
+    """The publish lane is on but no installed package registered its sink."""
+
+
+def _publish_tags(config) -> set[str]:
+    return {t.strip().lower() for t in config.archivist_publish_tags if t and t.strip()}
+
+
+def _row_tags(raw: str | None) -> set[str]:
+    return {t.strip().lower() for t in (raw or "").split(",") if t.strip()}
+
+
+def _chain_roots(db_path) -> dict[int, int]:
+    """Map each knowledge id that superseded something to the oldest id among all of
+    its ancestors. A merge (several rows superseded by one) can join branches of
+    different depth, so every branch is followed, not just the nearest predecessor."""
+    from techne.core.stores import plain_connect
+
+    conn = plain_connect(db_path)
+    try:
+        preds: dict[int, set[int]] = {}
+        for old, new in conn.execute(
+            "SELECT id, superseded_by FROM knowledge WHERE superseded_by IS NOT NULL"
+        ):
+            preds.setdefault(new, set()).add(old)
+    finally:
+        conn.close()
+
+    roots: dict[int, int] = {}
+    for start in preds:
+        oldest, stack, seen = start, [start], {start}
+        while stack:
+            for p in preds.get(stack.pop(), ()):
+                if p not in seen:
+                    seen.add(p)
+                    oldest = min(oldest, p)
+                    stack.append(p)
+        roots[start] = oldest
+    return roots
+
+
+def publish_tagged_knowledge(config) -> int:
+    """Enqueue live knowledge carrying an ``archivist_publish_tags`` tag to the
+    publish lane (#1298). Returns the number enqueued.
+
+    Off unless ``archivist_publish_tags`` is non-empty. An empty list never means
+    "publish everything": the lane feeds a store other agents read, so every row on
+    it is one somebody chose. Independent of ``archivist_binding``, which decides
+    what recall federates over; the network archivist is read through a recall
+    source instead.
+
+    Raises PublishSinkMissing when the lane is on but no sink is registered for it,
+    so the session-end caller reports it rather than the rows piling up unsent.
+    """
+    wanted = _publish_tags(config)
+    if not wanted:
+        return 0
+
+    from techne.core.knowledge import REDIRECTED_TYPES
+    from techne.core.knowledge_export import query_live_knowledge
+    from techne.core.redaction import redact_credentials
+    from techne.sync.outbox import content_hash_for, delivered_hashes, enqueue
+    from techne.sync.sinks import ensure_sinks_registered, get_sink
+
+    ensure_sinks_registered(config)
+    if get_sink(ARCHIVIST_PUBLISH_TARGET) is None:
+        raise PublishSinkMissing(
+            f"archivist_publish_tags is set but no sink is registered for "
+            f"{ARCHIVIST_PUBLISH_TARGET}; install its package and add it to "
+            f"sync.allowed_sinks"
+        )
+
+    already = delivered_hashes(config.db_path, ARCHIVIST_PUBLISH_TARGET)
+    roots = _chain_roots(config.db_path)
+    pushed = 0
+    for k in query_live_knowledge(config.db_path):
+        # Same exclusions as push_knowledge_to_archivist, for the same reasons.
+        if k["type"] in REDIRECTED_TYPES or k.get("status") == "archived":
+            continue
+        if not (_row_tags(k.get("tags")) & wanted):
+            continue
+        data = {
+            "content": redact_credentials(k["content"]),
+            "knowledge_id": k["id"],
+            "chain_id": roots.get(k["id"], k["id"]),
+            "type": k["type"],
+            "tags": k.get("tags") or "",
+            "confidence": k.get("confidence") or "medium",
+            "written_by": config.instance_name or "",
+        }
+        digest = content_hash_for(data)
+        if digest in already:
+            continue
+        # deliver=False: the sink makes a network call per row, so delivery waits for
+        # flush_sinks and its time budget instead of running inline here.
+        enqueue(
+            config.db_path, ARCHIVIST_PUBLISH_TARGET, data, content_hash=digest, deliver=False
+        )
+        already.add(digest)
+        pushed += 1
+    log.debug("archivist publish: enqueued %d tagged row(s)", pushed)
     return pushed
 
 

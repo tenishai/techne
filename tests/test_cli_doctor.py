@@ -86,11 +86,14 @@ def test_doctor_exits_nonzero_when_a_subsystem_is_not_confirmed(cli_db):
     from techne.core.database import connect
 
     # Give the store activity, so missing hook markers are undecidable rather
-    # than merely "nothing has happened yet".
+    # than merely "nothing has happened yet". Two sessions, so one has settled:
+    # on a new store a lone in-flight session reads never-fired hooks DORMANT
+    # (techne#1318).
     conn = connect(cli_db.db_path)
     try:
-        conn.execute(
-            "INSERT INTO sessions (id, started_at) VALUES (?, ?)", ("s1", "2026-08-01 00:00:00")
+        conn.executemany(
+            "INSERT INTO sessions (id, started_at) VALUES (?, ?)",
+            [("s1", "2026-08-01 00:00:00"), ("s2", "2026-08-02 00:00:00")],
         )
         conn.commit()
     finally:

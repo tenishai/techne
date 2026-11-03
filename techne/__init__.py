@@ -9,7 +9,7 @@ if TYPE_CHECKING:
     # import savings below are preserved while static analysis still resolves the
     # public API and consumers keep autocomplete.
     __version__: str
-    from techne import lifecycle
+    from techne import api, lifecycle
     from techne.config import Config, HookConfig, Platform, SyncConfig, ThreadConfig
     from techne.core import identity, knowledge, search
     from techne.core.database import connect, init_db
@@ -59,6 +59,7 @@ _LAZY: dict[str, tuple[str, str | None]] = {
     "knowledge": ("techne.core.knowledge", None),
     "search": ("techne.core.search", None),
     "lifecycle": ("techne.lifecycle", None),
+    "api": ("techne.api", None),
 }
 
 __all__ = [
@@ -87,6 +88,8 @@ __all__ = [
     "search",
     # lifecycle module (consumers may import techne.lifecycle directly)
     "lifecycle",
+    # recall and publish for an embedding runtime
+    "api",
 ]
 
 

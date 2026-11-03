@@ -155,11 +155,15 @@ class TestBuiltinChecks:
         # assertion (see TestConfigGateBeatsMarker).
         _enable_all_config_gated_hooks(config)
 
+        # TWO SESSIONS, so one has SETTLED. Since techne#1318 a new store whose
+        # only session is the one in flight reads never-fired hooks DORMANT
+        # (TestFreshInstallIsDormantNotFailing); activity that should have left
+        # a marker means a session that has had its chance to.
         conn = connect(config.db_path)
         try:
-            conn.execute(
+            conn.executemany(
                 "INSERT INTO sessions (id, started_at) VALUES (?, ?)",
-                ("s1", "2026-08-01 00:00:00"),
+                [("s1", "2026-08-01 00:00:00"), ("s2", "2026-08-02 00:00:00")],
             )
             conn.commit()
         finally:
@@ -195,6 +199,21 @@ class TestBuiltinChecks:
         hook = next(r for r in results if r.name == "hook:session_end")
         assert hook.verdict is Verdict.BROKEN
         assert "boom" in hook.detail
+
+    def test_a_recovering_hook_says_how_many_clean_runs_since(self, config):
+        """techne#1251 keeps the error for CLEAN_RUNS_TO_CLEAR clean runs; doctor must
+        not say "last run FAILED" when the last runs succeeded (PR 1312 review)."""
+        from techne.hooks._liveness import record_hook_run
+
+        record_hook_run(
+            config.db_path, "session_end", outcome="failed", error={"stage": "s", "msg": "boom"}
+        )
+        for _ in range(3):
+            record_hook_run(config.db_path, "session_end", outcome="ok")
+        hook = next(r for r in run_checks(config) if r.name == "hook:session_end")
+        assert hook.verdict is Verdict.BROKEN
+        assert "last run FAILED" not in hook.detail
+        assert "3 clean run(s) since" in hook.detail and "boom" in hook.detail
 
     def test_disabled_reflect_is_dormant_not_stale(self, config):
         """Off-by-config is a healthy state and must name the key, so deliberate
@@ -3177,3 +3196,121 @@ class TestSessionOverlap:
         assert all(r.verdict is Verdict.STALE for r in got.values()), {
             n: (r.verdict, r.detail) for n, r in got.items()
         }
+
+
+class TestFreshInstallIsDormantNotFailing:
+    """techne#1318 — on a fresh install whose first SessionStart had run, every
+    other hook read UNOBSERVABLE, consolidate and dream read UNOBSERVABLE, and
+    doctor exited 1 with a remedy to rerun the init the user had just run."""
+
+    def _store(self, tmp_path, monkeypatch, sessions, store_age=timedelta(hours=1)):
+        from techne.core import coord
+        from techne.core.database import connect
+
+        db = tmp_path / "techne.db"
+        init_db(db).close()
+        conn = connect(db)
+        try:
+            conn.execute("UPDATE schema_version SET applied_at = ?", (_iso(store_age),))
+            conn.executemany(
+                "INSERT INTO sessions (id, started_at, ended_at) VALUES (?, ?, ?)", sessions
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        monkeypatch.setattr(coord, "present_session_ids", lambda *a, **k: set())
+        cfg = Config()
+        cfg.db_path = db
+        _enable_all_config_gated_hooks(cfg)
+        return cfg
+
+    def _hooks(self, cfg):
+        from techne.core.checks import check_hooks
+
+        hooks = check_hooks(cfg)
+        _assert_no_hook_is_gated_off(hooks)
+        return {r.name: r for r in hooks}
+
+    _FIRST = [("first", _iso(timedelta(minutes=5)), None)]
+
+    def test_hooks_that_never_fired_during_the_first_session_are_dormant(
+        self, tmp_path, monkeypatch
+    ):
+        hooks = self._hooks(self._store(tmp_path, monkeypatch, self._FIRST))
+
+        for name in (
+            "hook:post_tool_use",
+            "hook:session_end",
+            "hook:user_prompt_submit",
+            "hook:codex_grep_assist",
+        ):
+            r = hooks[name]
+            assert r.verdict is Verdict.DORMANT, (name, r.verdict, r.detail)
+            assert r.ok and r.remedy is None
+            assert "no session has finished since install" in r.detail
+
+    def test_a_settled_session_that_left_no_marker_still_fails(self, tmp_path, monkeypatch):
+        """Once one session has had its chance, never-fired is a finding again."""
+        rows = [
+            ("done", _iso(timedelta(hours=2)), _iso(timedelta(hours=1))),
+            ("now", _iso(timedelta(minutes=5)), None),
+        ]
+        hooks = self._hooks(self._store(tmp_path, monkeypatch, rows))
+
+        for name in ("hook:post_tool_use", "hook:session_end", "hook:user_prompt_submit"):
+            assert not hooks[name].ok, (name, hooks[name].verdict, hooks[name].detail)
+
+    def test_an_old_store_with_one_session_still_fails(self, tmp_path, monkeypatch):
+        """The store-age bound from #469 finding 1 still holds."""
+        hooks = self._hooks(self._store(tmp_path, monkeypatch, self._FIRST, timedelta(days=30)))
+
+        assert hooks["hook:post_tool_use"].verdict is Verdict.UNOBSERVABLE
+
+    def test_a_hook_that_fired_and_went_quiet_still_fails(self, tmp_path, monkeypatch):
+        from techne.hooks._liveness import record_hook_run
+
+        cfg = self._store(tmp_path, monkeypatch, self._FIRST)
+        record_hook_run(cfg.db_path, "codex_grep_assist", ts=_iso(timedelta(days=8)))
+
+        assert self._hooks(cfg)["hook:codex_grep_assist"].verdict is Verdict.STALE
+
+    def _rails(self, cfg):
+        from techne.core.checks import check_maintenance_rails
+        from techne.core.knowledge import store
+
+        store(cfg.db_path, "one row, as the install test stores", type="fact")
+        return {r.name: r for r in check_maintenance_rails(cfg)}
+
+    def test_rails_before_their_first_interval_are_dormant(self, tmp_path, monkeypatch):
+        rails = self._rails(self._store(tmp_path, monkeypatch, self._FIRST))
+
+        for name in ("rail:consolidate", "rail:dream"):
+            assert rails[name].verdict is Verdict.DORMANT, (name, rails[name].detail)
+            assert "first run is due within 14d" in rails[name].detail
+
+    def test_rails_that_never_produced_past_their_interval_still_fail(self, tmp_path, monkeypatch):
+        rails = self._rails(self._store(tmp_path, monkeypatch, self._FIRST, timedelta(days=15)))
+
+        for name in ("rail:consolidate", "rail:dream"):
+            assert rails[name].verdict is Verdict.UNOBSERVABLE, (name, rails[name].detail)
+
+    def test_session_start_missing_after_the_session_moved_on_still_fails(
+        self, tmp_path, monkeypatch
+    ):
+        """PR 1322 review, Important 1: one session, two days old, whose
+        post_tool_use and user_prompt_submit marked yesterday, and no
+        session_start marker. That session got past startup, so the missing
+        marker is the Phase 3 / Phase 8 partial death, not "not yet fired"."""
+        from techne.hooks._liveness import record_hook_run
+
+        rows = [("only", _iso(timedelta(days=2)), None)]
+        cfg = self._store(tmp_path, monkeypatch, rows, store_age=timedelta(days=2))
+        for hook in ("post_tool_use", "user_prompt_submit"):
+            record_hook_run(cfg.db_path, hook, ts=_iso(timedelta(days=1)))
+
+        hooks = self._hooks(cfg)
+
+        assert hooks["hook:session_start"].verdict is Verdict.UNOBSERVABLE
+        # session_end stays DORMANT: with one session row there is no settled
+        # session (OFFSET 1), whatever that row's ended_at says.
+        assert hooks["hook:session_end"].verdict is Verdict.DORMANT

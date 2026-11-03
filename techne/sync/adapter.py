@@ -46,6 +46,14 @@ class KnowledgeEntry:
     confidence: str
     source: str
     target: str = ""
+    # Optional, so a recalled team row carries enough to cite and to supersede
+    # (issue #1335). An adapter that doesn't know them leaves them None.
+    id: str | None = None
+    written_by: str | None = None
+    updated_at: str | None = None
+    supersedes: str | None = None
+    entities: list[str] | None = None
+    relations: list[dict] | None = None
 
 
 @dataclass
@@ -91,7 +99,7 @@ class SourceAdapter(Protocol):
     # isinstance() on EVERY Python this project supports (measured 2026-08-29 on
     # 3.9 through 3.14; this comment previously said "3.12+", which is wrong and
     # understates the blast radius — see techne#818), which would break adapters
-    # that don't declare it (e.g. the isinstance check in test_jsonl_transcript).
+    # that don't declare it.
     # ---------------------------------------------------------------------------
 
     def initial_walk(self) -> int:

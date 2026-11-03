@@ -846,6 +846,16 @@ def run_session_end(
     except Exception as e:  # noqa: BLE001 — egress must never break session teardown
         print(f"techne: archivist knowledge push deferred: {e}", file=sys.stderr)
 
+    # The publish lane (#1298): tagged knowledge for a network archivist. Separate from
+    # the push above, which follows the archivist binding.
+    knowledge_published = 0
+    try:
+        from techne.core.archivist import publish_tagged_knowledge
+
+        knowledge_published = publish_tagged_knowledge(config)
+    except Exception as e:  # noqa: BLE001 — egress must never break session teardown
+        print(f"techne: archivist publish deferred: {e}", file=sys.stderr)
+
     return {
         "threads": len(threads),
         "linked": sum(1 for _, p in parent_links if p),
@@ -858,6 +868,7 @@ def run_session_end(
         # before #514 those two were indistinguishable from outside.
         "queued_for_reflection": queued_for_reflection,
         "knowledge_pushed": knowledge_pushed,
+        "knowledge_published": knowledge_published,
         "reflect": reflect_result,
     }
 
