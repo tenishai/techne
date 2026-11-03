@@ -6045,7 +6045,13 @@ def _import_resolve_pass(db_path: Path) -> dict:
     second and only on rows the import pass left `unresolved` with no import
     binding, so the two cannot disagree about a row. Its count is reported as
     `scope_resolved`, apart from `resolved`, so the import figure keeps its meaning.
+
+    GO HAS ITS OWN PASS (techne#1284), and its counts fold into the same three
+    figures: a same-package call into `scope_resolved`, a `pkg.F()` call into
+    `resolved`, and a predeclared name or out-of-repo package into `external`.
+    The generic passes skip Go rows, so no row is counted twice.
     """
+    from techne.codex.go_resolve import resolve_go_edges
     from techne.codex.import_resolve import resolve_edges_by_import, resolve_edges_by_scope
     from techne.core.stores import plain_connect
 
@@ -6053,6 +6059,11 @@ def _import_resolve_pass(db_path: Path) -> dict:
     try:
         report = resolve_edges_by_import(conn)
         report["scope_resolved"] = resolve_edges_by_scope(conn)["resolved"]
+        go = resolve_go_edges(conn)
+        report["resolved"] += go["import_resolved"]
+        report["scope_resolved"] += go["scope_resolved"]
+        report["external"] += go["external"]
+        report["go"] = go
         return report
     finally:
         conn.close()
@@ -6063,9 +6074,9 @@ def _import_resolve_pass(db_path: Path) -> dict:
 @click.option(
     "--language",
     "languages",
-    default="python,typescript",
+    default="python,typescript,go",
     show_default=True,
-    help="Comma-separated list of languages to index (python,typescript).",
+    help="Comma-separated list of languages to index (python,typescript,go).",
 )
 @click.option(
     "--lsp/--no-lsp",
@@ -6127,7 +6138,7 @@ def codex_index(ctx, repo, languages, lsp, rebuild):
     rep = _import_resolve_pass(db_path)
     click.echo(
         f"Resolved: {rep['resolved']} call edges by import binding, "
-        f"{rep['scope_resolved']} by same-file scope, "
+        f"{rep['scope_resolved']} by same-file or same-package scope, "
         f"{rep['external']} ruled external (no toolchain, techne#679)"
     )
     if src.last_failed:
@@ -6154,9 +6165,9 @@ def codex_index(ctx, repo, languages, lsp, rebuild):
 @click.option(
     "--language",
     "languages",
-    default="python,typescript",
+    default="python,typescript,go",
     show_default=True,
-    help="Comma-separated list of languages to index (python,typescript).",
+    help="Comma-separated list of languages to index (python,typescript,go).",
 )
 @click.option(
     "--rebuild",
@@ -6308,7 +6319,14 @@ def codex_callers(ctx, symbol_id, repo, include_fixtures):
         # techne#606: '?' marks a caller matched only on the bare call name, which
         # may not call this symbol at all. Shown, but not asserted.
         guess = " ?" if s.get("resolution") == "name-inferred" else ""
-        click.echo(f"  {s['id']}  {s['name']}  ({s['file']}){marker}{guess}")
+        # techne#1284: every line the caller calls from, so N calls in one
+        # function read as N sites rather than one row.
+        lines = s.get("call_lines") or []
+        at = f"  line{'s' if len(lines) > 1 else ''} {', '.join(map(str, lines))}" if lines else ""
+        click.echo(f"  {s['id']}  {s['name']}  ({s['file']}){at}{marker}{guess}")
+    sites = sum(len(s.get("call_lines") or []) for s in rows)
+    if sites > len(rows):
+        click.echo(f"  ({sites} call sites in {len(rows)} callers)")
     inferred = sum(1 for s in rows if s.get("resolution") == "name-inferred")
     if inferred:
         click.echo(
@@ -6423,9 +6441,9 @@ def codex_blast(ctx, symbol_id, repo, direction, depth, include_fixtures, only_p
 @click.option(
     "--language",
     "languages",
-    default="python,typescript",
+    default="python,typescript,go",
     show_default=True,
-    help="Comma-separated list of languages to watch (python,typescript).",
+    help="Comma-separated list of languages to watch (python,typescript,go).",
 )
 @click.option(
     "--debounce-ms",

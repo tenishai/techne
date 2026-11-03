@@ -51,6 +51,29 @@ _NOT_EXTERNAL = "e.resolution_status != 'external'"
 _FIXTURE_LIKE = "%tests/fixtures/%"
 
 
+def encode_call_sites(sites) -> str:
+    """JSON for ``edges.call_sites``: ``[[line, qualifier], ...]``, sorted.
+
+    Sorted with None before any name, so the same file always encodes the same
+    string — the incremental index must equal a full rebuild (issue #1055).
+    """
+    import json
+
+    return json.dumps(sorted(sites, key=lambda s: (s[0], s[1] or "")), separators=(",", ":"))
+
+
+def decode_call_sites(raw: str | None) -> list[tuple[int, str | None]]:
+    """``edges.call_sites`` back to (line, qualifier) pairs; [] for NULL or bad JSON."""
+    import json
+
+    if not raw:
+        return []
+    try:
+        return [(int(line), q) for line, q in json.loads(raw)]
+    except (ValueError, TypeError):
+        return []
+
+
 def add_symbol(
     db_path: Path,
     *,
@@ -298,10 +321,17 @@ def callers(db_path: Path, symbol_id: str, *, exclude_fixtures: bool = True,
         params.append(_FIXTURE_LIKE)
     conn = plain_connect(db_path)
     try:
+        # The READ path does not migrate (`resolve_repo_db_for_query` only finds the
+        # db), so a v6 index queried before its next `codex index` has no column.
+        has_sites = any(
+            r[1] == "call_sites" for r in conn.execute("PRAGMA table_info(edges)").fetchall()
+        )
+        sites_col = "e.call_sites" if has_sites else "NULL"
         rows = conn.execute(
             f"""SELECT s.*,
                       CASE WHEN e.to_symbol = ? THEN 'exact' ELSE 'name-inferred' END
-                        AS resolution
+                        AS resolution,
+                      {sites_col} AS call_sites
                FROM edges e
                JOIN symbols s ON s.id = e.from_symbol
                WHERE e.kind = 'call'
@@ -313,6 +343,11 @@ def callers(db_path: Path, symbol_id: str, *, exclude_fixtures: bool = True,
             [symbol_id, *params],
         ).fetchall()
         out = [dict(r) for r in rows]
+        # CALL-SITE LINES (techne#1284): one row per calling symbol, but that
+        # symbol may call this one many times, and the lines are what a reader
+        # opens. Empty for a row indexed before schema v7.
+        for r in out:
+            r["call_lines"] = sorted({line for line, _q in decode_call_sites(r.pop("call_sites"))})
         return out if include_inferred else [r for r in out if r["resolution"] == "exact"]
     finally:
         conn.close()

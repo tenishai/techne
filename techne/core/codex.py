@@ -52,7 +52,7 @@ from techne.core.stores import (
 
 log = logging.getLogger(__name__)
 
-CODEX_VERSION = 6
+CODEX_VERSION = 7
 
 # v1 shape — the authoritative schema for fresh databases.
 # Incremental: CREATE TABLE IF NOT EXISTS + CREATE INDEX IF NOT EXISTS are
@@ -104,6 +104,11 @@ CREATE TABLE IF NOT EXISTS edges (
     -- to_orig='real', so the resolver asks `a.b` for `real`. NULL otherwise,
     -- and on rows indexed before v6 (whose renamed imports carry no module).
     to_orig           TEXT,
+    -- techne#1284. For kind='call' ONLY: every call site collapsed into this
+    -- row, as JSON `[[line, qualifier], ...]`. The qualifier is NULL for a bare
+    -- call, the operand's name for `name.f()`, and "*" for any other operand.
+    -- NULL on non-call edges and on rows indexed before v7.
+    call_sites        TEXT,
     PRIMARY KEY (from_symbol, to_name, kind)
 );
 CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_symbol);
@@ -467,6 +472,29 @@ def _codex_v5_to_v6(conn) -> None:
         )
 
 
+def _codex_v6_to_v7(conn) -> None:
+    """Add edges.call_sites (techne#1284). Structurally guarded, so re-entrant.
+
+    Nullable ADD COLUMN, like v4 to v6: a pre-v7 call row cannot recover its
+    sites without re-parsing, so it reports none and Go's qualified calls stay
+    unresolved until then. The reparse debt is recorded as v4 records it
+    (techne#864).
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(edges)").fetchall()}
+    if "call_sites" not in cols:
+        conn.execute("ALTER TABLE edges ADD COLUMN call_sites TEXT")
+    try:
+        has_rows = conn.execute("SELECT 1 FROM symbols LIMIT 1").fetchone() is not None
+    except Exception:  # noqa: BLE001 — no symbols table yet: nothing owed
+        has_rows = False
+    if has_rows:
+        conn.execute("CREATE TABLE IF NOT EXISTS codex_meta (key TEXT PRIMARY KEY, value TEXT)")
+        conn.execute(
+            "INSERT INTO codex_meta (key, value) VALUES ('reparse_owed_since', '7') "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+        )
+
+
 def _run_codex_steps(conn, current: int, target: int) -> None:
     """Chain all codex migration steps from *current* to *target*.
 
@@ -486,6 +514,8 @@ def _run_codex_steps(conn, current: int, target: int) -> None:
         _codex_v4_to_v5(conn)
     if current < 6:
         _codex_v5_to_v6(conn)
+    if current < 7:
+        _codex_v6_to_v7(conn)
     migrator.user_version_io.write(conn, target)
     conn.commit()
 

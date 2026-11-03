@@ -109,7 +109,7 @@ A curated corpus of **architectural patterns** lifted from other projects' code 
 
 ## Codex — *what does the code look like?*  ·  `codex/<repo>-<hash>.db`, one per repo  ·  **experimental**
 
-Point it at a repo (`techne codex index`) and it extracts a **symbol + call/import graph** with tree-sitter (Python + TypeScript today). The agent can then ask **`codex_search`** (find a function/class) and **`codex_blast_radius`** (what does this reach / what reaches this — transitive callers/callees over the graph).
+Point it at a repo (`techne codex index`) and it extracts a **symbol + call/import graph** with tree-sitter (Python, TypeScript and Go today). The agent can then ask **`codex_search`** (find a function/class) and **`codex_blast_radius`** (what does this reach / what reaches this — transitive callers/callees over the graph).
 
 **Why it's different:** real graph queries — `callers`, `callees`, BFS reachability — not just grep.
 

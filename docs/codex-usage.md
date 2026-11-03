@@ -120,7 +120,10 @@ graph engine worth adopting right now.
   imports bind: a relative or aliased one (`from . import x`, `'./util'`, `'@/x'`) stays
   `unresolved`, renamed or not. The v6 upgrade makes the next
   `codex index` of each repo re-parse every file once. `codex index --lsp` resolves Python
-  call edges through pyright. A name
+  call edges through pyright. Go (#1284, schema v7) resolves same-package calls and
+  `pkg.F()` calls through `go.mod` with no toolchain; a call through a value or field
+  (`s.db.Get()`) stays name-matched. Since v7 every caller row carries its call-site
+  lines, so `codex callers` shows each site, not just each calling function. A name
   that neither pass can place still falls back to bare-name matching, marked
   `name-inferred`. Go further *only* once a high-value recurring auto-consumer exists —
   `stack-graphs` proves a resolution layer built ahead of its consumer gets thrown away.
