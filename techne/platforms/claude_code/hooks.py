@@ -468,6 +468,59 @@ def _under_worktree(p: Path) -> Path | None:
     return None
 
 
+def _uv_tool_heal(exe: str) -> str | None:
+    """Heal for a uv tool venv: ``uv tool install --force`` of the recorded requirement.
+
+    ``uv tool upgrade`` refuses a tool whose interpreter is gone ("not installed"),
+    so the heal reinstalls from scratch. Only ``uv-receipt.toml`` records the extras,
+    and a reinstall that drops them loses sqlite_vec and model2vec while everything
+    still appears to work. ``--python`` pins the dead venv's minor version (from its
+    pyvenv.cfg, which survives the interpreter) so wheels resolve as before.
+
+    Receipt shapes verified against uv 0.13.1 and 0.13.5: ``editable``, ``directory``
+    and ``git`` (``<url>?rev=<rev>``). Anything else, a ``--with`` requirement, a
+    ``[tool]`` key beyond ``requirements``/``entrypoints``/``python`` (``constraints``
+    and ``options`` record ``-c`` and resolver flags the reinstall would drop), or an
+    unreadable receipt returns None rather than a heal that installs the wrong thing.
+
+    A uv tool venv is recognised by its receipt, not by a ``/uv/tools/`` path
+    segment: ``UV_TOOL_DIR`` can put it anywhere.
+    """
+    tool_dir = Path(exe).parent.parent  # <venv>/bin/python, unresolved
+    if not (tool_dir / "uv-receipt.toml").is_file():
+        return None
+    try:
+        import tomllib
+
+        receipt = tomllib.loads((tool_dir / "uv-receipt.toml").read_text())["tool"]
+        if set(receipt) - {"requirements", "entrypoints", "python"}:
+            return None
+        reqs = receipt["requirements"]
+        if len(reqs) != 1:
+            return None
+        req = reqs[0]
+        extras = f"[{','.join(req['extras'])}]" if req.get("extras") else ""
+        if "editable" in req:
+            target = f"--editable {shlex.quote(req['editable'] + extras)}"
+        elif "directory" in req:
+            target = shlex.quote(f"{req['name']}{extras} @ {Path(req['directory']).as_uri()}")
+        elif "git" in req:
+            url, _, query = req["git"].split("#")[0].partition("?")
+            params = dict(p.split("=", 1) for p in query.split("&") if p)
+            if set(params) - {"rev"}:
+                return None
+            rev = f"@{params['rev']}" if "rev" in params else ""
+            target = shlex.quote(f"{req['name']}{extras} @ git+{url}{rev}")
+        else:
+            return None
+        cfg = (tool_dir / "pyvenv.cfg").read_text()
+    except (OSError, KeyError, IndexError, TypeError, ValueError):
+        return None
+    version = re.search(r"^version_info\s*=\s*(\d+\.\d+)", cfg, re.M)
+    python = f"--python {version.group(1)} " if version else ""
+    return f"uv tool install --force {python}{target}"
+
+
 def _heal_command() -> str:
     """Install-method-aware heal command baked into the launcher (techne#276).
 
@@ -483,6 +536,11 @@ def _heal_command() -> str:
       By naming ``python3`` explicitly we survive the common case of a minor-version
       removal (e.g. 3.11→3.12 Homebrew upgrade) as long as ``python3`` and ``pipx`` are
       on PATH at heal time. MEDIUM confidence. Best-effort path.
+
+    - **uv tool** (the venv holds a ``uv-receipt.toml``): ``uv tool install --force``
+      of the requirement recorded in the tool's ``uv-receipt.toml``; see
+      ``_uv_tool_heal``. A receipt it cannot rebuild falls through to the plain-venv
+      message below.
 
     - **system/non-venv** (sys.prefix == sys.base_prefix): attempt ``pip install -e``
       under whatever ``python3`` PATH resolves to at heal time, with
@@ -513,6 +571,10 @@ def _heal_command() -> str:
         venv_name = re.search(r"pipx/venvs/([^/]+)/", exe)
         name = venv_name.group(1) if venv_name else DIST_NAME
         return f'pipx reinstall --python "$(command -v python3)" {shlex.quote(name)}'
+
+    uv_heal = _uv_tool_heal(exe)
+    if uv_heal:
+        return uv_heal
 
     if not in_venv:
         # system install: fresh editable install under PATH's python3, then re-point PY
@@ -595,10 +657,13 @@ def _backfill_command() -> str:
     baked absolute path gets wrong the moment the install moves.
 
     `>/dev/null` IS PROTOCOL, NOT TIDINESS — do not remove it to see the output.
-    `vectors backfill` writes to stdout on EVERY exit — a JSON counts blob whenever a
-    backend RESOLVED, even if every count is zero, and a prose `vector search
-    unavailable` line when none did (the distinction the 0.16.1 upgrade notes hang
-    their success test on) — and
+    `vectors backfill` writes to stdout on almost every exit — a JSON counts blob
+    whenever a backend RESOLVED, even if every count is zero, and a prose `vector
+    search unavailable` line when none did (the distinction the 0.16.1 upgrade notes
+    hang their success test on). The exception is an interpreter that cannot load
+    extensions with no backend: it writes only to stderr and exits 1 (techne#1321),
+    which is safe here because segments are joined with `;` and the chain's status
+    is the last segment's. And
     for SessionStart Claude Code consumes the whole chain's stdout. Unredirected,
     that output prepends to session_start's payload and corrupts it on EVERY
     session start — a total loss of the banner, dressed
@@ -667,8 +732,23 @@ def _matcher_of(group: dict) -> str:
     return m if isinstance(m, str) else ""
 
 
+# What only techne's own hook commands contain (techne#1250). The bare substring
+# "techne" also matched any personal hook under a path like
+# ~/working/tenishai/techne/scripts/guard.sh, and register_hooks deleted it.
+# Every shape techne has written: `python -m techne.hooks.X` (v0.2 on), the
+# launcher `.../techne-hook.sh -m techne.hooks.X` (#276), its `-m techne.cli`
+# backfill segment, the packaged preflight guard, and the old hand-wired
+# ~/.claude/techne_preflight.py stopgap.
+_TECHNE_COMMAND = re.compile(
+    r"-m\s+techne\.(?:hooks\.|cli\b)"
+    r"|(?:^|[\s/'\"])techne-hook\.sh(?=$|[\s'\"])"
+    r"|(?:^|[\s/'\"])techne_preflight\.py(?=$|[\s'\"])"
+    r"|techne/platforms/claude_code/preflight_guard\.py"
+)
+
+
 def _group_contains_techne(group: dict) -> bool:
-    """True if a settings.json hook-group entry references techne anywhere.
+    """True if a settings.json hook-group entry holds one of techne's own commands.
 
     Handles both the wrapped shape ``{matcher, hooks: [{type, command}, ...]}``
     and the legacy flat shape ``{type, command}`` that earlier techne versions
@@ -689,7 +769,7 @@ def _group_contains_techne(group: dict) -> bool:
     # _settings_shape_error the way a parallel validator clause would.
     # (Prudence, PR #457.)
     def _mentions_techne(value: object) -> bool:
-        return isinstance(value, str) and "techne" in value
+        return isinstance(value, str) and _TECHNE_COMMAND.search(value) is not None
 
     if _mentions_techne(group.get("command")):
         return True

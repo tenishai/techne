@@ -152,6 +152,13 @@ def _warn_if_outside_home(key: str, value: Path, home: Path) -> None:
     print(msg, file=sys.stderr)
 
 
+def _positive(key: str, value):
+    """A config number that must be above zero, or a ValueError naming the key."""
+    if value <= 0:
+        raise ValueError(f"{key} must be positive; got {value!r}.")
+    return value
+
+
 @dataclass
 class SyncConfig:
     adapter: str = "noop"
@@ -170,6 +177,10 @@ class SyncConfig:
     #: layer with the rest of the `sync` block.
     allowed_sinks: list[str] = field(default_factory=list)
     allow_unlisted_sinks: bool = False
+    #: Seconds the session-end hook may spend delivering outbox rows to sinks (#1298).
+    #: Rows not reached stay pending for the next session end. 0 = unbounded, which
+    #: suits local sinks; set it when a sink makes a network call per row.
+    flush_budget_s: float = 0.0
     # `auth`, `audience` and an `extra` catch-all for other `sync:` keys lived here
     # until techne#1074 and reached nothing: every `load_adapter` call passes only
     # `url`, `path` and `allow_unlisted`. A config.yaml that still carries them
@@ -501,24 +512,6 @@ class HookConfig:
 
 
 ReflectWriteTo = Literal["candidates", "live"]
-
-
-@dataclass
-class TranscriptSourceConfig:
-    """Config for one JsonlTranscriptSource instance."""
-
-    paths: list[str] = field(default_factory=list)
-    include_globs: list[str] = field(default_factory=lambda: ["*.jsonl"])
-    exclude_globs: list[str] = field(default_factory=list)
-    debounce_ms: int = 500
-    adapter_name: str = "jsonl_transcript"
-
-
-@dataclass
-class SourcesConfig:
-    """Config for all source adapters."""
-
-    claude_code_transcripts: TranscriptSourceConfig | None = None
 
 
 @dataclass
@@ -935,7 +928,6 @@ class Config:
     # Federation connections (techne#222): connection name → FederationConnectionSpec.
     # Empty dict = local-only (unchanged behavior). opt-in: no migration needed.
     connections: dict[str, FederationConnectionSpec] = field(default_factory=dict)
-    sources: SourcesConfig = field(default_factory=SourcesConfig)
     threads: ThreadConfig = field(default_factory=ThreadConfig)
     hooks: HookConfig = field(default_factory=HookConfig)
     heuristic: HeuristicConfig = field(default_factory=HeuristicConfig)
@@ -969,6 +961,16 @@ class Config:
     # Base Archivist store (techne#346): the techne-schema SQLite db a non-standalone
     # instance's sink:archivist writes team memory into. "" → <data_dir>/archivist.db.
     archivist_db_path: str = ""
+    #: The publish lane (#1298): live knowledge carrying any of these tags is
+    #: enqueued to `sink:archivist_publish` for a network archivist. Empty turns the
+    #: lane off; it never means "everything".
+    archivist_publish_tags: list[str] = field(default_factory=list)
+    #: The worker that runs a guarded `techne_archivist_query` (techne#1313): SQLite's
+    #: heap cap in that process, and the wall-clock deadline after which it is killed.
+    #: The heap cap is what bounds the sorter; a real query against ~1,100 rows needs
+    #: well under 1 MB of it.
+    archivist_query_heap_bytes: int = 64 * 1024 * 1024
+    archivist_query_timeout_s: float = 10.0
     #: WHO this instance is, when it writes into a shared store (techne#553). Stamped
     #: on federated knowledge as `written_by`. Empty means NULL rather than a guess —
     #: an unattributed row is honest, a wrongly-attributed one is worse than none in
@@ -1240,6 +1242,23 @@ class Config:
             cfg.archivist = value
         if "archivist_db_path" in raw:
             cfg.archivist_db_path = str(raw["archivist_db_path"])
+        if "archivist_publish_tags" in raw:
+            tags = raw["archivist_publish_tags"] or []
+            if isinstance(tags, str):
+                tags = tags.split(",")
+            if not isinstance(tags, list):
+                raise ValueError("archivist_publish_tags must be a list of tags.")
+            cfg.archivist_publish_tags = [str(t).strip() for t in tags if str(t).strip()]
+        # Spelled out per key, not looped, so test_config_roundtrip's `"<key>" in raw`
+        # scan sees them.
+        if "archivist_query_heap_bytes" in raw:
+            cfg.archivist_query_heap_bytes = _positive(
+                "archivist_query_heap_bytes", int(raw["archivist_query_heap_bytes"])
+            )
+        if "archivist_query_timeout_s" in raw:
+            cfg.archivist_query_timeout_s = _positive(
+                "archivist_query_timeout_s", float(raw["archivist_query_timeout_s"])
+            )
         if "instance_name" in raw:
             cfg.instance_name = str(raw["instance_name"])
         if "model" in raw:
@@ -1281,20 +1300,6 @@ class Config:
                         label=str(spec.get("label", "")),
                     )
 
-        if "sources" in raw and isinstance(raw["sources"], dict):
-            s = raw["sources"]
-            sc = SourcesConfig()
-            if "claude_code_transcripts" in s and isinstance(s["claude_code_transcripts"], dict):
-                t = s["claude_code_transcripts"]
-                sc.claude_code_transcripts = TranscriptSourceConfig(
-                    paths=list(t.get("paths", [])),
-                    include_globs=list(t.get("include_globs", ["*.jsonl"])),
-                    exclude_globs=list(t.get("exclude_globs", [])),
-                    debounce_ms=int(t.get("debounce_ms", 500)),
-                    adapter_name=str(t.get("adapter_name", "jsonl_transcript")),
-                )
-            cfg.sources = sc
-
         if "sync" in raw and isinstance(raw["sync"], dict):
             s = raw["sync"]
             cfg.sync = SyncConfig(
@@ -1305,7 +1310,10 @@ class Config:
                 allowed_sinks=[str(n) for n in (s.get("allowed_sinks") or [])],
                 # Only a real `true` opens an egress gate: bool("false") is True.
                 allow_unlisted_sinks=s.get("allow_unlisted_sinks") is True,
+                flush_budget_s=float(s.get("flush_budget_s") or 0),
             )
+            if cfg.sync.flush_budget_s < 0:
+                raise ValueError("sync.flush_budget_s must be 0 (unbounded) or positive.")
 
         if "threads" in raw and isinstance(raw["threads"], dict):
             t = raw["threads"]
@@ -1662,6 +1670,9 @@ class Config:
             "standalone": self.standalone,
             "archivist": self.archivist,
             "archivist_db_path": self.archivist_db_path,
+            "archivist_publish_tags": list(self.archivist_publish_tags),
+            "archivist_query_heap_bytes": self.archivist_query_heap_bytes,
+            "archivist_query_timeout_s": self.archivist_query_timeout_s,
             "instance_name": self.instance_name,
             "model": self.model,
             "model_engine": self.model_engine,
@@ -1793,20 +1804,6 @@ class Config:
                 "log_raw_response": self.conflict.log_raw_response,
             },
         }
-        # sources: only emit the sub-keys that are configured to avoid
-        # polluting a minimal config with empty stubs.
-        sources_data: dict[str, Any] = {}
-        if self.sources.claude_code_transcripts is not None:
-            t = self.sources.claude_code_transcripts
-            sources_data["claude_code_transcripts"] = {
-                "paths": list(t.paths),
-                "include_globs": list(t.include_globs),
-                "exclude_globs": list(t.exclude_globs),
-                "debounce_ms": t.debounce_ms,
-                "adapter_name": t.adapter_name,
-            }
-        if sources_data:
-            data["sources"] = sources_data
         if self.identity_dir:
             data["identity_dir"] = str(self.identity_dir)
         if self.llm_api_base:
@@ -1863,6 +1860,8 @@ class Config:
             data["sync"]["allowed_sinks"] = list(self.sync.allowed_sinks)
         if self.sync.allow_unlisted_sinks:
             data["sync"]["allow_unlisted_sinks"] = True
+        if self.sync.flush_budget_s:
+            data["sync"]["flush_budget_s"] = self.sync.flush_budget_s
         # DEFAULT PATHS ARE NOT WRITTEN (techne#947). `techne init` is a load->save
         # round-trip, and writing the resolved default pinned this home's absolute
         # path into the file: a copied home kept pointing at the original store.

@@ -18,6 +18,44 @@ All notable changes to techne are documented here. Format loosely follows
   attached, or when a new reason cites no `[[pattern]]` and no file:line.
   `techne architect snapshot` now covers hand-set applies rows, so its digest changes once
   on upgrade; take before-and-after snapshots on the same version.
+- **codex indexes Go** (#1284, codex schema v7). `techne codex index` extracts Go functions,
+  methods (the signature names the receiver), structs (kind `class`) and interfaces, plus
+  their calls and imports, and skips `vendor/` and `testdata/` for Go files. Go is in the
+  default `--language` set, and the `codex` extra adds `tree-sitter-go`. A Go-only resolver
+  binds same-package calls across files and `pkg.F()` calls through `go.mod`, and rules
+  standard-library and predeclared names (`len`, `string`) `external`, plus out-of-repo
+  imports from a file that a `go.mod` governs (from a module-less directory they stay
+  unresolved). Calls
+  through a value or a field (`s.db.Get()`) stay name-matched; proving them needs gopls
+  (#324). **Every call edge now records its call-site lines**, in all languages, so
+  `codex callers` prints each line a caller calls from, and `codex_blast_radius` gives direct
+  callers a `call_lines` field. The v7 upgrade makes the next `codex index` of each repo
+  re-parse every file once.
+
+## [0.19.1] — 2026-10-30
+
+### Upgrading
+
+- **Nothing to run.** No schema change and no new config. Code that embeds techne can now
+  call `techne.api.recall` and `techne.api.publish` (below); hooks and the MCP server
+  behave as in 0.19.0.
+
+### Added
+
+- **`techne.api.recall` and `techne.api.publish` for a runtime that embeds techne** (#1335).
+  `recall(topic, limit=10)` returns the rows `techne_recall` returns, installed recall
+  sources included; a team-pool row names its source in `recall_source` (for example
+  `liminal_archivist`), a local row has `store == "local"`. `publish()` runs session end's
+  two publish steps, enqueueing knowledge tagged with an `archivist_publish_tags` tag and
+  flushing the outbox through the registered sinks, and returns `enqueued`, `synced` and
+  `failed` counts. It never raises; a failed step adds `error`. `KnowledgeEntry` gains
+  optional `id`, `written_by`, `updated_at`, `supersedes`, `entities` and `relations`, which
+  the `team` recall source copies onto a row when an adapter sets them.
+
+## [0.19.0] — 2026-10-26
+
+### Added
+
 - **`est_tokens` on every `techne_search` and `techne_recall` row, and `row_chars` to open a cut one**
   (#386). `est_tokens` prices the text delivered; a local knowledge row cut short of its full
   length (500 characters by default) also carries `est_tokens_full`. Both tools take
@@ -43,6 +81,27 @@ All notable changes to techne are documented here. Format loosely follows
   schemas and when they load up front. Measured for #808: the schemas cost about 1.4k
   tokens per session on first-party Claude Code with tool search on, and about 14.2k
   with it off. No runtime change.
+- **A publish lane for tagged knowledge to a network archivist** (#1298). Set
+  `archivist_publish_tags` and, at session end, live knowledge carrying any of those tags
+  is enqueued to `sink:archivist_publish` for a sink registered through
+  `techne.outbox_sinks` (techne-archivist-sync is one). An empty list, the default, turns
+  the lane off; it never means "everything". Rows are credential-redacted before enqueue
+  and carry a `chain_id`, the oldest id in their supersede chain, so a sink can replace the
+  previous revision. `sync.flush_budget_s` (default 0, unbounded) caps how long the
+  session-end hook spends delivering; the rest goes out next time. With the lane on and no
+  sink registered, session end prints `archivist publish deferred` on stderr instead of
+  dropping rows. `archivist_binding` is unchanged.
+- **`techne scrub-credentials [--apply] [--json]`** (#1245) re-applies the current credential
+  redaction to rows already stored: observations, knowledge, session summaries, thread
+  labels and summaries, coord bodies, injection snippets, reminders and curated memory.
+  Without `--apply` it only counts. It doesn't reach vector tables, librarian.db, backups
+  or remote sinks.
+- **`scripts/install-e2e.sh` and a CI job, `install-e2e`, test the README's install paths**
+  (#1319). Both the source and pipx paths start from a fresh `$HOME` and check init, all
+  8 hook events, MCP `initialize` and `tools/list`, store and recall, the SessionStart
+  hook, `techne doctor` exiting 0, and (pipx) the vector backfill. `--ref vX.Y.Z` tests a
+  published tag; `docs/releasing.md` runs it after tagging. The job takes 10 to 12 minutes,
+  almost all of it the pipx `[recommended]` install.
 
 ### Changed
 
@@ -127,7 +186,120 @@ All notable changes to techne are documented here. Format loosely follows
   detail left to the guides they point at. `MCP_INSTRUCTIONS_BUDGET_CHARS` goes from 4400
   to 1900, and tests keep the text under it and the load-bearing lines inside the cut.
 
+### Removed
+
+- **`JsonlTranscriptSource` and the `sources.claude_code_transcripts` config section** (#1262,
+  closes #1240). The tailer in `techne/sync/jsonl_transcript.py` was never constructed outside
+  its tests; transcripts arrive through `techne import`, the hooks and
+  `techne librarian index-transcripts`. Its cursor bug (#1240: a half-written last line was
+  skipped for good) was therefore dormant. The `sources` key leaves `Config` and the
+  config-trust egress set. A `sources:` block in an existing config.yaml still loads, is
+  read by nothing, and is written back unchanged.
+
 ### Fixed
+
+- **A Python whose `sqlite3` can't load extensions no longer reports semantic recall as
+  ready** (#1321). python.org and Apple's system builds lack `enable_load_extension`, so
+  sqlite-vec never loads. `techne init` now checks first, skips the model download, and
+  names the cause and the fix (reinstall with a uv-managed, distro or Homebrew Python:
+  `uv tool install --managed-python`, or `pipx install --python <path>`). It also reports
+  "not ready" whenever the backfill returns without its `orphans_swept` key, and the
+  "embedded N" count no longer includes swept orphans. `techne vectors backfill` exits 1
+  with the same message on stderr (pending tags are still inferred), and doctor's
+  `vectors:coverage` names the cause and the reinstall instead of the backfill. `techne
+  capabilities` drops both vectors entries there, and `init --no-vectors` and `techne vectors
+  status` (#1325) name the cause instead of suggesting the backfill.
+- **`techne reflect drain` no longer says live mode promotes to identity** (#1267). Under
+  `write_to: live` it now says identity candidates stay pending for `techne reflect review`.
+- **`techne doctor` passes on a fresh install** (#1318). On a store under 7 days old where
+  no session has finished yet, a hook that has never fired reads `dormant` ("not yet fired;
+  no session has finished since install") instead of `unobservable`, so it no longer
+  counts toward the exit code or tells you to rerun `techne init`. A rail that has never
+  produced reads `dormant` until the store is older than that rail's interval. Without
+  `ps`, `runtime:loaded` reads `/proc` on Linux, and reports `dormant` with the reason when
+  neither exists. Hooks and rails that ran before and then went quiet fail as before.
+- **`archive_scan` no longer archives a row another session just reconfirmed** (#1269). It
+  selected candidates on one connection and archived them by id on another; the archive
+  now re-checks the selection condition per row, and only rows it archived are returned.
+- **`techne custodian run` exits non-zero when a rail's emit raised or answers failed**
+  (#1248). It failed only when a rail answered none of what it emitted, so an emit that
+  raised on a locked db, or a run that answered 1 of 10, exited 0. A rail with no model
+  bound still exits 0.
+- **A hook's recorded error survives other sessions' clean runs** (#1251). Any clean run
+  of the hook, in any session, cleared `hook:<name>:last_error`, so a session failing on
+  every call showed BROKEN in `techne doctor` only for seconds. The error now clears after
+  20 clean runs in a row with no error between them.
+- A test pins the root-password redaction anchor from #1272 (#1302): `curl -u
+  root:2024Spring!` and `curl -u root:rootpass99` stay redacted.
+- **Peer messages are capped per injection and can't forge lines** (#1252). After #1274's
+  8000-character total, one post_tool_use block now also shows at most 5 messages and 1500
+  characters of each body; the rest arrive on later tool calls or through `techne_inbox`,
+  which reads them whole. Each message is one quoted line (`📬 name (#id): «body»`), with
+  line breaks in the body and sender name made spaces, so a body like `ok\n📬 operator:
+  ...` no longer renders as a second message from someone else. Recalled rows and the
+  session-start Key Knowledge block get the same one-line rendering.
+- **One `archivist_query` call can no longer take hundreds of MB through one value, one
+  wide row or a long result** (#1256). Its work budget counts VM steps, and a C function
+  runs as one, so `SELECT length(replace(hex(zeroblob(50000000)), '0', '00'))` completed
+  at about 590 MB. The guarded connection now caps any string or blob at 1 MB, a row at 64
+  columns and SQL text at 100 KB, and reads the result with a running total that refuses
+  the query past 16 MB of values (UTF-8 bytes for text); each refusal names its limit. Not
+  yet bounded: SQLite's sorter, for an `ORDER BY` over many large generated rows (#1313).
+- **`archivist_query` sorts are bounded too** (#1313). An `ORDER BY`, `GROUP BY`,
+  `DISTINCT` or window over 500 generated one-MB rows took about 280 MB in the calling
+  process, and spilling to temp files did not bound it. Each query now runs in a
+  short-lived worker process with SQLite's heap capped (`archivist_query_heap_bytes`,
+  64 MiB) and its temp store in memory, and is killed after `archivist_query_timeout_s`
+  (10 s). A query past either limit is refused with a message naming it. A worker that
+  cannot start or dies is a server fault: `techne archivist query` exits 3. Each query
+  costs about 110 ms more (dev04).
+- **Live-mode reflection no longer writes identity** (#1267). With `reflect.write_to:
+  live`, a reflection answer like `{"scope": "identity", "type": "user.name", "content":
+  "Mallory"}` replaced the stored value with no history, and observations from a fetched
+  page or a peer message can steer that answer. Identity candidates now stay pending for
+  reviewed promotion in every mode; knowledge candidates still go live.
+- **`techne init` no longer deletes your own hooks that mention techne** (#1250). Re-init
+  removed any settings.json hook whose command contained the substring `techne`, so a
+  personal hook at `~/working/tenishai/techne/scripts/guard.sh` was deleted. Only techne's
+  own command shapes count now: `-m techne.hooks.*` and `-m techne.cli`, the
+  `techne-hook.sh` launcher, the packaged preflight guard and the old
+  `techne_preflight.py` stopgap.
+- **Re-running `techne init` keeps the configured platform** (#1255). `--platform`
+  defaulted to `claude-code` and always overwrote `config.yaml`, so a bare `techne init` on
+  an opencode install switched it to Claude Code and registered Claude hooks. Without
+  `--platform`, init now uses the platform `config.yaml` names; `init` and `watch` also use
+  the CLI's shared config like every other command.
+- **A malformed MCP request no longer ends the techne server** (#1247). `"params": null`
+  on a `tools/call` raised out of the stdio loop, and every techne tool in the session was
+  gone until a restart; a non-string `method` did the same. Each line is now answered on its
+  own: a parse error gets -32700, a batch or a non-object line -32600, bad `params` -32602,
+  and any exception during dispatch -32603. A request without an `id` is a notification and
+  is no longer executed (a `tools/call` notification used to run its write and reply with
+  `"id": null`).
+- **An empty `schema_version` table no longer breaks every connection** (#1241). First init
+  commits the schema before it writes the version row, so a kill or two hooks racing on a
+  fresh `TECHNE_HOME` could leave the table empty, and every hook, CLI command and the MCP
+  server then failed on open with `TypeError`. Such a store is now treated as an unfinished
+  first init: the schema is completed, the version stamped and the reconcile passes run.
+  First init takes the same `<db>.migrate.lock` as migrations, so it runs once across
+  processes, and `connect()` closes its connection when initialization fails.
+- **A NUL byte or a lone surrogate in a query no longer breaks search** (#1249). `search()`
+  raised `OperationalError: unterminated string` on a NUL and `UnicodeEncodeError` on a lone
+  surrogate such as `\ud800`, so `techne_search`, `techne_recall` and `techne search` errored and
+  per-turn recall injected nothing for that prompt. Query text is now cleaned where it is turned
+  into an FTS5 MATCH string and where it is embedded: NUL, DEL and the other control characters
+  except tab and line breaks become spaces, and lone surrogates become U+FFFD. The recall hooks
+  log the cleaned query, because a surrogate in the logged trigger made the injection log drop
+  that row without a word.
+- **A coord reader with no read receipts no longer gets the whole bus** (#1274). A session with no
+  `-n` name, one sharing its name with another live session, or a replayed hook whose sidecar was
+  gone had no receipts, so its first tool call injected every message back to the first: 832
+  messages and 873 KB on 2026-10-12. Such a reader now starts at the newest 20 broadcasts plus
+  any messages addressed to it, and that floor is stored so it holds after the reader marks
+  them read. Readers that already have receipts see the same unread set as before. The
+  post_tool_use injection now stops at 8000 characters of message text and says how many more
+  are waiting; they arrive on later tool calls, and a bare `techne_mark_read` still covers only
+  what was shown.
 
 - **The post-compaction restore now reaches the model** (#1242). Claude Code drops a
   PostCompact hook's stdout, so the restore it printed (active threads, last task, files,
@@ -178,6 +350,67 @@ All notable changes to techne are documented here. Format loosely follows
 - **`LazyLogger` forwards attribute assignment to the real logger** (#1221). Setting
   `log.propagate` or `log.disabled` raised `AttributeError` instead of reaching the
   logger. Nothing assigned one yet.
+
+- **Credential redaction catches more secret shapes, and a preview never cuts one in half**
+  (#1245). It missed prefixed names (`DB_PASSWORD=`), bare `token=`, URL userinfo, `curl -u`
+  and `--user`, `Authorization: Basic|Token|Digest`, `--password`/`--token` flags and more
+  token prefixes. Previews of tool output, Edit and Write were cut before redaction, so a
+  key cut mid-token matched nothing. A cut that would land inside a match now moves to its
+  edge. `$VAR` references, `git push -u`, `max_tokens=`, pagination tokens and `==` version
+  pins stay readable. `decision_reason` is now redacted at all five write sites, not only
+  in conflict resolution. Rows stored before this keep their old text until you run
+  `techne scrub-credentials --apply` (see Added).
+- **Live-mode reflection can no longer mint a `document_card` with no document behind it**
+  (#1300). The #633 guard sat only on the promote and consolidate-merge paths, and live mode
+  calls `knowledge.store()` directly. `store()` and every merge now store such a card as a
+  `fact`; a card with a `doc:` pointer keeps its type.
+- **The hook launcher's heal command covers a `uv tool install` whose Python is gone**
+  (PR 1297). Such an install fell through to the plain-venv warning and could not recover.
+  The heal now reads the tool's `uv-receipt.toml` and prints `uv tool install --force` for
+  the recorded requirement, keeping its extras and pinning `--python` to the old venv's
+  minor version. A receipt it can't rebuild still gets the warning.
+
+### Upgrading
+
+- **On a `uv tool install`, re-run `techne init`** so `~/.claude/techne-hook.sh` picks up
+  the new heal command (PR 1297). The launcher is written only by `init`, so an existing one
+  keeps the 0.18.2 heal, which can't recover a uv tool install whose Python is gone.
+- **Restart the MCP server.** Schema v30 (the per-session token columns on `sessions`) is
+  applied when the store is next opened; the columns are nullable and existing rows read
+  NULL until `techne usage-backfill`.
+- **Run `techne scrub-credentials`** to see how many stored rows the wider redaction would
+  change, then `--apply` to rewrite them.
+- **On a python.org or Apple system Python,** `techne vectors backfill` now exits 1 with the
+  cause instead of printing an empty result, and `techne init` no longer claims semantic
+  recall is ready. The SessionStart chain joins its steps with `;`, so the hook is
+  unaffected. To get semantic recall, reinstall with a Python whose `sqlite3` can load
+  extensions (see the README's install section).
+- **Scripts that gate on `techne doctor`** now see exit 0 straight after install. A hook that
+  hasn't fired before any session has finished, on a store under 7 days old, and a rail
+  that hasn't produced while the store is younger than that rail's interval (3 days for
+  reflect, 14 for consolidate and dream), read DORMANT instead of UNOBSERVABLE. Once a session has finished, a hook with
+  no record fails again, except the compaction hooks, which stay DORMANT until a session
+  compacts; `session_start` fails as soon as its session has moved on without it.
+- **`techne custodian run`** now exits non-zero when a rail's emit raised or only some
+  answers came back (#1248). A scheduled custodian job that ignored partial failures will
+  start reporting them.
+- **A bare `techne_mark_read`** marks only messages the reader was shown (#1243), so call
+  `techne_inbox` first in that session; an agent that marks read without listing leaves
+  messages unread.
+- **`techne vectors backfill --tags`** prints one JSON document with a `tags` key, not two
+  (#1215).
+- **`techne archivist query`** runs each query in a worker process: about 110 ms more per
+  query, `archivist_query_heap_bytes` (64 MiB) and `archivist_query_timeout_s` (10 s) as the
+  limits, and exit 3 when the worker can't start or dies. Scripts that treated any non-zero
+  exit as "bad SQL" should tell 1, 2 and 3 apart.
+- **Peer messages and recalled rows render as one line each,** with at most 5 messages and
+  1500 characters per body in one post_tool_use block. Anything that parsed the old
+  multi-line injection needs to follow the `📬 name (#id): «body»` shape, or
+  `📬 name [coord] (#id): «body»` for a broadcast.
+- **The `sources` config section is retired** (#1262). Nothing ever read it; configs that
+  carry it still load and keep the block.
+- **Contributors:** PR pushes run the `test` job on Python 3.12 only (#1233), and PRs from
+  branches in this repo also run `install-e2e`, which takes 10 to 12 minutes.
 
 ## [0.18.2] — 2026-10-07
 

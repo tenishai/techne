@@ -1,12 +1,14 @@
 ---
 card: arch-card:techne-egress
 updated: 2026-10-06
-anchor: techne/core/egress.py sha=6150ae0caec48e76d3efd9b60d1f2d076cd2433b
+anchor: techne/core/egress.py sha=3d7870fe9fad34ed39e7b0690ffe80cf27cb31bd
 ---
 # egress — Tier-0 SessionStart injection rails (techne#93)
 
 WHAT: selective-injection rail deciding what durable knowledge is PUSHED (not just pull-recallable) into a fresh SessionStart context, under a hard char budget (injection.char_budget, default 2000).
 GATE: superseded_by IS NULL AND confidence='high' AND type NOT IN PULL_ONLY_TYPES (patterns/documents/document_cards = pull-only, NEVER auto-injected — core/knowledge.py:PULL_ONLY_TYPES).
+ONE LINE PER ROW (techne#1252): `_render_line` (and the per-turn recall renderer, hooks/user_prompt_submit._build_context) pass content through `one_line`, so a stored line break cannot start a line that reads as another `- ⟦techne#N⟧` row.
+
 LESSONS ARE NOT IN THESE BANDS (techne#1195): type NOT IN LESSON_TYPES (lesson/grant/charter). They have their own band, core/lessons.select_principles, with its OWN budget (injection.principle_char_budget, default 4000 — not a share of char_budget) and its own render. hooks/session_start.py puts it ahead of Key Knowledge on a cold start and is the only block re-injected after `compact` or `clear` (PRINCIPLE_REINJECT_SOURCES); each send is logged to context_injections as source='lesson_principles' (best-effort, like every injection log: a failed write is swallowed), which is what lessons.loaded_when_failed reads. A session with no such row reads as NULL (unknown), not 0, so a lost write costs evidence, not a false 'not loaded'.
 BANDS (priority order; fill budget in order; each line prefixed ⟦techne#<id>⟧ for attribution):
   1 Identity (memory-type:user, always first)

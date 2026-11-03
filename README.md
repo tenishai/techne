@@ -45,6 +45,11 @@ want.
 
 ---
 
+The tenishai repos are private for now. The clone and the `pipx install` from git below
+need a GitHub account with read access to the tenishai organization, with git set up to
+use it (an SSH key, or a token through a credential helper); without that, the install
+fails at the git clone step.
+
 On Debian/Ubuntu, `venv` isn't preinstalled: `sudo apt update && sudo apt install python3-venv`.
 
 ```bash
@@ -62,7 +67,7 @@ techne init
 > On Debian/Ubuntu, `pipx` isn't preinstalled: `sudo apt update && sudo apt install pipx` (macOS: `brew install pipx`).
 >
 > ```bash
-> pipx install "tenish-techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.18.2"
+> pipx install "tenish-techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.19.1"
 > pipx ensurepath
 > ```
 >
@@ -83,6 +88,11 @@ techne init
 > of MB, then cached) so search is semantic from the first session; `--no-vectors` skips it.
 > Drop it for a **core-only** install, or swap in any other set — see the
 > [extras matrix](#extras--what-to-install) for the full possibility space.
+>
+> **Semantic recall needs a Python whose `sqlite3` can load extensions.** The python.org
+> and Apple system builds can't, and pipx uses the Python it was installed with. Pick
+> another with `pipx install --python <path-to-python> ...`, or use
+> `uv tool install --managed-python ...`; `techne init` says which case you are in.
 >
 > Upgrade later with `pipx install --force "tenish-techne[recommended] @ git+https://github.com/tenishai/techne.git@<newer-tag>"`
 > (a plain `pipx install` on an already-installed techne refuses without `--force`).
@@ -222,7 +232,7 @@ gracefully** when absent (vector search returns empty, the CVE gate fails open, 
 
 Combine freely — extras compose: `pip install -e ".[vectors,watch,llm]"`. For the
 non-editable pinned install, use the direct-reference form:
-`pipx install "tenish-techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.18.2"`.
+`pipx install "tenish-techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.19.1"`.
 
 **Python 3.14 note:** `fastembed` pulls in `onnxruntime` which has no 3.14 wheel yet. `techne` auto-selects `model2vec` (a numpy-only static embedding backend, no onnxruntime/torch) as the vector backend on 3.14+ instead. FTS5 search works fully on every supported Python (3.11+); vector search works via whichever backend is available.
 
@@ -330,6 +340,18 @@ techne.capture_tool_use(
 # saves to DB, ages old threads, enqueues outbox sync. Returns a summary dict.
 result = techne.run_session_end(config, session_id)
 # {'threads': 2, 'linked': 1, 'aged_completed': 0, 'aged_stale': 0, 'queued': 2}
+```
+
+### Recall and publish
+
+`techne.api` gives an embedded agent the recall the `techne_recall` tool runs, installed recall sources included, and the publish lane session end runs:
+
+```python
+rows = techne.api.recall("deploy runbook", limit=10, config=config)
+# A team-pool row names its source: row["recall_source"] == "liminal_archivist"
+
+techne.api.publish(config=config)
+# {'enqueued': 1, 'synced': 1, 'failed': 0}; never raises, adds 'error' if a step failed
 ```
 
 ### Knowledge store
@@ -573,6 +595,12 @@ techne cards repair [--apply]              # retype document_cards that never ha
                                            # (they were mistyped knowledge, not cards). Dry-run by
                                            # default. REFUSES to touch a card whose pointer exists
                                            # but doesn't resolve — that needs a human
+techne scrub-credentials [--apply] [--json]
+                                           # re-apply current credential redaction to rows
+                                           # already stored (observations, knowledge, summaries,
+                                           # coord, reminders, candidates, ...). Dry-run counts
+                                           # only; --apply rewrites in one transaction. Does not
+                                           # reach vectors, librarian.db, backups or remote sinks
 techne reconcile                           # force the schema drift-reconcile passes on techne.db;
                                            # use when you suspect schema drift or after an
                                            # additive SCHEMA_SQL change at unchanged SCHEMA_VERSION
@@ -613,7 +641,10 @@ techne probe [--runtime claude-code|opencode|pi] [--mode off-test|pull|different
 # Archivist — read-only SQL over the team (or local) knowledge store
 techne archivist schema                    # tables and columns `archivist query` can read
 techne archivist query SQL [--limit N] [--json]
-                                           # one guarded read-only SELECT
+                                           # one guarded read-only SELECT, run in a worker
+                                           # process with a capped heap and a timeout.
+                                           # Exit 1 = bad SQL, 2 = denied by a guard,
+                                           # 3 = the worker failed to start or died
 # Librarian (librarian.db) — documents: transcripts + markdown; recall the gist, fetch full on demand
 techne librarian                           # document + card counts
 techne librarian index-transcripts [--platform claude-code] [--dir DIR]
@@ -866,6 +897,16 @@ sync:
   allow_unlisted_adapter: false  # true permits a non-built-in adapter (default deny)
   allowed_sinks: []           # `techne.outbox_sinks` entry-point names allowed to load
   allow_unlisted_sinks: false # true loads every installed sink
+  flush_budget_s: 0           # seconds the session-end hook may spend delivering to sinks;
+                              #   0 = unbounded. Set it (e.g. 2) when a sink makes a network
+                              #   call per row; undelivered rows wait for the next session end
+                              #   (or techne.api.publish()).
+
+archivist_publish_tags: []    # publish lane (#1298): live knowledge with any of these tags is
+                              #   enqueued to `sink:archivist_publish` for a network archivist.
+                              #   [] = off. Needs a package that registers that sink.
+archivist_query_heap_bytes: 67108864  # SQLite heap cap for the techne_archivist_query worker (#1313)
+archivist_query_timeout_s: 10         # the worker is killed after this many seconds
 
 recall:                       # which sources recall consults, in what order (#1170)
   order: []                   # [] = the built-in ladder, then any allowed plugged-in source
@@ -889,8 +930,8 @@ The keys that choose **where memory can go**, or what reaches the model's contex
 (the whole block, so `sync.allow_unlisted_adapter`, `sync.allowed_sinks` and
 `sync.allow_unlisted_sinks` ride with it), `connections`, `llm_api_base`, `llm_api_key`,
 `model`, `model_engine`, `reflect.model`, `conflict.model`, `custodian.model`,
-`custodian.rail_models`, `archivist_db_path`, `standalone`, `archivist`, `recall.allowed_sources`,
-`recall.allow_unlisted_sources`, `stores`, `sources` — can be pinned in a `config.operator.yaml` that techne honors **only
+`custodian.rail_models`, `archivist_db_path`, `standalone`, `archivist`, `archivist_publish_tags`, `recall.allowed_sources`,
+`recall.allow_unlisted_sources`, `stores` — can be pinned in a `config.operator.yaml` that techne honors **only
 while the file is provably not writable by the process reading it**. Resolved in order:
 
 ```
@@ -914,6 +955,9 @@ deliberately not governed: they only rank and bound sources that are already adm
 
 **Removed (#1074):** `search.expansion_ratio`, and the `sync.auth` / `sync.audience` fields.
 None of them reached any code. Configs carrying them still load.
+
+**Removed (#1262):** `sources` (`sources.claude_code_transcripts`). Nothing read it. Configs
+carrying it still load, and the block is written back unchanged.
 
 **Removed in 0.13.0:** `search.mmr_lambda`. It round-tripped through `config.yaml` and was
 never passed to any search function, so setting it was a silent no-op. Existing configs

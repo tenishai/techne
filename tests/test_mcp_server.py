@@ -337,6 +337,79 @@ class TestTechneStatus:
         assert "sync_adapter" in payload
 
 
+class TestMalformedRequests:
+    """techne#1247: no request shape ends the server, and notifications never run."""
+
+    def test_null_params_is_invalid_params_not_a_crash(self, config):
+        req = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": None}
+        resp = handle_request(req, config)
+        assert resp["error"]["code"] == -32601  # null params = no params: unknown tool ""
+
+    def test_non_object_params_is_invalid_params(self, config):
+        req = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": [1]}
+        resp = handle_request(req, config)
+        assert resp["error"]["code"] == -32602
+
+    @pytest.mark.parametrize(
+        "params", [{"name": 5}, {"name": "techne_status", "arguments": "x"}, {"name": None}]
+    )
+    def test_bad_tool_call_params_are_invalid_params(self, config, params):
+        req = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params}
+        resp = handle_request(req, config)
+        assert resp["error"]["code"] == -32602
+
+    def test_non_string_method_is_invalid_request(self, config):
+        resp = handle_request({"jsonrpc": "2.0", "id": 1, "method": ["tools/list"]}, config)
+        assert resp["error"]["code"] == -32600
+
+    def test_a_tools_call_notification_is_not_executed(self, config, monkeypatch):
+        from techne import mcp_server
+
+        ran = []
+        monkeypatch.setitem(mcp_server.TOOL_HANDLERS, "techne_status", lambda a, c: ran.append(a))
+        req = {"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "techne_status"}}
+        assert handle_request(req, config) is None
+        assert ran == []
+
+    def test_an_explicit_null_id_is_a_request_not_a_notification(self, config):
+        resp = handle_request({"jsonrpc": "2.0", "id": None, "method": "ping"}, config)
+        assert resp == {"jsonrpc": "2.0", "id": None, "result": {}}
+
+    def test_parse_error_and_batch_get_error_replies(self, config):
+        from techne.mcp_server import _dispatch_line
+
+        assert _dispatch_line("{not json", config)["error"]["code"] == -32700
+        assert _dispatch_line('[{"id": 1, "method": "ping"}]', config)["error"]["code"] == -32600
+
+    def test_an_exception_inside_dispatch_is_internal_error(self, config, monkeypatch):
+        from techne import mcp_server
+
+        def boom(request, config):
+            raise AttributeError("'NoneType' object has no attribute 'get'")
+
+        monkeypatch.setattr(mcp_server, "handle_request", boom)
+        resp = mcp_server._dispatch_line('{"jsonrpc": "2.0", "id": 7, "method": "x"}', config)
+        assert resp["id"] == 7 and resp["error"]["code"] == -32603
+        assert mcp_server._dispatch_line('{"jsonrpc": "2.0", "method": "x"}', config) is None
+
+    def test_server_keeps_serving_after_bad_requests(self, tmp_path):
+        stdin = "\n".join([
+            json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": None}),
+            json.dumps({"jsonrpc": "2.0", "id": 2, "method": 3}),
+            "{oops",
+            json.dumps({"jsonrpc": "2.0", "id": 3, "method": "ping"}),
+        ]) + "\n"
+        env = {**os.environ, "TECHNE_HOME": str(tmp_path)}
+        result = subprocess.run(
+            [sys.executable, "-m", "techne.mcp_server"],
+            input=stdin, capture_output=True, text=True, env=env, timeout=30,
+        )
+        assert result.returncode == 0, result.stderr
+        out = [json.loads(ln) for ln in result.stdout.splitlines() if ln.strip()]
+        assert [r["id"] for r in out] == [1, 2, None, 3]
+        assert out[-1]["result"] == {}
+
+
 class TestMainLoopNonDictGuard:
     """techne#166: the stdio loop must not crash on well-formed JSON that isn't a
     request object. `null`, `42`, and `[]` all parse via json.loads but have no
@@ -367,10 +440,12 @@ class TestMainLoopNonDictGuard:
             timeout=30,
         )
         assert result.returncode == 0, f"server crashed: {result.stderr}"
-        # Exactly one response line — the non-dict lines produced none.
-        out_lines = [ln for ln in result.stdout.splitlines() if ln.strip()]
-        assert len(out_lines) == 1, f"expected 1 response, got {out_lines!r}"
-        resp = json.loads(out_lines[0])
+        # Each non-object line gets an Invalid Request reply with a null id
+        # (techne#1247), then the initialize is answered.
+        out_lines = [json.loads(ln) for ln in result.stdout.splitlines() if ln.strip()]
+        assert [r.get("error", {}).get("code") for r in out_lines[:3]] == [-32600] * 3
+        assert all(r["id"] is None for r in out_lines[:3])
+        resp = out_lines[3]
         assert resp["id"] == 1
         assert resp["result"]["serverInfo"]["name"] == "techne"
 

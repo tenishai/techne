@@ -869,7 +869,11 @@ def connect(db_path: Path, *, check_same_thread: bool = True) -> sqlite3.Connect
     # the concurrent writer raises immediately instead of waiting its turn.
     conn.execute("PRAGMA busy_timeout=5000")
     conn.row_factory = sqlite3.Row
-    _ensure_initialized(conn, db_path)
+    try:
+        _ensure_initialized(conn, db_path)
+    except BaseException:
+        conn.close()  # techne#1241: a failed init used to leak the connection
+        raise
     return conn
 
 
@@ -883,7 +887,7 @@ def _guarded_migrate(conn: sqlite3.Connection, db_path: Path, existing_version: 
         # Literal move of the old double-check read (MAX(version) always returns a
         # row, so this is row[0]); existing_version is the documented fallback.
         row = c.execute("SELECT MAX(version) FROM schema_version").fetchone()
-        return row[0] if row else existing_version
+        return row[0] if row and row[0] is not None else existing_version
 
     migrator.guarded_migrate(
         conn,
@@ -949,24 +953,59 @@ def force_reconcile(db_path: Path) -> None:
         conn.close()
 
 
-def _ensure_initialized(conn: sqlite3.Connection, db_path: Path) -> None:
-    """Initialize the schema if absent. Safe to call repeatedly."""
+def _stored_version(conn: sqlite3.Connection) -> int | None:
+    """MAX(version) from schema_version; None when the table has no rows."""
+    return conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
+
+
+def _first_init(conn: sqlite3.Connection, db_path: Path, *, half_built: bool) -> None:
+    """Create the schema and stamp SCHEMA_VERSION, once across processes.
+
+    Runs under the same flock as migrator.guarded_migrate, and re-checks under it,
+    so two hooks opening a fresh TECHNE_HOME together don't both build it
+    (techne#1241). SCHEMA_SQL and FTS_TRIGGERS_SQL are all IF NOT EXISTS, so
+    finishing a half-built store is safe. A half-built store also gets the
+    reconcile passes rather than the sentinel alone: it may predate this code, and
+    the passes add whatever columns and indexes CREATE IF NOT EXISTS skipped."""
     from techne.core.extension_state import set_state
 
-    existing = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_version'"
-    ).fetchone()
-    if existing is None:
+    def _do() -> None:
+        has_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version'"
+        ).fetchone()
+        if has_table and _stored_version(conn) is not None:
+            return  # another process finished it while we waited
         conn.executescript(SCHEMA_SQL)
         conn.executescript(FTS_TRIGGERS_SQL)
-        conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+        )
+        if half_built:
+            _run_reconcile_passes(conn)  # stamps the sentinel and commits
+            return
         # A freshly-created schema is correct by construction — no reconcile needed;
         # stamp the sentinel so the next connect skips the passes (techne#140).
         set_state(conn, _RECONCILE_SENTINEL, {"version": SCHEMA_VERSION})
         conn.commit()
+
+    migrator.with_migration_lock(db_path, _do)
+
+
+def _ensure_initialized(conn: sqlite3.Connection, db_path: Path) -> None:
+    """Initialize the schema if absent. Safe to call repeatedly."""
+    existing = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_version'"
+    ).fetchone()
+    if existing is None:
+        _first_init(conn, db_path, half_built=False)
+    elif _stored_version(conn) is None:
+        # techne#1241: SCHEMA_SQL commits before the version row is inserted, so a
+        # kill or a race there leaves the tables with an empty schema_version, and
+        # MAX(version) is NULL. Treat it as an unfinished first init, never as v0:
+        # running the migration ladder from 0 over a current schema would break it.
+        _first_init(conn, db_path, half_built=True)
     else:
-        row = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
-        existing_version = row[0] if row else 0
+        existing_version = _stored_version(conn)
         if existing_version < SCHEMA_VERSION:
             # Schema is changing — reconcile is mandatory afterwards.
             _guarded_migrate(conn, db_path, existing_version)

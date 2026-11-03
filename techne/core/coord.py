@@ -58,6 +58,22 @@ def _now_iso() -> str:
 READER_NAME = "name:"
 READER_UUID = "uuid:"
 
+#: How many of the newest broadcast messages a reader with NO receipts sees on
+#: its first read (techne#1274). Without a floor such a reader was shown the whole
+#: bus back to message 1: 832 messages and 873,339 bytes of body text in one
+#: post_tool_use injection on 2026-10-12. Messages addressed to the session
+#: directly are never floored.
+FIRST_READ_CATCHUP = 20
+
+#: Body characters one post_tool_use injection carries before the rest waits for
+#: a later tool call or an explicit techne_inbox (techne#1274). A total, not a
+#: per-message cap; the per-message and count caps are issue 1252.
+INJECT_MAX_CHARS = 8000
+#: Messages and body characters per message one injection shows (techne#1252).
+#: The rest waits for a later tool call or techne_inbox, which reads them whole.
+INJECT_MAX_MESSAGES = 5
+INJECT_MAX_BODY = 1500
+
 
 def _same_process_pids(recs: list[dict]) -> set[int]:
     """Which of these sidecars' pids are still the process the sidecar describes?
@@ -441,7 +457,72 @@ def threads(
     return out[:limit]
 
 
-def _unread_rows(conn, session_id: str, channels: list[str], ident: tuple[str | None, str]):
+def _floor_key(reader: str) -> str:
+    return f"coord:floor:{reader}"
+
+
+def _author_filter(session_id: str, name: str | None) -> tuple[str, tuple]:
+    """SQL excluding messages this reader wrote (see :func:`_unread_rows`)."""
+    # NULL from_name (pre-#376 rows, or a sender with no -n alias) must not match
+    # anyone's name — SQL's `!=` on NULL is NULL, i.e. the row is filtered out, so
+    # the comparison is written to leave those rows visible.
+    by_name = " AND (from_name IS NULL OR from_name != ?)" if name else ""
+    clause = "AND from_session != ?" + by_name
+    return clause, ((session_id, name) if name else (session_id,))
+
+
+def _reader_floor(
+    conn, session_id: str, channels: list[str], ident: tuple[str | None, str], *, persist: bool
+) -> int:
+    """Lowest broadcast message id this reader can count as unread; 0 means none.
+
+    A READER WITH NO RECEIPTS STARTS NEAR NOW (techne#1274). Its first read sets
+    the floor so that only the newest ``FIRST_READ_CATCHUP`` broadcast messages
+    not written by it are above it, and stores it under ``coord:floor:<reader>``.
+    The floor is computed once and kept, which is what makes it stable: once the
+    reader marks those messages read it HAS receipts, and a floor recomputed from
+    "no receipts" would vanish and hand it the whole backlog one call later.
+
+    A reader that already has receipts gets no floor, so its unread set is exactly
+    what it was before. Reaching this state takes no name (session started without
+    ``-n``), a shared name (``reader_key`` consequence 4), or a hook replayed after
+    the session's sidecar is gone. ``persist=False`` computes the floor the next
+    read would set without storing it, for the read-only ``unread_count``.
+    """
+    from techne.core.extension_state import get_state, set_state
+
+    key = ident[1]
+    st = get_state(conn, _floor_key(key)) or {}
+    if isinstance(st.get("min_id"), int):
+        return st["min_id"]
+    if conn.execute(
+        "SELECT 1 FROM coord_reads WHERE reader_session = ? LIMIT 1", (key,)
+    ).fetchone():
+        return 0
+    broadcast = [c for c in channels if c != session_id]
+    floor = 0
+    if broadcast:
+        author_clause, author_params = _author_filter(session_id, ident[0])
+        placeholders = ",".join("?" for _ in broadcast)
+        row = conn.execute(
+            f"SELECT id FROM coord_messages WHERE recipient IN ({placeholders}) {author_clause}"
+            f" ORDER BY id DESC LIMIT 1 OFFSET ?",
+            (*broadcast, *author_params, FIRST_READ_CATCHUP - 1),
+        ).fetchone()
+        floor = row["id"] if row else 0
+    if persist:
+        set_state(conn, _floor_key(key), {"min_id": floor}, commit=False)
+    return floor
+
+
+def _unread_rows(
+    conn,
+    session_id: str,
+    channels: list[str],
+    ident: tuple[str | None, str],
+    *,
+    persist_floor: bool = True,
+):
     """Unread = on a watched channel, not authored by me, no receipt from me.
 
     THE SESSION UUID APPEARED TWICE HERE AND MEANT TWO DIFFERENT THINGS — which is
@@ -463,21 +544,19 @@ def _unread_rows(conn, session_id: str, channels: list[str], ident: tuple[str | 
     """
     placeholders = ",".join("?" for _ in channels)
     name, key = ident
-    # NULL from_name (pre-#376 rows, or a sender with no -n alias) must not match
-    # anyone's name — SQL's `!=` on NULL is NULL, i.e. the row is filtered out, so
-    # the comparison is written to leave those rows visible.
-    author_clause = "AND from_session != ?" + (
-        " AND (from_name IS NULL OR from_name != ?)" if name else ""
-    )
-    author_params = (session_id, name) if name else (session_id,)
+    author_clause, author_params = _author_filter(session_id, name)
+    # techne#1274: a reader with no receipts sees nothing below its floor except
+    # messages addressed to it directly.
+    floor = _reader_floor(conn, session_id, channels, ident, persist=persist_floor)
     return conn.execute(
         f"SELECT id, from_session, from_name, recipient, thread_id, body, created_at"
         f"  FROM coord_messages"
         f" WHERE recipient IN ({placeholders})"
         f"   {author_clause}"
+        f"   AND (id >= ? OR recipient = ?)"
         f"   AND id NOT IN (SELECT message_id FROM coord_reads WHERE reader_session = ?)"
         f" ORDER BY id",
-        (*channels, *author_params, key),
+        (*channels, *author_params, floor, session_id, key),
     ).fetchall()
 
 
@@ -495,7 +574,36 @@ def inbox(
 
     Every call records the highest id it returned as seen by this reader, which
     bounds a bare ``mark_read`` (techne#1243). The post_tool_use injection reads
-    through here too, so an injected message counts as seen.
+    through :func:`inbox_page`, so an injected message counts as seen.
+
+    A reader with no receipts sees at most the newest ``FIRST_READ_CATCHUP``
+    broadcast messages plus its direct messages (techne#1274, :func:`_reader_floor`).
+    """
+    return inbox_page(db_path, session_id, channels=channels, mark_read=mark_read)[0]
+
+
+def inbox_page(
+    db_path: Path,
+    session_id: str,
+    *,
+    channels: list[str] | None = None,
+    mark_read: bool = False,
+    exclude_ids: set[int] | frozenset[int] = frozenset(),
+    max_chars: int | None = None,
+    max_messages: int | None = None,
+) -> tuple[list[dict], int]:
+    """:func:`inbox`, limited, returning ``(messages, not_returned)``.
+
+    ``exclude_ids`` drops messages the caller already has (the post_tool_use
+    surfaced set). ``max_chars`` stops adding messages, oldest first, once their
+    bodies would pass that many characters; the first message is always
+    returned, whatever its size, so a caller that renders it must bound it.
+    ``max_messages`` stops after that many. ``not_returned`` counts the unread
+    messages either limit left out.
+
+    The seen mark is the highest id RETURNED, so a bare ``mark_read`` never
+    covers a message cut here (techne#1243). Every unread id below it was either
+    returned now or excluded as already surfaced.
     """
     from techne.core.database import connect
 
@@ -504,7 +612,17 @@ def inbox(
     conn = connect(db_path)
     try:
         rows = _unread_rows(conn, session_id, chans, ident)
-        msgs = [dict(r) for r in rows]
+        candidates = [dict(r) for r in rows if r["id"] not in exclude_ids]
+        msgs = candidates if max_messages is None else candidates[:max_messages]
+        if max_chars is not None:
+            kept, used = [], 0
+            for m in msgs:
+                size = len(m["body"] or "")
+                if kept and used + size > max_chars:
+                    break
+                kept.append(m)
+                used += size
+            msgs = kept
         if msgs:
             _note_seen(conn, ident[1], max(m["id"] for m in msgs))
         if mark_read and msgs:
@@ -516,7 +634,7 @@ def inbox(
                 [(m["id"], key, now) for m in msgs],
             )
         conn.commit()
-        return msgs
+        return msgs, len(candidates) - len(msgs)
     finally:
         conn.close()
 
@@ -529,7 +647,7 @@ def unread_count(db_path: Path, session_id: str, *, channels: list[str] | None =
     ident = _identity(session_id)
     conn = connect(db_path)
     try:
-        return len(_unread_rows(conn, session_id, chans, ident))
+        return len(_unread_rows(conn, session_id, chans, ident, persist_floor=False))
     finally:
         conn.close()
 
@@ -582,15 +700,19 @@ def mark_read(
     ident = _identity(session_id)
     conn = connect(db_path)
     try:
+        chans = _channels_for(session_id, channels)
         if message_ids is None:
             seen = _seen_max(conn, ident[1])
             if seen is None:
                 return 0
-            chans = _channels_for(session_id, channels)
             ids = [r["id"] for r in _unread_rows(conn, session_id, chans, ident) if r["id"] <= seen]
         else:
+            # The first receipt ends "no receipts", so fix the floor before
+            # writing one (techne#1274); a later read keeps it.
+            _reader_floor(conn, session_id, chans, ident, persist=True)
             ids = list(message_ids)
         if not ids:
+            conn.commit()
             return 0
         now = _now_iso()
         key = ident[1]

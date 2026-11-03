@@ -418,8 +418,9 @@ def _insert_candidate(
 def _write_live(
     db_path: Path, candidate: Candidate, source: str, session_id: str | None = None
 ) -> int | None:
-    """Write straight to the live knowledge / identity tables. Used only when
-    config.reflect.write_to='live' — intended for after the test concludes.
+    """Write a knowledge candidate straight to the live knowledge table. Used only
+    when config.reflect.write_to='live' — intended for after the test concludes.
+    Identity candidates are never written live (techne#1267).
 
     `session_id` goes into `origin_session` in the same INSERT (techne#949), the way
     reviewed promotion stamps it."""
@@ -435,11 +436,8 @@ def _write_live(
             source=source,
             provenance={"origin_session": session_id} if session_id else None,
         )
-    if candidate.scope == "identity":
-        from techne.core.identity import set_value
-
-        set_value(db_path, candidate.type, candidate.content, source=source)
-        return None
+    # Identity scope is not written here (techne#1267); the caller leaves those
+    # candidates pending, and this refuses them as a second guard.
     return None
 
 
@@ -2140,7 +2138,11 @@ def ingest_reflection_response(
             if cand_id is None:
                 continue
             counts["candidates_written"] += 1
-            if effective_write_to(config) == "live":
+            # Identity is never auto-written, even in live mode (techne#1267): an
+            # observation (a fetched page, a peer message) could steer a reflection
+            # to replace user.name or any other key, and set_value keeps no
+            # history. Identity candidates stay pending for reviewed promotion.
+            if effective_write_to(config) == "live" and c.scope != "identity":
                 promoted_id = _write_live(
                     config.db_path,
                     c,
@@ -2427,31 +2429,6 @@ def list_candidates(
         conn.close()
 
 
-def _card_type_or_fact(ktype: str, tags: str) -> str:
-    """Refuse to mint a `document_card` that has no `doc:<id>` pointer (#633).
-
-    `document_card` is a MANAGED type: the card summary pass owns it and supplies
-    the librarian pointer. Neither reflect-promote nor consolidate-merge has a
-    document in hand, so both could mint a card with nothing behind it — four such
-    rows exist (knowledge 361, 366, 624, 625), and `fsck`'s dangling_cards check has
-    been red since 2026-06-21 because of them.
-
-    Demote rather than reject: the content is real prose about a document and worth
-    keeping, it just isn't a card. This mirrors the fallback already on the same line
-    at both call sites (an unrecognized type becomes `fact`).
-    """
-    from techne.core.cards import CARD_TYPE, card_doc_id
-
-    if ktype == CARD_TYPE and card_doc_id(tags or "") is None:
-        log.warning(
-            "refusing to mint an unbacked %s (no doc: pointer in tags); storing as fact "
-            "instead — tenishai/techne#633",
-            CARD_TYPE,
-        )
-        return "fact"
-    return ktype
-
-
 def _apply_add(conn, row, db_path: Path) -> int | None:
     """Apply an additive candidate — the original reflect promotion path, verbatim.
 
@@ -2471,6 +2448,7 @@ def _apply_add(conn, row, db_path: Path) -> int | None:
         CONFIDENCE_NUMERIC,
         VALID_CONFIDENCE,
         _add_dep_in_conn,
+        card_type_or_fact,
     )
     from techne.core.knowledge import GENERIC_TYPES as VALID_TYPES  # techne#1195
 
@@ -2481,7 +2459,7 @@ def _apply_add(conn, row, db_path: Path) -> int | None:
         conf = row["confidence"] if row["confidence"] in VALID_CONFIDENCE else "medium"
         numeric = CONFIDENCE_NUMERIC[conf]
         tags = row["tags"] or ""
-        ktype = _card_type_or_fact(row["type"] if row["type"] in VALID_TYPES else "fact", tags)
+        ktype = card_type_or_fact(row["type"] if row["type"] in VALID_TYPES else "fact", tags)
         cur2 = conn.execute(
             # last_confirmed_at is set HERE (techne#938). This is promote_candidate's
             # "add" dispatch -- the main way curated knowledge grows -- and the
@@ -2569,9 +2547,7 @@ def _apply_merge(conn, row, db_path: Path) -> int | None:
             f"merge candidate {row['id']} needs at least two target_ids, got {targets}"
         )
     conf = row["confidence"] if row["confidence"] in VALID_CONFIDENCE else "medium"
-    ktype = _card_type_or_fact(
-        row["type"] if row["type"] in VALID_TYPES else "fact", row["tags"] or ""
-    )
+    ktype = row["type"] if row["type"] in VALID_TYPES else "fact"  # card guard: _merge_in_conn
     return _merge_in_conn(
         conn,
         targets,
@@ -2697,7 +2673,7 @@ def promote_candidate(
                 WHERE id = ? AND status = 'pending'""",
             (
                 decided_by,
-                decision_reason,
+                redact_credentials(decision_reason) if decision_reason else decision_reason,
                 # Redacted like every other text written to this table (Prudence #961
                 # r1); `reflect review` echoes it back.
                 redact_credentials(revised_content) if revised_content is not None else None,
@@ -2754,7 +2730,11 @@ def discard_candidate(
                   SET status = 'discarded', reviewed_at = CURRENT_TIMESTAMP,
                       decided_by = ?, decision_reason = ?
                 WHERE id = ? AND status = 'pending'""",
-            (decided_by, decision_reason, candidate_id),
+            (
+                decided_by,
+                redact_credentials(decision_reason) if decision_reason else decision_reason,
+                candidate_id,
+            ),
         )
         if cur.rowcount == 0:
             raise ValueError(f"Candidate {candidate_id} not found or already reviewed")

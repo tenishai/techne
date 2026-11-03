@@ -1,6 +1,6 @@
 """RepoSource — tree-sitter SourceAdapter for Codex repo indexing (techne#89).
 
-Walks a repository, parses Python and TypeScript files with tree-sitter, and
+Walks a repository, parses Python, TypeScript and Go files with tree-sitter, and
 writes symbols + unresolved call/import edges to codex.db. Implements the
 SourceAdapter Protocol from techne.sync.adapter.
 
@@ -22,11 +22,11 @@ Key design decisions
   (id = "<file>::<module>::module::0") as the from_symbol for calls/imports
   that appear outside any function or class definition.
 
-* Lazy grammar imports:  tree_sitter_python / tree_sitter_typescript are
+* Lazy grammar imports:  tree_sitter_python / _typescript / _go are
   optional extras (tenish-techne[codex]).  Missing grammars degrade gracefully:
   files for that language are silently skipped.
 
-* Watch mode:  mirrors JsonlTranscriptSource — a watchdog Observer calls
+* Watch mode:  a watchdog Observer calls
   _index_file() on each changed file through a Debouncer.
 """
 
@@ -40,6 +40,7 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from techne import install_spec
+from techne.core.codegraph import encode_call_sites
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +48,7 @@ log = logging.getLogger(__name__)
 _EXT_LANGUAGE: dict[str, str] = {
     ".py": "python",
     ".ts": "typescript",
+    ".go": "go",
     # .tsx deferred to a follow-up: it needs tree-sitter's `language_tsx()`
     # grammar. The plain typescript grammar parses JSX into ERROR nodes, which
     # silently swallow surrounding symbol/call captures — worse than honestly
@@ -103,6 +105,21 @@ _SKIP_DIRS: frozenset[str] = frozenset(
     }
 )
 
+#: Directories skipped for ONE language only (techne#1284). `vendor/` holds Go's
+#: vendored dependencies, and `go build` ignores `testdata/`, whose .go files are
+#: often deliberately invalid fixtures. Neither name can go in `_SKIP_DIRS`: a
+#: Python or TypeScript repo may keep real code under `vendor/`, and
+#: `sweep_excluded_rows` would purge it from every existing index.
+_LANGUAGE_SKIP_DIRS: dict[str, frozenset[str]] = {
+    "go": frozenset({"vendor", "testdata"}),
+}
+
+
+def _language_skipped(rel_parts: tuple[str, ...], language: str | None) -> bool:
+    """True if a file of *language* sits under a directory skipped for it."""
+    skip = _LANGUAGE_SKIP_DIRS.get(language or "")
+    return bool(skip) and any(part in skip for part in rel_parts[:-1])
+
 
 # ---------------------------------------------------------------------------
 # Grammar / parser cache
@@ -140,6 +157,10 @@ class _GrammarCache:
                 import tree_sitter_typescript as tsts
 
                 lang = Language(tsts.language_typescript())
+            elif language == "go":
+                import tree_sitter_go as tsg
+
+                lang = Language(tsg.language())
             else:
                 self._langs[language] = None
                 return
@@ -175,6 +196,9 @@ class _GrammarCache:
 
 
 _GRAMMAR = _GrammarCache()
+
+#: What `codex index`, `index-all` and `watch` index when `--language` is not given.
+DEFAULT_LANGUAGES: tuple[str, ...] = ("python", "typescript", "go")
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +269,72 @@ def _find_enclosing_symbol(byte_pos: int, spans: list[tuple[int, int, str]]) -> 
 #: A bare specifier is deliberately NOT in this set — that one resolves through
 #: node_modules and is handled by the builtin guard and the workspace cost.
 _TS_ALIAS_SIGILS = (".", "@", "$")
+
+
+def _text(node) -> str:
+    return node.text.decode("utf-8", errors="replace")
+
+
+def _call_qualifier(callee_node) -> str | None:
+    """What a call site's callee hangs off, for ``edges.call_sites`` (techne#1284).
+
+    None for a bare call (`f()`), the operand's name when it is a plain
+    identifier (`store.Get()` -> "store", `self.f()` -> "self"), and "*" for any
+    other operand (`s.db.Get()`, `f().g()`, `this.x()`), which no resolver can
+    place without types. Read from the same parent `bare_call` reads: the field
+    is `operand` in Go's selector_expression and `object` in Python's attribute
+    and TypeScript's member_expression.
+    """
+    parent = callee_node.parent
+    if parent is None or parent.type in ("call", "call_expression"):
+        return None
+    obj = parent.child_by_field_name("operand") or parent.child_by_field_name("object")
+    if obj is not None and obj.type == "identifier":
+        return _text(obj)
+    return "*"
+
+
+def go_default_package_name(import_path: str) -> str:
+    """The name an unaliased Go import binds, by the usual convention.
+
+    The last path element, skipping a major-version element (`.../redis/v9` binds
+    `redis`) and dropping a gopkg.in version suffix (`gopkg.in/yaml.v3` binds
+    `yaml`). It is a convention, not a rule: the package clause decides, and a
+    repo `github.com/x/go-foo` holding `package foo` breaks it. The resolver
+    corrects it for in-repo packages, whose clause it has read; for others a
+    wrong guess only leaves a call unresolved rather than external.
+    """
+    parts = [p for p in import_path.split("/") if p]
+    if len(parts) > 1 and parts[-1][:1] == "v" and parts[-1][1:].isdigit():
+        parts = parts[:-1]
+    last = parts[-1] if parts else import_path
+    head, dot, tail = last.rpartition(".v")
+    if dot and head and tail.isdigit():
+        last = head
+    return last
+
+
+def _go_receiver_type(method_node) -> str | None:
+    """`*Server` for `func (s *Server) Serve()`, or None if it cannot be read."""
+    recv = method_node.child_by_field_name("receiver")
+    if recv is None:
+        return None
+    for child in recv.named_children:
+        if child.type == "parameter_declaration":
+            typ = child.child_by_field_name("type")
+            if typ is not None:
+                return _text(typ)
+    return None
+
+
+def _go_package_name(root) -> str | None:
+    """The name in a Go file's `package` clause, or None."""
+    for child in root.named_children:
+        if child.type == "package_clause":
+            for sub in child.named_children:
+                if sub.type == "package_identifier":
+                    return _text(sub)
+    return None
 
 
 def _extract_import_names(node, language: str, *, with_orig: bool = False) -> list[tuple]:
@@ -439,6 +529,23 @@ def _extract_import_names(node, language: str, *, with_orig: bool = False) -> li
                         ident = next((c for c in sub.children if c.type == "identifier"), None)
                         if ident:
                             names.append((ident.text.decode("utf-8", errors="replace"), module))
+    elif language == "go":
+        # import "x/store"; import st "x/store"; import _ "x/driver"; import . "x/dsl"
+        # The bound name is a PACKAGE, never the called function: `store.Get()`
+        # calls `Get`, so Go call edges are bound through `call_sites`
+        # qualifiers by `resolve_go_edges`, not through the (file, name) binding
+        # the Python and TypeScript passes use. `to_module` is the full import
+        # path. A blank import binds nothing, and a dot import binds every
+        # exported name of the package with no qualifier; both are left out, so
+        # calls through a dot import stay unresolved.
+        path_node = node.child_by_field_name("path")
+        if path_node is not None:
+            path = _text(path_node).strip("\"`")
+            name_node = node.child_by_field_name("name")
+            if name_node is None:
+                names.append((go_default_package_name(path), path))
+            elif name_node.type == "package_identifier":
+                names.append((_text(name_node), path))
     if not with_orig:
         return names
     return [(n, *renamed[n]) if m is None and n in renamed else (n, m, None) for n, m in names]
@@ -481,7 +588,14 @@ def _parse_file(
             "file": file_str,
             "name": "<module>",
             "kind": "module",
-            "signature": None,
+            # Go's package clause rides here (techne#1284): a package is a
+            # directory plus this name, and `resolve_go_edges` reads it to
+            # group files into packages and to learn what an in-repo import binds.
+            "signature": (
+                f"package {pkg}"
+                if language == "go" and (pkg := _go_package_name(root))
+                else None
+            ),
             "span": f"0:{total_lines}",
             "language": language,
             "file_hash": file_hash,
@@ -533,6 +647,14 @@ def _parse_file(
                 sym_id = f"{file_str}::{name_str}::{kind}::{start_line}"
                 if kind == "interface":
                     sig = f"interface {name_str}"
+                elif language == "go":
+                    if kind == "class":
+                        sig = f"type {name_str} struct"
+                    elif kind == "method":
+                        recv = _go_receiver_type(def_node)
+                        sig = f"func ({recv or '?'}) {name_str}(...)"
+                    else:
+                        sig = f"func {name_str}(...)"
                 elif language == "python":
                     sig = f"def {name_str}(...)"
                 else:
@@ -562,6 +684,12 @@ def _parse_file(
     # Emit call edges.
     seen_edges: set[tuple[str, str, str]] = set()
     call_edges: dict[tuple[str, str, str], dict] = {}
+    # CALL SITES, KEPT PER ROW (techne#1284). The edge key collapses every call
+    # from one caller to one name onto one row, so seven `NewSubscriber(...)`
+    # calls inside one function were one edge with no line: `callers` could say
+    # WHICH functions call it, never how many sites or where. Each row now
+    # carries its sites as (line, qualifier); see `_call_qualifier`.
+    sites: dict[tuple[str, str, str], set[tuple[int, str | None]]] = {}
     for caps in call_matches:
         callee_nodes = caps.get("call.callee", [])
         range_nodes = caps.get("call.range", [])
@@ -578,6 +706,9 @@ def _parse_file(
             # because that is what makes a same-file `def f` a real dependency.
             parent = callee_node.parent
             bare = int(parent is not None and parent.type in ("call", "call_expression"))
+            sites.setdefault(key, set()).add(
+                (callee_node.start_point[0] + 1, _call_qualifier(callee_node))
+            )
             if key not in seen_edges:
                 seen_edges.add(key)
                 edge = {
@@ -591,6 +722,8 @@ def _parse_file(
                 edges.append(edge)
             elif bare:
                 call_edges[key]["bare_call"] = 1
+    for key, edge in call_edges.items():
+        edge["call_sites"] = encode_call_sites(sites.get(key, ()))
 
     # Emit import edges (from the module symbol).
     for caps in import_matches:
@@ -744,12 +877,13 @@ def _index_file(db_path: Path, file_path: Path, repo_root: Path, *, force: bool 
                 e.setdefault("to_module", None)
                 e.setdefault("bare_call", None)
                 e.setdefault("to_orig", None)
+                e.setdefault("call_sites", None)
             conn.executemany(
                 """INSERT OR IGNORE INTO edges
                    (from_symbol, to_name, kind, src_file_hash, resolution_status, to_module,
-                    bare_call, to_orig)
+                    bare_call, to_orig, call_sites)
                    VALUES (:from_symbol, :to_name, :kind, :src_file_hash, 'unresolved',
-                           :to_module, :bare_call, :to_orig)""",
+                           :to_module, :bare_call, :to_orig, :call_sites)""",
                 edges,
             )
         conn.commit()
@@ -827,7 +961,12 @@ def _walk_repo(
         dirnames[:] = kept
         for name in filenames:
             path = here / name
-            if path.suffix.lower() in exts and path.is_file():
+            suffix = path.suffix.lower()
+            if suffix not in exts or _language_skipped(
+                (*rel_parts, name), _EXT_LANGUAGE.get(suffix)
+            ):
+                continue
+            if path.is_file():
                 yield path
 
 
@@ -867,7 +1006,9 @@ def _is_excluded_stored_path(file_str: str, repo_root: Path) -> bool:
             path = path.relative_to(repo_root)
         except ValueError:
             return False
-    return any(part in _SKIP_DIRS for part in path.parts)
+    if any(part in _SKIP_DIRS for part in path.parts):
+        return True
+    return _language_skipped(path.parts, _EXT_LANGUAGE.get(path.suffix.lower()))
 
 
 def sweep_excluded_rows(db_path: Path, repo_root: Path) -> int:
@@ -958,7 +1099,7 @@ def is_indexable_path(file_path: Path) -> bool:
 
 
 class RepoSource:
-    """SourceAdapter that indexes a repository's Python + TypeScript symbols.
+    """SourceAdapter that indexes a repository's Python, TypeScript and Go symbols.
 
     Satisfies the SourceAdapter Protocol (techne.sync.adapter.SourceAdapter).
     Drives codex.db via the tree-sitter extraction layer; no core techne.db
@@ -981,7 +1122,7 @@ class RepoSource:
     ) -> None:
         self._db_path = db_path
         self._root = repo_root
-        self._languages: set[str] = set(languages or ["python", "typescript"])
+        self._languages: set[str] = set(languages or DEFAULT_LANGUAGES)
         self._debounce_ms = debounce_ms
         self._observer = None
         self._debouncer = None

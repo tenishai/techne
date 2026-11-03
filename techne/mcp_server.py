@@ -85,8 +85,19 @@ def _drift_notice(config) -> str | None:
 def handle_request(request: dict, config: Config) -> dict:
     """Route a JSON-RPC request to the appropriate handler."""
     method = request.get("method", "")
-    params = request.get("params", {})
     req_id = request.get("id")
+    # A request without an "id" is a notification: it gets no reply, and nothing is
+    # dispatched for it (techne#1247). A tools/call without an id used to run its
+    # write and then answer with "id": null.
+    if "id" not in request:
+        return None
+    if not isinstance(method, str):
+        return _error(req_id, -32600, "Invalid request: 'method' must be a string")
+    params = request.get("params")
+    if params is None:
+        params = {}
+    if not isinstance(params, dict):
+        return _error(req_id, -32602, "Invalid params: 'params' must be an object")
 
     if method == "initialize":
         from techne.core.health import build_identity
@@ -111,7 +122,13 @@ def handle_request(request: dict, config: Config) -> dict:
 
     if method == "tools/call":
         tool_name = params.get("name", "")
-        arguments = params.get("arguments", {})
+        arguments = params.get("arguments")
+        if arguments is None:
+            arguments = {}
+        if not isinstance(tool_name, str) or not isinstance(arguments, dict):
+            return _error(
+                req_id, -32602, "Invalid params: 'name' must be a string, 'arguments' an object"
+            )
         handler = TOOL_HANDLERS.get(tool_name)
         if handler:
             try:
@@ -138,11 +155,8 @@ def handle_request(request: dict, config: Config) -> dict:
                 )
         return _error(req_id, -32601, f"Unknown tool: {tool_name}")
 
-    # Per JSON-RPC spec, notifications (requests without an "id" field) must
-    # receive no response. Silently ignore all notification/* methods and any
-    # other request that arrived without an id.
-    if method.startswith("notifications/") or req_id is None:
-        return None
+    if method.startswith("notifications/"):
+        return None  # sent with an id by mistake; still a notification
 
     return _error(req_id, -32601, f"Unknown method: {method}")
 
@@ -1500,7 +1514,9 @@ TOOLS = [
             "tests/fixtures/** nodes are excluded by default (name-collision noise in the "
             "v1 name-based edge model; set include_fixtures=true to keep them). Scoped to "
             "one repo (db-per-repo, techne#209): pass `repo` to pick it, else the "
-            "server's working directory's repo is used. Each node carries `proven`: "
+            "server's working directory's repo is used. A direct caller (depth 1, "
+            "direction in) carries `call_lines`, the lines it calls from. "
+            "Each node carries `proven`: "
             "false means it is reached only by matching a bare call name and may not be "
             "a real dependent (techne#606) — see only_proven. Returns the closest `limit` "
             "nodes by depth (default 50), with `walked` and `truncated` stating what was "
@@ -2616,6 +2632,19 @@ def _codex_blast_radius(args: dict, config: Config) -> dict:
         raw = filtered
     for r in raw:
         r["proven"] = r["id"] in proven_ids
+    # DIRECT CALLERS CARRY THEIR CALL-SITE LINES (techne#1284). A caller that calls
+    # the symbol seven times is one node, and the lines are what a reader opens next.
+    if direction == "in":
+        from techne.core.codegraph import callers as _callers
+
+        lines_by_id = {
+            c["id"]: c["call_lines"]
+            for c in _callers(db_path, symbol_id, exclude_fixtures=not include_fixtures)
+            if c.get("call_lines")
+        }
+        for r in raw:
+            if r.get("depth") == 1 and r["id"] in lines_by_id:
+                r["call_lines"] = lines_by_id[r["id"]]
     rows = annotate_freshness(db_path, raw)
     stale_count = sum(1 for r in rows if r.get("freshness") in ("stale", "missing"))
     inferred_count = sum(1 for r in rows if not r["proven"])
@@ -3227,6 +3256,28 @@ def _error(req_id, code, message):
     return {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}}
 
 
+def _dispatch_line(line: str, config: Config) -> dict | None:
+    """One stdin line → its JSON-RPC reply, or None. Never raises (techne#1247).
+
+    An exception here used to leave main()'s loop and end the server, taking every
+    techne tool in the session with it until a restart."""
+    try:
+        request = json.loads(line)
+    except json.JSONDecodeError:
+        return _error(None, -32700, "Parse error")
+    if isinstance(request, list):
+        return _error(None, -32600, "Invalid request: batch requests are not supported")
+    # A JSON scalar parses but isn't a request object (techne#166).
+    if not isinstance(request, dict):
+        return _error(None, -32600, "Invalid request: expected a JSON object")
+    try:
+        return handle_request(request, config)
+    except Exception as e:  # noqa: BLE001 — one bad request must not end the server
+        if "id" not in request:
+            return None
+        return _error(request.get("id"), -32603, f"Internal error: {type(e).__name__}")
+
+
 def main():
     """Run the MCP server over stdio."""
     config = Config.load()
@@ -3258,19 +3309,7 @@ def main():
             line = line.strip()
             if not line:
                 continue
-            try:
-                request = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-
-            # A well-formed JSON scalar/array (e.g. `null`, `42`, `[]`) parses fine but
-            # isn't a JSON-RPC request object; handle_request does request.get(...) and
-            # would crash the whole server on it. Skip anything that isn't an object.
-            # (techne#166)
-            if not isinstance(request, dict):
-                continue
-
-            response = handle_request(request, config)
+            response = _dispatch_line(line, config)
             if response is not None:
                 sys.stdout.write(json.dumps(response) + "\n")
                 sys.stdout.flush()

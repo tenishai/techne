@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tenish-techne"
-version = "0.18.2"
+version = "0.19.1"
 description = "Agentic memory and knowledge system for AI coding agents"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
@@ -62,11 +62,12 @@ security = ["pip-audit>=2.7"]
 # code agents (the Codex persona) and for keeping a docs corpus current.
 watch = ["watchdog>=4.0"]
 # `codex` enables `techne codex index <repo>` — tree-sitter extraction of
-# Python + TypeScript symbols and call/import edges into codex.db (techne#89).
+# Python, TypeScript and Go symbols and call/import edges into codex.db (techne#89, #1284).
 codex = [
     "tree-sitter>=0.25",   # source.py uses the QueryCursor API (landed in 0.25); <0.25 import-fails and silently no-ops the parser
     "tree-sitter-python>=0.23",
     "tree-sitter-typescript>=0.23",
+    "tree-sitter-go>=0.25",  # 0.25.0 verified against tree-sitter 0.25.2 (techne#1284)
     "watchdog>=4.0",
 ]
 # `recommended` is the convenience bundle behind the blessed pipx install in the

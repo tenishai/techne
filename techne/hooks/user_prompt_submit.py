@@ -596,6 +596,8 @@ def _build_context(
     reader does not read the fallback as EVIDENCE that it sometimes is, and
     weaken a guard on that basis. The tests already record this.
     """
+    from techne.core.egress import one_line
+
     header = list(header)
     lines: list[str] = []
     truncated_any = False
@@ -698,7 +700,9 @@ def _build_context(
             # cut row would under-report by the marker's width.
             _cut_rows += 1
             _cut_chars += stored_len - (len(content) - len(_CUT_SUFFIX))
-        lines.append(f"- ⟦techne#{rid}⟧ [{rtype}] {content}")
+        # One line per row (techne#1252): a stored line break must not start a
+        # line that reads as another row.
+        lines.append(f"- ⟦techne#{rid}⟧ [{rtype}] {one_line(content)}")
     # Populated on EVERY exit, including the empty one: "the rail fired and cut
     # nothing" and "the rail never fired" are different facts, and a caller that
     # only sees stats on the happy path cannot tell them apart.
@@ -797,9 +801,13 @@ def recall_block(
     ``rows`` is the post-cap selection, returned even when the block renders
     empty. Raises on search failure; the caller decides what degraded means.
     """
-    from techne.core.search import search
+    from techne.core.search import clean_query_text, search
     from techne.hooks._timeout import bounded_hook
 
+    # techne#1249: `search()` cleans its own copy, but the query is also the
+    # logged trigger below, and a lone surrogate there made the best-effort log
+    # drop the row without a word. Clean it once so both see the same text.
+    query = clean_query_text(query)
     with bounded_hook(config.hooks.timeout_s, label=timeout_label):
         # OVER-FETCH, THEN SUPPRESS, so the session gets k FRESH rows rather
         # than k-minus-the-duplicates (techne#576). Dropping without

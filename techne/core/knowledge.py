@@ -1,6 +1,7 @@
 """Knowledge store — durable facts, decisions, patterns, evaluations, procedures."""
 
 import hashlib
+import logging
 import re
 from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
@@ -8,6 +9,8 @@ from pathlib import Path
 
 from techne.core.database import connect, like_escape
 from techne.core.redaction import redact_credentials
+
+log = logging.getLogger(__name__)
 
 VALID_TYPES = (
     "fact",
@@ -81,6 +84,32 @@ DEFAULT_CONFIDENCE_HALF_LIFE_DAYS = 30.0
 UNCERTAIN_CONFIDENCE_PENALTY = 0.5
 
 
+def card_type_or_fact(ktype: str, tags: str | None) -> str:
+    """Refuse to mint a `document_card` that has no `doc:<id>` pointer (#633, #1300).
+
+    `document_card` is a MANAGED type: the card summary pass owns it and supplies
+    the librarian pointer. A writer with no document in hand (reflect-promote,
+    consolidate-merge, live-mode reflect, an agent's store) can only mint a card
+    with nothing behind it, and fsck's dangling_cards check goes red.
+
+    Demote rather than reject: the content is real prose about a document and worth
+    keeping, it just isn't a card. store() and _merge_in_conn() (under merge_into()
+    and the promote merge dispatch) apply this; reflect's promote-add path INSERTs
+    directly and calls it itself. The #633 fix guarded only the two promote paths,
+    and live-mode reflect went through store() unguarded (#1300).
+    """
+    from techne.core.cards import CARD_TYPE, card_doc_id
+
+    if ktype == CARD_TYPE and card_doc_id(tags or "") is None:
+        log.warning(
+            "refusing to mint an unbacked %s (no doc: pointer in tags); storing as fact "
+            "instead — tenishai/techne#633",
+            CARD_TYPE,
+        )
+        return "fact"
+    return ktype
+
+
 def store(
     db_path: Path,
     content: str,
@@ -141,6 +170,7 @@ def store(
         raise ValueError(f"Invalid knowledge type '{type}'. Must be one of: {GENERIC_TYPES}")
     if confidence not in VALID_CONFIDENCE:
         raise ValueError(f"Invalid confidence '{confidence}'. Must be one of: {VALID_CONFIDENCE}")
+    type = card_type_or_fact(type, tags)
 
     anchor_path: str | None = None
     anchor_symbol: str | None = None
@@ -769,6 +799,7 @@ def _merge_in_conn(
     a freshly-minted `current` row would resurrect it under a different id — the
     same resurrection this guard already blocks for a superseded row.
     """
+    ktype = card_type_or_fact(ktype, tags)
     seen: set[int] = set()
     for oid in old_ids:
         if oid in seen:
@@ -1378,25 +1409,31 @@ def archive_scan(
     if not to_archive or dry_run:
         return to_archive
 
-    # TOCTOU note: candidates are read on one connection above and UPDATEd on a
-    # fresh connection below. A concurrent reaffirm() landing between the two could
-    # archive a just-reaffirmed row. Negligible for a single-operator CLI (the only
-    # caller); the miss self-heals on the next scan or via unarchive(). Documented
-    # rather than defended (a held write-lock across the whole scan isn't worth it).
-    # Write: flip status to 'archived' for each qualifying row.
-    ids = [r["id"] for r in to_archive]
-    placeholders = ",".join("?" * len(ids))
+    # Candidates are read on one connection above and UPDATEd on a fresh one below,
+    # and MCP sessions reconfirm concurrently (techne#1269). The UPDATE re-checks
+    # the selection condition, so a row reconfirmed in between is left alone, and
+    # only the rows it actually archived are returned.
     conn = connect(db_path)
+    archived: set[int] = set()
     try:
-        conn.execute(
-            f"""UPDATE knowledge
-                SET status = 'archived', updated_at = CURRENT_TIMESTAMP
-                WHERE id IN ({placeholders})""",
-            ids,
-        )
+        # One UPDATE per row, in one transaction, so rowcount says which rows were
+        # still eligible (RETURNING would need SQLite 3.35).
+        for r in to_archive:
+            cur = conn.execute(
+                """UPDATE knowledge
+                   SET status = 'archived', updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ?
+                     AND superseded_by IS NULL
+                     AND status = 'uncertain'
+                     AND last_confirmed_at < ?""",
+                (r["id"], cutoff_str),
+            )
+            if cur.rowcount:
+                archived.add(r["id"])
         conn.commit()
     finally:
         conn.close()
+    to_archive = [r for r in to_archive if r["id"] in archived]
 
     return to_archive
 

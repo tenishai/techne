@@ -360,9 +360,19 @@ class TestExtensionStatePersistence:
         finally:
             conn.close()
 
-        # Clean run clears it.
+        # CLEAN_RUNS_TO_CLEAR clean runs in a row clear it (techne#1251); one alone
+        # no longer does, because another session's clean run could erase a
+        # failing session's error.
+        from techne.hooks._liveness import CLEAN_RUNS_TO_CLEAR
+
         ts2 = "2026-06-20T12:00:00+00:00"
-        _persist_hook_state(db_path, last_run=ts2, error=None)
+        for i in range(CLEAN_RUNS_TO_CLEAR):
+            conn = connect(db_path)
+            try:
+                assert get_state(conn, "hook:session_start:last_error"), f"cleared after {i}"
+            finally:
+                conn.close()
+            _persist_hook_state(db_path, last_run=ts2, error=None)
 
         conn = connect(db_path)
         try:
@@ -371,6 +381,23 @@ class TestExtensionStatePersistence:
             conn.close()
         # After clear, should be {} (empty dict, not None).
         assert payload == {} or payload is None
+
+    def test_an_interleaved_failure_restarts_the_clean_count(self, db_path: Path):
+        """techne#1251: session A fails on every call while session B runs clean.
+        B's runs must not clear A's error between A's failures."""
+        from techne.hooks._liveness import CLEAN_RUNS_TO_CLEAR
+        from techne.hooks.session_start import _persist_hook_state
+
+        err = {"stage": "outbox", "msg": "A fails"}
+        for _ in range(3):
+            _persist_hook_state(db_path, last_run="t", error=err)
+            for _ in range(CLEAN_RUNS_TO_CLEAR - 1):
+                _persist_hook_state(db_path, last_run="t", error=None)
+        conn = connect(db_path)
+        try:
+            assert get_state(conn, "hook:session_start:last_error").get("msg") == "A fails"
+        finally:
+            conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -736,8 +763,12 @@ class TestHookLiveness:
         assert err["msg"] == "boom"
         assert err["ts"], "error payload must be timestamped even when caller omits it"
 
-        # A fixed hook must stop reporting a failure it no longer has.
-        record_hook_run(db_path, "demo", outcome="ok")
+        # A fixed hook must stop reporting a failure it no longer has, once it has
+        # run clean CLEAN_RUNS_TO_CLEAR times in a row (techne#1251).
+        from techne.hooks._liveness import CLEAN_RUNS_TO_CLEAR
+
+        for _ in range(CLEAN_RUNS_TO_CLEAR):
+            record_hook_run(db_path, "demo", outcome="ok")
         conn = connect(db_path)
         try:
             cleared = get_state(conn, "hook:demo:last_error")

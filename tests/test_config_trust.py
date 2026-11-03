@@ -428,32 +428,6 @@ class TestKeySurgery:
         assert applied == []
         assert raw == {}
 
-    def test_strip_removes_sources_now_that_it_is_governed(self):
-        """techne#585 CHANGED ENFORCEMENT, so it gets a test rather than only a
-        comment. `sources.claude_code_transcripts.paths` names arbitrary
-        filesystem paths whose CONTENTS are ingested into the ledger; admitting
-        it to EGRESS_KEYS means a LOCKED operator layer now DROPS agent-supplied
-        source paths instead of honouring them.
-
-        That is the intended effect of locking — an agent choosing what gets read
-        into its own memory is the thing being prevented — but it is a live
-        behaviour change for any locked install that set `sources` in
-        config.yaml, not a no-op. Pinned here so nobody can quietly revert the
-        decision by moving one line back to `_NOT_A_DESTINATION`.
-        """
-        raw = {
-            "sources": {"claude_code_transcripts": {"paths": ["/tmp/somebody-elses-transcripts"]}},
-            "threads": {"min_observations": 3},
-        }
-
-        removed = strip_egress(raw)
-
-        assert "sources" in removed
-        assert "sources" not in raw
-        # A neighbouring non-destination block is untouched — the gate is
-        # targeted, not a blanket wipe.
-        assert raw["threads"] == {"min_observations": 3}
-
     def test_strip_tolerates_a_wrong_shaped_block(self):
         """A scalar where a mapping belongs must not raise — this runs inside
         Config.load, and a crash here takes down every hook on the host."""
@@ -1082,9 +1056,10 @@ _EGRESS_PROBES: dict[str, object] = {
     "recall.allowed_sources": ["probe-source"],
     "recall.allow_unlisted_sources": True,
     "archivist_db_path": "/tmp/probe-archivist.db",
+    # techne#1298. A non-empty tag list turns the publish lane on.
+    "archivist_publish_tags": ["team"],
     "standalone": False,
     "stores": {"librarian": {"adapter": "sqlite", "dsn": "/tmp/probe-lib.db"}},
-    "sources": {"claude_code_transcripts": {"paths": ["/tmp/probe-transcripts"]}},
 }
 
 

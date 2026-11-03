@@ -101,8 +101,9 @@ def _module_candidates(dotted: str, language: str | None = None) -> tuple[str, .
     row reaches the evidence gate with no lookup attempted, so it can still be
     written `external` if its module root names nothing in the repo — it does not
     become `unresolved` by default. That is correct for a genuine stdlib import
-    and is unreachable today anyway: `_EXT_LANGUAGE` maps exactly two extensions
-    and `_parse_file` always writes one, so the only NULL-language route is
+    and is unreachable today anyway: every language `_EXT_LANGUAGE` maps either
+    has candidate shapes here or is Go, whose rows this pass skips (#1284), and
+    `_parse_file` always writes one, so the only NULL-language route is
     `codegraph.add_symbol`'s default, which has no production caller. `.tsx` is
     the language that would first walk into it. No indexed symbol
     in any live codex db has a NULL language (measured 2026-08-31 across techne,
@@ -419,9 +420,13 @@ def resolve_edges_by_import(conn) -> dict:
               FROM edges e JOIN symbols s ON s.id = e.from_symbol
              WHERE e.kind = 'call'
                AND e.to_symbol IS NULL
+               AND COALESCE(s.language, '') != 'go'
                AND e.resolution_status IN ({",".join("?" * len(_OVERWRITABLE))})""",
         _OVERWRITABLE,
     ).fetchall()
+    # GO IS NOT THIS PASS'S (techne#1284): a Go import binds a package and its
+    # calls are bound through their qualifier, so `go_resolve.resolve_go_edges`
+    # owns every Go row. One owner per language keeps the two from disagreeing.
 
     for rowid, file, to_name, language in rows:
         binding = bindings.get((file, to_name))
@@ -564,6 +569,7 @@ def resolve_edges_by_scope(conn) -> dict:
              WHERE e.kind = 'call'
                AND e.to_symbol IS NULL
                AND e.bare_call = 1
+               AND COALESCE(s.language, '') != 'go'
                AND e.resolution_status IN ({",".join("?" * len(_OVERWRITABLE))})""",
         _OVERWRITABLE,
     ).fetchall()

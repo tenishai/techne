@@ -100,7 +100,7 @@ def consolidate_clusters(
     Excludes `document_card` (techne#823): a card's identity is its `doc:` pointer,
     not its gist, so cards with one gist cluster as perfect duplicates while pointing
     at different documents. And a merge cannot even produce a card: the candidate is
-    written with empty tags, so `_card_type_or_fact` demotes the result to a `fact`
+    written with empty tags, so `knowledge.card_type_or_fact` demotes the result to a `fact`
     with no pointer. Measured 2026-08-29: a 9-way cluster over nine distinct `doc:`
     ids, judged `keep` by hand, recurring on every drain since.
     """
@@ -336,7 +336,7 @@ def _insert_consolidation_candidate(
             json.dumps(sorted(target_ids)),
             status,
             decided_by,
-            decision_reason,
+            redact_credentials(decision_reason) if decision_reason else decision_reason,
         ),
     )
 
@@ -730,7 +730,7 @@ def _insert_dream_candidate(
             json.dumps(sorted(group_ids)),
             status,
             decided_by,
-            decision_reason,
+            redact_credentials(decision_reason) if decision_reason else decision_reason,
         ),
     )
 

@@ -1186,6 +1186,9 @@ class TestReadOnlyRemoteUnderWAL:
         # Snapshot .db files + the main db content hash before
         db_files_before = {p.name for p in team_dir.iterdir() if p.suffix == ".db"}
         assert "techne.db" in db_files_before
+        # Setup's own files (e.g. the <db>.migrate.lock first init takes, techne#1241)
+        # are not the read-only open's doing; only what appears after this counts.
+        all_before = {p.name for p in team_dir.iterdir()}
         main_hash_before = _hash(team_db)
 
         ro_conn = _open_remote_readonly(team_db)
@@ -1212,7 +1215,7 @@ class TestReadOnlyRemoteUnderWAL:
         #    — never a rollback -journal (which would signal a non-WAL write attempt) and
         #    never anything outside the -wal/-shm set.
         all_after = {p.name for p in team_dir.iterdir()}
-        new_files = all_after - {p.name for p in team_dir.iterdir() if p.suffix == ".db"}
+        new_files = all_after - all_before
         allowed_sidecars = {"techne.db-wal", "techne.db-shm"}
         assert new_files <= allowed_sidecars, (
             f"Only transient -wal/-shm sidecars are acceptable; got unexpected: "
