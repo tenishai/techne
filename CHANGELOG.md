@@ -7,6 +7,17 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Added
 
+- **Hand curation for the pattern corpus** (#1293, architect schema v7).
+  `techne architect tag <id> --applies <target>` tags a pattern for a configured project and
+  `--no-applies <target>` removes one, including a target derived from the body. Both are
+  stored with an `origin` (`curated`, `excluded`; derived rows are `body`), so a later
+  `architect backfill` neither drops a hand-set target nor re-derives a removed one.
+  `architect.target_aliases` maps a word bodies use to a configured target, e.g.
+  `{prudence: agents}`. `techne architect reverdict` takes `--reason` and `--clear-reason`,
+  and warns when a skip becomes patterns-only or full-eval with its skip reason still
+  attached, or when a new reason cites no `[[pattern]]` and no file:line.
+  `techne architect snapshot` now covers hand-set applies rows, so its digest changes once
+  on upgrade; take before-and-after snapshots on the same version.
 - **codex indexes Go** (#1284, codex schema v7). `techne codex index` extracts Go functions,
   methods (the signature names the receiver), structs (kind `class`) and interfaces, plus
   their calls and imports, and skips `vendor/` and `testdata/` for Go files. Go is in the
