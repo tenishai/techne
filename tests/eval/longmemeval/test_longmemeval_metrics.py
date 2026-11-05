@@ -43,6 +43,23 @@ def test_ndcg_matches_upstream_discount() -> None:
     assert ndcg_any(["x"], set(), 5) == 0.0
 
 
+def test_ndcg_ignores_hits_past_k_and_caps_the_ideal_at_k() -> None:
+    # A hit at rank 3 is outside k=2, so it adds nothing.
+    assert ndcg_any(["x", "y", "g"], {"g"}, 2) == 0.0
+    # Three gold, k=2: the ideal is two hits, so two hits in the top 2 score 1.0.
+    assert ndcg_any(["g1", "g2", "x"], {"g1", "g2", "g3"}, 2) == pytest.approx(1.0)
+
+
+def test_session_ranking_collapses_repeats_ahead_of_gold() -> None:
+    # Three turns of s1 come first. Collapsed, gold s2 is the 3rd session (inside @5);
+    # uncollapsed it would be 6th.
+    ranked = [("s1", "s1_0"), ("s1", "s1_1"), ("s1", "s1_2"), ("s3", "s3_0"), ("s3", "s3_1")]
+    m = score_question([*ranked, ("s2", "s2_0")], gold_sessions={"s2"}, gold_turns={"s2_0"})
+    assert m["session"]["recall_all@5"] == 1.0
+    assert m["session"]["ndcg_any@5"] == pytest.approx(1 / math.log2(3))
+    assert m["turn"]["recall_all@5"] == 0.0
+
+
 def test_two_question_fixture() -> None:
     # Question A: one evidence session s2, its evidence turn s2_1 ranked second.
     a = score_question(

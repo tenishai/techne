@@ -1,15 +1,22 @@
-"""LongMemEval retrieval metrics, under upstream's names.
+"""LongMemEval retrieval metrics under upstream's names, scored by this harness's rules.
 
-Upstream (xiaowu0162/LongMemEval, src/retrieval/eval_utils.py) defines
-recall_all@k as 1.0 only when every gold id is in the top k, recall_any@k as 1.0
-when at least one is, and ndcg_any@k as binary-relevance NDCG with an
-undiscounted first rank and log2(rank) after it. Its printer
-(src/evaluation/print_retrieval_metrics.py) reports recall_all and ndcg_any at
-session k=5,10 and turn k=5,10,50, and drops `_abs` questions.
+The per-list formulas follow upstream (xiaowu0162/LongMemEval,
+src/retrieval/eval_utils.py): recall_all@k is 1.0 only when every gold id is in the
+top k, recall_any@k when at least one is, and ndcg_any@k is binary-relevance NDCG
+with an undiscounted first rank and log2(rank) after it. The k values follow its
+printer (src/evaluation/print_retrieval_metrics.py): session 5,10, turn 5,10,50.
 
-One difference, stated in the results: techne ranks turns (observation rows), so
-the session ranking here is those turns collapsed to their sessions in first-hit
-order, not a retriever that ranks whole sessions.
+What is scored differs from upstream, so the numbers are not comparable with its:
+- Corpus: upstream's flat index holds user turns only; this one holds user and
+  assistant turns, which is what techne stores.
+- Gold turns: every has_answer turn, assistant ones included. Upstream uses user
+  turns, and its run_retrieval.py average skips the questions with none (all 51 are
+  single-session-assistant); here they are scored.
+- Session hit: a session counts once any of its turns is retrieved, collapsed in
+  first-hit order. Upstream's turn-to-session path (evaluate_retrieval_turn2session)
+  renames an answer session's non-evidence turns, so a session counts only when its
+  evidence turn is retrieved, and computes NDCG over the uncollapsed turns.
+- Abstention (`_abs`) questions are dropped, as upstream's printer does.
 """
 
 from __future__ import annotations

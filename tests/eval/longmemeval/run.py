@@ -10,9 +10,15 @@ or writes ~/.techne: TECHNE_HOME points at the temp dir before techne is importe
 and every db path is checked to be under it.
 
 Writes OUT/results.jsonl (one row per question) and OUT/summary.md. Run it on a
-build host (mash1-run), not a dev machine: the full set is 470 stores of ~500 turns.
-The data comes from Hugging Face xiaowu0162/longmemeval-cleaned and is never
-committed here.
+build host, not a dev machine: the full set is 470 stores of ~500 turns. The data
+comes from Hugging Face xiaowu0162/longmemeval-cleaned and is never committed here.
+
+The metric names are upstream's, but the corpus, gold and session rule are this
+harness's own (see lme_metrics.py), so the numbers do not compare with upstream's.
+
+`--arm hybrid` refuses to report unless every turn was embedded and the vector
+channel contributed results: search() falls back to FTS without a backend, and
+would otherwise publish FTS numbers under a hybrid label.
 """
 
 from __future__ import annotations
@@ -99,7 +105,12 @@ def run_question(root: Path, item: dict, arm: str, limit: int) -> dict:
     t0 = time.monotonic()
     rows, gold_turns, repeats = load_haystack(db_path, item)
     if arm == "hybrid":
-        backfill_vectors(db_path, allow_download=True)
+        embedded = backfill_vectors(db_path, allow_download=True).get("observations", 0)
+        if embedded != len(rows):
+            raise SystemExit(
+                f"{item['question_id']}: embedded {embedded} of {len(rows)} turns; "
+                "install the vectors extra and an embedding backend, or run --arm fts"
+            )
     t1 = time.monotonic()
     # Observation recency always decays at a fixed 30-day half-life from now
     # (_rerank calls _recency_score(ts) without a half-life; search()'s half_life_days
@@ -126,6 +137,7 @@ def run_question(root: Path, item: dict, arm: str, limit: int) -> dict:
         "n_turns": len(rows),
         "repeated_sessions": repeats,
         "n_results": len(ranked),
+        "vec_results": sum(1 for r in results if "vec" in (r.get("match_source") or "")),
         "load_s": round(t1 - t0, 3),
         "search_s": round(t2 - t1, 3),
         "metrics": metrics,
@@ -150,8 +162,11 @@ def summarize(out: list[dict], arm: str, limit: int) -> str:
         "",
         f"{len(out)} questions (abstention dropped), search(limit={limit}, table='observations'). "
         "Recency adds ~0 to every row (2023 dates, fixed 30-day half-life). "
-        "Sessions are turn hits collapsed in first-hit order.",
+        "Corpus is user and assistant turns, gold is every has_answer turn, and a session "
+        "counts once any of its turns is retrieved: upstream's metric names, not its "
+        "corpus or rules, so not comparable with upstream numbers.",
         f"Zero-result queries: {sum(1 for r in out if r['n_results'] == 0)}. "
+        f"Results from the vector channel: {sum(r['vec_results'] for r in out)}. "
         f"Repeated sessions skipped: {sum(r['repeated_sessions'] for r in out)}. "
         f"Median load {statistics.median(r['load_s'] for r in out):.2f}s, "
         f"median search {statistics.median(r['search_s'] for r in out):.3f}s.",
@@ -197,6 +212,8 @@ def main() -> int:
                 log.debug("%s %s", r["question_id"], r["metrics"]["session"])
                 if n % 25 == 0:
                     log.info("%d/%d questions", n, len(items))
+    if args.arm == "hybrid" and not any(r["vec_results"] for r in out):
+        raise SystemExit("--arm hybrid: no result came from the vector channel")
     (args.out / "summary.md").write_text(summarize(out, args.arm, args.limit))
     print((args.out / "summary.md").read_text())
     return 0
