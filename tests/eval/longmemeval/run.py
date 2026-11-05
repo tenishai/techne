@@ -1,7 +1,7 @@
 """LongMemEval-S retrieval against an isolated techne store, one store per question.
 
     python tests/eval/longmemeval/run.py --data longmemeval_s_cleaned.json --out OUT \
-        [--arm fts|hybrid|compare] [--max-questions N] [--workers N]
+        [--arm fts|hybrid|compare] [--max-questions N]
 
 Each question's haystack becomes its own techne.db under a temp dir: every haystack
 session is a `sessions` row, every turn an `observations` row ("role: content",
@@ -31,7 +31,6 @@ its session is gold, to show what displaces evidence turns (issue #1342).
 from __future__ import annotations
 
 import argparse
-import functools
 import json
 import logging
 import os
@@ -41,7 +40,6 @@ import sys
 import tempfile
 import time
 from collections import defaultdict
-from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -277,7 +275,6 @@ def main() -> int:
     ap.add_argument("--arm", choices=("fts", "hybrid", "compare"), default="fts")
     ap.add_argument("--limit", type=int, default=100, help="search() limit; >=50 to fill turn@50")
     ap.add_argument("--max-questions", type=int, default=0, help="0 = all")
-    ap.add_argument("--workers", type=int, default=1, help="questions run in parallel")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
@@ -292,14 +289,9 @@ def main() -> int:
             items = items[: args.max_questions]
         args.out.mkdir(parents=True, exist_ok=True)
         out: list[dict] = []
-        run = functools.partial(run_question, root, arm=args.arm, limit=args.limit)
-        with (
-            (args.out / "results.jsonl").open("w") as fh,
-            ProcessPoolExecutor(args.workers) as pool,
-        ):
-            # Each question has its own store, so workers share nothing but TECHNE_HOME,
-            # which they inherit. map() keeps the input order.
-            for n, r in enumerate(pool.map(run, items), 1):
+        with (args.out / "results.jsonl").open("w") as fh:
+            for n, item in enumerate(items, 1):
+                r = run_question(root, item, args.arm, args.limit)
                 out.append(r)
                 fh.write(json.dumps(r) + "\n")
                 log.debug("%s %s", r["question_id"], r["metrics"]["session"])
