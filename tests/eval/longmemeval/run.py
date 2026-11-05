@@ -101,14 +101,16 @@ def run_question(root: Path, item: dict, arm: str, limit: int) -> dict:
     if arm == "hybrid":
         backfill_vectors(db_path, allow_download=True)
     t1 = time.monotonic()
-    # half_life_days=0: decay is measured from now, and every 2023 row would score ~0.
+    # Observation recency always decays at a fixed 30-day half-life from now
+    # (_rerank calls _recency_score(ts) without a half-life; search()'s half_life_days
+    # is knowledge-confidence decay only). With 2023 dates that term is under 1e-9 for
+    # every row, so the FTS order here is effectively BM25.
     results = search(
         db_path,
         item["question"],
         table="observations",
         limit=limit,
         use_vectors=arm == "hybrid",
-        half_life_days=0,
     )
     t2 = time.monotonic()
 
@@ -146,8 +148,9 @@ def summarize(out: list[dict], arm: str, limit: int) -> str:
     lines = [
         f"# LongMemEval-S retrieval, arm `{arm}`",
         "",
-        f"{len(out)} questions (abstention dropped), search(limit={limit}, table='observations', "
-        "half_life_days=0). Sessions are turn hits collapsed in first-hit order.",
+        f"{len(out)} questions (abstention dropped), search(limit={limit}, table='observations'). "
+        "Recency adds ~0 to every row (2023 dates, fixed 30-day half-life). "
+        "Sessions are turn hits collapsed in first-hit order.",
         f"Zero-result queries: {sum(1 for r in out if r['n_results'] == 0)}. "
         f"Repeated sessions skipped: {sum(r['repeated_sessions'] for r in out)}. "
         f"Median load {statistics.median(r['load_s'] for r in out):.2f}s, "
