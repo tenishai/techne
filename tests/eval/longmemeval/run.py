@@ -1,7 +1,7 @@
 """LongMemEval-S retrieval against an isolated techne store, one store per question.
 
     python tests/eval/longmemeval/run.py --data longmemeval_s_cleaned.json --out OUT \
-        [--arm fts|hybrid] [--max-questions N]
+        [--arm fts|hybrid|compare] [--max-questions N] [--workers N]
 
 Each question's haystack becomes its own techne.db under a temp dir: every haystack
 session is a `sessions` row, every turn an `observations` row ("role: content",
@@ -19,11 +19,19 @@ harness's own (see lme_metrics.py), so the numbers do not compare with upstream'
 `--arm hybrid` refuses to report unless every turn was embedded and the vector
 channel contributed results: search() falls back to FTS without a backend, and
 would otherwise publish FTS numbers under a hybrid label.
+
+`--arm compare` embeds each haystack once and scores four rankings of it: `fts`
+(search without vectors), `vec` (search_vec alone), `hybrid` (search's vec-first
+union) and `rrf` (_rrf_fuse over the fts and vec channels, the pre-#401 hybrid,
+built as tests/eval/test_ranking_ablation_vec.py builds it). Each row also
+records, for hybrid's top 10, which channel every result came from and whether
+its session is gold, to show what displaces evidence turns (issue #1342).
 """
 
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import logging
 import os
@@ -33,6 +41,7 @@ import sys
 import tempfile
 import time
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -95,8 +104,36 @@ def load_haystack(db_path: Path, item: dict) -> tuple[dict[int, tuple[str, str]]
     return rows, gold_turns, repeats
 
 
+def _key(r: dict) -> tuple:
+    return (r.get("source_table"), r.get("id"))
+
+
+def _rrf(fts: list[dict], vec: list[dict], limit: int) -> list[dict]:
+    from techne.core.search import _rrf_fuse
+
+    by_key = {_key(r): r for r in [*vec, *fts]}
+    fused = _rrf_fuse(
+        [
+            [(_key(r), i) for i, r in enumerate(fts, 1)],
+            [(_key(r), i) for i, r in enumerate(vec, 1)],
+        ]
+    )
+    return [by_key[k] for k, _ in fused[:limit]]
+
+
+def _top10_sources(results: list[dict], rows: dict, gold_sessions: set[str]) -> list[list]:
+    """[match_source, session is gold] for each of the first 10 observation results."""
+    out = []
+    for r in results:
+        if r.get("source_table") == "observation" and r.get("id") in rows:
+            out.append([r.get("match_source") or "fts", rows[r["id"]][0] in gold_sessions])
+        if len(out) == 10:
+            break
+    return out
+
+
 def run_question(root: Path, item: dict, arm: str, limit: int) -> dict:
-    from techne.core.search import backfill_vectors, search
+    from techne.core.search import backfill_vectors, search, search_vec
 
     db_path = root / item["question_id"] / "techne.db"
     db_path.parent.mkdir(parents=True)
@@ -104,7 +141,7 @@ def run_question(root: Path, item: dict, arm: str, limit: int) -> dict:
 
     t0 = time.monotonic()
     rows, gold_turns, repeats = load_haystack(db_path, item)
-    if arm == "hybrid":
+    if arm in ("hybrid", "compare"):
         embedded = backfill_vectors(db_path, allow_download=True).get("observations", 0)
         if embedded != len(rows):
             raise SystemExit(
@@ -116,31 +153,45 @@ def run_question(root: Path, item: dict, arm: str, limit: int) -> dict:
     # (_rerank calls _recency_score(ts) without a half-life; search()'s half_life_days
     # is knowledge-confidence decay only). With 2023 dates that term is under 1e-9 for
     # every row, so the FTS order here is effectively BM25.
-    results = search(
-        db_path,
-        item["question"],
-        table="observations",
-        limit=limit,
-        use_vectors=arm == "hybrid",
-    )
+    q = item["question"]
+    gold_sessions = set(item["answer_session_ids"])
+    if arm == "compare":
+        fts = search(db_path, q, table="observations", limit=limit, use_vectors=False)
+        vec = search_vec(db_path, q, table="observations", limit=limit)
+        hyb = search(db_path, q, table="observations", limit=limit, use_vectors=True)
+        arms = {"fts": fts, "vec": vec, "hybrid": hyb, "rrf": _rrf(fts, vec, limit)}
+    else:
+        arms = {
+            arm: search(db_path, q, table="observations", limit=limit, use_vectors=arm == "hybrid")
+        }
     t2 = time.monotonic()
 
-    ranked = [
-        rows[r["id"]]
-        for r in results
-        if r.get("source_table") == "observation" and r.get("id") in rows
-    ]
-    metrics = score_question(ranked, set(item["answer_session_ids"]), gold_turns)
+    def ranked(results: list[dict]) -> list[tuple[str, str]]:
+        return [
+            rows[r["id"]]
+            for r in results
+            if r.get("source_table") == "observation" and r.get("id") in rows
+        ]
+
+    scored = {a: score_question(ranked(res), gold_sessions, gold_turns) for a, res in arms.items()}
+    results = arms["hybrid"] if "hybrid" in arms else arms[arm]
+    extra = {}
+    if arm == "compare":
+        extra = {
+            "arms": scored,
+            "hybrid_top10": _top10_sources(results, rows, gold_sessions),
+        }
     return {
         "question_id": item["question_id"],
         "question_type": item["question_type"],
         "n_turns": len(rows),
         "repeated_sessions": repeats,
-        "n_results": len(ranked),
+        "n_results": len(ranked(results)),
         "vec_results": sum(1 for r in results if "vec" in (r.get("match_source") or "")),
         "load_s": round(t1 - t0, 3),
         "search_s": round(t2 - t1, 3),
-        "metrics": metrics,
+        "metrics": scored["hybrid"] if "hybrid" in scored else scored[arm],
+        **extra,
     }
 
 
@@ -183,13 +234,50 @@ def summarize(out: list[dict], arm: str, limit: int) -> str:
     return "\n".join(lines) + "\n"
 
 
+def displacement(out: list[dict]) -> str:
+    """What hybrid's top 10 holds on the questions where FTS@10 has every gold turn
+    and hybrid@10 does not."""
+    lost = [
+        r
+        for r in out
+        if r["arms"]["fts"]["turn"]["recall_all@10"]
+        and not r["arms"]["hybrid"]["turn"]["recall_all@10"]
+    ]
+    gained = sum(
+        1
+        for r in out
+        if r["arms"]["hybrid"]["turn"]["recall_all@10"]
+        and not r["arms"]["fts"]["turn"]["recall_all@10"]
+    )
+    slots = [s for r in lost for s in r["hybrid_top10"]]
+    by_src: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+    for src, in_gold in slots:
+        by_src[src][0] += 1
+        by_src[src][1] += int(in_gold)
+    lines = [
+        "## Hybrid vs FTS at turn recall_all@10",
+        "",
+        f"FTS has every gold turn in its top 10 and hybrid does not: {len(lost)} questions. "
+        f"The reverse: {gained}.",
+        "",
+        "On those questions, hybrid's top-10 slots by channel:",
+        "",
+        "| match_source | slots | in a gold session |",
+        "|---|---|---|",
+    ]
+    for src, (n, g) in sorted(by_src.items()):
+        lines.append(f"| {src} | {n} | {g} |")
+    return "\n".join(lines) + "\n"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--data", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
-    ap.add_argument("--arm", choices=("fts", "hybrid"), default="fts")
+    ap.add_argument("--arm", choices=("fts", "hybrid", "compare"), default="fts")
     ap.add_argument("--limit", type=int, default=100, help="search() limit; >=50 to fill turn@50")
     ap.add_argument("--max-questions", type=int, default=0, help="0 = all")
+    ap.add_argument("--workers", type=int, default=1, help="questions run in parallel")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
@@ -204,17 +292,30 @@ def main() -> int:
             items = items[: args.max_questions]
         args.out.mkdir(parents=True, exist_ok=True)
         out: list[dict] = []
-        with (args.out / "results.jsonl").open("w") as fh:
-            for n, item in enumerate(items, 1):
-                r = run_question(root, item, args.arm, args.limit)
+        run = functools.partial(run_question, root, arm=args.arm, limit=args.limit)
+        with (
+            (args.out / "results.jsonl").open("w") as fh,
+            ProcessPoolExecutor(args.workers) as pool,
+        ):
+            # Each question has its own store, so workers share nothing but TECHNE_HOME,
+            # which they inherit. map() keeps the input order.
+            for n, r in enumerate(pool.map(run, items), 1):
                 out.append(r)
                 fh.write(json.dumps(r) + "\n")
                 log.debug("%s %s", r["question_id"], r["metrics"]["session"])
                 if n % 25 == 0:
                     log.info("%d/%d questions", n, len(items))
-    if args.arm == "hybrid" and not any(r["vec_results"] for r in out):
-        raise SystemExit("--arm hybrid: no result came from the vector channel")
-    (args.out / "summary.md").write_text(summarize(out, args.arm, args.limit))
+    if args.arm != "fts" and not any(r["vec_results"] for r in out):
+        raise SystemExit(f"--arm {args.arm}: no result came from the vector channel")
+    if args.arm == "compare":
+        text = "".join(
+            summarize([{**r, "metrics": r["arms"][a]} for r in out], a, args.limit) + "\n"
+            for a in ("fts", "vec", "hybrid", "rrf")
+        )
+        text += displacement(out)
+    else:
+        text = summarize(out, args.arm, args.limit)
+    (args.out / "summary.md").write_text(text)
     print((args.out / "summary.md").read_text())
     return 0
 
