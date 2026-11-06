@@ -202,8 +202,8 @@ def _expand_aliases(match_str: str, groups: dict[str, tuple[str, ...]]) -> str:
     implicit AND FTS5 ignores a phrase with no tokens; under explicit AND it matches
     nothing, which would empty the AND pass (Prudence, #1347). Group members are
     quote-doubled like every other MATCH term, so a configured spelling can't break
-    the string (#74). A multi-word alias key never matches, since query terms are
-    single words.
+    the string (#74). Lookup is per query word, so a multi-word old name is reached
+    from its new name (it goes out as a phrase) but never from its own words.
     """
     phrases = _PHRASE.findall(match_str)
     if not any(_alias_key(ph) in groups for ph in phrases):
