@@ -181,7 +181,7 @@ def test_v6_store_gains_origin_and_keeps_its_rows(tmp_path):
 
     conn = plain_connect(db)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == ARCHITECT_VERSION == 7
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == ARCHITECT_VERSION == 8
         row = conn.execute("SELECT target, origin FROM pattern_applies").fetchone()
         assert (row[0], row[1]) == ("techne", "body")
     finally:

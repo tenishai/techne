@@ -804,6 +804,73 @@ def supersede(
         conn.close()
 
 
+def retire(
+    db_path: Path,
+    *,
+    pattern_id: str,
+    reason: str,
+    invalid_at: str | None = None,
+) -> bool:
+    """Retire *pattern_id*: it leaves the active set with no successor (issue #1345).
+
+    `superseded` needs a successor, so a pattern that is simply not worth carrying (a
+    docs-only source, a standard idiom, a mechanism that is only prose) had no way
+    out. This stamps `status='retired'`, the reason, and the end of its validity
+    window in one write. Every read path already filters on `status = 'active'`, so
+    the pattern drops out of search, topic and applies exactly as a superseded one
+    does, and `show` still prints it with the reason.
+
+    Refused, with the reason in the error:
+    - an empty reason: a retirement nobody can explain is the uncited skip the
+      investigating guide warns about;
+    - a superseded pattern: it already left, and has a successor that says why;
+    - a pattern with a recorded outcome: something was filed or shipped from it, so
+      it is evidence of use, and retiring it would hide that from `outcomes`.
+
+    Re-retiring with a new reason updates the reason and keeps the original date.
+    Returns True if the row changed."""
+    reason = (reason or "").strip()
+    if not reason:
+        raise ValueError('a retirement needs a reason: pass --reason "<why>" (issue #1345)')
+    conn = plain_connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT status, superseded_by FROM patterns WHERE id = ?", (pattern_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"unknown pattern id: {pattern_id}")
+        if row["status"] == "superseded":
+            raise ValueError(
+                f"{pattern_id} is already superseded by {row['superseded_by']}; "
+                "retire is for a pattern with no successor"
+            )
+        have_outcomes = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='pattern_outcomes'"
+        ).fetchone()
+        if have_outcomes:
+            n = conn.execute(
+                "SELECT COUNT(*) FROM pattern_outcomes WHERE pattern_id = ?", (pattern_id,)
+            ).fetchone()[0]
+            if n:
+                raise ValueError(
+                    f"{pattern_id} has {n} recorded outcome(s); a pattern something was "
+                    "filed or shipped from is not retired (see `techne architect outcomes`)"
+                )
+        with conn:
+            ts = invalid_at or conn.execute("SELECT CURRENT_TIMESTAMP").fetchone()[0]
+            cur = conn.execute(
+                """UPDATE patterns
+                     SET status = 'retired', retired_reason = ?,
+                         invalid_at = COALESCE(invalid_at, ?)
+                   WHERE id = ?
+                     AND (status != 'retired' OR COALESCE(retired_reason, '') != ?)""",
+                (reason, ts, pattern_id, reason),
+            )
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
 def tag_pattern(
     db_path: Path,
     pattern_id: str,
@@ -814,8 +881,12 @@ def tag_pattern(
     absorbed: str | None = None,
     applies: list[str] | tuple[str, ...] = (),
     no_applies: list[str] | tuple[str, ...] = (),
+    reason: str | None = None,
 ) -> bool:
     """Curation mutator for a single pattern (techne#308 `architect tag`).
+
+    `status='retired'` (issue #1345) routes to `retire()` and needs *reason*; *reason*
+    is refused with any other status, so it cannot land on a live row by accident.
 
     *applies* / *no_applies* (issue #1293) set or remove project targets by hand, for
     patterns whose body never says "where to apply in <target>". See `set_applies`.
@@ -839,6 +910,12 @@ def tag_pattern(
         )
     if status == "active" and superseded_by is not None:
         raise ValueError("--status active contradicts --superseded-by; pass one or the other")
+    if status == "retired" and superseded_by is not None:
+        raise ValueError(
+            "--status retired is for a pattern with no successor; drop it to supersede instead"
+        )
+    if reason is not None and status != "retired":
+        raise ValueError("--reason goes with --status retired")
     conn = plain_connect(db_path)
     try:
         if conn.execute("SELECT 1 FROM patterns WHERE id = ?", (pattern_id,)).fetchone() is None:
@@ -850,6 +927,14 @@ def tag_pattern(
     # the topic or supersession applied and the applies change refused.
     resolved = _resolve_applies(applies, no_applies)
     applies_changed = False
+
+    if status == "retired":
+        changed = retire(db_path, pattern_id=pattern_id, reason=reason or "")
+        if topic is not None:
+            changed = _set_fields(db_path, pattern_id, {"topic": topic}) or changed
+        if resolved:
+            changed = set_applies(db_path, pattern_id, resolved) or changed
+        return changed
 
     if superseded_by is not None:
         changed = supersede(db_path, old_id=pattern_id, new_id=superseded_by, absorbed=absorbed)
@@ -1348,6 +1433,9 @@ def stats(db_path: Path) -> dict:
             ).fetchone()[0],
             "patterns_superseded": conn.execute(
                 "SELECT COUNT(*) FROM patterns WHERE status = 'superseded'"
+            ).fetchone()[0],
+            "patterns_retired": conn.execute(
+                "SELECT COUNT(*) FROM patterns WHERE status = 'retired'"
             ).fetchone()[0],
             "skips": conn.execute(
                 "SELECT COUNT(*) FROM investigations WHERE verdict LIKE 'skip%'"

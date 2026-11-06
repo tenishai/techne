@@ -4892,8 +4892,13 @@ def architect(ctx):
         f"Patterns: {s['patterns']} active  "
         f"Investigations: {s['investigations']}  Skips: {s['skips']}"
     )
-    if s["patterns_superseded"]:
-        line += f"  (+{s['patterns_superseded']} superseded)"
+    gone = [
+        f"+{s[k]} {label}"
+        for k, label in (("patterns_superseded", "superseded"), ("patterns_retired", "retired"))
+        if s.get(k)
+    ]
+    if gone:
+        line += f"  ({', '.join(gone)})"
     click.echo(line)
 
 
@@ -5414,6 +5419,14 @@ def architect_show(ctx, pattern_id):
         click.echo(f"No pattern {pattern_id}", err=True)
         ctx.exit(1)
     click.echo(f"# {p['name']}  [{p['source_url']}]")
+    # A row that left the active set says so first: `show` is the one read that still
+    # returns it, and without this line it reads as live (issue #1345).
+    if p.get("status") == "retired":
+        when = f" {p['invalid_at']}" if p.get("invalid_at") else ""
+        click.echo(f"status: retired{when}: {p.get('retired_reason') or '(no reason recorded)'}")
+    elif p.get("status") == "superseded":
+        note = f": {p['absorbed']}" if p.get("absorbed") else ""
+        click.echo(f"status: superseded by {p.get('superseded_by')}{note}")
     click.echo(p["body"])
 
 
@@ -5673,9 +5686,10 @@ def architect_topic(ctx, name, as_of):
 # This is the only caller of tag_pattern, so the Choice closes the in-product path.
 @click.option(
     "--status",
-    type=click.Choice(["active", "superseded"]),
+    type=click.Choice(["active", "superseded", "retired"]),
     default=None,
-    help="Set status directly. `superseded` also needs --superseded-by (techne#880).",
+    help="Set status directly. `superseded` also needs --superseded-by (techne#880); "
+    "`retired` (no successor) needs --reason (issue #1345).",
 )
 @click.option(
     "--superseded-by",
@@ -5702,8 +5716,16 @@ def architect_topic(ctx, name, as_of):
     help="Remove this target, including one derived from the body; the removal "
     "survives `architect backfill`. Repeatable.",
 )
+@click.option(
+    "--reason",
+    default=None,
+    help="Why the pattern is retired, with --status retired. Refused for a pattern that "
+    "has a recorded outcome or is already superseded (issue #1345).",
+)
 @click.pass_context
-def architect_tag(ctx, pattern_id, topic, status, superseded_by, absorbed, applies, no_applies):
+def architect_tag(
+    ctx, pattern_id, topic, status, superseded_by, absorbed, applies, no_applies, reason
+):
     """Curate a pattern (techne#597): set its --topic, supersede it via
     --superseded-by (the atomic supersession path), or set its project targets with
     --applies/--no-applies. Any subset of options applies."""
@@ -5722,6 +5744,7 @@ def architect_tag(ctx, pattern_id, topic, status, superseded_by, absorbed, appli
             absorbed=absorbed,
             applies=applies,
             no_applies=no_applies,
+            reason=reason,
         )
     except ValueError as exc:
         click.echo(str(exc), err=True)
