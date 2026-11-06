@@ -134,3 +134,14 @@ def test_a_quote_in_a_configured_spelling_cannot_break_the_query(db, home):
     )
     _mk(db, "Foo", "foo is here")
     assert len(_ids(db, "foo")) == 1
+
+
+def test_a_lone_punctuation_term_keeps_the_and_pass(db, home):
+    """Prudence's fixture on #1347: both words common among short rows, only the
+    matching row long. With the zero-token drop reverted, the long row falls to
+    rank 6 of 7 because the AND pass goes empty."""
+    long_row = _mk(db, "Long", "liminal " + " ".join(f"pad{i}" for i in range(50)) + " gateway")
+    for i in range(3):
+        _mk(db, f"L{i}", f"liminal note {i}")
+        _mk(db, f"G{i}", f"gateway note {i}")
+    assert search_patterns(db, "liminal - gateway")[0]["id"] == long_row

@@ -292,3 +292,29 @@ def test_cli_show_names_a_successor_and_related_marks_status(cli_db):
     r = _cli("architect", "related", c)
     assert r.exit_code == 0, r.output
     assert f"{b}  Beta (retired)" in r.output
+
+
+def test_reactivating_a_superseded_pattern_undoes_the_supersession(db):
+    """Issue #1348: `--status active` left invalid_at, superseded_by and the edge."""
+    a = _mk(db, "Alpha")
+    b = _mk(db, "Beta")
+    supersede(db, old_id=a, new_id=b, absorbed="the alpha clause", invalid_at="2026-11-06 10:00:00")
+    assert tag_pattern(db, a, status="active") is True
+    p = get_pattern(db, a)
+    assert (p["status"], p["superseded_by"], p["invalid_at"]) == ("active", None, None)
+    assert p["absorbed"] == "the alpha clause"  # kept as history
+    assert {r["id"] for r in current_as_of(db, "2099-01-01", topic="eval-harness")} == {a, b}
+    assert not [r for r in related_patterns(db, a)["outbound"] if r["kind"] == "supersedes"]
+    assert a in {x["id"] for x in topic_show(db, "eval-harness")}
+    # And it can be superseded again cleanly.
+    assert supersede(db, old_id=a, new_id=b) is True
+    assert get_pattern(db, a)["status"] == "superseded"
+
+
+def test_unsuperseding_an_active_pattern_is_no_change(db):
+    from techne.core.patterns import unsupersede
+
+    a = _mk(db, "Alpha")
+    assert unsupersede(db, pattern_id=a) is False
+    with pytest.raises(ValueError, match="unknown pattern id"):
+        unsupersede(db, pattern_id="0" * 16)

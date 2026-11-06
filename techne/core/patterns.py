@@ -853,8 +853,11 @@ def supersede(
     window (techne#306) — `old.invalid_at` and `new.valid_at` get the SAME handoff
     timestamp (default now; *invalid_at* overrides it) so the read-path can ask
     "what was current as of T?" — AND upsert a resolved `supersedes` edge (old → new)
-    so the relation graph reflects it. Both patterns must exist and differ. Idempotent
-    (COALESCE keeps the original window on a re-run). Returns True if the row changed.
+    so the relation graph reflects it. Both patterns must exist and differ, and the
+    successor must not be retired (issue #1345). Re-running the same supersession is
+    a no-op on the window (COALESCE keeps the original handoff time), but it is
+    refused once the successor has since been retired. Returns True if the row
+    changed. `unsupersede` undoes it.
 
     Columns are the source of truth for supersession; the edge is written by the
     same atomic op purely so the graph view (techne#308 → #305) stays consistent."""
@@ -863,15 +866,14 @@ def supersede(
     conn = plain_connect(db_path)
     try:
         old = conn.execute("SELECT id FROM patterns WHERE id = ?", (old_id,)).fetchone()
-        new = conn.execute("SELECT id, name FROM patterns WHERE id = ?", (new_id,)).fetchone()
+        new = conn.execute(
+            "SELECT id, name, status FROM patterns WHERE id = ?", (new_id,)
+        ).fetchone()
         if old is None:
             raise ValueError(f"unknown pattern id (old): {old_id}")
         if new is None:
             raise ValueError(f"unknown pattern id (new): {new_id}")
-        new_status = conn.execute("SELECT status FROM patterns WHERE id = ?", (new_id,)).fetchone()[
-            "status"
-        ]
-        if new_status == "retired":
+        if new["status"] == "retired":
             raise ValueError(
                 f"{new_id} is retired; a supersession needs a live successor (issue #1345)"
             )
@@ -973,6 +975,40 @@ def retire(
         conn.close()
 
 
+def unsupersede(db_path: Path, *, pattern_id: str) -> bool:
+    """Undo a supersession: make *pattern_id* active again (issue #1348).
+
+    `tag --status active` used to flip only `status`, which left a row that was
+    active by status but superseded by every other measure: `invalid_at` still set,
+    so `current_as_of` called it not current, `superseded_by` still naming a
+    successor, and the resolved `supersedes` edge still in the graph. In one
+    transaction this clears `superseded_by` and `invalid_at` and deletes the
+    pattern's outbound `supersedes` edge. `absorbed` stays as history: `show`
+    prints it only for a superseded row. The successor's `valid_at` is left alone,
+    since it did become current at that time. Returns True if the row changed.
+    """
+    conn = plain_connect(db_path)
+    try:
+        if conn.execute("SELECT 1 FROM patterns WHERE id = ?", (pattern_id,)).fetchone() is None:
+            raise ValueError(f"unknown pattern id: {pattern_id}")
+        with conn:
+            cur = conn.execute(
+                """UPDATE patterns
+                     SET status = 'active', superseded_by = NULL, invalid_at = NULL
+                   WHERE id = ? AND status = 'superseded'""",
+                (pattern_id,),
+            )
+            if cur.rowcount:
+                conn.execute(
+                    "DELETE FROM pattern_relations"
+                    " WHERE src_pattern_id = ? AND kind = 'supersedes'",
+                    (pattern_id,),
+                )
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
 def tag_pattern(
     db_path: Path,
     pattern_id: str,
@@ -1052,6 +1088,11 @@ def tag_pattern(
     if resolved:
         applies_changed = set_applies(db_path, pattern_id, resolved)
 
+    unsuperseded = False
+    if status == "active" and _status_of(db_path, pattern_id) == "superseded":
+        unsuperseded = unsupersede(db_path, pattern_id=pattern_id)
+        status = None  # done; the rest of the fields still apply below
+
     fields: dict[str, str | None] = {}
     if topic is not None:
         fields["topic"] = topic
@@ -1065,8 +1106,8 @@ def tag_pattern(
     if absorbed is not None:
         fields["absorbed"] = absorbed
     if not fields:
-        return applies_changed
-    return _set_fields(db_path, pattern_id, fields) or applies_changed
+        return applies_changed or unsuperseded
+    return _set_fields(db_path, pattern_id, fields) or applies_changed or unsuperseded
 
 
 def _resolve_applies(
@@ -1246,7 +1287,10 @@ def related_patterns(db_path: Path, pattern_id: str) -> dict:
     edges only (an unresolved edge has no known source-of-truth target).
 
     Edges to and from non-active patterns are kept, not filtered, and each row
-    carries the other end's status (`dst_status` / `src_status`). A `supersedes`
+    carries the other end's status (`dst_status` / `src_status`). After an
+    `architect backfill`, an outbound edge to a non-active pattern is re-derived as
+    unresolved (backfill resolves names against active patterns only), so it reads
+    `(unresolved) <name>` with `dst_status` None until that pattern is live again. A `supersedes`
     edge from a superseded row is meant to be seen, and a link to a retired pattern
     should read as one rather than as a live lead (issue #1345, Prudence on #1346)."""
     conn = plain_connect(db_path)
