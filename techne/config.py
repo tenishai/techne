@@ -616,6 +616,12 @@ class ArchitectConfig:
     #: apply in" phrase, on top of the built-in pre-rename aliases. An alias whose
     #: value is not in `pattern_targets` resolves to nothing, like any unknown token.
     target_aliases: dict[str, str] = field(default_factory=dict)
+    #: Old spelling -> current name, for `architect search` (issue #1345), e.g. a
+    #: renamed project. A query naming either side matches bodies that use the other,
+    #: on top of the built-in `{limenal: liminal}`. Kept apart from `target_aliases`
+    #: because that one maps persona names onto repos (`prudence: agents`), and
+    #: widening every search for a common word like "agents" would bury its results.
+    search_aliases: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -1525,6 +1531,7 @@ class Config:
                 # with no targets.
                 pattern_targets=_pattern_targets(a.get("pattern_targets")),
                 target_aliases=_target_aliases(a.get("target_aliases")),
+                search_aliases=_target_aliases(a.get("search_aliases")),
             )
         if "recall" in raw and isinstance(raw["recall"], dict):
             r = raw["recall"]
@@ -1750,6 +1757,7 @@ class Config:
                 "lens": self.architect.lens,
                 "pattern_targets": list(self.architect.pattern_targets),
                 "target_aliases": dict(self.architect.target_aliases),
+                "search_aliases": dict(self.architect.search_aliases),
             },
             "search": {
                 "recency_weight": self.search.recency_weight,
