@@ -5426,7 +5426,10 @@ def architect_show(ctx, pattern_id):
         click.echo(f"status: retired{when}: {p.get('retired_reason') or '(no reason recorded)'}")
     elif p.get("status") == "superseded":
         note = f": {p['absorbed']}" if p.get("absorbed") else ""
-        click.echo(f"status: superseded by {p.get('superseded_by')}{note}")
+        # Rows written by a bare `--status superseded` before techne#880 have no
+        # successor; say that rather than printing "None".
+        succ = p.get("superseded_by") or "(no successor recorded)"
+        click.echo(f"status: superseded by {succ}{note}")
     click.echo(p["body"])
 
 
@@ -5447,13 +5450,15 @@ def architect_related(ctx, pattern_id):
         click.echo("→ outbound:")
         for r in rel["outbound"]:
             if r["resolution_status"] == "resolved":
-                click.echo(f"  [{r['kind']}] {r['dst_pattern_id']}  {r['dst_pattern_name']}")
+                mark = _status_mark(r.get("dst_status"))
+                click.echo(f"  [{r['kind']}] {r['dst_pattern_id']}  {r['dst_pattern_name']}{mark}")
             else:
                 click.echo(f"  [{r['kind']}] (unresolved) {r['dst_name']}")
     if rel["inbound"]:
         click.echo("← inbound:")
         for r in rel["inbound"]:
-            click.echo(f"  [{r['kind']}] {r['src_pattern_id']}  {r['src_pattern_name']}")
+            mark = _status_mark(r.get("src_status"))
+            click.echo(f"  [{r['kind']}] {r['src_pattern_id']}  {r['src_pattern_name']}{mark}")
 
 
 @architect.command("targets")
@@ -5496,9 +5501,12 @@ def architect_targets(ctx):
         click.echo(f"  {r['target']:<16} {r['active']:>5}{mark}")
 
     if retired_only:
-        click.echo("\nretired only (no active pattern; `pattern_search` serves nothing for these):")
+        click.echo(
+            "\ninactive only (every pattern superseded or retired; "
+            "`pattern_search` serves nothing for these):"
+        )
         for r in retired_only:
-            click.echo(f"  {r['target']:<16} {r['retired']:>5} retired")
+            click.echo(f"  {r['target']:<16} {r['retired']:>5} inactive")
 
     if unlisted:
         click.echo(
@@ -5671,6 +5679,11 @@ def architect_topic(ctx, name, as_of):
         for s in e["superseded"]:
             note = f" — {s['absorbed']}" if s.get("absorbed") else ""
             click.echo(f"      ⤷ superseded: {s['id']}  {s['name']}{note}")
+
+
+def _status_mark(status: str | None) -> str:
+    """` (retired)` / ` (superseded)` after a linked pattern that is not live (#1345)."""
+    return f" ({status})" if status and status != "active" else ""
 
 
 @architect.command("tag")

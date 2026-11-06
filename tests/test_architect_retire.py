@@ -7,12 +7,17 @@ from click.testing import CliRunner
 
 from techne.core import architect
 from techne.core.architect import ARCHITECT_SCHEMA, ARCHITECT_VERSION
+from techne.core.pattern_graph import render_dot, render_mermaid
 from techne.core.patterns import (
     add_pattern,
+    add_relation,
     backfill_graph,
+    current_as_of,
     get_pattern,
+    graph_data,
     patterns_for_target,
     record_outcome,
+    related_patterns,
     retire,
     search_patterns,
     stats,
@@ -167,6 +172,66 @@ def test_v7_store_gains_retired_reason_and_keeps_its_rows(tmp_path):
         conn.close()
 
 
+def test_un_retiring_reopens_the_validity_window(db):
+    """Prudence on #1346, Important 1: `current_as_of` keys on `invalid_at`."""
+    a = _mk(db, "Alpha")
+    retire(db, pattern_id=a, reason="slip", invalid_at="2026-11-06 10:00:00")
+    assert tag_pattern(db, a, status="active")
+    p = get_pattern(db, a)
+    assert (p["status"], p["invalid_at"]) == ("active", None)
+    assert [r["id"] for r in current_as_of(db, "2099-01-01", topic="eval-harness")] == [a]
+    # A later retirement dates from then, not from before the reinstatement.
+    retire(db, pattern_id=a, reason="for real", invalid_at="2026-12-01 00:00:00")
+    assert get_pattern(db, a)["invalid_at"] == "2026-12-01 00:00:00"
+
+
+def test_related_marks_a_retired_end_instead_of_hiding_it(db):
+    """Prudence on #1346, Important 2."""
+    a = _mk(db, "Alpha")
+    b = _mk(db, "Beta")
+    add_relation(db, src_pattern_id=a, dst_name="Beta")
+    add_relation(db, src_pattern_id=b, dst_name="Alpha")
+    retire(db, pattern_id=b, reason="x")
+    rel = related_patterns(db, a)
+    assert [(r["dst_pattern_id"], r["dst_status"]) for r in rel["outbound"]] == [(b, "retired")]
+    assert [(r["src_pattern_id"], r["src_status"]) for r in rel["inbound"]] == [(b, "retired")]
+
+
+def test_retired_refuses_absorbed(db):
+    a = _mk(db, "Alpha")
+    with pytest.raises(ValueError, match="--absorbed"):
+        tag_pattern(db, a, status="retired", reason="x", absorbed="note")
+    assert get_pattern(db, a)["status"] == "active"
+
+
+def test_no_outcome_is_recorded_on_a_retired_pattern(db):
+    a = _mk(db, "Alpha")
+    retire(db, pattern_id=a, reason="x")
+    with pytest.raises(ValueError, match="is retired"):
+        record_outcome(db, pattern_id=a, ref="tenishai/techne#1", state="shipped")
+
+
+def test_a_retired_pattern_cannot_be_a_successor(db):
+    a = _mk(db, "Alpha")
+    b = _mk(db, "Beta")
+    retire(db, pattern_id=b, reason="x")
+    with pytest.raises(ValueError, match="needs a live successor"):
+        supersede(db, old_id=a, new_id=b)
+    assert get_pattern(db, a)["status"] == "active"
+
+
+def test_graph_dims_retired_nodes(db):
+    a = _mk(db, "Alpha")
+    _mk(db, "Beta")
+    retire(db, pattern_id=a, reason="x")
+    data = graph_data(db)
+    mer = render_mermaid(data)
+    assert "classDef superseded" in mer and a[:8] in mer.split("class ")[-1]
+    dot = render_dot(data)
+    dimmed = [line for line in dot.splitlines() if 'style="dashed"' in line and "label=" in line]
+    assert len(dimmed) == 1 and "Alpha" in dimmed[0]
+
+
 def _cli(*args):
     from techne.cli import main
 
@@ -211,3 +276,19 @@ def test_cli_retire_show_and_summary(cli_db):
     assert r.exit_code == 0, r.output
     assert "Patterns: 1 active" in r.output
     assert "+1 retired" in r.output
+
+
+def test_cli_show_names_a_successor_and_related_marks_status(cli_db):
+    a = _mk(cli_db, "Alpha")
+    b = _mk(cli_db, "Beta")
+    c = _mk(cli_db, "Gamma")
+    add_relation(cli_db, src_pattern_id=c, dst_name="Beta")
+    supersede(cli_db, old_id=a, new_id=b, absorbed="the alpha clause")
+    r = _cli("architect", "show", a)
+    assert r.exit_code == 0, r.output
+    assert f"status: superseded by {b}: the alpha clause" in r.output
+
+    retire(cli_db, pattern_id=b, reason="docs only")
+    r = _cli("architect", "related", c)
+    assert r.exit_code == 0, r.output
+    assert f"{b}  Beta (retired)" in r.output

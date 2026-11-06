@@ -15,6 +15,11 @@ All notable changes to techne are documented here. Format loosely follows
   architect` summary counts retired patterns beside superseded ones. Refused without a
   reason, for a pattern already superseded, and for a pattern with a recorded outcome
   (`architect outcomes`), since something filed or shipped from it is evidence of use.
+  `--status active` on a retired pattern reinstates it and reopens its validity window.
+  `architect related` marks a linked pattern `(retired)` or `(superseded)`, and its rows
+  carry `dst_status` / `src_status`. A retired pattern can't be a supersession's successor
+  or take a new outcome. `architect targets` and `pattern_search` now say "inactive" /
+  "superseded or retired" where they said "retired" for any non-active row.
   Upgrading adds the column; existing rows are untouched, and the snapshot digest
   changes once because the column list is part of it.
 - **Hand curation for the pattern corpus** (#1293, architect schema v7).

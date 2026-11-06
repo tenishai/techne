@@ -2782,7 +2782,7 @@ def _pattern_search(args: dict, config: Config) -> dict:
                 held = sorted(r["target"] for r in counts if r["active"])
                 why = (
                     f"it is not configured and all {retired} pattern(s) tagged with it "
-                    "are retired"
+                    "are superseded or retired"
                     if retired
                     else "it is neither configured nor tagged on any pattern"
                 )
@@ -2821,7 +2821,7 @@ def _pattern_search(args: dict, config: Config) -> dict:
         row = next((r for r in target_counts(db) if r["target"] == target), None)
         if row and row["retired"] and not row["active"]:
             notice = (
-                f"all {row['retired']} pattern(s) tagged {target!r} are retired; "
+                f"all {row['retired']} pattern(s) tagged {target!r} are superseded or retired; "
                 "none is active, so none is served."
             )
     out: dict = {"results": hits, "count": len(hits)}
