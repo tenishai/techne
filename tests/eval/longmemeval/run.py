@@ -128,6 +128,25 @@ def _rrf(fts: list[dict], vec: list[dict], limit: int) -> list[dict]:
     ]
 
 
+def _ranked(results: list[dict], rows: dict) -> list[tuple[str, str]]:
+    """(session_id, turn key) for each observation result that maps to a haystack turn."""
+    return [
+        rows[r["id"]]
+        for r in results
+        if r.get("source_table") == "observation" and r.get("id") in rows
+    ]
+
+
+def _arm_stats(arm: str, results: list[dict], rows: dict, took_s: float) -> dict:
+    # search_vec rows carry no match_source; every one of them is a vector hit.
+    n_vec = sum(1 for r in results if arm == "vec" or "vec" in (r.get("match_source") or ""))
+    return {
+        "n_results": len(_ranked(results, rows)),
+        "vec_results": n_vec,
+        "search_s": round(took_s, 3),
+    }
+
+
 def _top10_sources(results: list[dict], rows: dict, gold_sessions: set[str]) -> list[list]:
     """[match_source, session is gold] for each of the first 10 observation results."""
     out = []
@@ -182,20 +201,10 @@ def run_question(root: Path, item: dict, arm: str, limit: int) -> dict:
     else:
         arms = {arm: timed(arm, lambda: obs_search(arm == "hybrid"))}
 
-    def ranked(results: list[dict]) -> list[tuple[str, str]]:
-        return [
-            rows[r["id"]]
-            for r in results
-            if r.get("source_table") == "observation" and r.get("id") in rows
-        ]
-
-    def stats(a: str, res: list[dict]) -> dict:
-        # search_vec rows carry no match_source; every one of them is a vector hit.
-        n_vec = sum(1 for r in res if a == "vec" or "vec" in (r.get("match_source") or ""))
-        return {"n_results": len(ranked(res)), "vec_results": n_vec, "search_s": round(took[a], 3)}
-
-    per_arm = {a: stats(a, res) for a, res in arms.items()}
-    scored = {a: score_question(ranked(res), gold_sessions, gold_turns) for a, res in arms.items()}
+    per_arm = {a: _arm_stats(a, res, rows, took[a]) for a, res in arms.items()}
+    scored = {
+        a: score_question(_ranked(res, rows), gold_sessions, gold_turns) for a, res in arms.items()
+    }
     # The top-level fields are hybrid's under compare: the hybrid guard reads them.
     main_arm = "hybrid" if arm == "compare" else arm
     extra = {}
