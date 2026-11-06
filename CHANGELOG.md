@@ -7,6 +7,12 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Added
 
+- **Architect search matches a renamed project's old spelling** (#1345). A search for
+  `liminal` also matches the 129 active pattern bodies written as `limenal` before the
+  2026-08-10 rename, and the reverse. Bodies are not rewritten, since a pattern id is a hash
+  of its content. The expansion applies to the AND pass and the OR fallback. A query with no
+  aliased term is sent unchanged. Add other renames with `architect.search_aliases:
+  {old: new}`. On a copy of the live store, "liminal" went from 122 to 227 hits.
 - **Retire a pattern that has no successor** (#1345, architect schema v8).
   `techne architect tag <id> --status retired --reason "<why>"` takes a pattern out of
   search, topic and applies, the way a supersession does, without naming a replacement.

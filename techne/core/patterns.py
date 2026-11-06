@@ -134,6 +134,59 @@ def target_aliases() -> dict[str, str]:
     return {**_TARGET_ALIASES, **Config.load().architect.target_aliases}
 
 
+#: Built-in search synonyms (issue #1345): old spelling -> current name. 129 active
+#: patterns were written before `limenal` was renamed `liminal` (2026-08-10), and
+#: FTS5 matches whole tokens, so a search for "liminal" missed every one of them.
+#: Rewriting the bodies is not an option: a pattern id is a hash of its content.
+_SEARCH_ALIASES = {"limenal": "liminal"}
+
+
+def search_alias_groups() -> dict[str, tuple[str, ...]]:
+    """Each spelling -> every spelling that means the same thing, for search.
+
+    The built-in aliases overlaid with `architect.search_aliases`. Both directions
+    resolve, so "liminal" finds "limenal" and the reverse.
+    """
+    from techne.config import Config
+
+    try:
+        configured = Config.load().architect.search_aliases
+    except Exception:  # a broken config costs the extra aliases, not the search
+        configured = {}
+    by_name: dict[str, set[str]] = {}
+    for old, new in {**_SEARCH_ALIASES, **configured}.items():
+        by_name.setdefault(new, {new}).add(old)
+    groups: dict[str, tuple[str, ...]] = {}
+    for members in by_name.values():
+        ordered = tuple(sorted(members))
+        for m in members:
+            groups[m] = ordered
+    return groups
+
+
+_PHRASE = re.compile(r'"(?:[^"]|"")*"')
+
+
+def _expand_aliases(match_str: str, groups: dict[str, tuple[str, ...]]) -> str:
+    """Widen each aliased phrase literal in an FTS5 MATCH string to an OR group.
+
+    Input is what `prepare_fts_query` (`"a" "b"`, implicit AND) or
+    `build_or_fts_query` (`"a" OR "b"`) produced. A string with no aliased term is
+    returned unchanged. Otherwise it is rebuilt with an explicit joiner, because
+    FTS5 rejects implicit AND next to a parenthesised group: `("x" OR "y") "b"` is
+    a syntax error, `("x" OR "y") AND "b"` is not.
+    """
+    phrases = _PHRASE.findall(match_str)
+    if not any(ph[1:-1].lower() in groups for ph in phrases):
+        return match_str
+    joiner = " OR " if " OR " in _PHRASE.sub("", match_str) else " AND "
+    out = []
+    for ph in phrases:
+        g = groups.get(ph[1:-1].lower())
+        out.append("(" + " OR ".join(f'"{m}"' for m in g) + ")" if g else ph)
+    return joiner.join(out)
+
+
 # Outcome lifecycle (techne#426). 'filed' → work exists; 'shipped' → it landed;
 # 'rejected' → considered and declined, which is a real signal, not an absence.
 _OUTCOME_STATES = {"filed", "shipped", "rejected"}
@@ -1412,10 +1465,12 @@ def search_patterns(db_path: Path, query: str, *, limit: int = 20) -> list[dict]
 
     if prepare_fts_query(query) is None:  # nothing searchable: don't open the db (#143)
         return []
+    groups = search_alias_groups()
     conn = plain_connect(db_path)
     try:
 
         def _match(match_str: str) -> list[dict]:
+            match_str = _expand_aliases(match_str, groups)
             rows = conn.execute(
                 """SELECT p.id, p.name, p.source_url, p.body, p.confidence,
                           bm25(patterns_fts) AS rank

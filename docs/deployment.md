@@ -266,6 +266,12 @@ Patterns written before a target was configured stay untagged for it: tags come 
 another word, such as a persona that lives in another repo, map it with
 `architect.target_aliases: {prudence: agents}`.
 
+`techne architect search` treats a renamed project's old and new names as one word, so a
+search for `liminal` also finds bodies written before the rename that say `limenal` (#1345).
+Add your own renames with `architect.search_aliases: {old-name: new-name}`. It is kept apart
+from `target_aliases` on purpose: a persona alias like `prudence: agents` would widen every
+search for the common word "agents".
+
 **`techne init` owns the hook chain, and only `init` rewrites it.** `register_hooks` strips
 every hook group that runs one of techne's own hook commands (`-m techne.hooks.*`,
 `techne-hook.sh`, the preflight guard) and re-appends its own template; a hook of your
