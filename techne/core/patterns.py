@@ -145,7 +145,8 @@ def search_alias_groups() -> dict[str, tuple[str, ...]]:
     """Each spelling -> every spelling that means the same thing, for search.
 
     The built-in aliases overlaid with `architect.search_aliases`. Both directions
-    resolve, so "liminal" finds "limenal" and the reverse.
+    resolve, and chains are followed: `{a: b, b: c}` puts a, b and c in one group,
+    so a project renamed twice still finds its oldest bodies.
     """
     from techne.config import Config
 
@@ -153,18 +154,39 @@ def search_alias_groups() -> dict[str, tuple[str, ...]]:
         configured = Config.load().architect.search_aliases
     except Exception:  # a broken config costs the extra aliases, not the search
         configured = {}
-    by_name: dict[str, set[str]] = {}
+    parent: dict[str, str] = {}
+
+    def find(x: str) -> str:
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
     for old, new in {**_SEARCH_ALIASES, **configured}.items():
-        by_name.setdefault(new, {new}).add(old)
+        parent[find(old)] = find(new)
+    members: dict[str, set[str]] = {}
+    for x in list(parent):
+        members.setdefault(find(x), set()).add(x)
     groups: dict[str, tuple[str, ...]] = {}
-    for members in by_name.values():
-        ordered = tuple(sorted(members))
-        for m in members:
+    for ms in members.values():
+        ordered = tuple(sorted(ms))
+        for m in ms:
             groups[m] = ordered
     return groups
 
 
 _PHRASE = re.compile(r'"(?:[^"]|"")*"')
+
+
+def _alias_key(phrase: str) -> str:
+    """The word a phrase literal is looked up by: unquoted, surrounding punctuation
+    stripped, lowercased. The same normalisation `search.py` applies to identifier
+    terms (`_IDENTIFIER_STRIP`, then a trailing period), so `liminal?`, `(liminal)`
+    and `liminal.` find the alias exactly as FTS5 tokenises them (Prudence, #1347)."""
+    from techne.core.search import _IDENTIFIER_STRIP
+
+    return phrase[1:-1].replace('""', '"').strip(_IDENTIFIER_STRIP).rstrip(".").lower()
 
 
 def _expand_aliases(match_str: str, groups: dict[str, tuple[str, ...]]) -> str:
@@ -175,15 +197,25 @@ def _expand_aliases(match_str: str, groups: dict[str, tuple[str, ...]]) -> str:
     returned unchanged. Otherwise it is rebuilt with an explicit joiner, because
     FTS5 rejects implicit AND next to a parenthesised group: `("x" OR "y") "b"` is
     a syntax error, `("x" OR "y") AND "b"` is not.
+
+    The rebuild drops phrases with no letter or digit (`"-"`, `"—"`, `"&"`). Under
+    implicit AND FTS5 ignores a phrase with no tokens; under explicit AND it matches
+    nothing, which would empty the AND pass (Prudence, #1347). Group members are
+    quote-doubled like every other MATCH term, so a configured spelling can't break
+    the string (#74). A multi-word alias key never matches, since query terms are
+    single words.
     """
     phrases = _PHRASE.findall(match_str)
-    if not any(ph[1:-1].lower() in groups for ph in phrases):
+    if not any(_alias_key(ph) in groups for ph in phrases):
         return match_str
     joiner = " OR " if " OR " in _PHRASE.sub("", match_str) else " AND "
     out = []
     for ph in phrases:
-        g = groups.get(ph[1:-1].lower())
-        out.append("(" + " OR ".join(f'"{m}"' for m in g) + ")" if g else ph)
+        g = groups.get(_alias_key(ph))
+        if g:
+            out.append("(" + " OR ".join('"' + m.replace('"', '""') + '"' for m in g) + ")")
+        elif any(c.isalnum() for c in ph):
+            out.append(ph)
     return joiner.join(out)
 
 

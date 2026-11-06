@@ -64,6 +64,13 @@ def test_a_query_without_an_alias_is_untouched():
     assert _expand_aliases('"cabal" OR "broker"', groups) == '"cabal" OR "broker"'
 
 
+def test_expansion_drops_phrases_with_no_token():
+    groups = {"liminal": ("limenal", "liminal")}
+    assert _expand_aliases('"liminal" "-" "gateway" "&"', groups) == (
+        '("limenal" OR "liminal") AND "gateway"'
+    )
+
+
 def test_expansion_uses_an_explicit_joiner():
     groups = {"liminal": ("liminal", "limenal")}
     assert _expand_aliases('"liminal" "gateway"', groups) == (
@@ -103,3 +110,27 @@ def test_search_aliases_round_trip_through_config(home):
     assert cfg.architect.target_aliases == {}
     cfg.save()
     assert Config.load().architect.search_aliases == {"raven": "archivist"}
+
+
+@pytest.mark.parametrize("q", ["liminal?", "liminal,", "liminal.", "liminal:", "(liminal)"])
+def test_punctuation_touching_a_term_still_finds_the_alias(db, home, q):
+    """Prudence on #1347, Important 2."""
+    old = _mk(db, "Old", "the limenal gateway")
+    new = _mk(db, "New", "the liminal gateway")
+    assert _ids(db, q) == {old, new}
+
+
+def test_chained_renames_form_one_group(home):
+    (home / "config.yaml").write_text(
+        "architect:\n  pattern_targets: [techne]\n  search_aliases: {a: b, b: c}\n"
+    )
+    groups = search_alias_groups()
+    assert groups["a"] == groups["b"] == groups["c"] == ("a", "b", "c")
+
+
+def test_a_quote_in_a_configured_spelling_cannot_break_the_query(db, home):
+    (home / "config.yaml").write_text(
+        "architect:\n  pattern_targets: [techne]\n  search_aliases: {foo: 'a\"b'}\n"
+    )
+    _mk(db, "Foo", "foo is here")
+    assert len(_ids(db, "foo")) == 1

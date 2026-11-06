@@ -270,7 +270,9 @@ another word, such as a persona that lives in another repo, map it with
 search for `liminal` also finds bodies written before the rename that say `limenal` (#1345).
 Add your own renames with `architect.search_aliases: {old-name: new-name}`. It is kept apart
 from `target_aliases` on purpose: a persona alias like `prudence: agents` would widen every
-search for the common word "agents".
+search for the common word "agents". Aliases match whole words: a multi-word key never
+matches, and a compound term such as `liminal-handler` or `tenishai/liminal` is not
+expanded.
 
 **`techne init` owns the hook chain, and only `init` rewrites it.** `register_hooks` strips
 every hook group that runs one of techne's own hook commands (`-m techne.hooks.*`,
