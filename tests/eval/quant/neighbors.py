@@ -159,7 +159,8 @@ def run_table(
             if hits:
                 top1.append(hits[0][1])
                 top10.extend(h[1] for h in hits[:10])
-                # The format's distance against float's, for rows both put in their top 20.
+                # The format's distance against float's, for the format's top-10 rows that
+                # float also has in its top 20.
                 pairs.extend(
                     (float_dist[qi][h[0]], h[1]) for h in hits[:10] if h[0] in float_dist[qi]
                 )
