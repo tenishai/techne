@@ -6,8 +6,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
-
-import pytest
+from types import SimpleNamespace
 
 _spec = importlib.util.spec_from_file_location("lme_run", Path(__file__).parent / "run.py")
 run = importlib.util.module_from_spec(_spec)
@@ -96,6 +95,13 @@ def test_compare_gives_each_arm_its_own_stats(tmp_path: Path, monkeypatch) -> No
         ],
     }
     ids: list[int] = []
+    # A fake clock: each stubbed search advances it, so every arm has a distinct time.
+    clock = [0.0]
+    monkeypatch.setattr(run, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+
+    def took(seconds: float, results: list[dict]) -> list[dict]:
+        clock[0] += seconds
+        return results
 
     def fake_backfill(db_path, allow_download=False):
         import sqlite3
@@ -106,21 +112,28 @@ def test_compare_gives_each_arm_its_own_stats(tmp_path: Path, monkeypatch) -> No
 
     def fake_search(db_path, q, table, limit, use_vectors):
         if use_vectors:
-            return [obs(ids[0], "fts+vec"), obs(ids[1], "vec"), obs(ids[2], "vec")]
-        return [obs(ids[1], "fts")]
+            return took(0.4, [obs(ids[0], "fts+vec"), obs(ids[1], "vec"), obs(ids[2], "vec")])
+        return took(0.1, [obs(ids[1], "fts")])
 
     monkeypatch.setattr(s, "backfill_vectors", fake_backfill)
     monkeypatch.setattr(s, "search", fake_search)
     monkeypatch.setattr(
-        s, "search_vec", lambda db_path, q, table, limit: [obs(ids[2]), obs(ids[0])]
+        s, "search_vec", lambda db_path, q, table, limit: took(0.2, [obs(ids[2]), obs(ids[0])])
     )
 
     r = run.run_question(tmp_path, item, "compare", limit=10)
     st = r["arm_stats"]
     assert {a: st[a]["n_results"] for a in st} == {"fts": 1, "vec": 2, "hybrid": 3, "rrf": 3}
     assert {a: st[a]["vec_results"] for a in st} == {"fts": 0, "vec": 2, "hybrid": 3, "rrf": 2}
-    fts_vec_s = st["fts"]["search_s"] + st["vec"]["search_s"]
-    assert st["rrf"]["search_s"] == pytest.approx(fts_vec_s, abs=0.002)
+    # rrf is timed as its two channels.
+    assert {a: st[a]["search_s"] for a in st} == {"fts": 0.1, "vec": 0.2, "hybrid": 0.4, "rrf": 0.3}
+    # Hybrid's top 10 is built from the hybrid arm, with gold read at session level.
+    assert r["hybrid_top10"] == [["fts+vec", True], ["vec", False], ["vec", False]]
+    # Each arm's summary table reads that arm's stats and metrics, not hybrid's.
+    for a in st:
+        view = run._arm_view(r, a)
+        assert {k: view[k] for k in st[a]} == st[a]
+        assert view["metrics"] == r["arms"][a]
     # Top-level fields stay hybrid's, which the hybrid guard reads.
     assert r["n_results"] == 3 and r["metrics"] == r["arms"]["hybrid"]
     assert r["arms"]["fts"]["session"]["recall_all@10"] == 0.0

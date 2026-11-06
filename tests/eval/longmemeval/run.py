@@ -147,6 +147,12 @@ def _arm_stats(arm: str, results: list[dict], rows: dict, took_s: float) -> dict
     }
 
 
+def _arm_view(r: dict, arm: str) -> dict:
+    """A compare result row as one arm's summary reads it: that arm's stats and metrics
+    in place of the top-level fields, which are hybrid's."""
+    return {**r, **r["arm_stats"][arm], "metrics": r["arms"][arm]}
+
+
 def _top10_sources(results: list[dict], rows: dict, gold_sessions: set[str]) -> list[list]:
     """[match_source, session is gold] for each of the first 10 observation results."""
     out = []
@@ -346,7 +352,7 @@ def main() -> int:
     if args.arm == "compare":
         text = "".join(
             summarize(
-                [{**r, **r["arm_stats"][a], "metrics": r["arms"][a]} for r in out],
+                [_arm_view(r, a) for r in out],
                 a,
                 args.limit,
                 backend,
