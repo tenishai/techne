@@ -986,6 +986,11 @@ def unsupersede(db_path: Path, *, pattern_id: str) -> bool:
     pattern's outbound `supersedes` edge. `absorbed` stays as history: `show`
     prints it only for a superseded row. The successor's `valid_at` is left alone,
     since it did become current at that time. Returns True if the row changed.
+
+    It also repairs a row the old `--status active` left behind: active by status but
+    still carrying `superseded_by` (Prudence on #1351). Every outbound `supersedes`
+    edge goes, not only the one to the recorded successor, because re-pointing a
+    supersession (`--superseded-by B`, then `--superseded-by C`) leaves both edges.
     """
     conn = plain_connect(db_path)
     try:
@@ -995,7 +1000,9 @@ def unsupersede(db_path: Path, *, pattern_id: str) -> bool:
             cur = conn.execute(
                 """UPDATE patterns
                      SET status = 'active', superseded_by = NULL, invalid_at = NULL
-                   WHERE id = ? AND status = 'superseded'""",
+                   WHERE id = ?
+                     AND (status = 'superseded'
+                          OR (status = 'active' AND superseded_by IS NOT NULL))""",
                 (pattern_id,),
             )
             if cur.rowcount:
@@ -1025,6 +1032,8 @@ def tag_pattern(
 
     `status='retired'` (issue #1345) routes to `retire()` and needs *reason*; *reason*
     is refused with any other status, so it cannot land on a live row by accident.
+    `status='active'` on a superseded row (issue #1348) routes to `unsupersede()`,
+    which undoes the supersession; *topic* and *absorbed* given alongside still apply.
 
     *applies* / *no_applies* (issue #1293) set or remove project targets by hand, for
     patterns whose body never says "where to apply in <target>". See `set_applies`.
@@ -1089,7 +1098,7 @@ def tag_pattern(
         applies_changed = set_applies(db_path, pattern_id, resolved)
 
     unsuperseded = False
-    if status == "active" and _status_of(db_path, pattern_id) == "superseded":
+    if status == "active" and _is_superseded(db_path, pattern_id):
         unsuperseded = unsupersede(db_path, pattern_id=pattern_id)
         status = None  # done; the rest of the fields still apply below
 
@@ -1203,6 +1212,21 @@ def _status_of(db_path: Path, pattern_id: str) -> str | None:
         conn.close()
 
 
+def _is_superseded(db_path: Path, pattern_id: str) -> bool:
+    """Superseded, or left half-reactivated by the pre-#1348 `--status active`."""
+    conn = plain_connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT status, superseded_by FROM patterns WHERE id = ?", (pattern_id,)
+        ).fetchone()
+        return bool(row) and (
+            row["status"] == "superseded"
+            or (row["status"] == "active" and row["superseded_by"] is not None)
+        )
+    finally:
+        conn.close()
+
+
 def _set_fields(db_path: Path, pattern_id: str, fields: dict[str, str | None]) -> bool:
     """Update a whitelisted set of columns on one pattern. Column names are from a
     fixed internal allowlist (never user input), so the f-string is injection-safe."""
@@ -1290,7 +1314,8 @@ def related_patterns(db_path: Path, pattern_id: str) -> dict:
     carries the other end's status (`dst_status` / `src_status`). After an
     `architect backfill`, an outbound edge to a non-active pattern is re-derived as
     unresolved (backfill resolves names against active patterns only), so it reads
-    `(unresolved) <name>` with `dst_status` None until that pattern is live again. A `supersedes`
+    `(unresolved) <name>` with `dst_status` None until a backfill runs after that
+    pattern is live again. A `supersedes`
     edge from a superseded row is meant to be seen, and a link to a retired pattern
     should read as one rather than as a live lead (issue #1345, Prudence on #1346)."""
     conn = plain_connect(db_path)

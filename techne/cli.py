@@ -5701,8 +5701,9 @@ def _status_mark(status: str | None) -> str:
     "--status",
     type=click.Choice(["active", "superseded", "retired"]),
     default=None,
-    help="Set status directly. `superseded` also needs --superseded-by (techne#880); "
-    "`retired` (no successor) needs --reason (issue #1345).",
+    help="Set status. `superseded` also needs --superseded-by (techne#880); "
+    "`retired` (no successor) needs --reason (issue #1345); `active` on a superseded "
+    "pattern undoes the supersession (issue #1348).",
 )
 @click.option(
     "--superseded-by",

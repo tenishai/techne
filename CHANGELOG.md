@@ -59,7 +59,9 @@ All notable changes to techne are documented here. Format loosely follows
   tag <id> --status active` on a superseded pattern now also clears `superseded_by` and
   `invalid_at` and removes its `supersedes` edge, in one write (`unsupersede()`). Before, only
   the status flipped, so `topic --as-of` still called the pattern not current and the graph
-  still showed the successor. The `absorbed` note is kept as history.
+  still showed the successor. The `absorbed` note is kept as history. A row the old
+  behaviour already left half-reactivated (active, but `superseded_by` still set) is repaired
+  by running `tag <id> --status active` on it again.
 
 ## [0.19.1] — 2026-10-30
 
