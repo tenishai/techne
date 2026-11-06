@@ -292,3 +292,62 @@ def test_cli_show_names_a_successor_and_related_marks_status(cli_db):
     r = _cli("architect", "related", c)
     assert r.exit_code == 0, r.output
     assert f"{b}  Beta (retired)" in r.output
+
+
+def test_reactivating_a_superseded_pattern_undoes_the_supersession(db):
+    """Issue #1348: `--status active` left invalid_at, superseded_by and the edge."""
+    a = _mk(db, "Alpha")
+    b = _mk(db, "Beta")
+    supersede(db, old_id=a, new_id=b, absorbed="the alpha clause", invalid_at="2026-11-06 10:00:00")
+    assert tag_pattern(db, a, status="active") is True
+    p = get_pattern(db, a)
+    assert (p["status"], p["superseded_by"], p["invalid_at"]) == ("active", None, None)
+    assert p["absorbed"] == "the alpha clause"  # kept as history
+    assert {r["id"] for r in current_as_of(db, "2099-01-01", topic="eval-harness")} == {a, b}
+    assert not [r for r in related_patterns(db, a)["outbound"] if r["kind"] == "supersedes"]
+    assert a in {x["id"] for x in topic_show(db, "eval-harness")}
+    # And it can be superseded again cleanly.
+    assert supersede(db, old_id=a, new_id=b) is True
+    assert get_pattern(db, a)["status"] == "superseded"
+
+
+def test_unsuperseding_an_active_pattern_is_no_change(db):
+    from techne.core.patterns import unsupersede
+
+    a = _mk(db, "Alpha")
+    assert unsupersede(db, pattern_id=a) is False
+    with pytest.raises(ValueError, match="unknown pattern id"):
+        unsupersede(db, pattern_id="0" * 16)
+
+
+def test_reactivation_after_a_re_pointed_supersession_keeps_other_edges_and_fields(db):
+    """Prudence on #1351, Important 2: pins the `kind` filter, the all-edges delete
+    and the fields applied alongside."""
+    a = _mk(db, "Alpha")
+    b = _mk(db, "Beta")
+    c = _mk(db, "Gamma")
+    d = _mk(db, "Delta")
+    supersede(db, old_id=a, new_id=b)
+    supersede(db, old_id=a, new_id=c)  # re-pointed: the A->B edge survives this
+    add_relation(db, src_pattern_id=a, dst_name="Delta")
+    assert tag_pattern(db, a, status="active", topic="policy-enforcement", absorbed="new note")
+    out = related_patterns(db, a)["outbound"]
+    assert not [r for r in out if r["kind"] == "supersedes"]
+    assert [(r["kind"], r["dst_pattern_id"]) for r in out] == [("related", d)]
+    p = get_pattern(db, a)
+    assert (p["status"], p["topic"], p["absorbed"]) == ("active", "policy-enforcement", "new note")
+
+
+def test_a_row_half_reactivated_by_the_old_code_is_repaired(db):
+    """Prudence on #1351, Important 1: active, but superseded_by, invalid_at and the
+    edge still set, the state the pre-#1348 `--status active` left."""
+    from techne.core.patterns import _set_fields
+
+    a = _mk(db, "Alpha")
+    b = _mk(db, "Beta")
+    supersede(db, old_id=a, new_id=b, invalid_at="2026-11-06 10:00:00")
+    _set_fields(db, a, {"status": "active"})  # what the old code did
+    assert tag_pattern(db, a, status="active") is True
+    p = get_pattern(db, a)
+    assert (p["superseded_by"], p["invalid_at"]) == (None, None)
+    assert not [r for r in related_patterns(db, a)["outbound"] if r["kind"] == "supersedes"]
