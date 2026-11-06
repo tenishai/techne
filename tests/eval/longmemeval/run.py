@@ -1,7 +1,7 @@
 """LongMemEval-S retrieval against an isolated techne store, one store per question.
 
     python tests/eval/longmemeval/run.py --data longmemeval_s_cleaned.json --out OUT \
-        [--arm fts|hybrid] [--max-questions N]
+        [--arm fts|hybrid|compare] [--max-questions N]
 
 Each question's haystack becomes its own techne.db under a temp dir: every haystack
 session is a `sessions` row, every turn an `observations` row ("role: content",
@@ -19,6 +19,17 @@ harness's own (see lme_metrics.py), so the numbers do not compare with upstream'
 `--arm hybrid` refuses to report unless every turn was embedded and the vector
 channel contributed results: search() falls back to FTS without a backend, and
 would otherwise publish FTS numbers under a hybrid label.
+
+`--arm compare` embeds each haystack once and scores four rankings of it: `fts`
+(search without vectors), `vec` (search_vec alone), `hybrid` (search's vec-first
+union) and `rrf` (_rrf_fuse over the fts and vec channels, the pre-#401 hybrid,
+built as tests/eval/test_ranking_ablation_vec.py builds it). Each row also
+records, for hybrid's top 10, which channel every result came from and whether
+its session is gold, to show what displaces evidence turns (issue #1342).
+
+Run the vector arms on Python 3.14 or later to measure the production backend
+(model2vec potion-base-8M): below 3.14 `[vectors]` installs fastembed instead. The
+summary names the backend it used.
 """
 
 from __future__ import annotations
@@ -95,8 +106,41 @@ def load_haystack(db_path: Path, item: dict) -> tuple[dict[int, tuple[str, str]]
     return rows, gold_turns, repeats
 
 
+def _key(r: dict) -> tuple:
+    return (r.get("source_table"), r.get("id"))
+
+
+def _rrf(fts: list[dict], vec: list[dict], limit: int) -> list[dict]:
+    from techne.core.search import _rrf_fuse
+
+    by_key = {_key(r): r for r in [*vec, *fts]}
+    in_fts, in_vec = {_key(r) for r in fts}, {_key(r) for r in vec}
+    fused = _rrf_fuse(
+        [
+            [(_key(r), i) for i, r in enumerate(fts, 1)],
+            [(_key(r), i) for i, r in enumerate(vec, 1)],
+        ]
+    )
+    # Tag provenance the way search() does; search_vec rows carry none of their own.
+    src = {(True, False): "fts", (False, True): "vec", (True, True): "fts+vec"}
+    return [
+        {**by_key[k], "match_source": src[(k in in_fts, k in in_vec)]} for k, _ in fused[:limit]
+    ]
+
+
+def _top10_sources(results: list[dict], rows: dict, gold_sessions: set[str]) -> list[list]:
+    """[match_source, session is gold] for each of the first 10 observation results."""
+    out = []
+    for r in results:
+        if r.get("source_table") == "observation" and r.get("id") in rows:
+            out.append([r.get("match_source") or "fts", rows[r["id"]][0] in gold_sessions])
+        if len(out) == 10:
+            break
+    return out
+
+
 def run_question(root: Path, item: dict, arm: str, limit: int) -> dict:
-    from techne.core.search import backfill_vectors, search
+    from techne.core.search import backfill_vectors, search, search_vec
 
     db_path = root / item["question_id"] / "techne.db"
     db_path.parent.mkdir(parents=True)
@@ -104,7 +148,7 @@ def run_question(root: Path, item: dict, arm: str, limit: int) -> dict:
 
     t0 = time.monotonic()
     rows, gold_turns, repeats = load_haystack(db_path, item)
-    if arm == "hybrid":
+    if arm in ("hybrid", "compare"):
         embedded = backfill_vectors(db_path, allow_download=True).get("observations", 0)
         if embedded != len(rows):
             raise SystemExit(
@@ -116,35 +160,64 @@ def run_question(root: Path, item: dict, arm: str, limit: int) -> dict:
     # (_rerank calls _recency_score(ts) without a half-life; search()'s half_life_days
     # is knowledge-confidence decay only). With 2023 dates that term is under 1e-9 for
     # every row, so the FTS order here is effectively BM25.
-    results = search(
-        db_path,
-        item["question"],
-        table="observations",
-        limit=limit,
-        use_vectors=arm == "hybrid",
-    )
-    t2 = time.monotonic()
+    q = item["question"]
+    gold_sessions = set(item["answer_session_ids"])
+    took: dict[str, float] = {}
 
-    ranked = [
-        rows[r["id"]]
-        for r in results
-        if r.get("source_table") == "observation" and r.get("id") in rows
-    ]
-    metrics = score_question(ranked, set(item["answer_session_ids"]), gold_turns)
+    def timed(name: str, fn) -> list[dict]:
+        t = time.monotonic()
+        res = fn()
+        took[name] = time.monotonic() - t
+        return res
+
+    def obs_search(vectors: bool) -> list[dict]:
+        return search(db_path, q, table="observations", limit=limit, use_vectors=vectors)
+
+    if arm == "compare":
+        fts = timed("fts", lambda: obs_search(False))
+        vec = timed("vec", lambda: search_vec(db_path, q, table="observations", limit=limit))
+        hyb = timed("hybrid", lambda: obs_search(True))
+        arms = {"fts": fts, "vec": vec, "hybrid": hyb, "rrf": _rrf(fts, vec, limit)}
+        took["rrf"] = took["fts"] + took["vec"]  # its two channels; the fuse itself is ~0
+    else:
+        arms = {arm: timed(arm, lambda: obs_search(arm == "hybrid"))}
+
+    def ranked(results: list[dict]) -> list[tuple[str, str]]:
+        return [
+            rows[r["id"]]
+            for r in results
+            if r.get("source_table") == "observation" and r.get("id") in rows
+        ]
+
+    def stats(a: str, res: list[dict]) -> dict:
+        # search_vec rows carry no match_source; every one of them is a vector hit.
+        n_vec = sum(1 for r in res if a == "vec" or "vec" in (r.get("match_source") or ""))
+        return {"n_results": len(ranked(res)), "vec_results": n_vec, "search_s": round(took[a], 3)}
+
+    per_arm = {a: stats(a, res) for a, res in arms.items()}
+    scored = {a: score_question(ranked(res), gold_sessions, gold_turns) for a, res in arms.items()}
+    # The top-level fields are hybrid's under compare: the hybrid guard reads them.
+    main_arm = "hybrid" if arm == "compare" else arm
+    extra = {}
+    if arm == "compare":
+        extra = {
+            "arms": scored,
+            "arm_stats": per_arm,
+            "hybrid_top10": _top10_sources(arms["hybrid"], rows, gold_sessions),
+        }
     return {
         "question_id": item["question_id"],
         "question_type": item["question_type"],
         "n_turns": len(rows),
         "repeated_sessions": repeats,
-        "n_results": len(ranked),
-        "vec_results": sum(1 for r in results if "vec" in (r.get("match_source") or "")),
+        **per_arm[main_arm],
         "load_s": round(t1 - t0, 3),
-        "search_s": round(t2 - t1, 3),
-        "metrics": metrics,
+        "metrics": scored[main_arm],
+        **extra,
     }
 
 
-def summarize(out: list[dict], arm: str, limit: int) -> str:
+def summarize(out: list[dict], arm: str, limit: int, backend: str) -> str:
     names = [("session", f"{m}@{k}") for k in SESSION_KS for m in ("recall_all", "ndcg_any")]
     names += [("turn", f"{m}@{k}") for k in TURN_KS for m in ("recall_all", "ndcg_any")]
 
@@ -159,6 +232,8 @@ def summarize(out: list[dict], arm: str, limit: int) -> str:
     head = "| group | n | " + " | ".join(f"{lvl} {n}" for lvl, n in names) + " |"
     lines = [
         f"# LongMemEval-S retrieval, arm `{arm}`",
+        "",
+        f"Embedding backend: {backend}.",
         "",
         f"{len(out)} questions (abstention dropped), search(limit={limit}, table='observations'). "
         "Recency adds ~0 to every row (2023 dates, fixed 30-day half-life). "
@@ -183,11 +258,47 @@ def summarize(out: list[dict], arm: str, limit: int) -> str:
     return "\n".join(lines) + "\n"
 
 
+def displacement(out: list[dict]) -> str:
+    """What hybrid's top 10 holds on the questions where FTS@10 has every gold turn
+    and hybrid@10 does not."""
+    lost = [
+        r
+        for r in out
+        if r["arms"]["fts"]["turn"]["recall_all@10"]
+        and not r["arms"]["hybrid"]["turn"]["recall_all@10"]
+    ]
+    gained = sum(
+        1
+        for r in out
+        if r["arms"]["hybrid"]["turn"]["recall_all@10"]
+        and not r["arms"]["fts"]["turn"]["recall_all@10"]
+    )
+    slots = [s for r in lost for s in r["hybrid_top10"]]
+    by_src: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+    for src, in_gold in slots:
+        by_src[src][0] += 1
+        by_src[src][1] += int(in_gold)
+    lines = [
+        "## Hybrid vs FTS at turn recall_all@10",
+        "",
+        f"FTS has every gold turn in its top 10 and hybrid does not: {len(lost)} questions. "
+        f"The reverse: {gained}.",
+        "",
+        "On those questions, hybrid's top-10 slots by channel:",
+        "",
+        "| match_source | slots | in a gold session |",
+        "|---|---|---|",
+    ]
+    for src, (n, g) in sorted(by_src.items()):
+        lines.append(f"| {src} | {n} | {g} |")
+    return "\n".join(lines) + "\n"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--data", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
-    ap.add_argument("--arm", choices=("fts", "hybrid"), default="fts")
+    ap.add_argument("--arm", choices=("fts", "hybrid", "compare"), default="fts")
     ap.add_argument("--limit", type=int, default=100, help="search() limit; >=50 to fill turn@50")
     ap.add_argument("--max-questions", type=int, default=0, help="0 = all")
     args = ap.parse_args()
@@ -212,9 +323,32 @@ def main() -> int:
                 log.debug("%s %s", r["question_id"], r["metrics"]["session"])
                 if n % 25 == 0:
                     log.info("%d/%d questions", n, len(items))
-    if args.arm == "hybrid" and not any(r["vec_results"] for r in out):
-        raise SystemExit("--arm hybrid: no result came from the vector channel")
-    (args.out / "summary.md").write_text(summarize(out, args.arm, args.limit))
+    if args.arm != "fts" and not any(r["vec_results"] for r in out):
+        raise SystemExit(f"--arm {args.arm}: no result came from the vector channel")
+    backend = "none (FTS only)"
+    if args.arm != "fts":
+        from techne.core.embeddings import _get_embedding_model
+
+        # The [vectors] extra installs fastembed below Python 3.14 and model2vec from
+        # 3.14, so the same command measures a different model on a different
+        # interpreter (issue #1342 was a fastembed artifact). Name it in the summary.
+        model = _get_embedding_model()
+        backend = f"{model.name}, dim {model.dim}"
+    if args.arm == "compare":
+        text = "".join(
+            summarize(
+                [{**r, **r["arm_stats"][a], "metrics": r["arms"][a]} for r in out],
+                a,
+                args.limit,
+                backend,
+            )
+            + "\n"
+            for a in ("fts", "vec", "hybrid", "rrf")
+        )
+        text += displacement(out)
+    else:
+        text = summarize(out, args.arm, args.limit, backend)
+    (args.out / "summary.md").write_text(text)
     print((args.out / "summary.md").read_text())
     return 0
 
