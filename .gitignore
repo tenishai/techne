@@ -23,3 +23,6 @@ uv.lock
 
 # macOS Finder metadata — never belongs in the repo (PR #526 review)
 .DS_Store
+
+# Quantization measurement extracts (tests/eval/quant/extract.py): store-derived vectors.
+*.npz
