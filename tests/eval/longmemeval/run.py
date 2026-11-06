@@ -26,6 +26,10 @@ union) and `rrf` (_rrf_fuse over the fts and vec channels, the pre-#401 hybrid,
 built as tests/eval/test_ranking_ablation_vec.py builds it). Each row also
 records, for hybrid's top 10, which channel every result came from and whether
 its session is gold, to show what displaces evidence turns (issue #1342).
+
+Run the vector arms on Python 3.14 or later to measure the production backend
+(model2vec potion-base-8M): below 3.14 `[vectors]` installs fastembed instead. The
+summary names the backend it used.
 """
 
 from __future__ import annotations
@@ -193,7 +197,7 @@ def run_question(root: Path, item: dict, arm: str, limit: int) -> dict:
     }
 
 
-def summarize(out: list[dict], arm: str, limit: int) -> str:
+def summarize(out: list[dict], arm: str, limit: int, backend: str) -> str:
     names = [("session", f"{m}@{k}") for k in SESSION_KS for m in ("recall_all", "ndcg_any")]
     names += [("turn", f"{m}@{k}") for k in TURN_KS for m in ("recall_all", "ndcg_any")]
 
@@ -208,6 +212,8 @@ def summarize(out: list[dict], arm: str, limit: int) -> str:
     head = "| group | n | " + " | ".join(f"{lvl} {n}" for lvl, n in names) + " |"
     lines = [
         f"# LongMemEval-S retrieval, arm `{arm}`",
+        "",
+        f"Embedding backend: {backend}.",
         "",
         f"{len(out)} questions (abstention dropped), search(limit={limit}, table='observations'). "
         "Recency adds ~0 to every row (2023 dates, fixed 30-day half-life). "
@@ -299,14 +305,23 @@ def main() -> int:
                     log.info("%d/%d questions", n, len(items))
     if args.arm != "fts" and not any(r["vec_results"] for r in out):
         raise SystemExit(f"--arm {args.arm}: no result came from the vector channel")
+    backend = "none (FTS only)"
+    if args.arm != "fts":
+        from techne.core.embeddings import _get_embedding_model
+
+        # The [vectors] extra installs fastembed below Python 3.14 and model2vec from
+        # 3.14, so the same command measures a different model on a different
+        # interpreter (issue #1342 was a fastembed artifact). Name it in the summary.
+        model = _get_embedding_model()
+        backend = f"{model.name}, dim {model.dim}"
     if args.arm == "compare":
         text = "".join(
-            summarize([{**r, "metrics": r["arms"][a]} for r in out], a, args.limit) + "\n"
+            summarize([{**r, "metrics": r["arms"][a]} for r in out], a, args.limit, backend) + "\n"
             for a in ("fts", "vec", "hybrid", "rrf")
         )
         text += displacement(out)
     else:
-        text = summarize(out, args.arm, args.limit)
+        text = summarize(out, args.arm, args.limit, backend)
     (args.out / "summary.md").write_text(text)
     print((args.out / "summary.md").read_text())
     return 0
