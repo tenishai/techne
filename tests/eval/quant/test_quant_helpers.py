@@ -1,14 +1,16 @@
 """Unit tests for the issue #1341 quantization scripts. Not eval-marked: they check the
-arithmetic the results rest on, and the sqlite-vec round trip skips without the
-extension."""
+sign test, int8 rounding and a per-format KNN round trip, not run_table's bookkeeping.
+The file skips without numpy (the vectors extra), and the round trip without
+sqlite-vec."""
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
-import numpy as np
 import pytest
+
+np = pytest.importorskip("numpy")
 
 sys.path.insert(0, str(Path(__file__).parent))
 from longmemeval_quant import sign_test  # noqa: E402
@@ -26,8 +28,9 @@ def test_sign_test_is_two_sided_exact() -> None:
 
 
 def test_to_int8_rounds_and_clips() -> None:
-    v = np.array([[0.5, -0.5, 0.004, 0.9]], dtype=np.float32)
-    assert _to_int8(v, 254.0).tolist() == [[127, -127, 1, 127]]
+    # 0.006 * 254 = 1.524 rounds to 2, where floor or truncation would give 1.
+    v = np.array([[0.5, -0.5, 0.006, 0.9]], dtype=np.float32)
+    assert _to_int8(v, 254.0).tolist() == [[127, -127, 2, 127]]
 
 
 def test_every_format_finds_the_exact_neighbor(tmp_path: Path) -> None:

@@ -2,11 +2,20 @@
 
     python tests/eval/quant/extract.py --db COPY.db --out vectors.npz
 
-Writes only numbers: each vec table's rowids and float32 embeddings, plus the
-embeddings of the distinct per-turn recall queries logged in context_injections. No
-row text leaves the copy, so the .npz can go to a build host. Run it against a
-`sqlite3 techne.db ".backup COPY.db"` copy, never the live store, and with the same
-Python as the live install so the query embeddings come from the live backend.
+Writes the observation and knowledge vec tables' rowids and float32 embeddings, plus
+the embeddings of the distinct per-turn recall queries logged in context_injections.
+The queries are `trigger_snippet`, the prompt's first 200 characters, while search()
+embeds the whole prompt.
+
+The .npz holds no text, but it is not anonymous. The model is public and static, and
+an embedding is close to an average of token vectors, so a search over the vocabulary
+recovers a prompt's keywords. Treat the file like the store: keep it out of git (it
+is ignored), move it only to hosts you trust with the store, and delete it when the
+numbers are settled.
+
+Run it against a `sqlite3 techne.db ".backup COPY.db"` copy, never the live store, and
+with the same Python as the live install so the query embeddings come from the live
+backend.
 """
 
 from __future__ import annotations
@@ -20,7 +29,8 @@ import numpy as np
 
 log = logging.getLogger("quant.extract")
 
-TABLES = ("observations_vec", "knowledge_vec", "threads_vec")
+# The tables neighbors.py measures; threads_vec is not exported.
+TABLES = ("observations_vec", "knowledge_vec")
 
 
 def main() -> int:
