@@ -114,13 +114,18 @@ def _rrf(fts: list[dict], vec: list[dict], limit: int) -> list[dict]:
     from techne.core.search import _rrf_fuse
 
     by_key = {_key(r): r for r in [*vec, *fts]}
+    in_fts, in_vec = {_key(r) for r in fts}, {_key(r) for r in vec}
     fused = _rrf_fuse(
         [
             [(_key(r), i) for i, r in enumerate(fts, 1)],
             [(_key(r), i) for i, r in enumerate(vec, 1)],
         ]
     )
-    return [by_key[k] for k, _ in fused[:limit]]
+    # Tag provenance the way search() does; search_vec rows carry none of their own.
+    src = {(True, False): "fts", (False, True): "vec", (True, True): "fts+vec"}
+    return [
+        {**by_key[k], "match_source": src[(k in in_fts, k in in_vec)]} for k, _ in fused[:limit]
+    ]
 
 
 def _top10_sources(results: list[dict], rows: dict, gold_sessions: set[str]) -> list[list]:
@@ -157,16 +162,25 @@ def run_question(root: Path, item: dict, arm: str, limit: int) -> dict:
     # every row, so the FTS order here is effectively BM25.
     q = item["question"]
     gold_sessions = set(item["answer_session_ids"])
+    took: dict[str, float] = {}
+
+    def timed(name: str, fn) -> list[dict]:
+        t = time.monotonic()
+        res = fn()
+        took[name] = time.monotonic() - t
+        return res
+
+    def obs_search(vectors: bool) -> list[dict]:
+        return search(db_path, q, table="observations", limit=limit, use_vectors=vectors)
+
     if arm == "compare":
-        fts = search(db_path, q, table="observations", limit=limit, use_vectors=False)
-        vec = search_vec(db_path, q, table="observations", limit=limit)
-        hyb = search(db_path, q, table="observations", limit=limit, use_vectors=True)
+        fts = timed("fts", lambda: obs_search(False))
+        vec = timed("vec", lambda: search_vec(db_path, q, table="observations", limit=limit))
+        hyb = timed("hybrid", lambda: obs_search(True))
         arms = {"fts": fts, "vec": vec, "hybrid": hyb, "rrf": _rrf(fts, vec, limit)}
+        took["rrf"] = took["fts"] + took["vec"]  # its two channels; the fuse itself is ~0
     else:
-        arms = {
-            arm: search(db_path, q, table="observations", limit=limit, use_vectors=arm == "hybrid")
-        }
-    t2 = time.monotonic()
+        arms = {arm: timed(arm, lambda: obs_search(arm == "hybrid"))}
 
     def ranked(results: list[dict]) -> list[tuple[str, str]]:
         return [
@@ -175,24 +189,30 @@ def run_question(root: Path, item: dict, arm: str, limit: int) -> dict:
             if r.get("source_table") == "observation" and r.get("id") in rows
         ]
 
+    def stats(a: str, res: list[dict]) -> dict:
+        # search_vec rows carry no match_source; every one of them is a vector hit.
+        n_vec = sum(1 for r in res if a == "vec" or "vec" in (r.get("match_source") or ""))
+        return {"n_results": len(ranked(res)), "vec_results": n_vec, "search_s": round(took[a], 3)}
+
+    per_arm = {a: stats(a, res) for a, res in arms.items()}
     scored = {a: score_question(ranked(res), gold_sessions, gold_turns) for a, res in arms.items()}
-    results = arms["hybrid"] if "hybrid" in arms else arms[arm]
+    # The top-level fields are hybrid's under compare: the hybrid guard reads them.
+    main_arm = "hybrid" if arm == "compare" else arm
     extra = {}
     if arm == "compare":
         extra = {
             "arms": scored,
-            "hybrid_top10": _top10_sources(results, rows, gold_sessions),
+            "arm_stats": per_arm,
+            "hybrid_top10": _top10_sources(arms["hybrid"], rows, gold_sessions),
         }
     return {
         "question_id": item["question_id"],
         "question_type": item["question_type"],
         "n_turns": len(rows),
         "repeated_sessions": repeats,
-        "n_results": len(ranked(results)),
-        "vec_results": sum(1 for r in results if "vec" in (r.get("match_source") or "")),
+        **per_arm[main_arm],
         "load_s": round(t1 - t0, 3),
-        "search_s": round(t2 - t1, 3),
-        "metrics": scored["hybrid"] if "hybrid" in scored else scored[arm],
+        "metrics": scored[main_arm],
         **extra,
     }
 
@@ -316,7 +336,13 @@ def main() -> int:
         backend = f"{model.name}, dim {model.dim}"
     if args.arm == "compare":
         text = "".join(
-            summarize([{**r, "metrics": r["arms"][a]} for r in out], a, args.limit, backend) + "\n"
+            summarize(
+                [{**r, **r["arm_stats"][a], "metrics": r["arms"][a]} for r in out],
+                a,
+                args.limit,
+                backend,
+            )
+            + "\n"
             for a in ("fts", "vec", "hybrid", "rrf")
         )
         text += displacement(out)
