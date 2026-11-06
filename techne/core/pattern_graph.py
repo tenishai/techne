@@ -37,7 +37,7 @@ def render_mermaid(data: dict) -> str:
         lines.append(f'  subgraph t{i}["{_mermaid_escape(topic)}"]')
         for n in members:
             lines.append(f'    {_nid(n["id"])}["{_mermaid_escape(n["name"])}"]')
-            if n.get("status") == "superseded":
+            if n.get("status") in ("superseded", "retired"):
                 superseded.append(_nid(n["id"]))
         lines.append("  end")
     for e in edges:
@@ -72,7 +72,7 @@ def render_dot(data: dict) -> str:
         lines.append(f'    label="{_dot_escape(topic)}";')
         for n in members:
             attrs = f'label="{_dot_escape(n["name"])}"'
-            if n.get("status") == "superseded":
+            if n.get("status") in ("superseded", "retired"):
                 attrs += ', style="dashed", color="gray60", fontcolor="gray40"'
             lines.append(f'    "{_nid(n["id"])}" [{attrs}];')
         lines.append("  }")

@@ -83,7 +83,8 @@ directly, and you never hand-edit a markdown corpus as a way of writing to it.
 | write one pattern | `techne architect add --name … --source … --body …` |
 | write a corpus | `techne architect ingest FILE.md` |
 | tag a pattern's problem area | `techne architect tag <id> --topic <slug>` |
-| retire a beaten pattern | `techne architect tag <old> --superseded-by <new> --absorbed "…"` |
+| supersede a beaten pattern | `techne architect tag <old> --superseded-by <new> --absorbed "…"` |
+| retire a pattern with no successor | `techne architect tag <id> --status retired --reason "…"` (refused if it has a recorded outcome) |
 | tag the projects a pattern applies to | `techne architect tag <id> --applies <target>` (`--no-applies` removes one); both survive `backfill` |
 | correct a verdict and its reason | `techne architect reverdict <url> --verdict <v> --reason "…"` (or `--clear-reason`) |
 | content hash, for the sandbox check | `techne architect snapshot` |

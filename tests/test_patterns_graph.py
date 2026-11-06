@@ -1281,13 +1281,13 @@ def test_a_target_with_only_retired_patterns_reads_the_same_on_both_surfaces(
     from techne.mcp_server import _pattern_search
 
     err = _pattern_search({"target": "cabal"}, Config.load())["error"]
-    assert "all 2 pattern(s) tagged with it are retired" in err
+    assert "all 2 pattern(s) tagged with it are superseded or retired" in err
     assert "Targets with active patterns in the store: liminal" in err
 
     out = CliRunner().invoke(main, ["architect", "targets"]).output
-    active_block = out.split("in the store (active patterns):")[1].split("retired only")[0]
+    active_block = out.split("in the store (active patterns):")[1].split("inactive only")[0]
     assert "liminal" in active_block and "cabal" not in active_block
-    assert "cabal                2 retired" in out
+    assert "cabal                2 inactive" in out
     # the paste line must not tell the operator to configure a retired-only target
     assert 'pattern_targets: ["liminal", "techne"]' in out
 
@@ -1296,5 +1296,5 @@ def test_a_target_with_only_retired_patterns_reads_the_same_on_both_surfaces(
     (home / "config.yaml").write_text("architect:\n  pattern_targets: [techne, cabal]\n")
     served = _pattern_search({"target": "cabal"}, Config.load())
     assert "error" not in served and served["count"] == 0
-    assert "all 2 pattern(s) tagged 'cabal' are retired" in served["notice"]
+    assert "all 2 pattern(s) tagged 'cabal' are superseded or retired" in served["notice"]
     assert "serves nothing for these" in CliRunner().invoke(main, ["architect", "targets"]).output

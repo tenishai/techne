@@ -24,7 +24,7 @@ from techne.config import Config
 from techne.core import migrator
 from techne.core.stores import StoreAdapter, migrated_store, plain_connect
 
-ARCHITECT_VERSION = 7  # PRAGMA user_version on architect.db
+ARCHITECT_VERSION = 8  # PRAGMA user_version on architect.db
 
 _PATTERNS_FTS_DDL = """
 -- `source_url` IS INDEXED; its absence was a silent false negative (techne#430).
@@ -84,12 +84,13 @@ CREATE TABLE IF NOT EXISTS patterns (
     lens_kind        TEXT,                    -- code | product | process
     body             TEXT NOT NULL,
     confidence       TEXT DEFAULT 'medium',
-    status           TEXT DEFAULT 'active',   -- active | superseded
+    status           TEXT DEFAULT 'active',   -- active | superseded | retired
     superseded_by    TEXT,                    -- id of the pattern that replaced this one
     topic            TEXT,                    -- problem-solved grouping key (techne#597 topic-index)
     absorbed         TEXT,                    -- salvage note: what this pattern contributed before being folded in
     valid_at         TEXT,                    -- when this pattern became current (NULL = since created_at) — techne#306
     invalid_at       TEXT,                    -- when it stopped being current / was superseded (NULL = still current) — techne#306
+    retired_reason   TEXT,                    -- why it left with no successor (#1345)
     created_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_patterns_investigation ON patterns(investigation_id);
@@ -340,6 +341,19 @@ def _step_v6_to_v7_applies_origin(conn) -> None:
         conn.execute("ALTER TABLE pattern_applies ADD COLUMN origin TEXT NOT NULL DEFAULT 'body'")
 
 
+def _step_v7_to_v8_retired_reason(conn) -> None:
+    """Add `patterns.retired_reason` (issue #1345).
+
+    A pattern can leave the active set with no successor: a docs-only source, a
+    standard idiom, a mechanism that is only prose. `superseded` cannot say that,
+    because it needs a successor, so `retired` is its own status and the reason is
+    kept beside it. Column-presence guard, like the rest of the ladder.
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(patterns)")}
+    if cols and "retired_reason" not in cols:
+        conn.execute("ALTER TABLE patterns ADD COLUMN retired_reason TEXT")
+
+
 def _architect_run_steps(conn, current: int, target: int) -> None:
     """Apply architect.db migration steps from *current* up to *target*.
 
@@ -362,6 +376,8 @@ def _architect_run_steps(conn, current: int, target: int) -> None:
         _step_v5_to_v6_index_source_url(conn)
     if current < 7:
         _step_v6_to_v7_applies_origin(conn)
+    if current < 8:
+        _step_v7_to_v8_retired_reason(conn)
     migrator.user_version_io.write(conn, target)
     conn.commit()
 
