@@ -46,6 +46,7 @@ import sqlite3
 import sys
 from typing import Any
 
+from techne.core.redaction import redact_credentials
 from techne.core.tokens import approx_tokens as _approx_tokens  # shared helper (#386)
 
 log = logging.getLogger(__name__)
@@ -297,7 +298,9 @@ def log_context_injection(
                 (
                     source,
                     session_id,
-                    (trigger[:200] if trigger else None),
+                    # Redact before the cut: a cut can split a secret so the
+                    # fragment no longer matches (techne#1238, #1245).
+                    (redact_credentials(trigger)[:200] if trigger else None),
                     len(rows),
                     json.dumps(hit_ids),
                     json.dumps(scores),
