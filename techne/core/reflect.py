@@ -441,6 +441,29 @@ def _write_live(
     return None
 
 
+# techne's own self-maintenance MCP tools. A drain of reflection debt is made of
+# these calls, so counting them toward the thread floor turned every drain into a
+# new thread of debt (techne#1283). They are still captured: check_evidence needs
+# them to back a drain session's claims.
+_RAIL_TOOLS = frozenset(
+    f"techne_{rail}_{step}"
+    for rail in ("reflect", "consolidate", "faithfulness", "dream", "memory_claims", "conflict")
+    for step in ("emit", "ingest")
+) | {"techne_federation_conflict_ingest"}
+
+
+def is_rail_tool(tool_name: str | None) -> bool:
+    """An MCP call to one of techne's rail tools, under any server name."""
+    if not tool_name or not tool_name.startswith("mcp__"):
+        return False
+    return tool_name.rsplit("__", 1)[-1] in _RAIL_TOOLS
+
+
+def _floor_count(observations: list[dict]) -> int:
+    """Observations that count toward ``reflect.min_observations_per_thread``."""
+    return sum(1 for o in observations if not is_rail_tool(o.get("tool_name")))
+
+
 def _bucket_observations(threads: list[Thread], observations: list[dict]) -> dict[int, list[dict]]:
     """Map each thread_num to its observation dicts (resolved from indices)."""
     out: dict[int, list[dict]] = {}
@@ -587,10 +610,12 @@ def pending_reflection(config: Config, *, limit: int | None = 5) -> list[dict]:
     min_obs = config.reflect.min_observations_per_thread
     conn = connect(config.db_path)
     try:
+        conn.create_function("is_rail_tool", 1, is_rail_tool, deterministic=True)
         rows = conn.execute(
             """SELECT s.id AS session_id, COUNT(o.id) AS n
                  FROM sessions s
                  JOIN observations o ON o.session_id = s.id
+                WHERE NOT is_rail_tool(o.tool_name)
              GROUP BY s.id
                HAVING n >= ?
              ORDER BY s.started_at DESC
@@ -634,7 +659,8 @@ def emittable_thread_ids(
 
     ids: list[str] = []
     for t in threads:
-        if len(obs_by_thread.get(t.thread_num, [])) < config.reflect.min_observations_per_thread:
+        t_count = _floor_count(obs_by_thread.get(t.thread_num, []))
+        if t_count < config.reflect.min_observations_per_thread:
             continue
         tid = persisted_thread_id(config.db_path, session_id, t, conn=conn)
         if tid:
@@ -700,7 +726,7 @@ def persist_unsaved_threads(
     keys: dict[str, str] = {}
     for t in threads:
         t_obs = obs_by_thread.get(t.thread_num, [])
-        if len(t_obs) < config.reflect.min_observations_per_thread:
+        if _floor_count(t_obs) < config.reflect.min_observations_per_thread:
             continue
         tid = persisted_thread_id(config.db_path, session_id, t)
         if tid is None:
@@ -929,7 +955,7 @@ def emit_reflection_batch(
     eligible: list[tuple[str | None, Thread, list[dict]]] = []
     for t in threads:
         t_obs = obs_by_thread.get(t.thread_num, [])
-        if len(t_obs) < config.reflect.min_observations_per_thread:
+        if _floor_count(t_obs) < config.reflect.min_observations_per_thread:
             continue
         eligible.append((persisted_thread_id(config.db_path, session_id, t), t, t_obs))
 
@@ -2258,7 +2284,7 @@ def reflect_on_session(
 
     for t in threads:
         t_obs = obs_by_thread.get(t.thread_num, [])
-        if len(t_obs) < config.reflect.min_observations_per_thread:
+        if _floor_count(t_obs) < config.reflect.min_observations_per_thread:
             continue
 
         prompt = _build_prompt(t, t_obs, config.db_path, config)

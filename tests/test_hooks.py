@@ -130,17 +130,12 @@ class TestShouldCapture:
         assert should_capture(config, "mcp__memory__search") is False
         assert should_capture(config, "mcp__memory__store") is False
 
-    def test_should_capture_rail_tools_skipped(self):
-        """techne's own rail tools are skipped, so a drain makes no new debt (techne#1283)."""
+    def test_should_capture_keeps_rail_tools(self):
+        """techne's rail tools are captured: check_evidence backs a drain session's
+        claims from these rows. They are left out of the reflect thread floor instead
+        (techne#1283, tests/test_reflect.py)."""
         config = _make_config()
-        rails = ("reflect_emit", "reflect_ingest", "consolidate_emit", "dream_ingest",
-                 "faithfulness_emit", "memory_claims_ingest", "conflict_emit",
-                 "federation_conflict_ingest")
-        names = [f"mcp__techne__techne_{r}" for r in rails]
-        for t in names + ["mcp__renamed__techne_reflect_emit"]:
-            assert should_capture(config, t) is False, t
-        for t in ("mcp__techne__techne_store", "mcp__techne__techne_send",
-                  "mcp__techne__techne_recall", "mcp__techne__techne_check_evidence"):
+        for t in ("mcp__techne__techne_reflect_emit", "mcp__techne__techne_reflect_ingest"):
             assert should_capture(config, t) is True, t
 
     def test_should_capture_grep_and_websearch_captured(self):
@@ -196,6 +191,20 @@ class TestBashReadonlyNoiseFilter:
         "tree -L 2",
         "date +%s",
         "hostname -f",
+        "echo x >&-",
+        # read-only spellings that a naive write rule over-captured (PR 1353 review)
+        "sed -n '1,20p' deploy/Dockerfile",
+        "sed -n '/type /p' a.py",
+        "sed -ne 's/x/y/p' f",
+        "sed '/x/{p;d}' f",
+        "sed 'y/abc/xyz/' f",
+        "date -Iseconds",
+        "sort -T/tmp/foo f",
+        "fd -tx",
+        "uniq --skip-fields 1 f",
+        "awk -F'|' '{print $1}' f",
+        "awk 'a || b' f",
+        "\\ls",
     ])
     def test_readonly_commands_dropped(self, cmd):
         assert should_capture(self._cfg(), "Bash", {"command": cmd}) is False
@@ -239,6 +248,39 @@ class TestBashReadonlyNoiseFilter:
         "tree -o f",
         "date -s 12:00",
         "hostname newhost",
+        # PR 1353 review: a `'` inside double quotes, or escaped, opens no quote
+        'echo "it\'s done: $(git commit -m x)"',
+        'echo "don\'t forget `touch x`"',
+        "echo it\\'s $(touch x)",
+        "echo it\\'s; touch x",
+        # sed: anything outside the read-only command set captures
+        "sed -n 's/a/b/gw out' in",
+        "sed -n 's|a|b|w out' in",
+        "sed 's#a#touch x#e' in",
+        "sed 's/a/touch x/eg' in",
+        "sed -n 'wout' in",
+        "sed '1etouch x' in",
+        "sed -n '1!w out' in",
+        "sed -f s.sed in",
+        "sed --in s/a/b/ f",
+        # awk: a program file, or any option but -v/-F
+        "awk -f p.awk in",
+        "awk -i inplace '{}' f",
+        "awk --include inplace '{}' f",
+        # a lone & separates commands
+        "ls & touch x",
+        "echo starting & git commit -m x",
+        "ls |& git push",
+        # option spellings that write
+        "ls >&1out",
+        "tree -ao out",
+        "sort --o=out f",
+        "sort --output out f",
+        "uniq - out",
+        "fd -X rm",
+        "fd --exec rm",
+        "date --set 1",
+        "rg --pre ./x y",
     ])
     def test_signal_commands_captured(self, cmd):
         assert should_capture(self._cfg(), "Bash", {"command": cmd}) is True

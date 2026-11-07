@@ -2905,3 +2905,69 @@ def test_the_hook_window_is_unchanged(tmp_path):
         _mk_db_backed_session(config)
     assert len(pending_reflection(config)) == 5
     assert len(pending_reflection(config, limit=None)) == 7
+
+
+# --- techne#1283: rail calls do not count toward the thread floor ----------------
+
+
+def _mk_rail_session(config, n_rail: int, n_real: int) -> str:
+    from techne.core.state import add_observation
+    from techne.lifecycle import redetect_threads
+
+    session_id = start_session(config.db_path, project_path="/tmp/p", agent_identity="test-agent")
+    for i in range(n_rail):
+        tool = "mcp__techne__techne_reflect_emit" if i % 2 else "mcp__techne__techne_reflect_ingest"
+        add_observation(config.db_path, session_id, tool, f"rail {i}")
+    for i in range(n_real):
+        add_observation(config.db_path, session_id, "Edit", f"edit {i}")
+    redetect_threads(config, session_id)
+    return session_id
+
+
+def test_a_session_of_rail_calls_owes_no_reflection(tmp_path):
+    """A drain session is made of rail calls. Counting them made every drain new
+    debt (techne#1283): the three sessions in that issue were 97-99% rail rows."""
+    from techne.core.reflect import pending_reflection
+
+    config = _mk_config(tmp_path, enabled=True)
+    sid = _mk_rail_session(config, n_rail=14, n_real=0)
+    assert pending_reflection(config, limit=None) == []
+    conn = connect(config.db_path)
+    try:
+        queued = conn.execute(
+            "SELECT COUNT(*) FROM reflection_queue WHERE session_id = ?", (sid,)
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert queued == 0
+
+
+def test_rail_calls_do_not_lift_real_work_over_the_floor(tmp_path):
+    """Two real observations under a floor of three stay under it, however many rail
+    calls sit beside them."""
+    from techne.core.reflect import pending_reflection
+
+    config = _mk_config(tmp_path, enabled=True)
+    _mk_rail_session(config, n_rail=12, n_real=2)
+    assert pending_reflection(config, limit=None) == []
+
+
+def test_real_work_beside_rail_calls_is_still_owed(tmp_path):
+    from techne.core.reflect import pending_reflection
+
+    config = _mk_config(tmp_path, enabled=True)
+    sid = _mk_rail_session(config, n_rail=6, n_real=14)
+    assert [p["session_id"] for p in pending_reflection(config, limit=None)] == [sid]
+
+
+def test_is_rail_tool_names_every_rail_and_nothing_else():
+    from techne.core.reflect import is_rail_tool
+
+    for rail in ("reflect", "consolidate", "faithfulness", "dream", "memory_claims", "conflict"):
+        for step in ("emit", "ingest"):
+            assert is_rail_tool(f"mcp__techne__techne_{rail}_{step}")
+    assert is_rail_tool("mcp__techne__techne_federation_conflict_ingest")
+    assert is_rail_tool("mcp__renamed__techne_reflect_emit")
+    for t in ("mcp__techne__techne_store", "mcp__techne__techne_send",
+              "mcp__techne__techne_check_evidence", "techne_reflect_emit", "Edit", None, ""):
+        assert not is_rail_tool(t)

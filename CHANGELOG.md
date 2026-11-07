@@ -62,6 +62,16 @@ All notable changes to techne are documented here. Format loosely follows
   still showed the successor. The `absorbed` note is kept as history. A row the old
   behaviour already left half-reactivated (active, but `superseded_by` still set) is repaired
   by running `tag <id> --status active` on it again.
+- **Bash capture sees writes the read-only filter used to drop** (#1339). A command that
+  runs or writes inside `$(...)`, backticks or `<(...)`, after a lone `&`, or through a
+  read-only head (`sed` outside a small read-only command set, `awk` with `system()` or a
+  pipe, `sort -o`, `uniq IN OUT`, `tree -o`, `date -s`, `hostname NAME`, `rg --pre`,
+  `fd -x`, `find -fls`, `>& file`) is now captured, so the evidence gate can see it. The
+  quote scanner now honours double quotes and backslash escapes.
+- **Draining reflection debt no longer creates new debt** (#1283). Calls to techne's own
+  rail tools (reflect, consolidate, faithfulness, dream, memory_claims and conflict
+  emit/ingest) no longer count toward `reflect.min_observations_per_thread`. They are still
+  captured, so `check_evidence` keeps backing a drain session's claims.
 
 ## [0.19.1] — 2026-10-30
 
