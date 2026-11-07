@@ -40,7 +40,8 @@ def test_a_secret_straddling_the_200_char_cut_leaves_no_fragment(tmp_path):
     assert "sk-ant-a" not in snippet  # the old cut kept "sk-ant-api"
 
 
-def test_an_empty_trigger_stays_null(tmp_path):
+def test_a_missing_or_empty_trigger_stays_null(tmp_path):
     db = tmp_path / "t.db"
     _log(db, None)
-    assert _snippets(db) == [None]
+    _log(db, "")
+    assert _snippets(db) == [None, None]
