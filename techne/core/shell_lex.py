@@ -29,22 +29,32 @@ COMMENT = "k"  # an unquoted # at the start of a word, to the end of the line
 _WORD_START = frozenset(" \t\n;|&()<>")
 
 
-def classify(text: str, state: str | None = None) -> tuple[str, str | None]:
-    """A class letter per character of *text*, and the quote open at its end.
+def classify(text: str, state: tuple | None = None) -> tuple[str, tuple | None]:
+    """A class letter per character of *text*, and the scanner state at its end.
 
-    *state* is the quote open where *text* starts (None, ``"'"``, ``'"'`` or
-    ``"$'"``), or ``"\\"`` when the previous line ended in a line continuation,
-    so a caller can thread it line by line and get the same answer as scanning
-    the whole text. A comment never carries over: it ends at a newline or at the
-    end of *text*.
+    The state is ``(quote, brace_depth, continuation)``, or None at rest: the
+    quote open (``"'"``, ``'"'``, ``"$'"``), how many ``${`` are open (a ``#``
+    inside one is not a comment), and whether the text ended in a line
+    continuation that resumes mid-word (``"mid"``: ``x\\``) or at a word start
+    (``"start"``: ``x \\``). Threading it line by line gives the same answer as
+    scanning the whole text. A comment never carries over: it ends at a newline
+    or at the end of *text*.
     """
+    q, depth, cont_in = state if state else (None, 0, None)
     out: list[str] = []
-    # After a continuation the line starts mid-word: `x\<newline># y` is `x# y`.
-    continued = state == "\\"
-    q = None if continued else state
     comment = False
-    trailing_escape = False
+    cont_out = None
     i, n = 0, len(text)
+
+    def word_start(k: int) -> bool:
+        # Look back past `\<newline>` pairs: bash removes them before reading words.
+        j = k - 1
+        while j >= 1 and out[j] == CONT and out[j - 1] == CONT:
+            j -= 2
+        if j < 0:
+            return cont_in != "mid"
+        return out[j] == CODE and text[j] in _WORD_START
+
     while i < n:
         ch = text[i]
         if comment:
@@ -83,7 +93,8 @@ def classify(text: str, state: str | None = None) -> tuple[str, str | None]:
                 i += 2
             else:
                 out.append(ESCAPE)  # a trailing backslash: a continuation if a line follows
-                trailing_escape = q is None
+                if q is None:
+                    cont_out = "start" if word_start(i) else "mid"
                 i += 1
             continue
         if q == '"':
@@ -103,69 +114,99 @@ def classify(text: str, state: str | None = None) -> tuple[str, str | None]:
             out += [ANSI, ANSI]
             i += 2
             continue
-        elif ch == "#" and (
-            (i == 0 and not continued)
-            or (i > 0 and out[i - 1] == CODE and text[i - 1] in _WORD_START)
-        ):
+        elif ch == "$" and text[i + 1 : i + 2] == "{":
+            depth += 1
+            out += [CODE, CODE]
+            i += 2
+            continue
+        elif ch == "}" and depth:
+            depth -= 1
+            out.append(CODE)
+        elif ch == "#" and depth == 0 and word_start(i):
             comment = True
             out.append(COMMENT)
         else:
             out.append(CODE)
         i += 1
-    return "".join(out), ("\\" if trailing_escape else q)
+    end = (q, depth, cont_out)
+    return "".join(out), (None if end == (None, 0, None) else end)
 
 
-def split_segments(command: str) -> list[str]:
-    """Top-level segments of a command, split on ``&&`` ``||`` ``|&`` ``;`` ``|``
-    newline and a lone ``&`` where those are code. Comments and line
-    continuations are dropped. A lone ``&`` next to a redirect (``2>&1``,
-    ``&>f``, ``<&3``) does not split.
+def _joined(text: str) -> tuple[str, str]:
+    """*text* and its classes with line continuations removed, as bash reads it."""
+    cls, _ = classify(text)
+    keep = [k for k, c in enumerate(cls) if c != CONT]
+    return "".join(text[k] for k in keep), "".join(cls[k] for k in keep)
+
+
+def split_with_ops(command: str) -> list[tuple[str, str | None]]:
+    """Top-level segments of a command, each with the operator that came before
+    it (None for the first). Splits on ``&&`` ``||`` ``|&`` ``;`` ``|`` newline
+    and a lone ``&`` where those are code. Comments and line continuations are
+    dropped. A lone ``&`` next to a redirect (``2>&1``, ``&>f``, ``<&3``) does
+    not split.
     """
-    cls, _ = classify(command)
-    segs: list[str] = []
+    text, cls = _joined(command)
+    out: list[tuple[str, str | None]] = []
     buf: list[str] = []
-    i, n = 0, len(command)
+    op: str | None = None
+
+    def close(next_op: str) -> None:
+        nonlocal buf, op
+        seg = "".join(buf).strip()
+        if seg:
+            out.append((seg, op))
+            op = next_op
+        elif op not in ("|", "|&"):
+            op = next_op  # an empty segment; a pipe before it still pipes (`ls |<newline>grep`)
+        buf = []
+
+    i, n = 0, len(text)
     while i < n:
-        ch, c = command[i], cls[i]
-        if c in (COMMENT, CONT):
+        ch, c = text[i], cls[i]
+        if c == COMMENT:
             i += 1
             continue
         if c == CODE:
-            two = command[i : i + 2]
+            two = text[i : i + 2]
             if two in ("&&", "||", "|&") and cls[i + 1 : i + 2] == CODE:
-                segs.append("".join(buf))
-                buf = []
+                close(two)
                 i += 2
                 continue
             lone_amp = (
-                ch == "&"
-                and (i == 0 or command[i - 1] not in "<>")
-                and command[i + 1 : i + 2] != ">"
+                ch == "&" and (i == 0 or text[i - 1] not in "<>") and text[i + 1 : i + 2] != ">"
             )
             if ch in (";", "|", "\n") or lone_amp:
-                segs.append("".join(buf))
-                buf = []
+                close(ch)
                 i += 1
                 continue
         buf.append(ch)
         i += 1
-    segs.append("".join(buf))
-    return [s.strip() for s in segs if s.strip()]
+    seg = "".join(buf).strip()
+    if seg:
+        out.append((seg, op))
+    return out
+
+
+def split_segments(command: str) -> list[str]:
+    """The segments of `split_with_ops`, without their operators."""
+    return [seg for seg, _ in split_with_ops(command)]
 
 
 def has_substitution(command: str) -> bool:
     """A ``$(...)`` or backtick the shell would run (code or double-quoted, not
-    escaped), or a ``<(``/``>(`` in code. ``$((`` is arithmetic, not a command."""
-    cls, _ = classify(command)
-    for i, ch in enumerate(command):
+    escaped), or a ``<(``/``>(`` in code. ``$((`` is arithmetic, not a command.
+    Read after continuations are removed, so ``$\\<newline>(`` counts."""
+    text, cls = _joined(command)
+    for i, ch in enumerate(text):
         c = cls[i]
         if c not in (CODE, DOUBLE):
             continue
         if ch == "`":
             return True
-        if command[i : i + 2] == "$(" and command[i : i + 3] != "$((":
+        if text[i : i + 2] == "$(" and text[i : i + 3] != "$((":
             return True
-        if c == CODE and command[i : i + 2] in ("<(", ">(") and cls[i + 1] == CODE:
+        if c == CODE and text[i : i + 2] in ("<(", ">(") and cls[i + 1] == CODE:
             return True
     return False
 
@@ -225,7 +266,7 @@ def words(seg: str) -> list[str]:
     return out
 
 
-def mask_line(line: str, state: str | None) -> tuple[str, str | None]:
+def mask_line(line: str, state: tuple | None) -> tuple[str, tuple | None]:
     """*line* with every non-code character replaced by NUL, and the quote state
     at its end. Used to LOCATE syntax (a `<<` that is code opens a heredoc; one
     inside quotes or a comment does not) while matching on the raw line."""
@@ -258,7 +299,7 @@ def strip_heredoc_bodies(command: str) -> str:
     lines = command.split("\n")
     kept: list[str] = []
     i = 0
-    state: str | None = None
+    state: tuple | None = None
     while i < len(lines):
         line = lines[i]
         kept.append(line)

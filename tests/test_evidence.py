@@ -935,6 +935,14 @@ class TestSuiteEvidence:
             is False
         )
 
+    def test_a_hash_in_a_parameter_expansion_hides_no_runner(self):
+        """PR 1353 review, round 3, Critical: `${x:- #}` was read as starting a
+        comment, so the `pytest` after it vanished and a failing run elsewhere in
+        the window was certified."""
+        from techne.core.evidence import _command_runs_tests
+
+        assert _command_runs_tests("echo ${x:- #}; pytest -q") is True
+
     def test_property_no_heredoc_body_line_is_ever_a_command(self):
         """Generated commands: a runner inside a body must never be an invocation.
 

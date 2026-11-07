@@ -474,12 +474,12 @@ def _consumes_next(tok: str, head: str) -> bool | None:
 def _bash_search_pattern(command: str) -> str | None:
     """The symbol-shaped search pattern in a shell command, or None.
 
-    Reuses the hardened shell handling rather than re-deriving it:
-    ``_strip_heredoc_bodies`` (so a `grep` inside a heredoc BODY is not read as a
-    command — techne#544's finding) and ``_split_bash_segments`` (quote-aware, so
-    a `grep "a|b"` alternation is not split mid-pattern). Both are already shared
-    cross-module by ``core/evidence.py``; a second copy of either would drift from
-    the one the evidence gate depends on.
+    Reuses the shared shell handling in ``core/shell_lex.py`` rather than
+    re-deriving it: ``strip_heredoc_bodies`` (so a `grep` inside a heredoc BODY is
+    not read as a command — techne#544's finding) and ``split_with_ops``
+    (quote-aware, so a `grep "a|b"` alternation is not split mid-pattern). The
+    evidence gate and the capture filter use the same module; a second copy would
+    drift from them.
 
     A LATER PIPELINE SEGMENT WITH NO PATH OPERAND IS FILTERING OUTPUT, NOT
     SEARCHING A TREE, and declining those is what makes this rail usable at all.
@@ -491,16 +491,14 @@ def _bash_search_pattern(command: str) -> str | None:
     guessed: 0 of 11 noise cases fire, 0 of 8 real searches are lost.
     """
     try:
-        from techne.core.evidence import _strip_heredoc_bodies
-        from techne.hooks.post_tool_use import _split_bash_segments
+        from techne.core import shell_lex
 
-        stripped = _strip_heredoc_bodies(command)
-        segments = _split_bash_segments(stripped)
+        with_ops = shell_lex.split_with_ops(shell_lex.strip_heredoc_bodies(command))
     except Exception:  # noqa: BLE001 — augmentation is best-effort, never fatal
         return None
 
-    for index, seg in enumerate(segments):
-        piped_into = _is_piped_into(stripped, segments, index)
+    for seg, op in with_ops:
+        piped_into = _is_piped_into(op)
         try:
             tokens = shlex.split(seg)
         except ValueError:  # unbalanced quotes — not parseable, skip
@@ -572,38 +570,23 @@ def _bash_search_pattern(command: str) -> str | None:
     return None
 
 
-def _is_piped_into(command: str, segments: list[str], index: int) -> bool:
-    """True if `segments[index]` receives the previous command's stdout.
+def _is_piped_into(op: str | None) -> bool:
+    """True if a segment receives the previous command's stdout: the operator
+    before it is ``|`` or ``|&``.
 
     THE DISCRIMINATOR IS THE PIPE, NOT THE POSITION (#596 r2).
-    `_split_bash_segments` splits on `&&`, `||`, `;`, newline and `|` IDENTICALLY,
-    so "not the first segment" is not "later in a pipeline". Testing position
-    declined `cd /repo && rg foo` — and `rg foo` with NO operand is rg's normal
-    form, so that is a real search lost. Worse, `_bash_cd_target` exists for
-    exactly the `cd X && <search>` shape, so the two halves of the same fix
-    collided. Measured on the reviewer's corpus: pipe-precedence still declines
-    11/11 noise cases AND recovers every lost search.
+    The splitter splits on `&&`, `||`, `;`, newline and `|` alike, so "not the
+    first segment" is not "later in a pipeline". Testing position declined
+    `cd /repo && rg foo` — and `rg foo` with NO operand is rg's normal form, so
+    that is a real search lost. Measured on the reviewer's corpus: pipe-precedence
+    still declines 11/11 noise cases AND recovers every lost search.
 
-    Derived by locating the segment in the original string rather than by
-    re-scanning it: a second quote-aware scanner would be a second definition of
-    "segment", and this function exists because the first one already conflates
-    operators.
+    The operator comes from `shell_lex.split_with_ops`, the scanner that made the
+    split. This used to re-locate each segment in the raw command by substring,
+    which broke once segments stopped being substrings (comments and line
+    continuations are dropped): PR 1353 review. An escaped `\\|` is not a pipe.
     """
-    if index == 0:
-        return False
-    pos = 0
-    for seg in segments[:index]:
-        found = command.find(seg, pos)
-        if found < 0:
-            return False  # cannot locate — decline to guess, i.e. treat as unpiped
-        pos = found + len(seg)
-    between = command[pos : command.find(segments[index], pos)]
-    # `||` is a control operator, not a pipe; check it first or the `|` test eats it.
-    # NO BACKSLASH-ESCAPE HANDLING, DELIBERATELY (#596 r4 Nit). `echo a \| grep
-    # <sym>` reads as piped and therefore declines, though the pipe is escaped.
-    # That errs toward silence, which is the direction this rail is tuned for —
-    # noted so the comment does not read stronger than the code.
-    return "|" in between.replace("||", "")
+    return op in ("|", "|&")
 
 
 def _bash_cd_target(command: str) -> str | None:

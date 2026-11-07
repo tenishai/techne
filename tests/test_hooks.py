@@ -317,6 +317,14 @@ class TestBashReadonlyNoiseFilter:
         # awk options before the program are skipped, not trusted
         "awk -v x=1 'BEGIN{system(\"x\")}'",
         "awk -- 'BEGIN{system(\"x\")}'",
+        # PR 1353 review, round 3
+        "echo ${x:- #}; touch x",
+        "awk '{print > \"o\"}' f",
+        "awk '{print >> \"o\"}' f",
+        "awk -v o=x '{print > o}' f",
+        "awk 'BEGIN{printf \"x\" > \"/tmp/o\"}'",
+        "ls \\\n# it's\ntouch x",
+        "echo $\\\n(touch x)",
     ])
     def test_signal_commands_captured(self, cmd):
         assert should_capture(self._cfg(), "Bash", {"command": cmd}) is True

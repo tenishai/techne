@@ -521,8 +521,14 @@ def _awk_mutates(rest: list[str]) -> bool:
         return True
     program = rest[i] if i < len(rest) else ""
     # `|` runs a command (`print | "sh"`, `"cmd" | getline`); `||` is logical or.
-    # A regex alternation (`/a|b/`) also captures; awk can't be told apart here.
-    return not program or "system" in program or "|" in program.replace("||", "")
+    # `>` writes a file (`print > "o"`). A regex alternation (`/a|b/`) and a
+    # comparison (`$1 > 3`) also capture; awk can't be told apart here.
+    return (
+        not program
+        or "system" in program
+        or "|" in program.replace("||", "")
+        or ">" in program
+    )
 
 
 def _head_mutates(head: str, rest: list[str]) -> bool:

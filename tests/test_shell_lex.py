@@ -29,6 +29,27 @@ def test_a_hash_inside_a_word_is_not_a_comment():
     assert classify("a#b")[0] == "ccc"
 
 
+def test_a_hash_inside_a_parameter_expansion_is_not_a_comment():
+    """PR 1353 review, round 3: `${x:- #}` made the rest of the line a comment and
+    hid a runner after it from the evidence gate."""
+    assert shell_lex.COMMENT not in classify("echo ${x:- #}; pytest -q")[0]
+    assert split_segments("echo ${x:- #}; pytest -q") == ["echo ${x:- #}", "pytest -q"]
+
+
+def test_a_continuation_resumes_mid_word_or_at_a_word_start():
+    """`x\\<newline># y` is the word `x#`; `x \\<newline># y` starts a comment."""
+    assert split_segments("ls x\\\n# y") == ["ls x# y"]
+    assert split_segments("ls \\\n# it's\ntouch x") == ["ls", "touch x"]
+
+
+def test_split_with_ops_reports_the_operator_before_each_segment():
+    assert shell_lex.split_with_ops("a | b && c; d") == [
+        ("a", None), ("b", "|"), ("c", "&&"), ("d", ";")
+    ]
+    assert shell_lex.split_with_ops("a |\nb") == [("a", None), ("b", "|")]
+    assert shell_lex.split_with_ops("a \\| b") == [("a \\| b", None)]
+
+
 def test_words_resolve_quotes_escapes_and_continuations():
     assert words("sed -n '1,20p' \"a b\" c\\ d") == ["sed", "-n", "1,20p", "a b", "c d"]
     assert words("find . -name in \\\n-delete") == ["find", ".", "-name", "in", "-delete"]
@@ -56,6 +77,7 @@ def test_substitution():
     assert not has_substitution('echo "<(x)"')  # process substitution is code-only
     assert not has_substitution("echo $((1+2))")
     assert not has_substitution("ls # $(x)")
+    assert has_substitution("echo $\\\n(touch x)")  # bash removes the continuation first
 
 
 def test_property_the_line_mask_agrees_with_the_whole_text_scan():

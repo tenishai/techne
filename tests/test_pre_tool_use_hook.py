@@ -582,6 +582,15 @@ class TestRoundTwoFindings:
         # ...while a genuine pipe still declines.
         assert self._p("cat x.py | rg foo_symbol") is None
 
+    def test_the_pipe_comes_from_the_splitter_not_a_substring_search(self):
+        """PR 1353 review: segments stopped being substrings of the command once
+        comments and continuations were dropped, and re-locating them by `find`
+        read a continued pipeline as unpiped and a `|` in a comment as a pipe."""
+        assert self._p("git log --oneline \\\n  --all | grep my_symbol") is None
+        assert self._p("cat a \\\n  b | grep my_symbol") is None
+        assert self._p("cd x # a|b\nrg my_symbol") == "my_symbol"
+        assert self._p("ls |\ngrep my_symbol") is None  # a pipe before a newline still pipes
+
     def test_an_ambiguous_flag_declines_rather_than_guessing(self):
         """An option we cannot read declines the whole command — measured in #596
         r3: 13 of 13 UNLISTED value-taking options injected a WRONG pattern and 0
