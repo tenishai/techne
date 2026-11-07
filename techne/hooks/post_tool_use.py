@@ -12,6 +12,7 @@ concurrency-safe across simultaneous sessions.
 """
 
 import json
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -34,6 +35,20 @@ _SESSION_STATE_TTL_SECONDS = 7 * 24 * 60 * 60
 SKIP_TOOLS = {
     "AskUserQuestion",
 }
+
+# techne's own self-maintenance MCP tools. Capturing them makes every drain of
+# reflection debt a new thread of debt (techne#1283). techne_store, techne_send,
+# techne_recall and the rest record real work and stay captured.
+_RAIL_TOOLS = frozenset(
+    f"techne_{rail}_{step}"
+    for rail in ("reflect", "consolidate", "faithfulness", "dream", "memory_claims", "conflict")
+    for step in ("emit", "ingest")
+) | {"techne_federation_conflict_ingest"}
+
+
+def is_rail_tool(tool_name: str) -> bool:
+    """An MCP call to one of techne's rail tools, under any server name."""
+    return tool_name.startswith("mcp__") and tool_name.rsplit("__", 1)[-1] in _RAIL_TOOLS
 
 # Bash command "heads" that are pure read/navigation utilities. When capture_bash
 # is ON, a Bash call whose every pipeline/sequence segment starts with one of these
@@ -383,9 +398,14 @@ def _bash_is_readonly_noise(command: str) -> bool:
     if not command or not command.strip():
         return False
     # A real output redirect (`>` / `>>`) mutates a file → capture. Ignore fd-dups
-    # like `2>&1` / `>&2` (the `>` is followed by `&`): they don't write a file, so
-    # a read-only command piping through `2>&1` shouldn't be treated as a mutation.
-    if ">" in command.replace(">&", ""):
+    # like `2>&1` / `>&2` / `>&-`: they don't write a file, so a read-only command
+    # piping through `2>&1` shouldn't be treated as a mutation. `>& out` is not an
+    # fd-dup: it writes `out` (techne#1339).
+    if ">" in _FD_DUP.sub("", command):
+        return False
+    # Command substitution runs a command the head-word rule never sees:
+    # `echo $(git commit -m x)` (techne#1339).
+    if _has_substitution(command):
         return False
     segments = _split_bash_segments(command)
     if not segments:
@@ -406,18 +426,73 @@ def _bash_is_readonly_noise(command: str) -> bool:
         head = tokens[i].rsplit("/", 1)[-1]  # basename of e.g. /bin/ls
         if head not in _READONLY_BASH_HEADS:
             return False
-        if head in ("sed", "awk") and any(t.startswith("-i") for t in tokens[i + 1 :]):
-            return False  # in-place edit mutates a file
-        if head == "find" and any(
-            t in ("-delete", "-exec", "-execdir", "-ok", "-okdir") or t.startswith("-fprint")
-            for t in tokens[i + 1 :]
-        ):
-            return False  # find action that deletes / runs a command / writes a file
-        if head == "sort" and any(
-            t.startswith("-o") or t.startswith("--output") for t in tokens[i + 1 :]
-        ):
-            return False  # `sort -o file` writes in place
+        if _head_mutates(head, tokens[i + 1 :], seg):
+            return False
     return True
+
+
+# fd-dups that write no file: `2>&1`, `>&2`, `>&-`.
+_FD_DUP = re.compile(r"\d*>&(?:\d+|-)")
+# A sed `w`/`W` file write or `e` command, or an `e` flag on `s///`.
+_SED_WRITES = re.compile(r"(?:^|[\s;{}'\"/0-9$])[wWe]\s+\S|/[a-zA-Z0-9]*e(?:['\"\s]|$)")
+
+
+def _has_substitution(command: str) -> bool:
+    """`$(`, a backtick or `<(` outside single quotes. Double quotes do not stop
+    substitution, so only single quotes are skipped."""
+    in_single = False
+    for k, ch in enumerate(command):
+        if ch == "'":
+            in_single = not in_single
+        elif not in_single and (ch == "`" or command[k : k + 2] in ("$(", "<(")):
+            return True
+    return False
+
+
+def _short_cluster_has(t: str, letters: str) -> bool:
+    """True for a single-dash option cluster (`-ni`, `-ro`) holding any of letters."""
+    return t.startswith("-") and not t.startswith("--") and any(c in t[1:] for c in letters)
+
+
+def _head_mutates(head: str, rest: list[str], seg: str) -> bool:
+    """Whether a read-only head's arguments make it write, delete or run something.
+    Errs toward True: an extra observation is cheap, a dropped write is not."""
+    if head == "sed":
+        return (
+            any(t.startswith("--in-place") or _short_cluster_has(t, "i") for t in rest)
+            or bool(_SED_WRITES.search(seg.split(None, 1)[-1]))
+        )
+    if head == "awk":
+        # `-i` loads an extension (inplace); system() and `| "cmd"` run commands.
+        return any(t.startswith("-i") or "system" in t or "|" in t for t in rest)
+    if head == "find":
+        return any(
+            t in ("-delete", "-exec", "-execdir", "-ok", "-okdir", "-fls")
+            or t.startswith("-fprint")
+            for t in rest
+        )
+    if head == "fd":
+        return any(t.startswith("--exec") or _short_cluster_has(t, "xX") for t in rest)
+    if head == "sort":
+        return any(t.startswith("--output") or _short_cluster_has(t, "o") for t in rest)
+    if head == "uniq":
+        # `uniq IN OUT` writes OUT. -f/-s/-w take a value.
+        positional, skip = 0, False
+        for t in rest:
+            if skip:
+                skip = False
+            elif t in ("-f", "-s", "-w"):
+                skip = True
+            elif not t.startswith("-"):
+                positional += 1
+        return positional >= 2
+    if head == "tree":
+        return any(t.startswith("-o") for t in rest)
+    if head == "date":
+        return any(t.startswith("--set") or _short_cluster_has(t, "s") for t in rest)
+    if head == "hostname":
+        return any(not t.startswith("-") for t in rest)  # `hostname NAME` sets it
+    return False
 
 
 def should_capture(config: Config, tool_name: str, tool_input: dict | None = None) -> bool:
@@ -434,7 +509,7 @@ def should_capture(config: Config, tool_name: str, tool_input: dict | None = Non
         return False
     if tool_name in SKIP_TOOLS:
         return False
-    if tool_name.startswith("mcp__memory__"):
+    if tool_name.startswith("mcp__memory__") or is_rail_tool(tool_name):
         return False
     return True
 

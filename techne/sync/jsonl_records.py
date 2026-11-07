@@ -20,7 +20,7 @@ import gzip
 import json
 from pathlib import Path
 
-from techne.hooks.post_tool_use import SKIP_TOOLS, _bash_is_readonly_noise
+from techne.hooks.post_tool_use import SKIP_TOOLS, _bash_is_readonly_noise, is_rail_tool
 
 
 def _open_text(path: Path):
@@ -139,7 +139,8 @@ def tool_result_text(result) -> str:
 def should_import(tool_name: str, tool_input: dict | None = None) -> bool:
     """Filter for backfill — looser than the live ``should_capture`` hook.
 
-    Drops the explicit blocklist (``SKIP_TOOLS``) and the memory-MCP tools.
+    Drops the explicit blocklist (``SKIP_TOOLS``), the memory-MCP tools and techne's
+    own rail tools (``is_rail_tool``).
     Historical Bash/Read is worth backfilling (the live hook skips them only for
     runtime overhead) — BUT pure read-only Bash navigation (``ls``/``grep``/``cd``…)
     carries no durable signal and only dilutes the ledger and vector index, so it
@@ -149,7 +150,7 @@ def should_import(tool_name: str, tool_input: dict | None = None) -> bool:
     """
     if tool_name in SKIP_TOOLS:
         return False
-    if tool_name.startswith("mcp__memory__"):
+    if tool_name.startswith("mcp__memory__") or is_rail_tool(tool_name):
         return False
     if (
         tool_name == "Bash"

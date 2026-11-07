@@ -130,6 +130,19 @@ class TestShouldCapture:
         assert should_capture(config, "mcp__memory__search") is False
         assert should_capture(config, "mcp__memory__store") is False
 
+    def test_should_capture_rail_tools_skipped(self):
+        """techne's own rail tools are skipped, so a drain makes no new debt (techne#1283)."""
+        config = _make_config()
+        rails = ("reflect_emit", "reflect_ingest", "consolidate_emit", "dream_ingest",
+                 "faithfulness_emit", "memory_claims_ingest", "conflict_emit",
+                 "federation_conflict_ingest")
+        names = [f"mcp__techne__techne_{r}" for r in rails]
+        for t in names + ["mcp__renamed__techne_reflect_emit"]:
+            assert should_capture(config, t) is False, t
+        for t in ("mcp__techne__techne_store", "mcp__techne__techne_send",
+                  "mcp__techne__techne_recall", "mcp__techne__techne_check_evidence"):
+            assert should_capture(config, t) is True, t
+
     def test_should_capture_grep_and_websearch_captured(self):
         """Grep and WebSearch are captured by default (not in SKIP_TOOLS)."""
         config = _make_config()
@@ -168,6 +181,21 @@ class TestBashReadonlyNoiseFilter:
         # must still count as noise.
         "grep -n foo bar.py 2>&1 | tail",
         "ls -la 2>&1",
+        "echo x >&2",
+        # single quotes stop substitution
+        "echo '$(git push)'",
+        # read-only uses of heads that can also write (techne#1339)
+        "sed 's/foo/bar/g' f",
+        "sed -n '/^Date/p' f",
+        "sed -e 's/a/b/' f",
+        "awk '{print $1}' f",
+        "fd -e py",
+        "sort -k1 f",
+        "uniq -c f",
+        "uniq -f 1 f",
+        "tree -L 2",
+        "date +%s",
+        "hostname -f",
     ])
     def test_readonly_commands_dropped(self, cmd):
         assert should_capture(self._cfg(), "Bash", {"command": cmd}) is False
@@ -188,6 +216,29 @@ class TestBashReadonlyNoiseFilter:
         "find . -name '*.pyc' -delete",
         "find . -type d -exec rm -rf {} +",
         "sort -o out.txt in.txt",
+        # techne#1339: command substitution runs a command the head rule never sees
+        "echo $(git commit -m x)",
+        "echo `git commit -m x`",
+        "cd x && echo $(pytest -q)",
+        'echo "$(rm x)"',
+        "cat <(git push)",
+        # techne#1339: read-only heads that write, delete or run something
+        "awk 'BEGIN{system(\"rm -rf x\")}'",
+        "awk '{print | \"sh\"}' f",
+        "sed -n 'w out' f",
+        "sed 's/a/b/w out' f",
+        "sed 's/a/b/e' f",
+        "sed --in-place s/a/b/ f",
+        "sed -Ei s/a/b/ f",
+        "sed -ni p f",
+        "ls >& out",
+        "find . -fls o",
+        "fd -x rm",
+        "sort -ro f",
+        "uniq f out",
+        "tree -o f",
+        "date -s 12:00",
+        "hostname newhost",
     ])
     def test_signal_commands_captured(self, cmd):
         assert should_capture(self._cfg(), "Bash", {"command": cmd}) is True
