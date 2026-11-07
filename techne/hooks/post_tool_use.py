@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from typing import NamedTuple
 
 from techne.config import Config
+from techne.core import shell_lex
 
 # Throttle window: skip a due reminder whose last_surfaced_at is within this many
 # seconds. ~3h keeps the signal fresh without repeating on every tool call. (#207)
@@ -323,115 +324,10 @@ def _skip_env_prefix(tokens: list[str], i: int = 0) -> int:
     return i
 
 
-def _split_bash_segments(command: str) -> list[str]:
-    """Split a compound command into top-level segments on shell operators
-    (``&&`` ``||`` ``;`` ``|`` ``|&`` ``&`` newline), ignoring operators inside
-    single or double quotes or escaped with a backslash.
-
-    Quote-awareness matters: a naive split on ``|`` would break a ``grep``
-    regex-alternation pattern (``grep "a|b"``) mid-quote, leaving a fragment whose
-    "head" looks like a non-read-only command — so pure grep noise would leak
-    through. Escapes matter the other way: ``echo it\\'s; touch x`` must not open a
-    quote at the escaped ``'`` and swallow the ``; touch x`` (techne#1339).
-
-    A lone ``&`` separates (``ls & git commit``), but not when it is part of a
-    redirect: ``2>&1``, ``&>f``, ``<&3``.
-    """
-    segs: list[str] = []
-    buf: list[str] = []
-    quote: str | None = None
-    i, n = 0, len(command)
-    while i < n:
-        ch = command[i]
-        if ch == "\\" and quote != "'":
-            buf.append(command[i : i + 2])
-            i += 2
-            continue
-        if quote:
-            buf.append(ch)
-            if ch == quote:
-                quote = None
-            i += 1
-            continue
-        if ch in ("'", '"'):
-            quote = ch
-            buf.append(ch)
-            i += 1
-            continue
-        if command[i : i + 2] in ("&&", "||", "|&"):
-            segs.append("".join(buf))
-            buf = []
-            i += 2
-            continue
-        lone_amp = (
-            ch == "&"
-            and (i == 0 or command[i - 1] not in "<>")
-            and (i + 1 >= n or command[i + 1] != ">")
-        )
-        if ch in (";", "|", "\n") or lone_amp:
-            segs.append("".join(buf))
-            buf = []
-            i += 1
-            continue
-        buf.append(ch)
-        i += 1
-    segs.append("".join(buf))
-    return [s.strip() for s in segs if s.strip()]
-
-
-def _words(seg: str) -> list[str]:
-    """Shell words of one segment: split on unquoted whitespace, quotes removed,
-    backslash escapes resolved. Enough to read a head and its arguments; no
-    expansion of any kind."""
-    words: list[str] = []
-    cur: list[str] = []
-    have = False  # a word is open, even if empty ('' is a word)
-    quote: str | None = None
-    i, n = 0, len(seg)
-    while i < n:
-        ch = seg[i]
-        if quote == "'":
-            if ch == "'":
-                quote = None
-            else:
-                cur.append(ch)
-            i += 1
-            continue
-        if ch == "\\":
-            nxt = seg[i + 1 : i + 2]
-            if quote == '"' and nxt not in ('$', '`', '"', "\\", "\n"):
-                cur.append(ch)  # inside double quotes most escapes stay literal
-            elif nxt:
-                cur.append(nxt)
-            else:
-                cur.append(ch)  # a trailing backslash is literal
-            have = True
-            i += 2
-            continue
-        if quote == '"':
-            if ch == '"':
-                quote = None
-            else:
-                cur.append(ch)
-            i += 1
-            continue
-        if ch in ("'", '"'):
-            quote = ch
-            have = True
-            i += 1
-            continue
-        if ch.isspace():
-            if have:
-                words.append("".join(cur))
-                cur, have = [], False
-            i += 1
-            continue
-        cur.append(ch)
-        have = True
-        i += 1
-    if have:
-        words.append("".join(cur))
-    return words
+# The quote model is shared with the evidence gate and grep-assist
+# (techne/core/shell_lex.py). `_split_bash_segments` keeps its name for them.
+_split_bash_segments = shell_lex.split_segments
+_words = shell_lex.words
 
 
 def _bash_is_readonly_noise(command: str) -> bool:
@@ -447,17 +343,23 @@ def _bash_is_readonly_noise(command: str) -> bool:
     """
     if not command or not command.strip():
         return False
+    # Heredoc bodies are data, not commands: `cat <<EOF` with `ls it's` in the
+    # body must not open a quote that hides the `touch x` after it.
+    stripped = shell_lex.strip_heredoc_bodies(command)
     # A real output redirect (`>` / `>>`) mutates a file → capture. Ignore fd-dups
     # like `2>&1` / `>&2` / `>&-`: they don't write a file, so a read-only command
     # piping through `2>&1` shouldn't be treated as a mutation. `>& out` and
     # `>&1out` are not fd-dups: they write a file (techne#1339).
-    if ">" in _FD_DUP.sub("", command):
+    if _has_redirect(stripped):
         return False
     # Command substitution runs a command the head-word rule never sees:
-    # `echo $(git commit -m x)` (techne#1339).
-    if _has_substitution(command):
+    # `echo $(git commit -m x)` (techne#1339). An unquoted heredoc body expands
+    # substitutions too, so a stripped body that held one also captures.
+    if shell_lex.has_substitution(stripped):
         return False
-    segments = _split_bash_segments(command)
+    if stripped != command and ("$(" in command or "`" in command):
+        return False
+    segments = _split_bash_segments(stripped)
     if not segments:
         return False
     for seg in segments:
@@ -470,7 +372,12 @@ def _bash_is_readonly_noise(command: str) -> bool:
         i = 0
         while i < len(tokens) and "=" in tokens[i] and not tokens[i].startswith("-"):
             i += 1
+        start = i
         i = _skip_env_prefix(tokens, i)
+        # `env -S'cmd'` runs cmd, and the prefix skip walks past it as an option.
+        prefix = tokens[start:i]
+        if any(_cluster_hits(t, "S", "uCP") or _long_is(t, "--split-string") for t in prefix):
+            return False
         if i >= len(tokens):
             continue  # only assignments, or a bare `env` — benign
         head = tokens[i].rsplit("/", 1)[-1]  # basename of e.g. /bin/ls
@@ -485,32 +392,14 @@ def _bash_is_readonly_noise(command: str) -> bool:
 _FD_DUP = re.compile(r"\d*>&(?:\d+|-)(?=$|[\s;|&)])")
 
 
-def _has_substitution(command: str) -> bool:
-    """`$(`, a backtick, or `<(`/`>(` that the shell would run: not inside single
-    quotes, not backslash-escaped. Inside double quotes `$(` and backticks still
-    run; a `'` there is literal."""
-    quote: str | None = None
-    i, n = 0, len(command)
-    while i < n:
-        ch = command[i]
-        if quote == "'":
-            if ch == "'":
-                quote = None
-            i += 1
-            continue
-        if ch == "\\":
-            i += 2
-            continue
-        if ch == "`" or command[i : i + 2] == "$(":
-            return True
-        if quote is None and command[i : i + 2] in ("<(", ">("):
-            return True
-        if ch == '"':
-            quote = None if quote == '"' else '"'
-        elif ch == "'" and quote is None:
-            quote = "'"
-        i += 1
-    return False
+def _has_redirect(command: str) -> bool:
+    """A `>` that is code (not quoted, escaped or in a comment) and not part of
+    an fd-dup."""
+    cls, _ = shell_lex.classify(command)
+    dup = {k for m in _FD_DUP.finditer(command) for k in range(m.start(), m.end())}
+    return any(
+        ch == ">" and cls[k] == shell_lex.CODE and k not in dup for k, ch in enumerate(command)
+    )
 
 
 def _cluster_hits(t: str, hit: str, stop: str = "") -> bool:
@@ -548,6 +437,8 @@ _SED_SAFE_LONG = frozenset(
         "--posix",
         "--debug",
         "--sandbox",
+        "--version",
+        "--help",
     }
 )
 # One sed command that only reads or prints: an optional address or range, an
@@ -600,7 +491,7 @@ def _sed_is_readonly(rest: list[str]) -> bool:
         i += 1
     if not scripts:
         if not positional:
-            return False
+            return True  # `sed --version`: nothing runs
         scripts = [positional[0]]
     for script in scripts:
         for cmd in re.split(r"[;\n]", script):
@@ -657,19 +548,29 @@ def _head_mutates(head: str, rest: list[str]) -> bool:
         for t in rest:
             if skip:
                 skip = False
-            elif t in ("-f", "-s", "-w", "--skip-fields", "--skip-chars", "--check-chars"):
-                skip = True
+            elif t in ("--skip-fields", "--skip-chars", "--check-chars") or (
+                t.startswith("-") and not t.startswith("--") and t[-1:] in ("f", "s", "w")
+            ):
+                skip = True  # a value follows (`uniq -cf 1 f`)
             elif t == "-" or not t.startswith("-"):
                 positional += 1
         return positional >= 2
     if head == "tree":
         return any(_cluster_hits(t, "o", "LPIHT") for t in rest)
     if head == "date":
-        return any(_long_is(t, "--set") or _cluster_hits(t, "s", "dfrI") for t in rest)
+        skip = False
+        for t in rest:
+            if skip:
+                skip = False  # the value of -d/-f/-r (`date -d '-5 seconds'`)
+            elif t in ("-d", "-f", "-r", "--date", "--file", "--reference"):
+                skip = True
+            elif _long_is(t, "--set") or _cluster_hits(t, "s", "dfrI"):
+                return True
+        return False
     if head == "hostname":
         return any(not t.startswith("-") for t in rest)  # `hostname NAME` sets it
     if head == "rg":
-        return any(t.startswith("--pre") for t in rest)  # --pre runs a command per file
+        return any(t == "--pre" or t.startswith("--pre=") for t in rest)  # runs a command per file
     return False
 
 

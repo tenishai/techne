@@ -205,6 +205,17 @@ class TestBashReadonlyNoiseFilter:
         "awk -F'|' '{print $1}' f",
         "awk 'a || b' f",
         "\\ls",
+        # PR 1353 review, round 2
+        "rg --pretty foo",
+        "sed --version",
+        "date -d '-5 seconds'",
+        "uniq -cf 1 f",
+        "echo $((1+2))",
+        "ls # git push",
+        'echo "a>b"',
+        "cat <<'EOF'\nhello > there\nEOF",
+        "awk -v x=1 '{print x}' f",
+        "ls \\\n-la",
     ])
     def test_readonly_commands_dropped(self, cmd):
         assert should_capture(self._cfg(), "Bash", {"command": cmd}) is False
@@ -281,6 +292,31 @@ class TestBashReadonlyNoiseFilter:
         "fd --exec rm",
         "date --set 1",
         "rg --pre ./x y",
+        # PR 1353 review, round 2: line continuations join words
+        "find . -name in \\\n-delete",
+        "sed -n 1p in \\\n-i",
+        "sort in \\\n-o out",
+        # env -S runs its argument
+        "env -S'touch x'",
+        "env --split-string='touch x'",
+        # an apostrophe in a comment, in $'...', or in a heredoc body opens no quote
+        "cd . # don't\ngit commit -m x",
+        "ls # it's\ntouch x",
+        "echo $'it\\'s'; touch x",
+        "echo $'it\\'s' $(touch x)",
+        "cat <<EOF\nls it's\nEOF\ntouch x",
+        # an unquoted heredoc body runs its substitutions
+        "cat <<EOF\n$(touch x)\nEOF",
+        # every sed script is checked, however it is given
+        "sed -e p -e 'w out' f",
+        "sed --expression='w out' f",
+        "sed -e'w out' f",
+        "sed -- 'w out' f",
+        "sed -n '/a/wout' in",
+        "echo \"name='$(touch x)'\"",
+        # awk options before the program are skipped, not trusted
+        "awk -v x=1 'BEGIN{system(\"x\")}'",
+        "awk -- 'BEGIN{system(\"x\")}'",
     ])
     def test_signal_commands_captured(self, cmd):
         assert should_capture(self._cfg(), "Bash", {"command": cmd}) is True

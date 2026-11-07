@@ -1888,7 +1888,9 @@ def emit_reflection_pass(
                     #: The session's observation count AT WRITE TIME. `total` alone
                     #: cannot re-open a session that was judged empty and later grew,
                     #: because this marker is the only thing the nudge reads (#734 r2).
-                    "observations": len(observations),
+                    #: In the floor's units, since pending_reflection compares it
+                    #: against a count without rail rows (#1283).
+                    "observations": _floor_count(observations),
                     "emitted": emitted_ids,
                     "total": total,
                     "remaining": remaining,

@@ -974,7 +974,17 @@ class TestSuiteEvidence:
         # grammar misses the round-3 regression entirely: verified by emulating
         # each prior implementation, the body-quote shapes alone catch round 4's
         # but not round 3's.
-        prefixes = ["", 'git commit -m "fix: a message\n\nspanning lines." && ']
+        prefixes = [
+            "",
+            'git commit -m "fix: a message\n\nspanning lines." && ',
+            # PR 1353 review, Critical: an escaped quote of odd parity. The splitter
+            # learned escapes and the mask did not, so the mask hid the `<<` while
+            # the splitter split the body into commands. Both now share shell_lex.
+            'git commit -m "bump 5\\" size"\n',
+            "echo it\\'s\n",
+            "echo $'it\\'s'\n",
+            "cd . # don't\n",
+        ]
 
         for prefix, opener, body, runner in itertools.product(
             prefixes, openers, bodies, runner_lines
