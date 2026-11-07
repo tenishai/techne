@@ -31,8 +31,8 @@ def test_a_secret_in_the_trigger_is_not_stored(tmp_path):
 
 
 def test_a_secret_straddling_the_200_char_cut_leaves_no_fragment(tmp_path):
-    # Cut first and the fragment ("sk-ant-api03-" + a few chars) would no longer
-    # match the pattern, so it would be stored as-is.
+    # Cut first and the fragment left at the 200-character mark ("sk-ant-api") no
+    # longer matches the pattern, so it would be stored as-is.
     db = tmp_path / "t.db"
     _log(db, "x" * 190 + SECRET)
     [snippet] = _snippets(db)
