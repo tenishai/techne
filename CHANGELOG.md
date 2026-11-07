@@ -62,6 +62,21 @@ All notable changes to techne are documented here. Format loosely follows
   still showed the successor. The `absorbed` note is kept as history. A row the old
   behaviour already left half-reactivated (active, but `superseded_by` still set) is repaired
   by running `tag <id> --status active` on it again.
+- **Bash capture sees writes the read-only filter used to drop** (#1339). A command that
+  runs or writes inside `$(...)`, backticks or `<(...)`, after a lone `&`, or through a
+  read-only head (`sed` outside a small read-only command set, `awk` with `system()` or a
+  pipe, `sort -o`, `uniq IN OUT`, `tree -o`, `date -s`, `hostname NAME`, `rg --pre`,
+  `fd -x`, `find -fls`, `>& file`, `env -S`) is now captured, so the evidence gate can see
+  it. The capture filter, the evidence gate and grep-assist now share one quote model
+  (`techne/core/shell_lex.py`) that honours double quotes, backslash escapes, `$'...'`,
+  comments and line continuations; heredoc bodies are skipped by the filter as they are
+  by the gate.
+- **Draining reflection debt no longer creates new debt** (#1283). Calls to techne's own
+  rail tools (reflect, consolidate, faithfulness, dream, memory_claims and conflict
+  emit/ingest) no longer count toward `reflect.min_observations_per_thread`. They are still
+  captured, so `check_evidence` keeps backing a drain session's claims. A queue row
+  already held by a thread of only rail calls can no longer be emitted; run
+  `techne reflect reconcile --apply` once after upgrading to park it.
 
 ## [0.19.1] — 2026-10-30
 

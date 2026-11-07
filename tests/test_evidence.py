@@ -935,6 +935,14 @@ class TestSuiteEvidence:
             is False
         )
 
+    def test_a_hash_in_a_parameter_expansion_hides_no_runner(self):
+        """PR 1353 review, round 3, Critical: `${x:- #}` was read as starting a
+        comment, so the `pytest` after it vanished and a failing run elsewhere in
+        the window was certified."""
+        from techne.core.evidence import _command_runs_tests
+
+        assert _command_runs_tests("echo ${x:- #}; pytest -q") is True
+
     def test_property_no_heredoc_body_line_is_ever_a_command(self):
         """Generated commands: a runner inside a body must never be an invocation.
 
@@ -974,7 +982,17 @@ class TestSuiteEvidence:
         # grammar misses the round-3 regression entirely: verified by emulating
         # each prior implementation, the body-quote shapes alone catch round 4's
         # but not round 3's.
-        prefixes = ["", 'git commit -m "fix: a message\n\nspanning lines." && ']
+        prefixes = [
+            "",
+            'git commit -m "fix: a message\n\nspanning lines." && ',
+            # PR 1353 review, Critical: an escaped quote of odd parity. The splitter
+            # learned escapes and the mask did not, so the mask hid the `<<` while
+            # the splitter split the body into commands. Both now share shell_lex.
+            'git commit -m "bump 5\\" size"\n',
+            "echo it\\'s\n",
+            "echo $'it\\'s'\n",
+            "cd . # don't\n",
+        ]
 
         for prefix, opener, body, runner in itertools.product(
             prefixes, openers, bodies, runner_lines

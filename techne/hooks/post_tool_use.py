@@ -12,12 +12,14 @@ concurrency-safe across simultaneous sessions.
 """
 
 import json
+import re
 import sys
 import time
 from datetime import datetime, timezone
 from typing import NamedTuple
 
 from techne.config import Config
+from techne.core import shell_lex
 
 # Throttle window: skip a due reminder whose last_surfaced_at is within this many
 # seconds. ~3h keeps the signal fresh without repeating on every tool call. (#207)
@@ -322,51 +324,10 @@ def _skip_env_prefix(tokens: list[str], i: int = 0) -> int:
     return i
 
 
-def _split_bash_segments(command: str) -> list[str]:
-    """Split a compound command into top-level segments on shell operators
-    (``&&`` ``||`` ``;`` ``|`` ``&`` newline), ignoring operators that appear
-    inside single/double quotes.
-
-    Quote-awareness matters: a naive split on ``|`` would break a ``grep``
-    regex-alternation pattern (``grep "a|b"``) mid-quote, leaving a fragment whose
-    "head" looks like a non-read-only command — so pure grep noise would leak
-    through. We only need each segment's leading command word, so a light scanner
-    that respects quotes is enough (no full shell parse).
-    """
-    segs: list[str] = []
-    buf: list[str] = []
-    quote: str | None = None
-    i, n = 0, len(command)
-    while i < n:
-        ch = command[i]
-        if quote:
-            buf.append(ch)
-            if ch == quote:
-                quote = None
-            i += 1
-            continue
-        if ch in ("'", '"'):
-            quote = ch
-            buf.append(ch)
-            i += 1
-            continue
-        if command[i : i + 2] in ("&&", "||"):
-            segs.append("".join(buf))
-            buf = []
-            i += 2
-            continue
-        # Note: a lone `&` is NOT a separator here — splitting on it would shatter
-        # fd-dups like `2>&1`. Backgrounding (`cmd &`) is rare in agent commands and
-        # irrelevant to head detection, so leave `&` inside the segment.
-        if ch in (";", "|", "\n"):
-            segs.append("".join(buf))
-            buf = []
-            i += 1
-            continue
-        buf.append(ch)
-        i += 1
-    segs.append("".join(buf))
-    return [s.strip() for s in segs if s.strip()]
+# The quote model is shared with the evidence gate and grep-assist
+# (techne/core/shell_lex.py). `_split_bash_segments` keeps its name for them.
+_split_bash_segments = shell_lex.split_segments
+_words = shell_lex.words
 
 
 def _bash_is_readonly_noise(command: str) -> bool:
@@ -375,23 +336,34 @@ def _bash_is_readonly_noise(command: str) -> bool:
 
     Conservative by construction: a single non-read-only segment (e.g. a
     ``git commit`` hidden behind ``cd x && …``), any output redirect (``>``/``>>``,
-    which mutates a file regardless of the head command), or an in-place
-    ``sed -i``/``awk -i`` makes the whole command capture-worthy. When in doubt we
-    CAPTURE — a missed observation is far cheaper than a silently-dropped commit or
-    test result the evidence gate needs.
+    which mutates a file regardless of the head command), a command substitution,
+    or a read-only head used to write (``sed -i``, ``sort -o``) makes the whole
+    command capture-worthy. When in doubt we CAPTURE — a missed observation is far
+    cheaper than a silently-dropped commit or test result the evidence gate needs.
     """
     if not command or not command.strip():
         return False
+    # Heredoc bodies are data, not commands: `cat <<EOF` with `ls it's` in the
+    # body must not open a quote that hides the `touch x` after it.
+    stripped = shell_lex.strip_heredoc_bodies(command)
     # A real output redirect (`>` / `>>`) mutates a file → capture. Ignore fd-dups
-    # like `2>&1` / `>&2` (the `>` is followed by `&`): they don't write a file, so
-    # a read-only command piping through `2>&1` shouldn't be treated as a mutation.
-    if ">" in command.replace(">&", ""):
+    # like `2>&1` / `>&2` / `>&-`: they don't write a file, so a read-only command
+    # piping through `2>&1` shouldn't be treated as a mutation. `>& out` and
+    # `>&1out` are not fd-dups: they write a file (techne#1339).
+    if _has_redirect(stripped):
         return False
-    segments = _split_bash_segments(command)
+    # Command substitution runs a command the head-word rule never sees:
+    # `echo $(git commit -m x)` (techne#1339). An unquoted heredoc body expands
+    # substitutions too, so a stripped body that held one also captures.
+    if shell_lex.has_substitution(stripped):
+        return False
+    if stripped != command and ("$(" in command or "`" in command):
+        return False
+    segments = _split_bash_segments(stripped)
     if not segments:
         return False
     for seg in segments:
-        tokens = seg.split()
+        tokens = _words(seg)
         # Skip leading `VAR=val` assignments AND any transparent `env` prefix to
         # find the real command head. Without the `env` skip this headed on `env`
         # itself — which IS in the read-only set — and dropped the whole command,
@@ -400,24 +372,212 @@ def _bash_is_readonly_noise(command: str) -> bool:
         i = 0
         while i < len(tokens) and "=" in tokens[i] and not tokens[i].startswith("-"):
             i += 1
+        start = i
         i = _skip_env_prefix(tokens, i)
+        # `env -S'cmd'` runs cmd, and the prefix skip walks past it as an option.
+        prefix = tokens[start:i]
+        if any(_cluster_hits(t, "S", "uCP") or _long_is(t, "--split-string") for t in prefix):
+            return False
         if i >= len(tokens):
             continue  # only assignments, or a bare `env` — benign
         head = tokens[i].rsplit("/", 1)[-1]  # basename of e.g. /bin/ls
         if head not in _READONLY_BASH_HEADS:
             return False
-        if head in ("sed", "awk") and any(t.startswith("-i") for t in tokens[i + 1 :]):
-            return False  # in-place edit mutates a file
-        if head == "find" and any(
-            t in ("-delete", "-exec", "-execdir", "-ok", "-okdir") or t.startswith("-fprint")
-            for t in tokens[i + 1 :]
-        ):
-            return False  # find action that deletes / runs a command / writes a file
-        if head == "sort" and any(
-            t.startswith("-o") or t.startswith("--output") for t in tokens[i + 1 :]
-        ):
-            return False  # `sort -o file` writes in place
+        if _head_mutates(head, tokens[i + 1 :]):
+            return False
     return True
+
+
+# fd-dups that write no file: `2>&1`, `>&2`, `>&-`, ended by a word boundary.
+_FD_DUP = re.compile(r"\d*>&(?:\d+|-)(?=$|[\s;|&)])")
+
+
+def _has_redirect(command: str) -> bool:
+    """A `>` that is code (not quoted, escaped or in a comment) and not part of
+    an fd-dup."""
+    cls, _ = shell_lex.classify(command)
+    dup = {k for m in _FD_DUP.finditer(command) for k in range(m.start(), m.end())}
+    return any(
+        ch == ">" and cls[k] == shell_lex.CODE and k not in dup for k, ch in enumerate(command)
+    )
+
+
+def _cluster_hits(t: str, hit: str, stop: str = "") -> bool:
+    """For a single-dash option cluster (`-ro`, `-ni`), whether a letter in *hit*
+    comes before any letter in *stop*. A *stop* letter takes a value, so the rest
+    of the token is that value, not more options (`sort -T/tmp/o`, `date -Is`)."""
+    if not t.startswith("-") or t.startswith("--") or t == "-":
+        return False
+    for c in t[1:]:
+        if c in hit:
+            return True
+        if c in stop:
+            return False
+    return False
+
+
+def _long_is(t: str, full: str, min_len: int = 3) -> bool:
+    """`t` names the long option *full*, including the unique prefixes getopt
+    accepts (`--o=f` for `--output`, `--in` for `--in-place`)."""
+    name = t.split("=", 1)[0]
+    return t.startswith("--") and len(name) >= min_len and full.startswith(name)
+
+
+# sed options that only change how input is read or printed.
+_SED_SAFE_SHORT = frozenset("nErszu")
+_SED_SAFE_LONG = frozenset(
+    {
+        "--quiet",
+        "--silent",
+        "--regexp-extended",
+        "--null-data",
+        "--zero-terminated",
+        "--separate",
+        "--unbuffered",
+        "--posix",
+        "--debug",
+        "--sandbox",
+        "--version",
+        "--help",
+    }
+)
+# One sed command that only reads or prints: an optional address or range, an
+# optional `!`, then a print/delete/hold-space command, `s` with read-only flags,
+# or `y`. Everything else (w, W, e, r, R, a, i, c, s///w, s///e, unknown) captures.
+_SED_ADDR = r"(?:\d+(?:~\d+)?|\$|/(?:[^/\\]|\\.)*/[IM]?)"
+_SED_READ_CMD = re.compile(
+    rf"^\s*(?:{_SED_ADDR}(?:\s*,\s*(?:{_SED_ADDR}|[+~]\d+))?)?\s*!?\s*\{{?\s*"
+    r"(?:[pP=lnNdDgGhHxz]|[qQ]\d*"
+    r"|s(?P<d>[^\\\n\s])(?:(?!(?P=d))[^\\]|\\.)*(?P=d)(?:(?!(?P=d))[^\\]|\\.)*(?P=d)[gpiImM0-9]*"
+    r"|y(?P<y>[^\\\n\s])(?:(?!(?P=y))[^\\]|\\.)*(?P=y)(?:(?!(?P=y))[^\\]|\\.)*(?P=y))?"
+    r"\s*\}?\s*$"
+)
+
+
+def _sed_is_readonly(rest: list[str]) -> bool:
+    """True only when every option is a read-only one and every script command
+    matches `_SED_READ_CMD`. A script in a file (`-f`) cannot be seen, so it
+    captures."""
+    scripts: list[str] = []
+    positional: list[str] = []
+    i = 0
+    while i < len(rest):
+        t = rest[i]
+        if t == "--":
+            positional += rest[i + 1 :]
+            break
+        if t.startswith("--"):
+            if _long_is(t, "--expression"):
+                if "=" in t:
+                    scripts.append(t.split("=", 1)[1])
+                else:
+                    scripts.append(rest[i + 1] if i + 1 < len(rest) else "")
+                    i += 1
+            elif t.split("=", 1)[0] not in _SED_SAFE_LONG:
+                return False  # --in-place, --file, --line-length, unknown
+        elif t.startswith("-") and t != "-":
+            for k, c in enumerate(t[1:], start=1):
+                if c == "e":
+                    if t[k + 1 :]:
+                        scripts.append(t[k + 1 :])
+                    else:
+                        scripts.append(rest[i + 1] if i + 1 < len(rest) else "")
+                        i += 1
+                    break
+                if c not in _SED_SAFE_SHORT:
+                    return False  # -i, -f, -l, unknown
+        else:
+            positional.append(t)
+        i += 1
+    if not scripts:
+        if not positional:
+            return True  # `sed --version`: nothing runs
+        scripts = [positional[0]]
+    for script in scripts:
+        for cmd in re.split(r"[;\n]", script):
+            if cmd.strip() and not _SED_READ_CMD.match(cmd):
+                return False
+    return True
+
+
+def _awk_mutates(rest: list[str]) -> bool:
+    """awk runs commands with system() and pipes, and edits in place with
+    `-i inplace`. Only -v and -F are known to be safe; any other option captures,
+    as does a program file (-f) that cannot be seen."""
+    i = 0
+    while i < len(rest):
+        t = rest[i]
+        if t == "--":
+            i += 1
+            break
+        if not t.startswith("-") or t == "-":
+            break
+        if t in ("-v", "-F"):
+            i += 2
+            continue
+        if t[:2] in ("-v", "-F"):
+            i += 1
+            continue
+        return True
+    program = rest[i] if i < len(rest) else ""
+    # `|` runs a command (`print | "sh"`, `"cmd" | getline`); `||` is logical or.
+    # `>` writes a file (`print > "o"`). A regex alternation (`/a|b/`) and a
+    # comparison (`$1 > 3`) also capture; awk can't be told apart here.
+    return (
+        not program
+        or "system" in program
+        or "|" in program.replace("||", "")
+        or ">" in program
+    )
+
+
+def _head_mutates(head: str, rest: list[str]) -> bool:
+    """Whether a read-only head's arguments make it write, delete or run something.
+    Errs toward True: an extra observation is cheap, a dropped write is not."""
+    if head == "sed":
+        return not _sed_is_readonly(rest)
+    if head == "awk":
+        return _awk_mutates(rest)
+    if head == "find":
+        return any(
+            t in ("-delete", "-exec", "-execdir", "-ok", "-okdir", "-fls")
+            or t.startswith("-fprint")
+            for t in rest
+        )
+    if head == "fd":
+        return any(t.startswith("--exec") or _cluster_hits(t, "xX", "tedEcjS") for t in rest)
+    if head == "sort":
+        return any(_long_is(t, "--output") or _cluster_hits(t, "o", "ktTS") for t in rest)
+    if head == "uniq":
+        # `uniq IN OUT` writes OUT. -f/-s/-w and their long forms take a value.
+        positional, skip = 0, False
+        for t in rest:
+            if skip:
+                skip = False
+            elif t in ("--skip-fields", "--skip-chars", "--check-chars") or (
+                t.startswith("-") and not t.startswith("--") and t[-1:] in ("f", "s", "w")
+            ):
+                skip = True  # a value follows (`uniq -cf 1 f`)
+            elif t == "-" or not t.startswith("-"):
+                positional += 1
+        return positional >= 2
+    if head == "tree":
+        return any(_cluster_hits(t, "o", "LPIHT") for t in rest)
+    if head == "date":
+        skip = False
+        for t in rest:
+            if skip:
+                skip = False  # the value of -d/-f/-r (`date -d '-5 seconds'`)
+            elif t in ("-d", "-f", "-r", "--date", "--file", "--reference"):
+                skip = True
+            elif _long_is(t, "--set") or _cluster_hits(t, "s", "dfrI"):
+                return True
+        return False
+    if head == "hostname":
+        return any(not t.startswith("-") for t in rest)  # `hostname NAME` sets it
+    if head == "rg":
+        return any(t == "--pre" or t.startswith("--pre=") for t in rest)  # runs a command per file
+    return False
 
 
 def should_capture(config: Config, tool_name: str, tool_input: dict | None = None) -> bool:

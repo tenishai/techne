@@ -420,92 +420,13 @@ _TEST_MODULES = frozenset({"pytest", "unittest", "nox", "tox"})
 _DASH_M_IS_A_MESSAGE = frozenset({"git", "hg", "svn", "jj", "bzr", "hub", "gh"})
 
 
-# `<<` or `<<-`, an optionally quoted or backslash-escaped tag, and a tag charset
-# wide enough for real delimiters (`PY-1`, `EOF.2`). The lookarounds keep a
-# herestring (`<<<word`) from matching: without them the scan finds the `<<` at
-# offset 1 of `<<<` and strips to end of command, swallowing a real run below.
-_HEREDOC_OPEN = re.compile(
-    r"(?<!<)<<(-?)(?!<)\s*(?:\\|(['\"]))?([A-Za-z_][A-Za-z0-9_.\-]*)(?(2)\2|)"
-)
-
-
-def _mask_quoted_line(line: str, quote: str | None) -> tuple[str, str | None]:
-    """Mask one line's quoted spans, carrying quote state in and out.
-
-    `echo "a << b"` contains no heredoc, but an unmasked scan reads `b` as a
-    delimiter and strips every following line hunting a terminator that never
-    comes — swallowing a real test run below.
-
-    State carries across newlines, because a quoted argument may span them and
-    ``_split_bash_segments`` models it that way. A per-line mask that restarts
-    clean disagrees: after a multi-line quoted commit message, the next line reads
-    the message's CLOSING quote as an opening one and hides a real heredoc opener.
-
-    But state must NOT carry across a heredoc body, which is why this is threaded
-    by the caller rather than run over the whole command. Body text is not subject
-    to shell quoting at all, so a stray apostrophe in a script being written —
-    ``# don't remove this`` — would otherwise open a quote that never closes and
-    poison every command line after it. Masking the whole command up front cannot
-    express that distinction, because the mask would run over text the segment
-    splitter never sees.
-    """
-    out: list[str] = []
-    for char in line:
-        if quote:
-            out.append("\x00" if char != quote else char)
-            if char == quote:
-                quote = None
-        elif char in ("'", '"'):
-            quote = char
-            out.append(char)
-        else:
-            out.append(char)
-    return "".join(out), quote
-
-
-def _strip_heredoc_bodies(command: str) -> str:
-    """Drop heredoc bodies, keeping the lines that are actually commands.
-
-    Quote-awareness is not enough here. ``_split_bash_segments`` splits on ``\\n``,
-    and a heredoc body is not quoted, so every line of it becomes a segment and a
-    body line beginning with a runner name becomes a command head. A script
-    written to disk with ``cat > probe.py <<'PY'`` whose text contains a
-    ``pytest`` line would then read as a test run, and whatever count-shaped text
-    that script printed would be admitted as test evidence — the eighth instance
-    of the same class this whole gate exists to close.
-    """
-    lines = command.split("\n")
-    kept: list[str] = []
-    i = 0
-    # Threaded across KEPT lines only. The body-skipping loop below advances `i`
-    # without touching `quote`, so a heredoc body cannot leak quote state into the
-    # commands that follow it.
-    quote: str | None = None
-    while i < len(lines):
-        line = lines[i]
-        kept.append(line)
-        # Match on the RAW line — a heredoc tag is usually quoted (`<<'PY'`), so
-        # scanning a masked line would blank out the tag itself. The mask is used
-        # only to LOCATE: a `<<` whose own position is inside a quoted span (as in
-        # `echo "a << b"`) opens nothing.
-        masked, quote = _mask_quoted_line(line, quote)
-        opens = [
-            (m.group(1) == "-", m.group(3))
-            for m in _HEREDOC_OPEN.finditer(line)
-            if masked[m.start()] != "\x00"
-        ]
-        i += 1
-        # A line may open several heredocs; their bodies follow in order.
-        for dash, tag in opens:
-            # Terminator rules differ, and being lenient ends a body EARLY: for
-            # plain `<<TAG` the terminator must be the whole line, so a tag that
-            # appears indented inside the body is body text, not the end. Only
-            # `<<-TAG` permits leading tabs.
-            while i < len(lines) and (lines[i].lstrip("\t") if dash else lines[i]) != tag:
-                i += 1
-            i += 1  # skip the terminator itself
-    return "\n".join(kept)
-
+# The quote model, the heredoc mask and the heredoc stripper live in
+# techne/core/shell_lex.py, shared with the capture filter and grep-assist. They
+# drifted apart once (PR 1353 review: a heredoc body read as a test run), so there
+# is now one copy. These names are kept for existing callers and tests.
+from techne.core.shell_lex import HEREDOC_OPEN as _HEREDOC_OPEN  # noqa: E402,F401
+from techne.core.shell_lex import mask_line as _mask_quoted_line  # noqa: E402,F401
+from techne.core.shell_lex import strip_heredoc_bodies as _strip_heredoc_bodies  # noqa: E402
 
 #: Shells whose ``-c`` argument is a nested script the gate must look inside.
 #: NOT added to `_TEST_RUNNER_WRAPPERS`: that set matches a head whose ARGUMENT

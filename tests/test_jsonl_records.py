@@ -124,6 +124,10 @@ class TestShouldImport:
     def test_skips_memory_mcp(self):
         assert should_import("mcp__memory__store") is False
 
+    def test_imports_rail_tools(self):
+        """Backfill matches live capture: rail calls are kept (techne#1283)."""
+        assert should_import("mcp__techne__techne_reflect_ingest") is True
+
     def test_allows_ordinary_tool(self):
         assert should_import("Edit") is True
         assert should_import("mcp__techne__techne_search") is True
