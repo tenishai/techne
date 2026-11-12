@@ -2432,6 +2432,45 @@ def test_an_un_ingested_emit_does_not_orphan_its_thread(tmp_path):
     )
 
 
+def test_a_heal_while_batches_wait_does_not_re_offer_them_once_ingested(tmp_path):
+    """techne#1359. Emit several slices before ingesting any (the documented `emit -o`
+    loop), then emit until a pass comes back empty, so the #900 heal fires and drops
+    the waiting threads from the cursor. Ingest the waiting slices: every row drains.
+    The next emit must offer nothing; before the fix it re-rendered paid threads,
+    because the cursor never re-learned what ingest had drained."""
+    from techne.core.reflect import (
+        emit_reflection_pass,
+        ingest_reflection_batch,
+        pending_reflection_queue,
+    )
+
+    config = _mk_config(tmp_path, enabled=True)
+    session_id = _mk_multi_thread_session(config, days=4)
+
+    slices = []
+    while True:
+        p = emit_reflection_pass(config, session_id, limit=1)
+        if not p["count"] or p["batch"][0]["thread_id"] in {
+            i["thread_id"] for b in slices for i in b
+        }:
+            heal = p
+            break
+        slices.append(p["batch"])
+    assert len(slices) >= 3, "precondition: a multi-thread session, one slice per pass"
+    assert heal["count"] == 1, "precondition: the empty pass healed and re-offered"
+
+    for b in slices:
+        ingest_reflection_batch(config, _fill_raw_responses(b))
+    assert not pending_reflection_queue(config.db_path), "precondition: every row drained"
+
+    after = emit_reflection_pass(config, session_id)
+    assert after["count"] == 0, (
+        "drained threads must not be re-offered; got "
+        f"{[i['thread_id'] for i in after['batch']]} (techne#1359)"
+    )
+    assert after.get("remaining", 0) == 0
+
+
 def test_a_partial_pass_still_takes_the_next_slice(tmp_path):
     """THE NO-REGRESSION HALF, and the reason the heal is scoped to an empty batch.
 

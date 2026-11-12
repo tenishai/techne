@@ -1597,8 +1597,19 @@ def _emitted_keys(config: Config, session_id: str, marker: dict | None) -> set[s
     threads once. That is the safe direction: re-reading a thread costs a prompt, while
     dropping one loses the session's memory silently.
     """
+    drained = _drained_thread_ids(config, session_id)
     if marker and marker.get("key") == _CURSOR_KEY:
-        return set(marker.get("emitted", []))
+        # A DRAINED ROW IS DELIVERED, WHATEVER THE MARKER SAYS (techne#1359). The #900
+        # heal shrinks the cursor on an empty pass, which drops threads still waiting in
+        # an un-ingested `emit -o` file. Ingest then drains them, but nothing put them
+        # back, so the next pass re-rendered paid threads. The ledger outranks the
+        # cursor in both directions: owed rows heal back in, drained rows stay out.
+        return set(marker.get("emitted", [])) | drained
+    return drained
+
+
+def _drained_thread_ids(config: Config, session_id: str) -> set[str]:
+    """Thread ids whose reflection debt for *session_id* is already paid."""
     conn = connect(config.db_path)
     try:
         return {
