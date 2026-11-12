@@ -76,6 +76,7 @@ KNOWN_SHIPPED_HASHES: dict[str, tuple[str, ...]] = {
     "techne-promote": (
         "85c3a86dd8240b6f78a9a43a6325c0f7c414d1c8bfbd9fa605e740b3105db00b",  # 2026-08-17 #650
         "eb1f090f46809ab183c947119c13e53b9f63f9f21e3f603a04af5db6bac29b41",  # 2026-09-17 #958
+        "6042d2cb42dcf080e6d3ef226ed8072b0f793eb2439716ad93ce28a3a1cb9851",  # 2026-11-12 #1361
     ),
 }
 
@@ -89,7 +90,7 @@ KNOWN_SHIPPED_HASHES: dict[str, tuple[str, ...]] = {
 #: OUTGOING hash into KNOWN_SHIPPED_HASHES and updates this pin to the new one.
 CURRENT_SHIPPED_HASHES: dict[str, str] = {
     "self-care": "e89dc076d46ef5b78d051465557ce55d113dd7926b87385764b6f87a58b05a54",  # #1132
-    "techne-promote": "6042d2cb42dcf080e6d3ef226ed8072b0f793eb2439716ad93ce28a3a1cb9851",  # #1064
+    "techne-promote": "cf9305682e9da37eb562586e57fe62368b02cb5dca07d1d5bde58c271be7a9fc",  # #1361
 }
 
 
