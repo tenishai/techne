@@ -2866,7 +2866,8 @@ def _techne_reflect_ingest(args: dict, config: Config) -> dict:
     `prompt` from techne_reflect_emit; `thread_id` and `prompt_hash` are the values
     from that emit batch item. Candidates land in knowledge_candidates for review
     (`techne reflect review`); they only touch live knowledge/identity when
-    config.reflect.write_to == 'live'. Call once per answered thread.
+    effective_write_to(config) == 'live' (reflect.write_to='live' and a posture
+    that doesn't override it, #1360). Call once per answered thread.
     """
     from techne.core.reflect import ingest_one_and_drain
 

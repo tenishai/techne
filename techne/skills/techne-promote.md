@@ -37,7 +37,7 @@ Run from the techne repo. Use `techne` on PATH, or `.venv/bin/python -m techne.c
 
 5. **Ingest** the same file:
    `techne reflect ingest /tmp/techne-promote-<SID>.json`
-   Reports candidates written + threads skipped. Candidates land in `knowledge_candidates` (pending) unless `reflect.write_to=live`.
+   Reports candidates written + threads skipped. Candidates land in `knowledge_candidates` (pending) unless `reflect.write_to=live` and the posture doesn't override it: under `posture.mode: spool-primary` they always stay pending. The ingest output says which applies (#1360).
 
 6. **Review and promote the keepers.** `techne reflect review --status pending` lists them. Promote the ones that survive a second look: `techne reflect promote <candidate_id> --by <who> --reason "<why>"` (→ live knowledge/identity). Discard noise: `techne reflect discard <candidate_id> --by <who> --reason "<why>"`. Always pass `--by`: without it the audit trail records `unspecified`.
 

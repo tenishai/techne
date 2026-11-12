@@ -1188,6 +1188,84 @@ def test_cli_ingest_reports_a_parse_failure(tmp_path):
     assert result.exit_code == 0, result.output
 
 
+def _cli_ingest_one(tmp_path, config):
+    """Run `techne reflect ingest` on one valid candidate; return (output, knowledge rows)."""
+    import json as _json
+    import sqlite3
+    import unittest.mock as _mock
+
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.config import Config
+
+    session_id, _ = _mk_session_with_obs(config, 5)
+    _save_thread_row(
+        config,
+        session_id,
+        Thread(thread_num=1, label="a", summary="a", observation_indices=list(range(5))),
+    )
+    responses = tmp_path / "r.json"
+    responses.write_text(
+        _json.dumps(
+            [
+                {
+                    "session_id": session_id,
+                    "thread_id": f"{session_id}-1",
+                    "prompt_hash": "d",
+                    "raw_response": _candidate_array(),
+                }
+            ]
+        )
+    )
+    with _mock.patch.object(Config, "load", classmethod(lambda cls: config)):
+        result = CliRunner().invoke(main, ["reflect", "ingest", str(responses)])
+    assert result.exit_code == 0, result.output
+    with sqlite3.connect(config.db_path) as conn:
+        rows = conn.execute("SELECT count(*) FROM knowledge").fetchone()[0]
+    return result.output, rows
+
+
+def test_cli_ingest_under_spool_primary_says_candidates_stay_pending(tmp_path):
+    """#1360: spool-primary forces candidates, so ingest must not claim a promotion."""
+    config = _mk_config(tmp_path, enabled=False, write_to="live")
+    config.posture.mode = "spool-primary"
+    out, knowledge_rows = _cli_ingest_one(tmp_path, config)
+    assert knowledge_rows == 0, "spool-primary must not promote"
+    assert "promoted straight to knowledge" not in out
+    assert "posture spool-primary keeps reflect advisory" in out
+    assert "candidates stay pending" in out
+
+
+def test_cli_ingest_under_observe_live_still_reports_the_promotion(tmp_path):
+    """The live message stays for the case where candidates really are promoted."""
+    config = _mk_config(tmp_path, enabled=False, write_to="live")
+    config.posture.mode = "observe"
+    out, knowledge_rows = _cli_ingest_one(tmp_path, config)
+    assert knowledge_rows > 0
+    assert "promoted straight to knowledge" in out
+
+
+def test_reflect_summary_names_a_posture_override(tmp_path):
+    """`techne reflect` shows the effective write mode, and why it differs (#1360)."""
+    import unittest.mock as _mock
+
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.config import Config
+
+    config = _mk_config(tmp_path, enabled=True, write_to="live")
+    config.posture.mode = "spool-primary"
+    with _mock.patch.object(Config, "load", classmethod(lambda cls: config)):
+        result = CliRunner().invoke(main, ["reflect"])
+    assert result.exit_code == 0, result.output
+    assert (
+        "Write mode: candidates (reflect.write_to=live, overridden by posture spool-primary)"
+        in result.output
+    )
+
+
 def test_low_confidence_candidates_are_not_silently_dropped(tmp_path):
     """The same silence one line past validation, on the DEFAULT config.
 

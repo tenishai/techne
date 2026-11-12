@@ -4041,6 +4041,41 @@ def skills_remove(ctx):
         click.echo(line)
 
 
+def _write_mode_label(config: Config) -> str:
+    """The write mode ingest will actually use, naming a posture override (#1360).
+
+    `reflect.write_to` is only a request: under `posture.mode: spool-primary`,
+    `effective_write_to` forces candidates. Reporting the configured value told
+    operators their candidates were live while they sat pending.
+    """
+    from techne.core.reflect import effective_write_to
+
+    effective = effective_write_to(config)
+    if effective != config.reflect.write_to:
+        return (
+            f"{effective} (reflect.write_to={config.reflect.write_to}, "
+            f"overridden by posture {config.posture.mode})"
+        )
+    return effective
+
+
+def _ingest_write_mode_note(config: Config) -> str:
+    """What happened to the candidates this ingest wrote, by the mode in effect."""
+    from techne.core.reflect import effective_write_to
+
+    if effective_write_to(config) == "live":
+        return (
+            "write_to=live — candidates promoted straight to knowledge; "
+            "identity candidates stay pending for techne reflect review."
+        )
+    if config.reflect.write_to == "live":
+        return (
+            f"write_to=live, but posture {config.posture.mode} keeps reflect advisory: "
+            "candidates stay pending — review with: techne reflect review"
+        )
+    return "write_to=candidates — review with: techne reflect review"
+
+
 @main.group(invoke_without_command=True)
 @click.pass_context
 def reflect(ctx):
@@ -4062,7 +4097,7 @@ def reflect(ctx):
         return
     s = candidate_stats(config.db_path)
     click.echo(f"Reflect enabled: {config.reflect.enabled}")
-    click.echo(f"Write mode: {config.reflect.write_to}")
+    click.echo(f"Write mode: {_write_mode_label(config)}")
     click.echo(f"Pending: {s['pending']}")
     click.echo(f"Promoted: {s['promoted']}")
     click.echo(f"Discarded: {s['discarded']}")
@@ -4252,13 +4287,7 @@ def reflect_ingest(ctx, responses_file):
     if skipped:
         click.echo(f"skipped {skipped} thread(s) with empty raw_response")
     click.echo(f"reflection debt drained: {drained} thread(s)")
-    if config.reflect.write_to == "live":
-        click.echo(
-            "write_to=live — candidates promoted straight to knowledge; "
-            "identity candidates stay pending for techne reflect review."
-        )
-    else:
-        click.echo("write_to=candidates — review with: techne reflect review")
+    click.echo(_ingest_write_mode_note(config))
 
 
 #: Recorded when `reflect promote`/`discard` is run without `--by` (techne#953). This
