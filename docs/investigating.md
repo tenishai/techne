@@ -50,7 +50,10 @@ and add `allowed-tools: Bash(techne guide *), Bash(techne architect *), Bash(tec
 command must be pre-approved: an injected command never prompts, and outside auto mode
 an unapproved one aborts the whole skill. And a non-zero exit also aborts it, which is
 what the `|| echo` is for — it turns a failed load into a visible instruction rather than
-a skill that silently will not start. Other hosts that read the Agent Skills standard do
+a skill that silently will not start. Add `argument-hint: "<url> [context]"` as well:
+Claude Code shows it beside the name in the `/` menu, which is the only sign there that
+the skill takes a URL. It is display only. Enter on a menu entry still runs the skill at
+once with no URL, so accept the entry with Tab and then type the URL. Other hosts that read the Agent Skills standard do
 not run these lines, so keep the plain body above for them.
 
 **Why a stub and not a copy.** A copy is a second spelling of this document, and nothing

@@ -316,7 +316,11 @@ def skills_status(config: Config) -> list[SkillResult]:
 # stub frontmatter it recommends, and a second spelling of it in this module would be
 # exactly the kind of copy this stub exists to remove.
 
-#: stub name -> (guide name, the argument label, extra allowed tools)
+#: stub name -> (guide name, the argument label, the argument hint, extra allowed tools)
+#:
+#: The hint becomes `argument-hint`, which Claude Code shows beside the name in the
+#: slash-command menu. It is display only: Enter on a menu entry still runs the skill
+#: at once with no arguments, and Tab accepts the entry so the operator can type them.
 GUIDE_STUBS = {
     # NO clone pre-approval, deliberately (Prudence, #1042 r1-r2). A permission rule
     # is a prefix plus a wildcard, and git reads options AFTER the URL, so even
@@ -325,8 +329,8 @@ GUIDE_STUBS = {
     # list of git options would be a hand-kept list again. Step 4.5's clone prompts
     # for each clone (one per surviving candidate), which is the moment the operator
     # should see it.
-    "investigate-url": ("investigating", "URL and context", ()),
-    "survey-field": ("surveying", "Field and context", ()),
+    "investigate-url": ("investigating", "URL and context", "<url> [context]", ()),
+    "survey-field": ("surveying", "Field and context", "<field or problem> [context]", ()),
 }
 
 #: extension_state key for the stubs. Separate from the procedures' key so removing
@@ -384,12 +388,15 @@ def render_guide_stub(name: str) -> str:
     """The SKILL.md techne writes for one research guide."""
     if name not in GUIDE_STUBS:
         raise ValueError(f"unknown guide stub {name!r}; known: {', '.join(GUIDE_STUBS)}")
-    guide, arg_label, extra_tools = GUIDE_STUBS[name]
+    import json
+
+    guide, arg_label, arg_hint, extra_tools = GUIDE_STUBS[name]
     tools = ", ".join(_BASE_TOOLS + extra_tools)
     return (
         "---\n"
         f"name: {name}\n"
         f"description: {_guide_description(guide)}\n"
+        f"argument-hint: {json.dumps(arg_hint)}\n"
         f"allowed-tools: {tools}\n"
         "---\n"
         "\n"

@@ -205,3 +205,18 @@ def test_skills_status_cli_lists_the_stubs(env):
     assert "Guide stubs directory:" in result.output
     for name in skills_mod.GUIDE_STUBS:
         assert f"  {name}: absent" in result.output
+
+
+@pytest.mark.parametrize("name", sorted(skills_mod.GUIDE_STUBS))
+def test_the_stub_carries_an_argument_hint(name):
+    """Claude Code shows `argument-hint` in the slash-command menu. Without it the
+    menu gives no sign the skill takes a URL or a field, and Enter on the entry runs
+    it with none, which is how /investigate-url kept starting empty."""
+    import yaml
+
+    front = yaml.safe_load(skills_mod.render_guide_stub(name).split("---\n")[1])
+    hint = skills_mod.GUIDE_STUBS[name][2]
+    assert front["argument-hint"] == hint
+    # The hint names the same first argument the body's $ARGUMENTS label does.
+    label = skills_mod.GUIDE_STUBS[name][1].split()[0].lower()
+    assert label in hint.lower()

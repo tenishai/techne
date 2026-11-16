@@ -7,6 +7,13 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Added
 
+- **The research skill stubs carry an `argument-hint`.** `techne skills install` now writes
+  `argument-hint: "<url> [context]"` into the `investigate-url` stub and
+  `"<field or problem> [context]"` into `survey-field`, and both guides' "Make this a
+  skill" sections say to add it. Claude Code shows the hint beside the name in the `/`
+  menu; it is display only, so Enter on the entry still runs the skill with no argument
+  and Tab accepts it for typing one. An installed stub you have not edited reports
+  `outdated` until `techne skills install` rewrites it; an edited one is kept as before.
 - **Architect search matches a renamed project's old spelling** (#1345). A search for
   `liminal` also matches the 129 active pattern bodies written as `limenal` before the
   2026-08-10 rename, and the reverse. Bodies are not rewritten, since a pattern id is a hash
