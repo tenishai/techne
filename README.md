@@ -659,7 +659,8 @@ techne librarian migrate-store             # one-time: move documents techne.db 
 
 # Architect (architect.db) — the architectural-patterns corpus
 techne architect                           # pattern / investigation counts
-techne architect add --name N --source URL [--surveyed YYYY-MM-DD] [--body T | --body-file F]
+techne architect add --name N --source URL [--surveyed YYYY-MM-DD] [--commit SHA]
+                     [--body T | --body-file F]
                                            # add ONE pattern from its fields — the feeder
                                            # that ships. No markdown to hand-write, so no
                                            # format to get wrong; body also reads stdin.

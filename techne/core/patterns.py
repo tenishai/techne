@@ -470,16 +470,21 @@ def get_investigation(
 
 # A file:line citation: a path-ish token with an extension, then :N (or :N-M).
 _FILE_LINE_RE = re.compile(r"[\w./-]+\.[A-Za-z0-9]+:\d+")
+# A path::symbol citation, the form the investigating guide asks for, with or without a
+# trailing :N line hint: `src/sched.ts::progressed`, `a/b.py::Cls.meth:12`.
+_PATH_SYMBOL_RE = re.compile(r"[\w./-]+\.[A-Za-z0-9]+::[A-Za-z_][\w.]*")
 
 
 def reason_cites_evidence(reason: str) -> bool:
-    """True if a skip reason cites a [[pattern]] or a file:line (issue #1293).
+    """True if a skip reason cites a [[pattern]], a path::symbol or a file:line (#1293).
 
     The investigating guide also accepts an availability fact (dead repo, licence,
     closed source) as grounds, which no pattern can recognise reliably, so a False
     here is a prompt to check, never a refusal.
     """
-    return "[[" in reason or bool(_FILE_LINE_RE.search(reason))
+    return (
+        "[[" in reason or bool(_FILE_LINE_RE.search(reason)) or bool(_PATH_SYMBOL_RE.search(reason))
+    )
 
 
 def _url_slug(url: str) -> str:

@@ -235,6 +235,10 @@ def test_reason_cites_evidence():
     assert reason_cites_evidence("covered by [[Some pattern]]")
     assert reason_cites_evidence("handled at src/tools/foo.ts:228-240")
     assert not reason_cites_evidence("not a control-plane fit")
+    # The form the investigating guide asks for, with and without a line hint.
+    assert reason_cites_evidence("covered at src/sched.ts::progressed")
+    assert reason_cites_evidence("see techne/core/patterns.py::add_pattern:619")
+    assert not reason_cites_evidence("the Foo::Bar idea does not apply")
 
 
 def _cli(home, *args):

@@ -10,8 +10,9 @@ pattern corpus lives only in architect.db now.)
 Two kinds of sections recognized:
 
   1. Pattern sections — `## <Pattern Name>` followed by lines
-     `- **Source**: <text>` and `- **Surveyed**: YYYY-MM-DD`, then a
-     body of paragraphs until the next `---` separator or `## ` heading.
+     `- **Source**: <url> — <citation>`, `- **Surveyed**: YYYY-MM-DD` and an
+     optional `- **Commit**: <sha>`, then a body of paragraphs until the next
+     `---` separator or `## ` heading.
 
   2. No-lift list — bullets under `## Surveyed (no patterns worth saving)`
      of the form `- <url> — surveyed YYYY-MM-DD — <reason>`. Preserves the

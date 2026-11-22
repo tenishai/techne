@@ -399,10 +399,10 @@ Then, for each keeper:
 - **Cite the code that implements the claim, at the commit you read**: `path::symbol` on
   the pattern's Source line after the URL (a line number is an optional hint, e.g.
   `src/sched.ts::progressed:3302`), and the commit on a `- **Commit**:` line (record it
-  with `git -C "$SP/src/r" rev-parse HEAD`). Cite the code, not the README, the docs, or a
-  doc comment on a type, so the next reader checks your work instead of re-deriving it. A
-  docstring that describes behavior is a claim in the same way a README is; find the
-  branch that does it. A bare line number does not survive the project's next commit, and
+  with `git -C "$SP/src/r" rev-parse HEAD`; a `/blob/<sha>/` Source URL also supplies
+  it). Cite the code, not the README, the docs, or a doc comment on a type, so the next
+  reader checks your work instead of re-deriving it. A docstring that describes behavior
+  is a claim in the same way a README is; find the branch that does it. A bare line number does not survive the project's next commit, and
   a symbol still drifts without the commit it was read at. The commit is also what a
   later re-investigation diffs against. Ingest stores both: `source_path` and
   `source_commit`, shown by `techne architect show <id>`.

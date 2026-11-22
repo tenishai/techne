@@ -5180,8 +5180,8 @@ def architect_add(ctx, name, source, surveyed, body, body_file, verdict, surveye
 @click.option(
     "--reason",
     default=None,
-    help="Replace the investigation's skip reason. Cite a [[pattern]], a file:line, "
-    "or an availability fact (dead repo, licence, closed source).",
+    help="Replace the investigation's skip reason. Cite a [[pattern]], a path::symbol "
+    "or file:line, or an availability fact (dead repo, licence, closed source).",
 )
 @click.option(
     "--clear-reason",
@@ -5218,7 +5218,7 @@ def architect_reverdict(ctx, url, verdict, surveyed_by, lens, reason, clear_reas
         click.echo(f"{url} -> {verdict}")
         if kwargs.get("reason") and not reason_cites_evidence(kwargs["reason"]):
             click.echo(
-                "warning: the reason cites no [[pattern]] and no file:line. Fine if it "
+                "warning: the reason cites no [[pattern]], path::symbol or file:line. Fine if it "
                 "rests on an availability fact (dead repo, licence, closed source); "
                 "otherwise it has not been filtered yet.",
                 err=True,
