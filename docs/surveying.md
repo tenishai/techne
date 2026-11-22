@@ -139,8 +139,9 @@ in the prompt:
   target it would go (a file or module).
 - **A markdown table for the ten, URLs cited inline, the whole reply under 1,500 words.**
 
-If you later clone any of these projects to check a claim against source, the
-investigating guide's clone rules apply, including the one about `AGENTS.md`.
+Before any borrowed idea is written as a pattern, walk its code as the investigating
+guide's step 4.5 says. The researchers' table is built from READMEs and docs, which are
+claims, not evidence. That guide's clone rules apply, including the one about `AGENTS.md`.
 
 ### 5. Validate what comes back
 

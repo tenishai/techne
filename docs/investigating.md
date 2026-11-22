@@ -317,12 +317,21 @@ Spawn a **web-only** subagent. Its prompt must carry:
   publisher stating what its skill file will never ask an agent to do, an author naming
   what their own evidence does not prove, a README's honest list of what the tool cannot
   do;
+- the **tests**, and specifically how they simulate failure (a kill, a fault-injecting
+  wrapper, a fake clock, a real platform harness), and the **bad side**: the issue tracker,
+  open and closed, including issues a bot auto-closed without a fix, and the changelog's
+  fixed defects and breaking changes. A repo's own tracker is where its flaws are written
+  down, and it is the part a mechanism-first read never reaches;
 - the exact output schema: a summary under 100 words, an architecture read under 200
   across code / product / process, and up to six candidate patterns, each with its path,
   lens, what it is, why it is interesting, and where it might apply. Cap the whole reply.
 
 Tell it to push back rather than pad. "Nothing rose above routine" is a valid answer and a
 useful one.
+
+Treat what comes back as a **map, not evidence**. The researcher reads README, docs and
+doc comments through a lossy summarizer; its candidates tell you where to look in step
+4.5, and nothing it reports is a fact until you have read the code behind it.
 
 ### 3. Validate what comes back
 
@@ -359,17 +368,21 @@ was tenancy-neutral.
 
 Then choose the verdict. Expect to drop about two thirds.
 
-### 4.5 Verify each survivor against source — clone, don't guess
+### 4.5 Walk the codebase — docs are claims, code is evidence
 
-**A pattern written from README-level reading is unreliable.** The researcher is web-only
-and reads through the fetch tool's summarizer, which is lossy in both directions: it has
-asserted mechanisms that do not exist, and summarized past the only thing worth keeping.
-Two patterns in one 2026-08-30 session needed corrected re-ingests for this reason.
+**A pattern written from README-level reading is unreliable, and so is one written from
+the docs or from a doc comment.** The researcher is web-only and reads through the fetch
+tool's summarizer, which is lossy in both directions: it has asserted mechanisms that do
+not exist, and summarized past the only thing worth keeping. Two patterns in one
+2026-08-30 session needed corrected re-ingests for this reason. On 2026-11-22 three of
+four pi-durable patterns had been sourced from a README, a design doc and a type's doc
+comment. Walking the code then corrected one mechanism outright: the docs implied a
+waiting tool "commits nothing", while the scheduler in fact ignores an unchanged
+re-committed intent, which is the real cause of the project's open restart-limit bug.
 
-So after filtering, for the candidates that survived — not all of them, which is what
-keeps this cheap — shallow-clone and read the code yourself. **You are the orchestrator
-and you have a shell; the researcher stays web-only.** Do not hand it a shell to save
-yourself the step; that is the sandbox.
+So shallow-clone and read the code yourself. **You are the orchestrator and you have a
+shell; the researcher stays web-only.** Do not hand it a shell to save yourself the step;
+that is the sandbox.
 
 ```sh
 SP="<your scratch directory>"; mkdir -p "$SP/src"
@@ -383,12 +396,28 @@ long as it exists.
 
 Then, for each keeper:
 
-- **Cite the `file:line` that implements the claim**, in the pattern's Source line. The
-  code, not the README or the docs, so the next reader checks your work instead of
-  re-deriving it.
+- **Cite the `file:line` of the logic that implements the claim**, in the pattern's Source
+  line. The code, not the README, the docs, or a doc comment on a type, so the next reader
+  checks your work instead of re-deriving it. A docstring that describes behavior is a
+  claim in the same way a README is; find the branch that does it.
 - If a claim cannot be traced to source, **drop it**, or keep it with an explicit
   "sourced from docs, not verified against code" note in the body. Do not launder a doc
-  claim into a pattern that reads as measured.
+  claim into a pattern that reads as measured. Docs are citable only as what they are:
+  stated rationale, a stated measurement you did not re-run (say so), or a document that
+  is itself the subject, such as a review record.
+- **Read the tests.** Find how the project proves the claim, and especially how it
+  simulates failure. That is often a pattern in its own right, and its blind spots are
+  usually the project's bugs.
+- **Read the issue tracker for the keeper's mechanism** — `gh issue list -R <owner>/<repo>
+  --search "<term>" --state all` — including auto-closed issues, which a contributor bot
+  can close with the defect still in the code. Check the current code for each defect
+  that bears on a keeper. A pattern carries its known flaws in its body, with the issue
+  number and whether the fix is in the code you read. Two pi-durable patterns were stored
+  without theirs on the first pass: one open production flaw, one corruption defect that
+  had been auto-closed and was still in the code.
+
+Read and grep only; the reading-is-not-executing rule covers `gh` as well. It reads
+issues, it does not run anything.
 
 **Do not conclude a mechanism is absent from one file.** A registry is not an
 implementation: one investigation dropped a candidate because the obvious
@@ -456,7 +485,15 @@ schema. Store it as a knowledge entry rather than forcing a fake URL onto it.
 
 Give the operator the summary verbatim, the verdict and one sentence on why that tier,
 the candidate count (surfaced N, kept M, dropped K), each keeper with where it applies,
-and where things landed. Say plainly what you did not do.
+its known flaws, and where things landed.
+
+**An operator who asks for an investigation expects you to know the project, good and
+bad.** A list of what you did not find out is a to-do list, not a section of the report:
+before reporting, go back and close every gap you can close by reading (code, tests,
+docs, the tracker). What may remain is only what this procedure forbids or cannot reach,
+such as a measurement that needs the code run (which needs a container) or a claim about
+an external system the repo cannot show. Name each with that reason. "I did not find
+out how they test X" is never one of them.
 
 If you were invoked with no URL, or with something that does not look like one, ask for
 it before doing anything else.

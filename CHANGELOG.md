@@ -5,6 +5,19 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Changed
+
+- **The investigating guide now requires walking the code, the tests and the issue
+  tracker.** Step 4.5 treats README, docs and doc comments as claims: each pattern cites
+  the line of logic that implements it, and docs are cited only as stated rationale or
+  unre-run measurements. The researcher's scan now covers how tests simulate failure, the
+  tracker (including bot-auto-closed issues) and the changelog. A pattern carries its known
+  flaws. The report may not list "what I did not find out": gaps are closed before
+  reporting, and only what the procedure forbids (running code) may remain, with the
+  reason. The surveying guide points borrowed ideas at the same step. Prompted by a
+  pi-durable investigation where three of four patterns rested on docs and two were stored
+  without the defects in the project's own tracker.
+
 ### Added
 
 - **Architect search matches a renamed project's old spelling** (#1345). A search for
