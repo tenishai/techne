@@ -66,6 +66,19 @@ All notable changes to techne are documented here. Format loosely follows
   callers a `call_lines` field. The v7 upgrade makes the next `codex index` of each repo
   re-parse every file once.
 
+- **A pattern keeps its code citation and the commit it was read at** (architect schema
+  v9). Ingest kept only the first URL on a `- **Source**:` line and dropped the rest as
+  "decorative", so the citation the investigating guide asks for never reached the store:
+  `patterns.source_path` was NULL in all 1,024 active rows of a live store. The text after
+  the URL is now stored as `source_path`, and a new `- **Commit**:` line (or a
+  `/blob/<sha>/` URL) is stored as `patterns.source_commit`. Re-ingesting a pattern fills
+  either column when it is empty and never overwrites one that is set, so old corpus files
+  restore lost citations without changing any pattern id. `architect add` takes the same
+  citation in `--source` plus `--commit`, `architect show` prints `cites: <path> @ <sha>`,
+  and `architect export` writes both back out. The investigating guide's step 4.5 now asks
+  for `path::symbol` at the surveyed commit, with the line number as an optional hint,
+  because a bare line does not survive the project's next commit.
+
 ### Fixed
 
 - **Reactivating a superseded pattern undoes the supersession** (#1348). `techne architect

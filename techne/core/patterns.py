@@ -619,18 +619,45 @@ def add_pattern(
     source_path: str | None = None,
     lens_kind: str | None = None,
     confidence: str = "medium",
+    source_commit: str | None = None,
 ) -> tuple[str, bool]:
-    """Insert a lifted pattern (content-hash id, idempotent). Returns (id, stored)."""
+    """Insert a lifted pattern (content-hash id, idempotent). Returns (id, stored).
+
+    `source_path` (the citation) and `source_commit` are not part of the id. When the
+    pattern already exists they FILL a column that is still NULL and never overwrite
+    one that is set: re-ingesting an old corpus file recovers citations that ingest
+    used to drop, and cannot silently re-point a pattern at another commit.
+    """
     pid = _hash(name, source_url, body)
     conn = plain_connect(db_path)
     try:
         if conn.execute("SELECT 1 FROM patterns WHERE id = ?", (pid,)).fetchone():
+            if source_path is not None or source_commit is not None:
+                conn.execute(
+                    """UPDATE patterns
+                          SET source_path = COALESCE(source_path, ?),
+                              source_commit = COALESCE(source_commit, ?)
+                        WHERE id = ?""",
+                    (source_path, source_commit, pid),
+                )
+                conn.commit()
             return pid, False
         conn.execute(
             """INSERT INTO patterns
-                 (id, investigation_id, name, source_url, source_path, lens_kind, body, confidence)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (pid, investigation_id, name, source_url, source_path, lens_kind, body, confidence),
+                 (id, investigation_id, name, source_url, source_path, lens_kind, body,
+                  confidence, source_commit)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                pid,
+                investigation_id,
+                name,
+                source_url,
+                source_path,
+                lens_kind,
+                body,
+                confidence,
+                source_commit,
+            ),
         )
         conn.commit()
         return pid, True
@@ -1671,7 +1698,7 @@ def export_patterns_md(db_path: Path) -> str:
     conn = plain_connect(db_path)
     try:
         pats = conn.execute(
-            """SELECT p.name, p.source_url, p.body, i.surveyed_at
+            """SELECT p.name, p.source_url, p.source_path, p.source_commit, p.body, i.surveyed_at
                FROM patterns p JOIN investigations i ON i.id = p.investigation_id
                WHERE p.status = 'active'
                ORDER BY i.surveyed_at, p.name"""
@@ -1703,8 +1730,11 @@ def export_patterns_md(db_path: Path) -> str:
     for p in pats:
         out.append(f"## {p['name']}")
         out.append("")
-        out.append(f"- **Source**: {p['source_url']}")
+        cite = f" — {p['source_path']}" if p["source_path"] else ""
+        out.append(f"- **Source**: {p['source_url']}{cite}")
         out.append(f"- **Surveyed**: {p['surveyed_at']}")
+        if p["source_commit"]:
+            out.append(f"- **Commit**: {p['source_commit']}")
         out.append("")
         out.append((p["body"] or "").strip())
         out.append("")
@@ -1728,8 +1758,9 @@ def export_patterns_md(db_path: Path) -> str:
         "",
         "    ## <Short pattern name>",
         "",
-        "    - **Source**: <url> — <optional file:line or §section>",
+        "    - **Source**: <url> — <path::symbol, line optional, or §section>",
         "    - **Surveyed**: <YYYY-MM-DD>",
+        "    - **Commit**: <sha the citation was read at>",
         "",
         "    <What it does — 1–2 paragraphs.>",
         "",
@@ -1816,7 +1847,13 @@ def ingest_patterns_md(
             clears_skip=True,
         )
         _pid, stored = add_pattern(
-            db_path, investigation_id=inv_id, name=p.name, source_url=p.source_url, body=p.body
+            db_path,
+            investigation_id=inv_id,
+            name=p.name,
+            source_url=p.source_url,
+            body=p.body,
+            source_path=p.source_path,
+            source_commit=p.source_commit,
         )
         patterns_added += int(stored)
         # Typed graph edges declared as md fields (techne#308). Resolution is

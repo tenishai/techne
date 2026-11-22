@@ -5025,8 +5025,14 @@ def architect_ingest(ctx, markdown_file, verdict):
     default=None,
     help="Angle the survey was done from. Defaults to config `architect.lens` ('infra').",
 )
+@click.option(
+    "--commit",
+    default=None,
+    help="Commit sha the citation in --source was read at (7-40 hex). A /blob/<sha>/ "
+    "URL in --source supplies it when this is omitted.",
+)
 @click.pass_context
-def architect_add(ctx, name, source, surveyed, body, body_file, verdict, surveyed_by, lens):
+def architect_add(ctx, name, source, surveyed, body, body_file, verdict, surveyed_by, lens, commit):
     """Add ONE pattern to architect.db from its fields — the feeder that ships.
 
     THE ARCHITECT HAD NO WAY IN THAT CAME WITH techne (techne#754). `ingest` takes a
@@ -5097,16 +5103,20 @@ def architect_add(ctx, name, source, surveyed, body, body_file, verdict, surveye
     # The date is checked against `_ISO_DATE_RE`, which is ANCHORED and already lives in
     # the module this command writes into — the right regex was one import away.
     from techne.core.patterns import _ISO_DATE_RE
-    from techne.import_md import _URL_RE
+    from techne.import_md import commit_from, split_source
 
     surveyed = surveyed or datetime.now(timezone.utc).strftime("%Y-%m-%d")
     if not _ISO_DATE_RE.match(surveyed):
         raise click.UsageError(f"--surveyed must be exactly YYYY-MM-DD; got {surveyed!r}")
-    url_match = _URL_RE.search(source)
-    if url_match is None:
+    split = split_source(source)
+    if split is None:
         raise click.UsageError(f"--source must be an http(s) URL; got {source!r}")
-    # `.group(0).rstrip("),.;")` — character-for-character what import_md.py:250 stores.
-    source = url_match.group(0).rstrip("),.;")
+    # `split_source` is the function ingest uses, so add and ingest store the same URL
+    # and the same citation for the same Source text.
+    source, citation = split
+    source_commit = commit_from(commit, source)
+    if commit is not None and source_commit is None:
+        raise click.UsageError(f"--commit must be a 7-40 character hex sha; got {commit!r}")
 
     db = architect_db(config)
     inv_id = upsert_investigation(
@@ -5123,7 +5133,13 @@ def architect_add(ctx, name, source, surveyed, body, body_file, verdict, surveye
         clears_skip=True,
     )
     pid, stored = add_pattern(
-        db, investigation_id=inv_id, name=name, source_url=source, body=body.strip()
+        db,
+        investigation_id=inv_id,
+        name=name,
+        source_url=source,
+        body=body.strip(),
+        source_path=citation,
+        source_commit=source_commit,
     )
     # AND THE GRAPH, WHICH `ingest` BUILDS AND THIS DID NOT (Prudence, #758 Important B).
     # `ingest_patterns_md` writes FOUR things: the investigation, the pattern, typed
@@ -5448,6 +5464,12 @@ def architect_show(ctx, pattern_id):
         click.echo(f"No pattern {pattern_id}", err=True)
         ctx.exit(1)
     click.echo(f"# {p['name']}  [{p['source_url']}]")
+    # The citation and the commit it was read at: what the next reader checks against.
+    if p.get("source_path") or p.get("source_commit"):
+        at = f" @ {p['source_commit']}" if p.get("source_commit") else ""
+        click.echo(f"cites: {p.get('source_path') or '(no citation)'}{at}")
+    else:
+        click.echo("cites: (none recorded)")
     # A row that left the active set says so first: `show` is the one read that still
     # returns it, and without this line it reads as live (issue #1345).
     if p.get("status") == "retired":

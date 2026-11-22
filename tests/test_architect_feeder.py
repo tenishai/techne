@@ -220,6 +220,11 @@ def test_add_stores_what_ingest_would_store(cli_config, raw):
     assert urls == [ingest_would_store], (
         f"add stored {urls}, parse extracts [{ingest_would_store!r}] from the same source"
     )
+    # The citation after the URL gets the same parity: both paths keep it, or neither.
+    paths = [r[0] for r in _query(architect_db(cli_config), "SELECT source_path FROM patterns")]
+    assert paths == [parsed[0].source_path], (
+        f"add stored citation {paths}, parse keeps [{parsed[0].source_path!r}]"
+    )
 
 
 def test_add_and_ingest_agree_on_one_investigation_per_url(cli_config, tmp_path):
