@@ -323,8 +323,8 @@ GUIDE_STUBS = {
     # `git clone --depth 1 --quiet https://github.com/*` admits a trailing
     # `-c credential.helper=!…` or `--template=…`, both of which run commands. A deny
     # list of git options would be a hand-kept list again. Step 4.5's clone prompts
-    # for each clone (one per surviving candidate), which is the moment the operator
-    # should see it.
+    # once per investigation (one clone of the repo, which every keeper is then read
+    # from), which is the moment the operator should see it.
     "investigate-url": ("investigating", "URL and context", ()),
     "survey-field": ("surveying", "Field and context", ()),
 }
