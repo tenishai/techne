@@ -66,6 +66,9 @@ def _row(db, cols="source_path, source_commit"):
         # One separator TOKEN is dropped, not a character set (Prudence, PR 1368 nit 1).
         ("https://github.com/x/y — -v flag handling", "https://github.com/x/y", "-v flag handling"),
         ("https://github.com/x/y — :memory: mode", "https://github.com/x/y", ":memory: mode"),
+        # A dangling separator is not a citation (Prudence, PR 1368 round-2 nit).
+        ("https://github.com/x/y — ", "https://github.com/x/y", None),
+        ("https://github.com/x/y -", "https://github.com/x/y", None),
         ("no url here", None, None),
     ],
 )
@@ -87,6 +90,11 @@ def test_a_trailing_at_sha_is_the_commit_and_leaves_the_citation():
         "https://github.com/x/y",
         None,
         SHA[:7],
+    )
+    assert split_source(f"https://github.com/x/y — @ {SHA}") == (
+        "https://github.com/x/y",
+        None,
+        SHA,
     )
 
 
