@@ -163,7 +163,8 @@ def test_v7_store_gains_retired_reason_and_keeps_its_rows(tmp_path):
 
     conn = plain_connect(db)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == ARCHITECT_VERSION == 8
+        # The ladder runs to the current version; this test owns only the v8 column.
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == ARCHITECT_VERSION >= 8
         cols = {r[1] for r in conn.execute("PRAGMA table_info(patterns)")}
         assert "retired_reason" in cols
         row = conn.execute("SELECT id, status, retired_reason FROM patterns").fetchone()

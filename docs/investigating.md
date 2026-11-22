@@ -396,10 +396,17 @@ long as it exists.
 
 Then, for each keeper:
 
-- **Cite the `file:line` of the logic that implements the claim**, in the pattern's Source
-  line. The code, not the README, the docs, or a doc comment on a type, so the next reader
-  checks your work instead of re-deriving it. A docstring that describes behavior is a
-  claim in the same way a README is; find the branch that does it.
+- **Cite the code that implements the claim, at the commit you read**: `path::symbol` on
+  the pattern's Source line after the URL (a line number is an optional hint, e.g.
+  `src/sched.ts::progressed:3302`), and the commit at the end of the same line as
+  `@ <sha>` (record it with `git -C "$SP/src/r" rev-parse HEAD`; a `/blob/<sha>/` Source
+  URL also supplies it). Cite the code, not the README, the docs, or a doc comment on a type, so the next
+  reader checks your work instead of re-deriving it. A docstring that describes behavior
+  is a claim in the same way a README is; find the branch that does it. A bare line
+  number does not survive the project's next commit, and a symbol still drifts without
+  the commit it was read at. The commit is also what a later re-investigation diffs
+  against. Ingest stores both: `source_path` and
+  `source_commit`, shown by `techne architect show <id>`.
 - If a claim cannot be traced to source, **drop it**, or keep it with an explicit
   "sourced from docs, not verified against code" note in the body. Do not launder a doc
   claim into a pattern that reads as measured. Docs are citable only as what they are:
@@ -430,8 +437,9 @@ across the tree before calling it missing.
 - **skip** — nothing.
 - **skip-with-flag** — record the URL, today's date, and the one-line reason. The reason
   must contain at least one of: a `[[wikilink]]` to the pattern that covers it; a
-  `file:line` you actually read; or an explicit availability/feasibility fact (dead repo,
-  no extension point, cannot verify from public material, licence-gated). A reason with
+  `path::symbol` or `file:line` you actually read; or an explicit availability or
+  feasibility fact (dead repo, no extension point, cannot verify from public material,
+  licence-gated). A reason with
   none of these has not been filtered yet — a 2026-09-13 audit of 111 skip-with-flag rows
   found every confirmed miss came from the uncited bucket, while every row citing a
   pattern held up on re-audit.
@@ -458,7 +466,7 @@ investigation's output, one section per keeper:
 ```markdown
 ## <Short pattern name>
 
-- **Source**: <https-url> — <file:line from step 4.5>
+- **Source**: <https-url> — <path::symbol from step 4.5, line optional> @ <commit sha>
 - **Surveyed**: <YYYY-MM-DD>
 
 <What it does, in one or two paragraphs.>
@@ -471,7 +479,11 @@ investigation's output, one section per keeper:
 ```
 
 **The Source line must contain an `http(s)://` URL, and the bold markers are required**
-(`- Source:` without them parses as body text). A section that fails either is skipped
+(`- Source:` without them parses as body text). Everything after the URL is kept as the
+citation, and a trailing `@ <sha>` is stored as the commit; leave it off only for sources
+that have no commit (a paper, a docs page). Keep the commit on the Source line, not on a
+line of its own: an older techne reads an extra preamble line as body text and would
+store a duplicate pattern. A section that fails either is skipped
 and listed under `skipped` in the ingest result, so read that list rather than assuming
 every section landed. A skip-with-flag goes in the same file as one bullet under
 `## Surveyed (no patterns worth saving)`: `- <url> — surveyed YYYY-MM-DD — <reason>`.

@@ -24,7 +24,7 @@ from techne.config import Config
 from techne.core import migrator
 from techne.core.stores import StoreAdapter, migrated_store, plain_connect
 
-ARCHITECT_VERSION = 8  # PRAGMA user_version on architect.db
+ARCHITECT_VERSION = 9  # PRAGMA user_version on architect.db
 
 _PATTERNS_FTS_DDL = """
 -- `source_url` IS INDEXED; its absence was a silent false negative (techne#430).
@@ -91,6 +91,7 @@ CREATE TABLE IF NOT EXISTS patterns (
     valid_at         TEXT,                    -- when this pattern became current (NULL = since created_at) — techne#306
     invalid_at       TEXT,                    -- when it stopped being current / was superseded (NULL = still current) — techne#306
     retired_reason   TEXT,                    -- why it left with no successor (#1345)
+    source_commit    TEXT,                    -- commit the source_path citation was read at
     created_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_patterns_investigation ON patterns(investigation_id);
@@ -354,6 +355,19 @@ def _step_v7_to_v8_retired_reason(conn) -> None:
         conn.execute("ALTER TABLE patterns ADD COLUMN retired_reason TEXT")
 
 
+def _step_v8_to_v9_source_commit(conn) -> None:
+    """Add `patterns.source_commit`: the commit a pattern's citation was read at.
+
+    `source_path` holds the citation (`path::symbol`, optionally a line), and a line
+    or even a symbol only means something at a known commit; a moving main shifts it.
+    The commit is also what a later re-investigation diffs against. Column-presence
+    guard, like the rest of the ladder.
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(patterns)")}
+    if cols and "source_commit" not in cols:
+        conn.execute("ALTER TABLE patterns ADD COLUMN source_commit TEXT")
+
+
 def _architect_run_steps(conn, current: int, target: int) -> None:
     """Apply architect.db migration steps from *current* up to *target*.
 
@@ -378,6 +392,8 @@ def _architect_run_steps(conn, current: int, target: int) -> None:
         _step_v6_to_v7_applies_origin(conn)
     if current < 8:
         _step_v7_to_v8_retired_reason(conn)
+    if current < 9:
+        _step_v8_to_v9_source_commit(conn)
     migrator.user_version_io.write(conn, target)
     conn.commit()
 

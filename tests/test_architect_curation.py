@@ -181,7 +181,8 @@ def test_v6_store_gains_origin_and_keeps_its_rows(tmp_path):
 
     conn = plain_connect(db)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == ARCHITECT_VERSION == 8
+        # The ladder runs to the current version; this test owns only the v7 column.
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == ARCHITECT_VERSION >= 8
         row = conn.execute("SELECT target, origin FROM pattern_applies").fetchone()
         assert (row[0], row[1]) == ("techne", "body")
     finally:
@@ -234,6 +235,10 @@ def test_reason_cites_evidence():
     assert reason_cites_evidence("covered by [[Some pattern]]")
     assert reason_cites_evidence("handled at src/tools/foo.ts:228-240")
     assert not reason_cites_evidence("not a control-plane fit")
+    # The form the investigating guide asks for, with and without a line hint.
+    assert reason_cites_evidence("covered at src/sched.ts::progressed")
+    assert reason_cites_evidence("see techne/core/patterns.py::add_pattern:619")
+    assert not reason_cites_evidence("the Foo::Bar idea does not apply")
 
 
 def _cli(home, *args):

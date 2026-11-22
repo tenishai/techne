@@ -10,8 +10,9 @@ pattern corpus lives only in architect.db now.)
 Two kinds of sections recognized:
 
   1. Pattern sections — `## <Pattern Name>` followed by lines
-     `- **Source**: <text>` and `- **Surveyed**: YYYY-MM-DD`, then a
-     body of paragraphs until the next `---` separator or `## ` heading.
+     `- **Source**: <url> — <citation> @ <sha>` (citation and commit optional)
+     and `- **Surveyed**: YYYY-MM-DD`, then a body of paragraphs until the next
+     `---` separator or `## ` heading.
 
   2. No-lift list — bullets under `## Surveyed (no patterns worth saving)`
      of the form `- <url> — surveyed YYYY-MM-DD — <reason>`. Preserves the
@@ -41,6 +42,12 @@ class ParsedPattern:
     surveyed_date: str  # YYYY-MM-DD
     body: str  # full markdown body — everything after the Source/Surveyed lines
     relations: tuple[tuple[str, str], ...] = ()  # (kind, dst_name) — typed graph edges (techne#308)
+    # The citation after the URL on the Source line (`path::symbol`, a line, a
+    # section), kept as written. Until 2026-11-22 it was dropped here as
+    # "decorative", so no stored pattern carried the code it was verified against.
+    source_path: str | None = None
+    # The commit the citation was read at: a trailing `@ <sha>` or a /blob/<sha>/ URL.
+    source_commit: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,10 +110,71 @@ NO_LIFT_HEADING = "surveyed (no patterns worth saving)"
 
 
 # A pattern's URL line looks like:
-#   - **Source**: https://github.com/foo/bar — `path/to/file.ts`
-# We grab the first http(s) URL on the line; the trailing path comment is
-# decorative and not stored separately.
+#   - **Source**: https://github.com/foo/bar — `path/to/file.ts::Symbol` @ 9c46526
+# The first http(s) URL is `source_url`; whatever follows it is the citation and is
+# stored as `source_path` (`split_source`), and a trailing `@ <sha>` is the commit it was
+# read at (`source_commit`). The rest of the line used to be called decorative and
+# dropped, which threw away every code citation the investigating guide asks for.
+#
+# THE COMMIT RIDES ON THE SOURCE LINE ON PURPOSE (Prudence, PR 1368). A separate
+# `- **Commit**:` line is read by an older parser as the first BODY line, and the body is
+# part of the pattern id, so a teammate on an older techne who ingested a regenerated
+# corpus would get a second, polluted copy of every pattern with a commit. Older parsers
+# already drop everything after the URL, so text there is invisible to them.
 _URL_RE = re.compile(r"https?://\S+")
+# A git object name: 7 to 40 hex characters, as `git rev-parse --short` and full shas.
+_SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
+# A commit pinned in a GitHub-style URL: .../blob/<sha>/... or .../tree/<sha>/...
+_URL_SHA_RE = re.compile(r"/(?:blob|tree|commit)/([0-9a-f]{7,40})(?:/|$|#)")
+# ONE separator token between the URL and the citation (em/en dash, hyphen, colon,
+# comma, semicolon) followed by whitespace. A token, not a character set: `lstrip` of a
+# set also ate the start of a citation such as `-v flag` or `:memory: mode`.
+_CITATION_LEAD_RE = re.compile(r"^[—–:,;-]+\s+")
+# A trailing `@ <sha>` (optionally backticked) on the citation: the commit it was read at.
+_TRAILING_SHA_RE = re.compile(r"(?:^|\s)@\s*`?([0-9a-fA-F]{7,40})`?\s*$")
+
+
+def split_source(text: str) -> tuple[str, str | None, str | None] | None:
+    """Split a Source value into (url, citation, commit). None when there is no URL.
+
+    One function for `ingest` and `architect add`, so both store the same thing for
+    the same line: the URL normalised exactly as before; the rest of the line, less one
+    leading separator token, as the citation; and a trailing `@ <sha>` lifted off the
+    citation as the commit, else a sha pinned in the URL (/blob/<sha>/...). Text after
+    `@` that is not a sha stays in the citation rather than being dropped.
+    """
+    m = _URL_RE.search(text)
+    if m is None:
+        return None
+    url = m.group(0).rstrip("),.;")
+    # From the end of the whole match: punctuation `rstrip` removed from the URL closed
+    # the sentence around it and is not part of the citation.
+    rest = text[m.end() :].strip()
+    rest = _CITATION_LEAD_RE.sub("", rest, count=1)
+    commit = None
+    sha = _TRAILING_SHA_RE.search(rest)
+    if sha:
+        commit = sha.group(1).lower()
+        rest = rest[: sha.start()].strip()
+    return url, (rest or None), (commit or commit_from(None, url))
+
+
+def commit_from(value: str | None, url: str | None = None) -> str | None:
+    """A commit sha from an explicit value (`architect add --commit`), else from a URL
+    pinned at a commit, else None.
+
+    The value must be one hex object name, lower-cased; anything else is not a commit
+    and returns None rather than storing prose in the column.
+    """
+    if value:
+        v = value.strip().strip("`").lower()
+        if _SHA_RE.match(v):
+            return v
+    if url:
+        m = _URL_SHA_RE.search(url)
+        if m:
+            return m.group(1)
+    return None
 _DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 
 # Typed graph edges declared as preamble fields (techne#308), e.g.
@@ -331,23 +399,26 @@ def _parse_pattern_body(heading: str, body: str) -> ParsedPattern | str:
         logger.warning("skip_section", extra={"heading": heading, "reason": reason})
         return reason
 
-    url_match = _URL_RE.search(source_line)
+    split = split_source(source_line[len("- **Source**:") :])
     date_match = _DATE_RE.search(date_line)
-    if url_match is None or date_match is None:
+    if split is None or date_match is None:
         reason = (
             "no http(s) URL in the Source line"
-            if url_match is None
+            if split is None
             else "no YYYY-MM-DD date in the Surveyed line"
         )
         logger.warning("skip_section", extra={"heading": heading, "reason": reason})
         return reason
 
+    url, citation, commit = split
     return ParsedPattern(
         name=heading,
-        source_url=url_match.group(0).rstrip("),.;"),
+        source_url=url,
         surveyed_date=date_match.group(1),
         body="\n".join(body_lines).strip(),
         relations=tuple(relations),
+        source_path=citation,
+        source_commit=commit,
     )
 
 
