@@ -398,9 +398,9 @@ Then, for each keeper:
 
 - **Cite the code that implements the claim, at the commit you read**: `path::symbol` on
   the pattern's Source line after the URL (a line number is an optional hint, e.g.
-  `src/sched.ts::progressed:3302`), and the commit on a `- **Commit**:` line (record it
-  with `git -C "$SP/src/r" rev-parse HEAD`; a `/blob/<sha>/` Source URL also supplies
-  it). Cite the code, not the README, the docs, or a doc comment on a type, so the next
+  `src/sched.ts::progressed:3302`), and the commit at the end of the same line as
+  `@ <sha>` (record it with `git -C "$SP/src/r" rev-parse HEAD`; a `/blob/<sha>/` Source
+  URL also supplies it). Cite the code, not the README, the docs, or a doc comment on a type, so the next
   reader checks your work instead of re-deriving it. A docstring that describes behavior
   is a claim in the same way a README is; find the branch that does it. A bare line
   number does not survive the project's next commit, and a symbol still drifts without
@@ -466,9 +466,8 @@ investigation's output, one section per keeper:
 ```markdown
 ## <Short pattern name>
 
-- **Source**: <https-url> — <path::symbol from step 4.5, line optional>
+- **Source**: <https-url> — <path::symbol from step 4.5, line optional> @ <commit sha>
 - **Surveyed**: <YYYY-MM-DD>
-- **Commit**: <sha the citation was read at>
 
 <What it does, in one or two paragraphs.>
 
@@ -481,8 +480,10 @@ investigation's output, one section per keeper:
 
 **The Source line must contain an `http(s)://` URL, and the bold markers are required**
 (`- Source:` without them parses as body text). Everything after the URL is kept as the
-citation, and the `- **Commit**:` line is optional only for sources that have no commit
-(a paper, a docs page). A section that fails either is skipped
+citation, and a trailing `@ <sha>` is stored as the commit; leave it off only for sources
+that have no commit (a paper, a docs page). Keep the commit on the Source line, not on a
+line of its own: an older techne reads an extra preamble line as body text and would
+store a duplicate pattern. A section that fails either is skipped
 and listed under `skipped` in the ingest result, so read that list rather than assuming
 every section landed. A skip-with-flag goes in the same file as one bullet under
 `## Surveyed (no patterns worth saving)`: `- <url> — surveyed YYYY-MM-DD — <reason>`.

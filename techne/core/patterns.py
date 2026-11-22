@@ -1735,11 +1735,12 @@ def export_patterns_md(db_path: Path) -> str:
     for p in pats:
         out.append(f"## {p['name']}")
         out.append("")
+        # The commit rides on the Source line, where older parsers drop text, never on a
+        # line of its own, which they read as body (and so as a different pattern id).
         cite = f" — {p['source_path']}" if p["source_path"] else ""
-        out.append(f"- **Source**: {p['source_url']}{cite}")
+        at = f" @ {p['source_commit']}" if p["source_commit"] else ""
+        out.append(f"- **Source**: {p['source_url']}{cite}{at}")
         out.append(f"- **Surveyed**: {p['surveyed_at']}")
-        if p["source_commit"]:
-            out.append(f"- **Commit**: {p['source_commit']}")
         out.append("")
         out.append((p["body"] or "").strip())
         out.append("")
@@ -1763,9 +1764,8 @@ def export_patterns_md(db_path: Path) -> str:
         "",
         "    ## <Short pattern name>",
         "",
-        "    - **Source**: <url> — <path::symbol, line optional, or §section>",
+        "    - **Source**: <url> — <path::symbol, line optional, or §section> @ <sha>",
         "    - **Surveyed**: <YYYY-MM-DD>",
-        "    - **Commit**: <sha the citation was read at>",
         "",
         "    <What it does — 1–2 paragraphs.>",
         "",

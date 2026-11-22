@@ -26,9 +26,8 @@ SHA = "9c4652688590abb836b40ebd1e4725ecf9a7c7d1"
 
 
 def _section(source: str, commit: str | None = None, body: str = "b") -> str:
-    lines = ["## P", "", f"- **Source**: {source}", "- **Surveyed**: 2026-11-22"]
-    if commit is not None:
-        lines.append(f"- **Commit**: {commit}")
+    at = f" @ {commit}" if commit is not None else ""
+    lines = ["## P", "", f"- **Source**: {source}{at}", "- **Surveyed**: 2026-11-22"]
     return "\n".join(lines + ["", body, ""])
 
 
@@ -64,6 +63,9 @@ def _row(db, cols="source_path, source_commit"):
         ),
         ("https://github.com/x/y", "https://github.com/x/y", None),
         ("https://github.com/x/y).", "https://github.com/x/y", None),
+        # One separator TOKEN is dropped, not a character set (Prudence, PR 1368 nit 1).
+        ("https://github.com/x/y — -v flag handling", "https://github.com/x/y", "-v flag handling"),
+        ("https://github.com/x/y — :memory: mode", "https://github.com/x/y", ":memory: mode"),
         ("no url here", None, None),
     ],
 )
@@ -72,16 +74,39 @@ def test_split_source_keeps_the_citation_after_the_url(source, url, citation):
     if url is None:
         assert got is None
     else:
-        assert got == (url, citation)
+        assert got[:2] == (url, citation)
 
 
-def test_a_commit_line_is_parsed_and_lowercased():
+def test_a_trailing_at_sha_is_the_commit_and_leaves_the_citation():
+    assert split_source(f"https://github.com/x/y — src/a.ts::run @ {SHA}") == (
+        "https://github.com/x/y",
+        "src/a.ts::run",
+        SHA,
+    )
+    assert split_source(f"https://github.com/x/y @ `{SHA[:7]}`") == (
+        "https://github.com/x/y",
+        None,
+        SHA[:7],
+    )
+
+
+def test_text_after_at_that_is_not_a_sha_stays_in_the_citation():
+    """Nothing is dropped silently (Prudence, PR 1368 nit 2): a non-sha after `@` is
+    citation text, so it survives into source_path and `architect show` shows it."""
+    assert split_source("https://github.com/x/y — f.py::g @ main") == (
+        "https://github.com/x/y",
+        "f.py::g @ main",
+        None,
+    )
+
+
+def test_a_commit_on_the_source_line_is_parsed_and_lowercased():
     (p,) = parse(_section("https://github.com/x/y — src/a.ts::run", commit=SHA.upper())).patterns
     assert p.source_path == "src/a.ts::run"
     assert p.source_commit == SHA
 
 
-def test_a_pinned_url_supplies_the_commit_when_no_commit_line_does():
+def test_a_pinned_url_supplies_the_commit_when_the_line_has_none():
     url = f"https://github.com/x/y/blob/{SHA[:12]}/src/a.ts#L10-L20"
     (p,) = parse(_section(url)).patterns
     assert p.source_commit == SHA[:12]
@@ -93,7 +118,7 @@ def test_a_commit_value_that_is_not_a_sha_is_not_stored(value):
     assert commit_from(value) is None
 
 
-def test_the_commit_line_does_not_leak_into_the_body():
+def test_the_commit_does_not_leak_into_the_body():
     (p,) = parse(_section("https://github.com/x/y — f.py::g", commit=SHA, body="the body")).patterns
     assert p.body == "the body"
 
@@ -125,7 +150,8 @@ def test_re_ingest_never_overwrites_a_recorded_citation(db):
 def test_export_round_trips_the_citation_and_the_commit(db, tmp_path):
     ingest_patterns_md(db, _section("https://github.com/x/y — src/a.ts::run:12", commit=SHA))
     exported = export_patterns_md(db)
-    assert f"- **Commit**: {SHA}" in exported
+    assert f"- **Source**: https://github.com/x/y — src/a.ts::run:12 @ {SHA}" in exported
+    assert "- **Commit**:" not in exported
     db2 = tmp_path / "architect2.db"
     SqliteStore("architect", db2).migrate(ARCHITECT_SCHEMA)
     architect._reconcile_relations(db2)
@@ -206,3 +232,23 @@ def test_show_says_when_no_citation_was_recorded(cli_config):
     assert _add("--name", "P", "--source", "https://github.com/x/y", "--body", "b").exit_code == 0
     (pid,) = _row(architect_db(cli_config), "id")[0]
     assert "cites: (none recorded)" in CliRunner().invoke(main, ["architect", "show", pid]).output
+
+
+def test_an_export_reads_the_same_to_a_parser_that_ignores_the_citation():
+    """THE MIXED-VERSION CASE (Prudence, PR 1368 Important 1). The previous release's
+    parser kept the first URL on the Source line and dropped the rest; a body line it did
+    not know was body text, and the body is part of the pattern id. A commit on its own
+    `- **Commit**:` line therefore became body text there, and an older teammate
+    ingesting a regenerated corpus stored a polluted duplicate of every such pattern.
+
+    Stand-in for the old parser: this release's parser with the citation and commit
+    thrown away, which is exactly what the old one stored. The ids must agree."""
+    from techne.core.patterns import _hash
+
+    md = _section("https://github.com/x/y — src/a.ts::run:12", commit=SHA, body="the body")
+    (new,) = parse(md).patterns
+    old_line = "- **Source**: https://github.com/x/y"
+    old_md = "\n".join(old_line if ln.startswith("- **Source**:") else ln for ln in md.splitlines())
+    (old,) = parse(old_md).patterns
+    assert old.body == new.body == "the body"
+    assert _hash(old.name, old.source_url, old.body) == _hash(new.name, new.source_url, new.body)

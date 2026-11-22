@@ -70,8 +70,10 @@ All notable changes to techne are documented here. Format loosely follows
   v9). Ingest kept only the first URL on a `- **Source**:` line and dropped the rest as
   "decorative", so the citation the investigating guide asks for never reached the store:
   `patterns.source_path` was NULL in all 1,024 active rows of a live store. The text after
-  the URL is now stored as `source_path`, and a new `- **Commit**:` line (or a
-  `/blob/<sha>/` URL) is stored as `patterns.source_commit`. Re-ingesting a pattern fills
+  the URL is now stored as `source_path`, and a trailing `@ <sha>` on the same line (or a
+  `/blob/<sha>/` URL) is stored as `patterns.source_commit`. The commit stays on the
+  Source line, where an older techne already ignores text, so a corpus exported by this
+  release does not make an older one store duplicate patterns. Re-ingesting a pattern fills
   either column when it is empty and never overwrites one that is set, so old corpus files
   restore lost citations without changing any pattern id. `architect add` takes the same
   citation in `--source` plus `--commit`, `architect show` prints `cites: <path> @ <sha>`,

@@ -18,9 +18,8 @@ temp file and ingest it (the **Source line must contain an `http(s)://` URL**, e
 cat > /tmp/p.md <<'EOF'
 ## <Short pattern name>
 
-- **Source**: <https-url> — <path::symbol (line optional) / §section>
+- **Source**: <https-url> — <path::symbol (line optional) / §section> @ <sha the citation was read at>
 - **Surveyed**: <YYYY-MM-DD>
-- **Commit**: <sha the citation was read at; omit for sources with no commit>
 
 <What it does — 1–2 paragraphs.>
 

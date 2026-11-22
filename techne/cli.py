@@ -5028,8 +5028,8 @@ def architect_ingest(ctx, markdown_file, verdict):
 @click.option(
     "--commit",
     default=None,
-    help="Commit sha the citation in --source was read at (7-40 hex). A /blob/<sha>/ "
-    "URL in --source supplies it when this is omitted.",
+    help="Commit sha the citation in --source was read at (7-40 hex). A trailing "
+    "`@ <sha>` or a /blob/<sha>/ URL in --source supplies it when this is omitted.",
 )
 @click.pass_context
 def architect_add(ctx, name, source, surveyed, body, body_file, verdict, surveyed_by, lens, commit):
@@ -5113,8 +5113,9 @@ def architect_add(ctx, name, source, surveyed, body, body_file, verdict, surveye
         raise click.UsageError(f"--source must be an http(s) URL; got {source!r}")
     # `split_source` is the function ingest uses, so add and ingest store the same URL
     # and the same citation for the same Source text.
-    source, citation = split
-    source_commit = commit_from(commit, source)
+    source, citation, line_commit = split
+    # An explicit --commit wins over a trailing `@ <sha>` or a pinned URL.
+    source_commit = commit_from(commit) if commit is not None else line_commit
     if commit is not None and source_commit is None:
         raise click.UsageError(f"--commit must be a 7-40 character hex sha; got {commit!r}")
 
