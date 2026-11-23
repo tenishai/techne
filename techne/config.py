@@ -622,6 +622,15 @@ class ArchitectConfig:
     #: because that one maps persona names onto repos (`prudence: agents`), and
     #: widening every search for a common word like "agents" would bury its results.
     search_aliases: dict[str, str] = field(default_factory=dict)
+    #: Rerank architect search with a cross-encoder (core/rerank.py). "" is off, the
+    #: default; "minilm" turns it on. Costs ~5.6 s per search on one CPU core and a
+    #: one-time 91 MB model download; needs the `rerank` extra.
+    rerank: str = ""
+    #: How many BM25 hits the reranker reorders. The gain was measured at 20.
+    rerank_top_k: int = 20
+    #: How many tokens of query plus pattern the model reads. 512 is the model's
+    #: maximum; 256 is ~2.5x faster but cut the measured gain from +0.063 to +0.046.
+    rerank_max_tokens: int = 512
 
 
 @dataclass
@@ -1532,6 +1541,9 @@ class Config:
                 pattern_targets=_pattern_targets(a.get("pattern_targets")),
                 target_aliases=_target_aliases(a.get("target_aliases")),
                 search_aliases=_target_aliases(a.get("search_aliases")),
+                rerank=str(a.get("rerank") or "").strip().lower(),
+                rerank_top_k=max(2, int(a.get("rerank_top_k") or 20)),
+                rerank_max_tokens=min(512, max(32, int(a.get("rerank_max_tokens") or 512))),
             )
         if "recall" in raw and isinstance(raw["recall"], dict):
             r = raw["recall"]
@@ -1758,6 +1770,9 @@ class Config:
                 "pattern_targets": list(self.architect.pattern_targets),
                 "target_aliases": dict(self.architect.target_aliases),
                 "search_aliases": dict(self.architect.search_aliases),
+                "rerank": self.architect.rerank,
+                "rerank_top_k": self.architect.rerank_top_k,
+                "rerank_max_tokens": self.architect.rerank_max_tokens,
             },
             "search": {
                 "recency_weight": self.search.recency_weight,

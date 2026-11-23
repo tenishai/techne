@@ -2748,9 +2748,11 @@ def _pattern_search(args: dict, config: Config) -> dict:
     """FTS over the Architect's pattern corpus (architect.db). Optionally scoped to
     patterns that apply to a given project target."""
     from techne.core.architect import architect_db
-    from techne.core.patterns import patterns_for_target, search_patterns
+    from techne.core.patterns import patterns_for_target
+    from techne.core.rerank import search_architect
 
     db = architect_db(config)
+    rerank = None
     query = args.get("query", "")
     limit = args.get("limit", 20)
     target = args.get("target")
@@ -2805,7 +2807,7 @@ def _pattern_search(args: dict, config: Config) -> dict:
     if target and not query:
         hits = patterns_for_target(db, target, limit=limit)
     else:
-        hits = search_patterns(db, query, limit=limit)
+        hits, rerank = search_architect(config, db, query, limit=limit)
         if target:
             # Post-filter FTS hits to the target's pattern set. The cap is a high
             # ceiling vs. the corpus (hundreds), not a real bound; revisit if a
@@ -2827,6 +2829,8 @@ def _pattern_search(args: dict, config: Config) -> dict:
     out: dict = {"results": hits, "count": len(hits)}
     if notice:
         out["notice"] = notice
+    if rerank is not None:
+        out["rerank"] = rerank
     return out
 
 

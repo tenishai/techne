@@ -1,13 +1,13 @@
 ---
 card: repo-card:techne
 updated: 2026-10-08
-anchor: pyproject.toml sha=74a2739fec73d06b138b8d7a3715fb3ca0f8929e
+anchor: pyproject.toml sha=8e407cddacf5d9ce568ba6a9b85b473235dfc750
 ---
 # techne — repo card
 
 WHAT: local-first, single-SQLite-file persistent memory for AI coding agents (mainly Claude Code). Captures sessions/threads/observations, curates durable knowledge, self-maintains (reflect/consolidate/dream) on the agent's OWN model — no API key.
 STATE: main, v0.19.1, Alpha, active (the distribution is renamed tenish-techne; the import package and CLI stay techne; `model_engine: claude-code` runs techne's own model calls through the user's claude CLI. Full notes: the 0.19.0 block in CHANGELOG.md; 0.19.0 adds the archivist publish lane, per-session token usage, a wider credential scrub, worker-isolated archivist queries and an install end-to-end CI job; 0.19.1 adds `techne.api.recall` and `techne.api.publish` for embedding runtimes.)
-STACK: Python 3.11+ (CI matrix: 3.12 on PRs, 3.12/3.13 on main, + a separate 3.14 `eval-vec` arm), Click CLI, stdlib sqlite3 (WAL) = sole store. Optional extras: `[vectors]` (sqlite-vec + fastembed/model2vec, semantic search), `[codex]` (tree-sitter code graph: Python, TypeScript, Go), `[llm]` (litellm, headless passes), `[security]`, `[watch]`, `[recommended]` = vectors+security. Install from git: `pipx install "tenish-techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.19.1"` — PyPI `techne` is an UNRELATED package. stdio MCP server. Dockerfile present.
+STACK: Python 3.11+ (CI matrix: 3.12 on PRs, 3.12/3.13 on main, + a separate 3.14 `eval-vec` arm), Click CLI, stdlib sqlite3 (WAL) = sole store. Optional extras: `[vectors]` (sqlite-vec + fastembed/model2vec, semantic search), `[codex]` (tree-sitter code graph: Python, TypeScript, Go), `[llm]` (litellm, headless passes), `[security]`, `[watch]`, `[rerank]` (numpy cross-encoder for architect search, opt-in via `architect.rerank`), `[recommended]` = vectors+security. Install from git: `pipx install "tenish-techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.19.1"` — PyPI `techne` is an UNRELATED package. stdio MCP server. Dockerfile present.
 ENTRY:
 - CLI techne → techne/cli.py:main (init/status/doctor/capabilities/threads/search/knowledge/reflect/custodian/architect/codex/librarian/archivist/bindings/vectors/skills/agents/guide…; `techne --help` is the full list. consolidate/dream/coord are MCP tools, not CLI groups)
 - MCP → techne/mcp_server.py (stdio JSON-RPC, 39 tools; `techne init --platform claude-code`)

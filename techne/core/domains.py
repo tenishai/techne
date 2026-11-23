@@ -95,15 +95,17 @@ def librarian_search(config, query: str, limit: int = 20) -> dict:
 def architect_search(config, query: str, limit: int = 20) -> dict:
     """Architectural patterns — the "what is worth borrowing" corpus in architect.db."""
     from techne.core.architect import architect_db
-    from techne.core.patterns import search_patterns
+    from techne.core.rerank import search_architect
 
     report = _binding_of(config, "architect")
     if not report.ok:
         # DO NOT READ AN UNREADABLE DOMAIN. Beyond being pointless, the accessor would
         # CREATE the store and the next call would report it healthy.
         return _envelope("architect", config, [], report=report)
-    rows = search_patterns(architect_db(config), query, limit=limit)
-    return _envelope("architect", config, rows, report=report)
+    rows, rerank = search_architect(config, architect_db(config), query, limit=limit)
+    if rerank is None:
+        return _envelope("architect", config, rows, report=report)
+    return _envelope("architect", config, rows, report=report, rerank=rerank)
 
 
 def codex_search(config, query: str, limit: int = 20, repo: str | None = None) -> dict:
