@@ -96,13 +96,10 @@ bare path (`→ docs/arch/<seam>.md`); a markdown link or backticks reads as abs
 
 **Staleness is checked, not hoped for.** `scripts/check_arch_cards.py` recomputes each
 card's anchor sha and fails if a seam drifted from its card (or an anchor is malformed).
-Run it locally before you push. It also runs in CI on every push and every same-repo PR — the `arch-cards`
-job in `.github/workflows/test.yml` (#383). A PR from a fork gets no arch-cards check;
-the `fork-pr` job does not reproduce it. CAVEAT, do not over-trust it: this repo's
-plan has no branch protection (`gh api repos/tenishai/techne/branches/main/protection`
-→ 403 "Upgrade to GitHub Pro"), so NO check here is a required status check. The job
-REPORTS drift; it cannot BLOCK a merge. Treat a red `arch-cards` as a stop signal by
-convention, not by enforcement. Re-bless a card by updating its body and bumping its
+Run it locally before you push. It also runs in CI on every push and every PR, fork PRs
+included — the `arch-cards` job in `.github/workflows/test.yml` (#383). The job reports
+drift, and the `ci` job fails when it does; whether that BLOCKS a merge depends on a
+ruleset requiring `ci`, so check that is set before relying on it. Re-bless a card by updating its body and bumping its
 recorded sha together.
 
 ```

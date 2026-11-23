@@ -3,71 +3,61 @@
 **Status: PAUSED, DELIBERATELY — not stalled.** Richard's call, 2026-08-17: the
 flip waits until more milestones are complete. This is the plan, not a record.
 
-**The step-by-step runbook is held privately and is not in this repo (#1005).**
-It names the CI host and its paths — a map of the machine this sequence exists
-to protect, in a file that would ship with the
-public repo. The operator has it; ask before executing.
-
-What is safe to say here, because the workflow already shows it, is *why* the
-order matters. Anyone editing CI needs that much.
+**The host-specific steps are held privately and are not in this repo (#1005).**
+They name the CI host and its paths, in a file that would ship with the public
+repo. The operator has them; ask before executing.
 
 ---
 
-## The hazard
+## CI no longer uses a runner of ours
 
-`.github/workflows/test.yml` runs jobs on a self-hosted runner. The moment the
-repo is public, a fork PR runs attacker-controlled code on that machine.
+Every job in `.github/workflows/test.yml` runs on a GitHub-hosted runner
+(`ubuntu-latest`), and fork PRs run the same jobs as in-repo PRs. The old hazard,
+attacker-controlled code from a fork PR on a machine we run, is gone because no
+workflow targets such a machine, not because a guard keeps forks away from it.
+`tests/test_ci_workflow_triggers.py` pins this: no job in any workflow file may
+target a runner that is not provably GitHub-hosted, and no job may carry an `if:`
+that skips fork PRs.
 
-**The in-workflow `if:` guards cannot prevent this.** For the `pull_request`
-event GitHub evaluates the workflow *from the PR's ref*, so a fork runs the
-fork's copy of `test.yml` and an attacker simply deletes the guards.
-
-The real control is a repo setting — and it cannot be enabled while the repo is
-private:
-
-```
-gh api repos/tenishai/techne/actions/permissions/fork-pr-contributor-approval
-→ 422  "Fork PR approval is not allowed for private repositories."
-```
-
-That makes this a **sequencing problem, not a checkbox.**
-
-## Why the runner comes down first
-
-Between "repo becomes public" and "approval setting applied" there is a window
-in which a fork PR reaches the runner. You cannot close it by being quick.
-
-You close it by having no runner. **A job whose `runs-on` labels match no
-*online* runner queues — it does not execute.** With the runner stopped, a fork
-PR arriving mid-window sits harmlessly until the gate is on.
-
-Stop the container; do not only de-register. An ephemeral runner's entrypoint
-re-registers on start, and API de-registration does not stick while the
-container runs (measured: one re-registered itself twice within seconds).
+The `ci` job in that workflow is the one check a ruleset should require. It fails
+unless every other job succeeded, so a skipped or cancelled job cannot read as a
+pass.
 
 ## The order
 
-1. Stop the runner container. Confirm GitHub agrees it is gone.
+1. Stop and deregister the self-hosted techne runners, **after the change that
+   moved CI to hosted runners has merged**. Nothing in this repo needs them
+   any more, and a runner that stays registered is a standing target the moment
+   the repo is public. Stop the container as well as deregistering: an ephemeral
+   runner's entrypoint re-registers on start, so API de-registration alone does
+   not stick while the container runs. Confirm GitHub lists no runner for the repo.
 2. Flip the repo to public. *(Deliberately a UI step — doing it by API invites
    doing it early.)*
-3. Apply the fork-PR approval gate **in the same sitting**, set to all outside
-   collaborators. **Do not accept the default**, which is believed to be
+3. Apply the fork-PR approval gate **in the same sitting**, set to
+   all outside collaborators. **Do not accept the default**, which is believed to be
    first-time contributors only — that is defeated by landing a typo fix first.
-   Verify by API; the UI radio is easy to misread.
-4. Restart the runner. Confirm its network isolation came back — it is a
-   separate unit and does not return with the container.
+   Verify by API; the UI radio is easy to misread. The setting cannot be applied
+   while the repo is private:
+
+   ```
+   gh api repos/tenishai/techne/actions/permissions/fork-pr-contributor-approval
+   → 422  "Fork PR approval is not allowed for private repositories."
+   ```
+
+   With hosted runners the window before this step costs minutes, not a
+   compromised host, but a fork PR can still spend them.
+4. Require the `ci` check in a ruleset on `main`.
 5. **Exercise a real fork PR before announcing** (#592). Until that has happened
    once, the fork path is a hand trace, and it is the only step that tests the
    thing being defended.
 
-## What protects the runner today, and why it disappears
+## What protects the repo today, and why it changes
 
 On a **private** repo an org-level policy means fork PRs execute no workflows at
 all. Verified by opening a real fork PR: zero check runs, an empty Checks tab.
 
-That policy is private-repos-only. **It stops applying at exactly the moment
-step 2 completes** — which is why step 1 is not optional and why the guard that
-has never executed becomes the sole control.
+That policy is private-repos-only. It stops applying when step 2 completes, so
+step 5 is the first time the fork path runs for real.
 
 ## Blockers outside this repo
 

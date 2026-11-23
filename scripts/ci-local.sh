@@ -3,7 +3,7 @@
 #
 # techne is a PRIVATE repo, so Actions minutes are metered — and as of 2026-07-25
 # the org's jobs stopped starting entirely on a billing failure (since resolved;
-# CI now runs on the self-hosted runner, #424). This script is the fast inner loop:
+# CI now runs on GitHub-hosted runners). This script is the fast inner loop:
 # it mirrors .github/workflows/test.yml step for step.
 #
 # "GREEN HERE" DOES NOT MEAN "GREEN THERE". The step sequence matches; the
@@ -21,7 +21,7 @@
 # exist as root-owned daemons on macOS (os.kill -> PermissionError -> "alive") but
 # not in a Linux container (ProcessLookupError -> "dead"). This script correctly
 # reported ALL GREEN throughout. Local green is not CI green — push and let the
-# self-hosted runner have the last word.
+# hosted runner have the last word.
 #
 # A REUSED VENV CAN STAY GREEN WHERE CI GOES RED. `uv pip install -e` adds and
 # upgrades, but does NOT uninstall a package that has since been REMOVED from
