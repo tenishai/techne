@@ -91,6 +91,10 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- **A Source line ending in a bare separator stores no citation** (follow-up to #1368).
+  `- **Source**: <url> — ` used to store the dash as the pattern's `source_path`, so
+  `architect show` printed `cites: —`. The separator is now dropped when nothing follows it.
+
 - **Reactivating a superseded pattern undoes the supersession** (#1348). `techne architect
   tag <id> --status active` on a superseded pattern now also clears `superseded_by` and
   `invalid_at` and removes its `supersedes` edge, in one write (`unsupersede()`). Before, only

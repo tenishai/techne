@@ -127,9 +127,10 @@ _SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
 # A commit pinned in a GitHub-style URL: .../blob/<sha>/... or .../tree/<sha>/...
 _URL_SHA_RE = re.compile(r"/(?:blob|tree|commit)/([0-9a-f]{7,40})(?:/|$|#)")
 # ONE separator token between the URL and the citation (em/en dash, hyphen, colon,
-# comma, semicolon) followed by whitespace. A token, not a character set: `lstrip` of a
-# set also ate the start of a citation such as `-v flag` or `:memory: mode`.
-_CITATION_LEAD_RE = re.compile(r"^[—–:,;-]+\s+")
+# comma, semicolon) followed by whitespace or the end of the line, so a bare trailing
+# separator leaves no citation. A token, not a character set: `lstrip` of a set also
+# ate the start of a citation such as `-v flag` or `:memory: mode`.
+_CITATION_LEAD_RE = re.compile(r"^[—–:,;-]+(?:\s+|$)")
 # A trailing `@ <sha>` (optionally backticked) on the citation: the commit it was read at.
 _TRAILING_SHA_RE = re.compile(r"(?:^|\s)@\s*`?([0-9a-fA-F]{7,40})`?\s*$")
 
