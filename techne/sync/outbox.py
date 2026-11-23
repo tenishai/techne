@@ -39,6 +39,12 @@ def content_hash_for(data: dict) -> str:
     the outbox would, and a second copy of the formula silently stops matching
     the moment either side changes — the same drift the REDIRECTED_TYPES filter
     was rewritten to avoid (#450). One definition, two callers. (techne#475.)
+
+    A PRE-FILTERING CALLER MUST PASS THE HASH IT FILTERED ON as ``content_hash=``.
+    When ``enqueue`` computes the hash itself, it hashes the payload AFTER
+    redaction (#1377), so on a secret-bearing payload ``content_hash_for(raw)``
+    and the stored hash differ and the pre-filter never matches. Both current
+    pre-filters (``techne/core/archivist.py``) pass their hash explicitly.
     """
     return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()[:16]
 

@@ -96,9 +96,9 @@ def test_the_go_public_runbook_exists_and_the_workflow_points_at_it():
     # This file ships with the public repo (#1005), so it must not name the CI host,
     # its paths or its runner names. Anything that names infrastructure belongs in the
     # private copy, and this assertion is what stops it coming back.
-    # Host names that also appear as synthetic fixture text elsewhere in the tree,
-    # so they are checked here rather than tree-wide (see INFRA_LEAKS below).
-    for leak in ("dev02", "dev04", "ssh ", "gha-runner"):
+    # Host names are checked tree-wide (INFRA_LEAKS below). These two stay
+    # runbook-only: "ssh " is ordinary prose elsewhere (README's install notes).
+    for leak in ("ssh ", "gha-runner"):
         assert leak not in text.lower(), (
             f"{leak!r} is back in docs/go-public-runbook.md. This file is public "
             "at the flip; infrastructure detail belongs in the private copy "
@@ -704,15 +704,23 @@ def _all_jobs() -> dict[tuple[str, str], dict]:
     return out
 
 
-# GitHub's own hosted images, named by their label. This is an ALLOW-LIST on purpose:
-# a custom label such as a pool name, `self-hosted`, or anything this regex does not
-# recognise is treated as a runner of ours. Fail closed: a new spelling is reviewed,
-# not waved through.
-_HOSTED_LABEL = re.compile(r"^(ubuntu|windows|macos)-[a-z0-9._-]+$")
+# GitHub's standard hosted image labels, as an ALLOW-LIST: a pool name, `self-hosted`,
+# or anything else this does not recognise counts as a runner of ours (fail closed).
+# EXACT SHAPES, NOT A PREFIX: a self-hosted runner can carry a custom label such as
+# `ubuntu-builder` (#1372 post-merge review). Shapes from the standard-runner tables at
+# docs.github.com/en/actions/reference/runners/github-hosted-runners (read 2026-11-23).
+# Larger-runner labels (`macos-15-xlarge`, named Linux pools) are left out, so count as ours.
+_HOSTED_LABEL = re.compile(
+    r"^(?:"
+    r"ubuntu-(?:latest|slim|\d{2}\.\d{2}(?:-arm)?)"
+    r"|windows-(?:latest|\d{4}(?:-vs\d{4})?|11(?:-vs\d{4})?-arm)"
+    r"|macos-(?:latest|\d{2}(?:-intel)?)"
+    r")$"
+)
 
 
 def _targets_own_runner(runs_on) -> bool:
-    """True unless `runs-on` PROVABLY names only GitHub-hosted labels.
+    """True unless `runs-on` names only labels of GitHub's standard hosted images.
 
     `runs-on` accepts a bare string, a list of labels, or a mapping with `labels:`
     and/or `group:`. A `group:` names a runner group, which this repo cannot show to
@@ -746,6 +754,22 @@ def _targets_own_runner(runs_on) -> bool:
         ({"group": "ci-pool"}, True),
         ({"group": "ci-pool", "labels": ["ubuntu-latest"]}, True),
         ("techne-ci", True),
+        ("ubuntu-builder", True),
+        (["ubuntu-builder"], True),
+        ({"labels": "ubuntu-builder"}, True),
+        ("ubuntu-24.04-large", True),
+        ("windows-gpu", True),
+        ("macos-15-xlarge", True),
+        ("macos-arm-pool", True),
+        ("ubuntu-slim", False),
+        ("ubuntu-22.04", False),
+        ("ubuntu-24.04-arm", False),
+        ("windows-latest", False),
+        ("windows-2025", False),
+        ("windows-11-arm", False),
+        ("macos-latest", False),
+        ("macos-15", False),
+        ("macos-15-intel", False),
         ("${{ matrix.runner }}", True),
         ("${{ github.event_name == 'push' && 'ubuntu-latest' || 'self-hosted' }}", True),
         (["${{ vars.RUNNER }}"], True),
@@ -1146,7 +1170,7 @@ def test_comment_block_gate_runs_in_ci_against_a_real_base():
 # The runbook left the repo for naming them, and the same names were still in the
 # workflow and in two docstrings when it did, so this checks every tracked file
 # rather than the one that was cleaned. Case-insensitive: "Mash1" is the same leak.
-INFRA_LEAKS = ("mash1", "prinkle", "/var/servers", "i7-8700")
+INFRA_LEAKS = ("mash1", "prinkle", "dev02", "dev04", "/var/servers", "i7-8700")
 # Files allowed to spell the names, because each is a guard listing them.
 INFRA_LEAK_GUARDS = {"tests/test_ci_workflow_triggers.py", "tests/test_skills_install.py"}
 

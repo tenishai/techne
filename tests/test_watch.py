@@ -93,13 +93,28 @@ def _record(bucket, timer):
 
 class TestDebouncer:
     def test_fires_after_delay(self) -> None:
+        """schedule() arms one timer for the delay, and the callback fires when it elapses.
+
+        Driven through the `_FakeTimer` seam like its siblings (techne#593). It used to
+        arm a real 50ms timer and sleep 100ms, and that 2x margin failed on a hosted
+        runner under `-n 4` (Actions run 45271543554, `main` at ad15586).
+        """
         seen: list[Path] = []
-        d = Debouncer(lambda p: seen.append(p), delay_ms=50)
+        armed: list[tuple[float, _FakeTimer]] = []
+
+        def factory(interval, fn, args):
+            timer = _FakeTimer(fn, args)
+            armed.append((interval, timer))
+            return timer
+
+        d = Debouncer(lambda p: seen.append(p), delay_ms=50, timer_factory=factory)
         d.schedule(Path("/tmp/x"))
-        # Initially no fire
-        assert seen == []
-        # Wait for the timer to elapse
-        time.sleep(0.1)
+
+        assert [(interval, t.started) for interval, t in armed] == [(0.05, True)], (
+            "schedule() must start one timer for delay_ms, in seconds"
+        )
+        assert seen == [], "nothing fires before the timer elapses"
+        armed[0][1].elapse()
         assert seen == [Path("/tmp/x")]
 
     def test_coalesces_rapid_schedules_on_same_key(self) -> None:
@@ -165,11 +180,22 @@ class TestDebouncer:
         assert seen == [Path("/tmp/x")]
 
     def test_different_keys_fire_independently(self) -> None:
+        """Fake timers (techne#593): scheduling /tmp/y must not cancel /tmp/x."""
         seen: list[Path] = []
-        d = Debouncer(lambda p: seen.append(p), delay_ms=50)
+        fired: list[_FakeTimer] = []
+        d = Debouncer(
+            lambda p: seen.append(p),
+            delay_ms=50,
+            timer_factory=lambda interval, fn, args: _record(fired, _FakeTimer(fn, args)),
+        )
         d.schedule(Path("/tmp/x"))
         d.schedule(Path("/tmp/y"))
-        time.sleep(0.1)
+
+        assert [t.cancelled for t in fired] == [False, False], (
+            "a schedule() on one key must not cancel another key's timer"
+        )
+        for t in fired:
+            t.elapse()
         assert set(seen) == {Path("/tmp/x"), Path("/tmp/y")}
 
     def test_flush_cancels_pending(self) -> None:
@@ -181,19 +207,29 @@ class TestDebouncer:
         assert seen == []
 
     def test_callback_exception_does_not_break_debouncer(self) -> None:
-        """A bad callback must not propagate or leave the debouncer broken."""
+        """A bad callback must not propagate or leave the debouncer broken.
 
-        def boom(_p):
-            raise RuntimeError("kaboom")
-
-        d = Debouncer(boom, delay_ms=10)
-        d.schedule(Path("/tmp/x"))  # should not raise
-        time.sleep(0.05)
-        # Debouncer should still work on subsequent calls
+        Fake timers (techne#593); it used to sleep 50ms past a 10ms timer.
+        """
         seen: list[Path] = []
-        d2 = Debouncer(lambda p: seen.append(p), delay_ms=10)
-        d2.schedule(Path("/tmp/y"))
-        time.sleep(0.05)
+
+        def callback(p):
+            if p == Path("/tmp/x"):
+                raise RuntimeError("kaboom")
+            seen.append(p)
+
+        fired: list[_FakeTimer] = []
+        d = Debouncer(
+            callback,
+            delay_ms=10,
+            timer_factory=lambda interval, fn, args: _record(fired, _FakeTimer(fn, args)),
+        )
+        d.schedule(Path("/tmp/x"))  # should not raise
+        fired[-1].elapse()  # the callback raises inside the timer; must not propagate
+
+        # The same debouncer keeps working on subsequent calls.
+        d.schedule(Path("/tmp/y"))
+        fired[-1].elapse()
         assert seen == [Path("/tmp/y")]
 
 

@@ -217,8 +217,8 @@ capabilities` prints the same command.
 
 Everything past core is an opt-in extra. Nothing here is required — core (capture, FTS
 recall, threads, knowledge, identity) runs standalone, and every extra **degrades
-gracefully** when absent (vector search returns empty, the CVE gate fails open, `watch`/
-`codex` subcommands are unavailable). Pick deliberately — this is the complete option space.
+gracefully** when absent (vector search returns empty, the `shell_guard.audit_install`
+helper allows an install unaudited, `watch`/`codex` subcommands are unavailable). Pick deliberately — this is the complete option space.
 
 | Install                 | Enables                                                        | Pulls                                              | Reach for it when |
 |-------------------------|---------------------------------------------------------------|----------------------------------------------------|-------------------|
