@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from techne.core.database import TIMESTAMP_FORMAT, connect
+from techne.core.redaction import redact_json_values
 from techne.sync.adapter import OutboxEntry, SyncAdapter
 
 logger = logging.getLogger(__name__)
@@ -96,6 +97,13 @@ def enqueue(
             f"outbox target must be namespaced {SINK_PREFIX!r} (sink-delivered) or "
             f"{SYNC_PREFIX!r} (adapter-delivered); got {target!r}"
         )
+
+    # Redact at the queue boundary, once, for every producer (issue #1238): the
+    # thread-summary payloads carried raw label/summary/resume_points here while
+    # the same text was redacted on its way into the threads table. After schema
+    # validation, so the schema check sees what the caller passed. Delivery below
+    # uses the redacted payload too.
+    data = redact_json_values(data)
 
     if content_hash is None:
         content_hash = content_hash_for(data)

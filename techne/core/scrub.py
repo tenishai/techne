@@ -3,11 +3,12 @@
 Redaction runs at write time, so widening the pattern set protects new rows
 only. This walks the free-text columns that carry captured or model-written text
 and rewrites any value the current patterns would change. Write-time redaction
-does not cover all of them: `context_injections.trigger_snippet` and the
-thread-summary payloads `run_session_end` enqueues into `outbox.data_json` are
-stored raw (issue #1238), and there may be others, so for those this pass is
-the only redaction they get. Dry run by default: it counts and never
-prints matched text.
+did not cover all of them: `context_injections.trigger_snippet` and the
+thread-summary payloads `run_session_end` enqueues into `outbox.data_json` were
+stored raw (issue #1238) until they were fixed, so rows written before that carry
+no write-time redaction and this pass is the only redaction they get.
+`tests/test_redaction_coverage.py` now fails when a new write site skips redaction.
+Dry run by default: it counts and never prints matched text.
 
 What it does not reach: vector embeddings (derived, not text), FTS shadow
 tables (rebuilt by the UPDATE triggers on observations, knowledge and threads),
