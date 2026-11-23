@@ -7,6 +7,7 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Changed
 
+- **Removed `scripts/ci_queue_wait.py`** and its test. It measured queue-wait on the self-hosted runners, which CI no longer uses (closed issue #897).
 - **`shell_guard` is described as a helper, not a gate (#1263).** `techne.security.shell_guard` has no caller in techne, which has no shell-exec path. The README extras table, the `[security]` and `[recommended]` comments in `pyproject.toml`, `docs/modules.md` and the module docstring no longer call it "the shell gate" or a CVE pre-install audit techne runs. `[security]` installs `pip-audit` for `shell_guard.audit_install`, a standalone helper. The module and its tests stay.
 - **README and the welcome guide corrected against the code.** `techne_recall` escalates across memory, the archivist and the librarian (not the architect or codex); the codex extra and the dev extra list `tree-sitter-go` and `pytest-xdist`; `techne doctor` has six verdicts; `knowledge list --type` takes all nine types; `conflict.model` is documented as having no effect; the welcome guide no longer says the loop needs no hand, that nothing touches the live store, or that per-turn recall and grep-assist never delay or misscope.
 - **CI: a separate `dco` job.** The DCO sign-off check moves out of `arch-cards` into its own job, so it reports as `dco`, the check name the branch rulesets require (tenishai/agora discussion 71). `ci` now needs it too. The script itself is unchanged.
