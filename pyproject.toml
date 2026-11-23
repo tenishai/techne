@@ -7,7 +7,7 @@ name = "tenish-techne"
 version = "0.19.1"
 description = "Agentic memory and knowledge system for AI coding agents"
 readme = "README.md"
-license = "AGPL-3.0-or-later"
+license = "MIT"
 requires-python = ">=3.11"
 authors = [{ name = "tenish" }]
 keywords = ["ai", "agents", "memory", "knowledge", "claude", "mcp"]

@@ -181,7 +181,7 @@ responsible for every line you submit: understand it, test it, and be able to
 explain it in review. Say in the pull request description which AI tools you
 used. Crediting the agent with a `Co-Authored-By:` trailer is optional. Don't
 submit code a tool reproduced from a source whose license isn't compatible with
-AGPL-3.0.
+the MIT license.
 
 ## Schema evolution
 

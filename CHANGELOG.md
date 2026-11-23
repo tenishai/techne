@@ -7,6 +7,8 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Changed
 
+- **Licence: MIT.** The project moves from AGPL-3.0-or-later to MIT, with the agreement of every contributor (tenishai/agora discussion 69). Releases already published keep the licence they shipped under.
+
 - **The investigating guide now requires walking the code, the tests and the issue
   tracker.** Step 4.5 treats README, docs and doc comments as claims: each pattern cites
   the line of logic that implements it, and docs are cited only as stated rationale or
