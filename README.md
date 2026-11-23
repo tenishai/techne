@@ -228,7 +228,7 @@ gracefully** when absent (vector search returns empty, the CVE gate fails open, 
 | `.[watch]`              | `techne watch <dir>` — continuous filesystem-change ingest    | `watchdog`                                          | You want a background daemon ingesting file changes (vs per-session hook capture). |
 | `.[llm]`                | Operator-model path for autonomous/headless reflect/consolidate | `litellm`                                        | Running headless/autonomous loops that can't use the agent's own model. |
 | `.[codex]`              | `techne codex index <repo>` — Tree-sitter code graph (experimental) | `tree-sitter`, `tree-sitter-python`, `tree-sitter-typescript`, `tree-sitter-go`, `watchdog` | Indexing a repo's symbols/edges for reachability/blast-radius queries. |
-| `.[rerank]`             | Opt-in cross-encoder reranking for architect search (`architect.rerank: minilm`) | `numpy`, `safetensors`, `tokenizers`, `huggingface_hub`; the 91 MB model downloads on first use | Architect search should rank by how well a pattern answers the query; ~5.6 s per search on one core (measured 2026-11-23: 5.6 to 5.8 s to rerank 20 patterns at 512 tokens, `OPENBLAS_NUM_THREADS=1`, Python 3.13). |
+| `.[rerank]`             | Opt-in cross-encoder reranking for architect search (`architect.rerank: minilm`) | `numpy`, `safetensors`, `tokenizers`, `huggingface_hub`; the 91 MB model downloads on first use | Architect search should rank by how well a pattern answers the query; ~5.6 s per search on one core (measured 2026-11-23: 5.4 to 5.8 s warm to rerank 20 patterns that each fill 512 tokens, `OPENBLAS_NUM_THREADS=1`, Python 3.13 on Linux; the first search in a process also loads the model). |
 | **`.[recommended]`**    | **`vectors` + `security`** as one bundle                      | union of those two                                 | **The blessed default** — semantic recall + `pip-audit` (an unused-by-techne helper dependency), skipping situational/experimental deps. |
 | `.[dev]`                | Test/lint toolchain                                            | `pytest`, `pytest-cov`, `pytest-xdist`, `ruff`, `litellm`        | Developing techne itself. |
 
@@ -250,18 +250,18 @@ search:
 
 `model2vec` works on **every supported Python (3.11+)**, not only 3.14 — the `<3.14` fastembed default exists because `onnxruntime` had no 3.14 wheel, which is a fact about *onnxruntime*, not a judgment that fastembed is better below it. Verified 2026-08-17: `model2vec` 0.9.0 installs and runs on 3.13.
 
-**It costs disk, and the difference is large.** Measured 2026-11-23 at main `d10cf4a` (the 0.19.1 release plus the unreleased changes), each in a fresh `python -m venv` with `pip install ".[recommended]"`, sizes from `du -sm` (MiB) on a `python:3.x-bookworm` image, with pip's own ~13 MB counted:
+**It costs disk, and the difference is large.** Measured 2026-11-23 at `10e5b61` (the 0.19.1 release plus the unreleased changes), each in a fresh `python -m venv` with `pip install ".[recommended]"`, sizes from `du -sm` (MiB) on Linux with uv-managed CPython, with pip's own ~13 MB counted (an earlier run at `d10cf4a` on a `python:3.x-bookworm` image gave 267 MB for fastembed):
 
 | backend | install | why |
 |---|---|---|
-| `fastembed` (py<3.14 default; measured on 3.13, fastembed 0.9.1) | **267 MB** | `onnxruntime` 78M + `numpy` 43M (+ 23M `numpy.libs`) + `pillow.libs` 15M + `tokenizers` 12M + `hf_xet` 11M |
+| `fastembed` (py<3.14 default; measured on 3.13, fastembed 0.9.1) | **266 MB** | `onnxruntime` 78M + `numpy` 43M (+ 23M `numpy.libs`) + `pillow.libs` 15M + `tokenizers` 12M + `hf_xet` 11M |
 | `model2vec` (py3.14 default; measured on 3.14, model2vec 0.9.0) | **172 MB** | numpy-only static embeddings; no onnxruntime, no PIL; `numpy` 43M (+ 23M `numpy.libs`) + `tokenizers` 12M + `hf_xet` 11M |
 
 fastembed no longer pulls in `sympy` (it was 72 MB in the v0.15.0 measurement, 290 MB). The model2vec row was 85 MB in the v0.14.0 measurement; that figure did not reproduce and is gone. The two rows differ in interpreter as well as backend, since each is its backend's default interpreter, so read the gap as the cost of the stock install on each, not as a clean backend-versus-backend comparison.
 
 The model files come on top, in each backend's model cache: 87 MB for fastembed's `all-MiniLM-L6-v2` (ONNX), 59 MB for model2vec's `potion-base-8M`.
 
-The techne wheel itself is **1.3 MB** (1,326,816 bytes, `pip wheel --no-deps`); effectively all of the difference between the two installs is the embedding backend's dependency tree.
+The techne wheel itself is **1.3 MB** (`pip wheel --no-deps`); effectively all of the difference between the two installs is the embedding backend's dependency tree.
 
 **Choosing `model2vec` on py<3.14 is a real decision with a real cost:** it is 256-d against fastembed's 384-d, so the same "not comparable vector spaces" warning above applies — an existing store must be re-embedded (`techne vectors backfill`) or semantic search silently degrades to FTS-only. Set it before you build up a vector channel, or budget for the re-embed. On a fresh install it is free.
 
