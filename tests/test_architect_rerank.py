@@ -234,4 +234,4 @@ def test_minilm_matches_sentence_transformers(np):
     except Exception as exc:  # noqa: BLE001
         pytest.skip(f"MiniLM not in the local HF cache: {exc!r}")
     for q, d, want in _REFERENCE:
-        assert m.score(q, [d])[0] == pytest.approx(want, abs=1e-3)
+        assert m.score(q, [d])[0] == pytest.approx(want, abs=5e-5)

@@ -227,6 +227,7 @@ gracefully** when absent (vector search returns empty, the CVE gate fails open, 
 | `.[watch]`              | `techne watch <dir>` — continuous filesystem-change ingest    | `watchdog`                                          | You want a background daemon ingesting file changes (vs per-session hook capture). |
 | `.[llm]`                | Operator-model path for autonomous/headless reflect/consolidate | `litellm`                                        | Running headless/autonomous loops that can't use the agent's own model. |
 | `.[codex]`              | `techne codex index <repo>` — Tree-sitter code graph (experimental) | `tree-sitter`, `tree-sitter-python`, `tree-sitter-typescript`, `watchdog` | Indexing a repo's symbols/edges for reachability/blast-radius queries. |
+| `.[rerank]`             | Opt-in cross-encoder reranking for architect search (`architect.rerank: minilm`) | `numpy`, `safetensors`, `tokenizers`, `huggingface_hub`; the 91 MB model downloads on first use | Architect search should rank by how well a pattern answers the query; ~5.6 s per search on one core. |
 | **`.[recommended]`**    | **`vectors` + `security`** as one bundle                      | union of those two                                 | **The blessed default** — semantic recall + the safety audit, skipping situational/experimental deps. |
 | `.[dev]`                | Test/lint toolchain                                            | `pytest`, `pytest-cov`, `ruff`, `litellm`          | Developing techne itself. |
 

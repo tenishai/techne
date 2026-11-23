@@ -9,7 +9,8 @@ better, and reading 256 tokens instead of 512 cut the gain to +0.046.
 
 NUMPY, NOT TORCH OR ONNXRUNTIME. The forward pass below is a plain BERT encoder
 over the model's safetensors weights, tokenized by `tokenizers`; it matches the
-sentence-transformers logits to ~1e-5. onnxruntime is about twice as fast but has
+sentence-transformers logits to ~1e-5 (max 7.6e-6 over 300 eval pairs;
+tests/test_architect_rerank.py holds it to 5e-5). onnxruntime is about twice as fast but has
 no Python 3.14 wheel for Intel Macs, and torch is far larger than the 91 MB
 model. Cost on one CPU core: about 5.6 s to rerank 20 patterns at 512 tokens.
 That is why it is off by default (`architect.rerank`).
