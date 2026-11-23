@@ -188,6 +188,23 @@ def redact_credentials(text: str) -> str:
     return text
 
 
+def redact_json_values(value):
+    """``redact_credentials`` applied to every string inside a JSON-shaped value.
+
+    Walks dicts, lists and tuples and leaves keys, numbers and None alone, so the
+    result serialises to the same shape. For payloads that become a JSON column
+    (the outbox); a whole-text pass over the serialised JSON could swallow a
+    quoted key/value pair and break it.
+    """
+    if isinstance(value, str):
+        return redact_credentials(value)
+    if isinstance(value, dict):
+        return {k: redact_json_values(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [redact_json_values(v) for v in value]
+    return value
+
+
 #: How far either side of a cut point to look for a credential that straddles
 #: it. The longest bounded pattern is the 8KB PEM body; the rest are far shorter.
 _CUT_WINDOW = 9000

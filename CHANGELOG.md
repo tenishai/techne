@@ -97,6 +97,8 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- **Outbox payloads are redacted when queued; a test now enforces redaction on every free-text write (#1238).** `enqueue` now runs every string in the payload through `redact_credentials`. The thread-summary payloads `run_session_end` and `redetect_threads` queue (label, summary, resume points) went into `outbox.data_json` and on to the sink raw, though the same text was redacted on its way into `threads`. `tests/test_redaction_coverage.py` scans `techne/` for SQL INSERT/UPDATE literals and fails when a free-text TEXT column is written by a function that does not call `redact_credentials`, unless the column or site is on a reasoned allowlist. It reads string literals only; SQL built at runtime is listed by hand in the test.
+
 - **A Source line ending in a bare separator stores no citation** (follow-up to #1368).
   `- **Source**: <url> — ` used to store the dash as the pattern's `source_path`, so
   `architect show` printed `cites: —`. The separator is now dropped when nothing follows it.
