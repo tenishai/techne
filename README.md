@@ -1,6 +1,6 @@
 # techne
 
-**Persistent memory for AI agents — local-first, one file, and it runs on the model already in the room.**
+**Persistent memory for AI agents — local-first, personal memory in one file, and it runs on the model already in the room.**
 
 *Technē* (τέχνη) is the ancient Greek word for **craft**: practical, applied know-how — the knowledge you build by *doing*, as opposed to *epistēmē*, abstract theoretical knowledge. That's the idea here. techne is the craft knowledge an agent accumulates across sessions — what it did, what it learned, who it works with — so it gets better at the work over time instead of starting cold every session.
 
@@ -40,7 +40,8 @@ librarian may become a shared one.
 the `binding`, and watch the same call answer from a different store. Start there.
 
 `techne_recall` remains the default for *"what do we know about X"* — it escalates
-across all four. Address a domain by name when you already know which function you
+across memory, the archivist (local and remote) and the librarian. Ask the architect
+and the codex by name. Address a domain by name when you already know which function you
 want.
 
 ---
@@ -61,8 +62,8 @@ techne init
 ```
 
 > **Just want to _run_ techne, not develop it?** Install a pinned release straight
-> from git — no clone, non-editable, and the Claude Code hook launcher self-heals
-> across interpreter changes:
+> from git — no clone, non-editable, and the Claude Code hook launcher repairs itself
+> on most interpreter changes:
 >
 > On Debian/Ubuntu, `pipx` isn't preinstalled: `sudo apt update && sudo apt install pipx` (macOS: `brew install pipx`).
 >
@@ -178,7 +179,7 @@ techne init
 | **Search** | FTS5 across all content layers. Optional vector search via `sqlite-vec` + `fastembed` for semantic similarity. |
 | **Domain stores** | Where [the four functions](#the-four-functions) keep their data — the *layout*, not the mental model. `techne.db` is personal memory and answers as the **archivist** when unbound; larger or team-scoped domains get their own db file behind a `StoreAdapter` (db-per-domain) — **librarian** (`librarian.db`, documents), **architect** (`architect.db`, patterns), **codex** (code graph, *experimental* — **one db per repo** at `codex/<slug>-<hash>.db`). Each db carries only its own schema. Address the domain by name; the db path is what it happens to resolve to today, and the answer's `target` tells you. See [Domain stores](#domain-stores-db-per-domain) and `docs/db-per-domain.md`. |
 
-The schema and triggers all live in `techne/core/database.py`. Schema migrations are tracked in a `schema_version` table; `connect()` is lazy-init so library callers don't need to remember to call `init_db()` first.
+`techne.db`'s schema and triggers live in `techne/core/database.py`; each domain db's live in its own module. Schema migrations are tracked in a `schema_version` table; `connect()` is lazy-init so library callers don't need to remember to call `init_db()` first.
 
 ---
 
@@ -226,10 +227,10 @@ gracefully** when absent (vector search returns empty, the CVE gate fails open, 
 | `.[security]`           | CVE pre-install audit for the shell gate (`shell_guard`)      | `pip-audit`                                         | Running the anti-chaining shell gate and you want the audit sharpened (fails open without). |
 | `.[watch]`              | `techne watch <dir>` — continuous filesystem-change ingest    | `watchdog`                                          | You want a background daemon ingesting file changes (vs per-session hook capture). |
 | `.[llm]`                | Operator-model path for autonomous/headless reflect/consolidate | `litellm`                                        | Running headless/autonomous loops that can't use the agent's own model. |
-| `.[codex]`              | `techne codex index <repo>` — Tree-sitter code graph (experimental) | `tree-sitter`, `tree-sitter-python`, `tree-sitter-typescript`, `watchdog` | Indexing a repo's symbols/edges for reachability/blast-radius queries. |
+| `.[codex]`              | `techne codex index <repo>` — Tree-sitter code graph (experimental) | `tree-sitter`, `tree-sitter-python`, `tree-sitter-typescript`, `tree-sitter-go`, `watchdog` | Indexing a repo's symbols/edges for reachability/blast-radius queries. |
 | `.[rerank]`             | Opt-in cross-encoder reranking for architect search (`architect.rerank: minilm`) | `numpy`, `safetensors`, `tokenizers`, `huggingface_hub`; the 91 MB model downloads on first use | Architect search should rank by how well a pattern answers the query; ~5.6 s per search on one core. |
 | **`.[recommended]`**    | **`vectors` + `security`** as one bundle                      | union of those two                                 | **The blessed default** — semantic recall + the safety audit, skipping situational/experimental deps. |
-| `.[dev]`                | Test/lint toolchain                                            | `pytest`, `pytest-cov`, `ruff`, `litellm`          | Developing techne itself. |
+| `.[dev]`                | Test/lint toolchain                                            | `pytest`, `pytest-cov`, `pytest-xdist`, `ruff`, `litellm`        | Developing techne itself. |
 
 Combine freely — extras compose: `pip install -e ".[vectors,watch,llm]"`. For the
 non-editable pinned install, use the direct-reference form:
@@ -466,7 +467,7 @@ techne threads redetect SESSION_ID [--sync]
 techne history [--days N] [--limit N]
 
 # Knowledge
-techne knowledge list [--type fact|decision|evaluation|procedure|document|document_card] [--tags T] [--limit N]
+techne knowledge list [--type fact|decision|evaluation|procedure|document|document_card|lesson|grant|charter] [--tags T] [--limit N]
 techne knowledge add CONTENT [--type T] [--tags T] [--confidence high|medium|low]
 techne knowledge supersede OLD_ID CONTENT  # new revision; OLD_ID stops being recalled
 techne knowledge supersede OLD_ID --by ID  # retire OLD_ID into an existing entry
@@ -611,7 +612,8 @@ techne backup [--out DIR] [--keep N]       # snapshot ALL present domain DBs tog
                                            # backups ROOT, and a set is created INSIDE it —
                                            # it is NOT the set, so it is not what you pass to
                                            # `restore` (changed in 0.16.0). --keep N prunes to
-                                           # the newest N sets; exit 3 = backup OK, prune failed
+                                           # the newest N sets; exit 3 = backup OK, prune failed,
+                                           # exit 4 = nothing backed up
 techne restore BACKUP_DIR [--yes] [--no-pre-backup]
                                            # restore all domain DBs from ONE backup set —
                                            # `<DIR>/backup-<stamp>`, not `<DIR>`; validates
@@ -620,7 +622,8 @@ techne restore BACKUP_DIR [--yes] [--no-pre-backup]
 # Diagnostics
 techne doctor                              # subsystem liveness — is techne actually WORKING,
                                            # not just installed. Each check reports LIVE /
-                                           # DORMANT / STALE / UNOBSERVABLE with a remedy you
+                                           # DORMANT / STALE / UNOBSERVABLE / BROKEN / UNKNOWN
+                                           # with a remedy you
                                            # can act on. A check that cannot say what to do
                                            # about a failure is a bug, not a warning.
                                            # Also lists the keys your config.yaml pins.
@@ -712,7 +715,7 @@ techne codex watch REPO [--language LIST] [--debounce-ms N]
 
 - **Librarian** (`librarian.db`) — **documents**: your session *transcripts* (the conversation prose, not just tool calls) and *markdown directories*. Recall returns a compact **gist card** that rides normal knowledge recall; the full document is fetched on demand via the card's pointer (a cross-db lookup). Long multi-topic transcripts get a deterministic **thread-index** gist; single-topic docs get an agent-written prose gist (`cards emit/ingest`, no API key). **New here, or setting up a teammate's machine? → [Using the Librarian](docs/librarian-guide.md)** (the documents↔cards model, getting your transcripts in, and an agent-instructions block).
 - **Architect** (`architect.db`) — the **architectural-patterns** corpus: `investigations` (lens-aware dedup, keyed `url × surveyed_by × lens`, so two reviewer lenses on one URL is a join) + the `patterns` lifted from them. Team-scope — queried directly, not folded into personal recall. A fresh store starts empty: add one pattern with `techne architect add`, or follow `techne guide investigating` to mine a repo for them. `techne architect export` writes a shareable markdown corpus and `techne architect ingest FILE.md` loads one (see [`patterns/README.md`](patterns/README.md)).
-- **Codex** — **a code graph (experimental):** `symbols` + call/import/def-use `edges`. Reachability and blast-radius are recursive CTEs (graph queries without a graph DB; `graphqlite` is an optional future upgrade, techne#89). Real-repo ingest works — a Tree-sitter `SourceAdapter` (`techne codex index <repo>`, Python+TS, needs the `[codex]` extra). **One db per repo (db-per-repo, techne#209):** each indexed repo lives at `<data_dir>/codex/<slug>-<hash8>.db`, derived deterministically from the repo's absolute root — indexing a second repo can never collide with or bleed into the first. A pre-#209 single `codex.db` migrates to its per-repo home automatically the first time any consumer resolves a codex db. **Experimental:** the first index is **manual** (`codex index`). After that, `hooks.codex_reindex_on_edit` (on by default) re-indexes each file the agent edits; changes made outside the agent still need `codex index` / `codex index-all`, or `codex watch`.
+- **Codex** — **a code graph (experimental):** `symbols` + call/import/def-use `edges`. Reachability and blast-radius are recursive CTEs (graph queries without a graph DB; `graphqlite` is an optional future upgrade, techne#89). Real-repo ingest works — a Tree-sitter `SourceAdapter` (`techne codex index <repo>`, Python, TypeScript and Go; needs the `[codex]` extra). **One db per repo (db-per-repo, techne#209):** each indexed repo lives at `<data_dir>/codex/<slug>-<hash8>.db`, derived deterministically from the repo's absolute root — a collision between repos is practically impossible, so indexing a second repo does not bleed into the first. A pre-#209 single `codex.db` migrates to its per-repo home automatically the first time any consumer resolves a codex db. **Experimental:** the first index is **manual** (`codex index`). After that, `hooks.codex_reindex_on_edit` (on by default) re-indexes each file the agent edits; changes made outside the agent still need `codex index` / `codex index-all`, or `codex watch`.
 
 Personal `techne.db` deliberately stays raw-SQLite and local-only. techne is **SQLite-only by decision** (techne#135): the domains are isolated db files behind a thin path/schema registry, not a backend-portability seam.
 
@@ -758,7 +761,8 @@ the problem the sparse file exists to fix. Set only the keys you change.
 # techne warns on stderr (techne#947).
 # db_path: /Volumes/data/techne.db
 platform: claude-code
-model: claude-haiku-4-5-20251001   # only used if threads.summarizer is "llm"
+model: claude-haiku-4-5-20251001   # model for techne's own LLM calls (LLM thread detection and
+                                   #   summaries, headless reflect/custodian)
 model_engine: litellm              # or 'claude-code': run your own `claude -p` (no API key)
 
 threads:
@@ -883,8 +887,8 @@ hooks:
   timeout_s: 5.0              # wall-clock budget for a hook (grep-assist / per-turn recall degrade to no-op if slow)
 
 conflict:                     # the contradiction rail — which candidate rows reach your model
-  model: ""                   # "" = answered by the resident agent, no API key. Egress-selecting;
-                              #   see Operator-owned config below.
+  model: ""                   # no effect: no conflict check reads it. It is still an
+                              #   egress-selecting key; see Operator-owned config below.
   max_comparison_candidates: 20  # how many matched rows are compared per check
   min_shared_keywords: 1      # floor on shared content tokens for the no-tags fallback path
                               #   (#933). 1 is the implicit floor it replaces, so leaving it
@@ -1187,7 +1191,7 @@ have had AI help.
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, the Developer Certificate of
-Origin sign-off every commit needs, and the policy on AI tools. Everyone taking
+Origin sign-off every commit in a pull request needs, and the policy on AI tools. Everyone taking
 part is expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md). For
 questions and bug reports, see [SUPPORT.md](SUPPORT.md). Report security
 problems privately, as [SECURITY.md](SECURITY.md) describes.
