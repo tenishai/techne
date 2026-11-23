@@ -80,7 +80,7 @@ def test_recombine_groups_excludes_meta_user_tag(config):
     db = config.db_path
     a = store(db, "Richard prefers terse answers", type="fact", confidence="high",
               tags="memory-type:user,style:communication")
-    b = store(db, "Richard uses dev04", type="fact", confidence="high",
+    b = store(db, "Richard uses host-a", type="fact", confidence="high",
               tags="memory-type:user,style:communication")
     groups = recombine_groups(config)
     # No group should contain either row.

@@ -20,12 +20,12 @@ class _FakeProc:
 class TestWorktreeDetection:
     def test_detects_claude_worktree(self):
         assert pg._is_worktree_path(
-            Path("/home/shaz/techne/.claude/worktrees/agent-abc/techne")
+            Path("/home/user/techne/.claude/worktrees/agent-abc/techne")
         )
 
     def test_ignores_canonical_checkout(self):
         assert not pg._is_worktree_path(Path("/Users/x/working/claude/techne"))
-        assert not pg._is_worktree_path(Path("/home/shaz/working/techne"))
+        assert not pg._is_worktree_path(Path("/home/user/working/techne"))
 
 
 class TestPipCommand:

@@ -241,7 +241,7 @@ def test_index_transcripts_surfaces_an_unreadable_archive_end_to_end(tmp_path):
         "<local-command-stdout>Goodbye!</local-command-stdout>",
         "<command-name>/exit</command-name>\n<command-args></command-args>",
         "<command-message>investigate-url</command-message>\n<command-name>/x</command-name>",
-        "<bash-input> sudo scutil --set HostName dev04.lan</bash-input>",
+        "<bash-input> sudo scutil --set HostName host-a.lan</bash-input>",
         "<bash-stdout></bash-stdout><bash-stderr>sudo: a terminal is required</bash-stderr>",
         "<task-notification>\n<task-id>abc</task-id>\n<status>completed</status>",
         "<system-reminder>remember the thing</system-reminder>",
@@ -258,7 +258,7 @@ def test_dialogue_text_strips_turn_context_but_keeps_the_message():
     the turn would discard what the user actually asked."""
     raw = (
         "<turn-context>\n<current-time>2026-07-13 17:20:00</current-time>\n"
-        "<working-directory>/Users/dimartin</working-directory>\n</turn-context>"
+        "<working-directory>/home/user</working-directory>\n</turn-context>"
         "Reply with exactly one line: ACP link works, and name the model you are."
     )
     assert dialogue_text(raw) == (

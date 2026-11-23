@@ -83,7 +83,7 @@ def seed(db_path: Path) -> dict[str, str]:
         db_path,
         "Platform-state delta since 2026-06-15: mailbox infra designed across "
         "techne#22 and cabal#14; the rookery-mcp inter-agent mailbox shipped on "
-        "dev02; the techne open queue was cleared.",
+        "host-b; the techne open queue was cleared.",
         type="fact",
         tags="platform-state",
         source="eval",
@@ -129,13 +129,13 @@ def seed(db_path: Path) -> dict[str, str]:
     # filtering would surface a stale revision and fail this task's must_exclude.
     _v1 = store(
         db_path,
-        "The eval-stack deploy target is host dev01-old (initial).",
+        "The eval-stack deploy target is host host-old (initial).",
         type="fact",
         tags="deploy",
         source="eval",
     )
-    _v2 = supersede(db_path, _v1, "The eval-stack deploy target is host dev02-mid (migrated).")
-    _v3 = supersede(db_path, _v2, "The eval-stack deploy target is host dev03-current (live).")
+    _v2 = supersede(db_path, _v1, "The eval-stack deploy target is host host-mid (migrated).")
+    _v3 = supersede(db_path, _v2, "The eval-stack deploy target is host host-current (live).")
     gold["deploy_target"] = "knowledge:%d" % _v3
 
     # --- GOLD: aggregation (one topic, N pieces — ALL must be recalled) ---
@@ -249,7 +249,7 @@ def seed(db_path: Path) -> dict[str, str]:
     #     the derived value as current.
     _trigger_id = store(
         db_path,
-        "Eval deploy pipeline config (v1): deploy path is /opt/eval/v1 on dev02.",
+        "Eval deploy pipeline config (v1): deploy path is /opt/eval/v1 on host-b.",
         type="fact",
         tags="deploy,eval,pipeline",
         source="eval",
@@ -273,8 +273,8 @@ def seed(db_path: Path) -> dict[str, str]:
     supersede(
         db_path,
         _trigger_id,
-        "Eval deploy pipeline config (v2): deploy path is /opt/eval/v2 on dev03 "
-        "(migrated from dev02 in the infra reshuffle).",
+        "Eval deploy pipeline config (v2): deploy path is /opt/eval/v2 on host-b "
+        "(migrated from host-b in the infra reshuffle).",
         source="eval",
     )
     # _derived_id is live (superseded_by IS NULL, status='uncertain') — search

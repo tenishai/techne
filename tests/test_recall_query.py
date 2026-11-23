@@ -133,7 +133,7 @@ def _rail_outputs() -> dict[str, str]:
             3,
         ),
         "codex_grep_assist": pre_tool_use._build_context("search", []),
-        "coord": "📬 poe2 [coord]: are you on #1018?",
+        "coord": "📬 agent-b [coord]: are you on #1018?",
         "reminder": "⏰ Reminder: is the floor measured yet?",
         "session_banner": (
             "## techne ⚠️\n> v0.17.0 · checkout 96e7c49\n\n"

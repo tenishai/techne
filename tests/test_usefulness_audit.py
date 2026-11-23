@@ -104,7 +104,7 @@ def test_corrections_emit_only_offers_rows_written_before_and_flags_injection(tm
         rows=[
             (
                 1,
-                "dev04 update with claude update never npm install",
+                "host-a update with claude update never npm install",
                 "agent",
                 "2026-09-01 00:00:00",
             ),

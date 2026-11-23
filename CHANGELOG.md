@@ -253,7 +253,7 @@ All notable changes to techne are documented here. Format loosely follows
 - **The post_tool_use hook no longer tags observations; `techne vectors backfill` does**
   (#1192). Tagging a captured tool call meant importing numpy, loading the embedding
   model and embedding the text in a fresh process on every tool call: about 195 ms of a
-  360 ms hook on dev04. The hook now stores the row with `tags` and `kind` NULL, and
+  360 ms hook on a workstation. The hook now stores the row with `tags` and `kind` NULL, and
   every `vectors backfill` run, including the one in the SessionStart chain, tags those
   pending rows (`backfill_tags(pending_only=True)`), once each. Measured on a copy of a
   71k-observation store: the hook went from ~363 ms to ~180 ms, and the first backfill
@@ -342,7 +342,7 @@ All notable changes to techne are documented here. Format loosely follows
   64 MiB) and its temp store in memory, and is killed after `archivist_query_timeout_s`
   (10 s). A query past either limit is refused with a message naming it. A worker that
   cannot start or dies is a server fault: `techne archivist query` exits 3. Each query
-  costs about 110 ms more (dev04).
+  costs about 110 ms more (workstation).
 - **Live-mode reflection no longer writes identity** (#1267). With `reflect.write_to:
   live`, a reflection answer like `{"scope": "identity", "type": "user.name", "content":
   "Mallory"}` replaced the stored value with no history, and observations from a fetched
@@ -408,7 +408,7 @@ All notable changes to techne are documented here. Format loosely follows
   nothing with the vec-channel error set, so the per-turn rail shows `degraded`. Before,
   a width change returned an empty list with no signal, and a same-width swap ranked in the
   wrong embedding space. Recall stays FTS-only during the re-embed (a full backfill of a
-  79k-row store took about 2 minutes on dev04); no old index is kept beside the new one.
+  79k-row store took about 2 minutes on a workstation); no old index is kept beside the new one.
 
 - **The fastembed embedding path returns float32 rows, as documented** (#536).
   `EmbeddingBackend.embed()` passed fastembed's output through unchanged, so the float32
@@ -972,7 +972,7 @@ in the README.
   live, unrelated knowledge rows: knowledge 1769 read "a correction to techne#621's
   own rationale" (meaning issue #621, not knowledge row 621, a grep-assist restart
   checklist), and knowledge 3537 read "CORRECTS techne#896's ... framing" (issue
-  #896, not knowledge row 896, the dev02 hardware profile). `find_declared_supersessions`
+  #896, not knowledge row 896, the hardware profile of a build host). `find_declared_supersessions`
   now marks a pair `ambiguous` when the only match is a literal `techne#N`, and
   doctor prints those as CHECK items — a sentence naming what to verify, never a
   copy-pasteable command — while a genuine `knowledge #N` or brain-sigil match still

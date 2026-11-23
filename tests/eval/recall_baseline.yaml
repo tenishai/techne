@@ -93,8 +93,8 @@ tasks:
     query: "what is the current eval-stack deploy target host"
     table: all
     gold_keys: [deploy_target]
-    must_include_phrases: ["dev03-current"]
-    must_exclude_phrases: ["dev01-old", "dev02-mid"]
+    must_include_phrases: ["host-current"]
+    must_exclude_phrases: ["host-old", "host-mid"]
     weight: 1.0
 
   # --- aggregation (techne#118): one topic, N pieces — ALL must be recalled.

@@ -70,7 +70,7 @@ def test_only_tagged_rows_are_enqueued(config):
     )
     store(config.db_path, "PR 349 is open", tags="cabal")
     config.archivist_publish_tags = ["team"]
-    config.instance_name = "dev04"
+    config.instance_name = "host-a"
     with use_registry({ARCHIVIST_PUBLISH_TARGET: _sink()}):
         assert publish_tagged_knowledge(config) == 1
 
@@ -79,7 +79,7 @@ def test_only_tagged_rows_are_enqueued(config):
     assert payload["knowledge_id"] == kept
     assert payload["chain_id"] == kept
     assert payload["content"].startswith("nzbget scripts")
-    assert payload["written_by"] == "dev04"
+    assert payload["written_by"] == "host-a"
 
 
 def test_a_revision_keeps_the_chain_id_of_the_first_row(config):

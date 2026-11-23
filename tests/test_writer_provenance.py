@@ -24,7 +24,7 @@ def pair(tmp_path):
     cfg.data_dir = tmp_path
     cfg.standalone = False
     cfg.archivist_db_path = str(tmp_path / "archivist.db")
-    cfg.instance_name = "poe@dev04"
+    cfg.instance_name = "poe@host-a"
     cfg.connections = {}
     init_db(cfg.db_path)
     return cfg
@@ -47,7 +47,7 @@ def test_the_writing_instance_is_recorded(pair):
         row = conn.execute("SELECT source, written_by FROM knowledge").fetchone()
     finally:
         conn.close()
-    assert row == ("team", "poe@dev04")
+    assert row == ("team", "poe@host-a")
 
 
 def test_local_provenance_survives_the_federated_write(pair):
@@ -219,8 +219,8 @@ def test_provenance_is_written_in_the_same_statement_as_the_row(pair):
         row = conn.execute("SELECT written_by, origin_source FROM knowledge").fetchone()
     finally:
         conn.close()
-    assert row == ("poe@dev04", "manual")
-    assert calls and calls[-1]["written_by"] == "poe@dev04", "provenance rides the INSERT"
+    assert row == ("poe@host-a", "manual")
+    assert calls and calls[-1]["written_by"] == "poe@host-a", "provenance rides the INSERT"
 
 
 # --- the name has to be unambiguous, not just present (Richard, 2026-08-20) ---

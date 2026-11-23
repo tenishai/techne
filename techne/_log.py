@@ -8,7 +8,7 @@ MCP server's stdio JSON-RPC stream, a hook's stdout protocol response, or any CL
 guarantee, because nothing can be emitted before an attribute is read.
 
 Why lazily: structlog drags in asyncio, ~80 ms cumulative on its own under
-``python -X importtime`` (Python 3.14, dev04). Before this, the import ran when a
+``python -X importtime`` (Python 3.14, workstation). Before this, the import ran when a
 logging module was imported, so the Stop hook paid it on every turn through
 ``techne.core.threads`` -> ``thread_orchestrator`` even on the gate path that
 never logs: importing ``techne.core.threads`` there went from ~55 ms to ~6 ms.

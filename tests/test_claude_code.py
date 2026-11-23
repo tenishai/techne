@@ -503,9 +503,9 @@ class TestPreflightGuard:
         from techne.platforms.claude_code import hooks as hooks_mod
 
         assert hooks_mod._is_worktree_path(
-            Path("/home/shaz/techne/.claude/worktrees/agent-abc/techne")
+            Path("/home/user/techne/.claude/worktrees/agent-abc/techne")
         )
-        assert not hooks_mod._is_worktree_path(Path("/home/shaz/working/techne"))
+        assert not hooks_mod._is_worktree_path(Path("/home/user/working/techne"))
         assert not hooks_mod._is_worktree_path(Path("/Users/x/working/claude/techne"))
 
 
