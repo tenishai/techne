@@ -548,6 +548,66 @@ jobs:
         with:
           path: techne
 
+      # Setup-python provides the `python3.13` this gate invokes by versioned name,
+      # and `git` is on every hosted image; the gate exits 2 with "git executable
+      # not found" without it, i.e. loud, not green.
+      - name: Set up Python 3.13
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.13'
+
+      - name: Architecture-card freshness gate
+        working-directory: techne
+        run: python3.13 scripts/check_arch_cards.py
+
+      # (#834) A stray `git worktree add` with an unset path variable collapsed to
+      # its two-arg form and committed a mode-160000 gitlink to a PR branch, caught
+      # only by reading `git push` output — this repo has no submodules, so ANY
+      # 160000 entry is a mistake by definition. Same posture as the gate above:
+      # fails this job, and the `ci` job turns that into a red required check.
+      - name: Stray gitlink guard
+        working-directory: techne
+        run: |
+          set -uo pipefail
+          gitlinks=$(git ls-files -s | grep '^160000' || true)
+          if [ -n "$gitlinks" ]; then
+            echo "::error::stray gitlink(s) (mode 160000) committed — a worktree was likely added with a missing/misused path argument (techne#834)"
+            echo "$gitlinks"
+            exit 1
+          fi
+
+      # techne#1071: `hooks.commentblockgate` is a REPO-LOCAL git config key, so
+      # it only ever reached an operator's own pre-commit hook — and this
+      # repo's global hook loader (outside the repo, not this file's concern)
+      # never learned a branch for it, so scripts/check_comment_blocks.sh has
+      # never run anywhere. This is the mechanism that makes it real. Needs
+      # origin/main resolvable, same reason and same fetch as the `test` job.
+      - name: Fetch origin/main for the comment-block gate
+        working-directory: techne
+        run: git fetch --depth=1 origin +refs/heads/main:refs/remotes/origin/main
+
+      # ONE ARG SWITCHES THE SCRIPT FROM ITS PRE-COMMIT SHAPE (diffing the
+      # index) TO A CI SHAPE (diffing a base ref against HEAD) — see the
+      # script's own header. Diffing against `origin/main` means a comment
+      # block already on `main` is never re-flagged here, only one a PR's own
+      # commits add.
+      - name: Comment-block gate
+        working-directory: techne
+        run: bash scripts/check_comment_blocks.sh origin/main
+
+  # DCO GATE: its own job, so the check reports under the name `dco` that the
+  # branch ruleset requires (tenishai/agora discussion 71). It runs on every
+  # event so `ci` can depend on it; the step itself only checks pull requests,
+  # and on push or dispatch the job passes with nothing to check.
+  dco:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout techne
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: techne
+
       # DCO (CONTRIBUTING.md): each non-merge commit the PR adds needs a
       # Signed-off-by line matching its author, anywhere in the message (a hook
       # appending a trailer after it moves it out of git's trailer block).
@@ -643,53 +703,6 @@ jobs:
             exit 1
           fi
           echo "DCO: $(($(echo "$commits" | wc -l | tr -d ' ') - skipped)) commit(s) signed off by their authors$( [ "$skipped" -gt 0 ] && printf ' (%s skipped as bot commits)' "$skipped" )"
-
-      # Setup-python provides the `python3.13` this gate invokes by versioned name,
-      # and `git` is on every hosted image; the gate exits 2 with "git executable
-      # not found" without it, i.e. loud, not green.
-      - name: Set up Python 3.13
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
-        with:
-          python-version: '3.13'
-
-      - name: Architecture-card freshness gate
-        working-directory: techne
-        run: python3.13 scripts/check_arch_cards.py
-
-      # (#834) A stray `git worktree add` with an unset path variable collapsed to
-      # its two-arg form and committed a mode-160000 gitlink to a PR branch, caught
-      # only by reading `git push` output — this repo has no submodules, so ANY
-      # 160000 entry is a mistake by definition. Same posture as the gate above:
-      # fails this job, and the `ci` job turns that into a red required check.
-      - name: Stray gitlink guard
-        working-directory: techne
-        run: |
-          set -uo pipefail
-          gitlinks=$(git ls-files -s | grep '^160000' || true)
-          if [ -n "$gitlinks" ]; then
-            echo "::error::stray gitlink(s) (mode 160000) committed — a worktree was likely added with a missing/misused path argument (techne#834)"
-            echo "$gitlinks"
-            exit 1
-          fi
-
-      # techne#1071: `hooks.commentblockgate` is a REPO-LOCAL git config key, so
-      # it only ever reached an operator's own pre-commit hook — and this
-      # repo's global hook loader (outside the repo, not this file's concern)
-      # never learned a branch for it, so scripts/check_comment_blocks.sh has
-      # never run anywhere. This is the mechanism that makes it real. Needs
-      # origin/main resolvable, same reason and same fetch as the `test` job.
-      - name: Fetch origin/main for the comment-block gate
-        working-directory: techne
-        run: git fetch --depth=1 origin +refs/heads/main:refs/remotes/origin/main
-
-      # ONE ARG SWITCHES THE SCRIPT FROM ITS PRE-COMMIT SHAPE (diffing the
-      # index) TO A CI SHAPE (diffing a base ref against HEAD) — see the
-      # script's own header. Diffing against `origin/main` means a comment
-      # block already on `main` is never re-flagged here, only one a PR's own
-      # commits add.
-      - name: Comment-block gate
-        working-directory: techne
-        run: bash scripts/check_comment_blocks.sh origin/main
 
   # CRASH-RECOVERY GATE (#388). The `crash` suite SIGKILLs a child mid-write and
   # then proves the store: uncommitted work leaves no trace, committed work
@@ -814,7 +827,7 @@ jobs:
   # tests/test_ci_workflow_triggers.py fails if a job is missing from it.
   ci:
     if: ${{ always() }}
-    needs: [test, eval-vec, arch-cards, crash-recovery, acceptance, install-e2e]
+    needs: [test, eval-vec, arch-cards, dco, crash-recovery, acceptance, install-e2e]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
