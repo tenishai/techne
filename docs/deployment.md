@@ -275,6 +275,20 @@ multi-word old name is found from its new name (`{'old name': newname}` lets a s
 `newname` reach bodies saying "old name"), but searching the old words does not reach the
 new one. A compound term such as `liminal-handler` or `tenishai/liminal` is not expanded.
 
+**Architect search can rerank its top 20 with a cross-encoder, off by default.** Set
+`architect.rerank: minilm` and install the `rerank` extra (`numpy`, `safetensors`,
+`tokenizers`, `huggingface_hub`). BM25 still finds the candidates; the model
+(cross-encoder/ms-marco-MiniLM-L-6-v2, 91 MB, fetched from Hugging Face on first use)
+reads the query with each of the top `rerank_top_k` (default 20) and reorders them. On the
+pooled architect eval it raised nDCG@10 from 0.550 to 0.613 (+0.063, 95% CI +0.040 to
++0.088, 78 judged queries). It costs about 5.6 s per search on one CPU core at the default
+`rerank_max_tokens: 512`; 256 is about 2.5 times faster and kept +0.046 of the gain. It runs
+in numpy, so it needs no torch or onnxruntime. In a CPU-limited container set
+`OPENBLAS_NUM_THREADS` to the container's CPU count: left unset, OpenBLAS starts a thread
+per host core and a search took 46 s. If the model cannot load, search keeps the BM25 order
+and says why: `techne architect search` prints it on stderr, and `pattern_search` and
+`architect_search` return it under `rerank`.
+
 **`techne init` owns the hook chain, and only `init` rewrites it.** `register_hooks` strips
 every hook group that runs one of techne's own hook commands (`-m techne.hooks.*`,
 `techne-hook.sh`, the preflight guard) and re-appends its own template; a hook of your

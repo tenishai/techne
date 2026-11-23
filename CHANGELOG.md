@@ -20,6 +20,14 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Added
 
+- **Opt-in reranking for architect search.** `architect.rerank: minilm` reorders the top 20
+  BM25 hits with the MiniLM cross-encoder (cross-encoder/ms-marco-MiniLM-L-6-v2), run in
+  numpy from its safetensors weights, so the new `rerank` extra adds no torch or
+  onnxruntime. On the pooled architect eval, nDCG@10 went from 0.550 to 0.613 (+0.063, 95%
+  CI +0.040 to +0.088). It costs about 5.6 s per search on one core plus a one-time 91 MB
+  download, which is why it is off by default. Applies to `techne architect search`, the
+  `pattern_search` MCP tool and the `architect_search` domain tool; a reranker that cannot
+  load leaves the BM25 order and reports why.
 - **Architect search matches a renamed project's old spelling** (#1345). A search for
   `liminal` also matches the 129 active pattern bodies written as `limenal` before the
   2026-08-10 rename, and the reverse. Bodies are not rewritten, since a pattern id is a hash

@@ -5438,9 +5438,11 @@ def architect_search(ctx, query, limit):
     """Full-text search the pattern corpus (name + body)."""
     config = ctx.obj["config"]
     from techne.core.architect import architect_db
-    from techne.core.patterns import search_patterns
+    from techne.core.rerank import search_architect
 
-    hits = search_patterns(architect_db(config), query, limit=limit)
+    hits, rerank = search_architect(config, architect_db(config), query, limit=limit)
+    if rerank and not rerank["applied"]:
+        click.echo(f"rerank ({rerank['model']}) not applied: {rerank.get('reason')}", err=True)
     if not hits:
         click.echo("No patterns matched.")
         return
