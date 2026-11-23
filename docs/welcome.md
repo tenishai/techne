@@ -4,11 +4,11 @@
 
 You just installed a memory. Not a database you have to babysit, not a note-taking
 app you have to remember to open — a memory that fills itself in while your agent
-works, tidies itself while it's idle, and hands the important parts back the next
+works, queues its own tidying for idle time, and hands the important parts back the next
 time they're needed. This guide is the tour: what you actually got, the good bits
 you'd never find on your own, the defaults, and what's worth turning on next.
 
-The [README](https://github.com/tenishai/techne/blob/main/README.md) is the reference manual — every flag, every command.
+The [README](https://github.com/tenishai/techne/blob/main/README.md) is the reference manual — the reference for the common commands and config keys.
 This is the brochure. Start here.
 
 ---
@@ -17,7 +17,7 @@ This is the brochure. Start here.
 
 Your agent starts every session cold. It re-derives the same facts, re-learns your
 preferences, re-discovers the decision it made last week, forgets the thing it swore
-it would remember. techne fixes that with **one local SQLite file** (`techne.db`) —
+it would remember. techne fixes that with **one local SQLite file for personal memory** (`techne.db`) —
 yours, offline, `sqlite3`-inspectable — that records *what the agent did*, *what it
 learned*, and *who it works with*. The clever part isn't the storage. It's that
 techne keeps the memory clean **using the model already running your agent** — no API
@@ -60,14 +60,16 @@ Everything techne does reduces to a loop. Learn the loop and you understand the 
 |---|---|---|
 | **Recall** | Before assuming | The agent asks its memory before it guesses. `techne_recall(topic)` at the start of a task; `techne_resume` at the start of a session. |
 | **Store** | When it learns something durable | A fact, a decision, a correction, hard-won reasoning — `techne_store` writes the *conclusion*, not the transcript. |
-| **Reflect** | When wrapping up | At session end, techne distills each thread of work into candidate knowledge — the agent answers its own reflection prompts with its own model. [Full guide](./reflect-guide.md). |
-| **Sleep** | While idle | Dedup overlapping entries (*consolidate*), surface non-obvious connections (*dream*), and check that merges didn't drop load-bearing claims (*faithfulness*). |
+| **Reflect** | When wrapping up | At session end, techne queues a reflection prompt per thread; the agent answers it with its own model and the answers land as candidate knowledge. The prompts run when you ask, or on their own once `reflect.enabled` is on. [Full guide](./reflect-guide.md). |
+| **Sleep** | When asked | Dedup overlapping entries (*consolidate*), surface non-obvious connections (*dream*), and check that merges didn't drop load-bearing claims (*faithfulness*). |
 
-The thing to internalize: **you never have to run the loop by hand.** Sessions are
+The thing to internalize: **the loop mostly runs itself.** Sessions are
 captured by hooks. Threads are detected automatically at session end. The hygiene
-passes are prompts your agent answers between tasks. Your job is to review what
+passes are prompts that techne queues and your agent answers when you ask it to (or
+automatically once `reflect.enabled` is on). Your job is to review what
 lands in the candidate queue and promote what's worth keeping (`techne reflect
-review`) — memory is *yours*, so nothing touches the live store without a nod.
+review`) — memory is *yours*, so reflection proposals wait in that queue until you
+promote them. `techne_store` writes straight to the live store.
 
 ---
 
@@ -115,8 +117,8 @@ That is the whole reason to learn four names instead of four file paths: `librar
 is where documents happen to live today; **the librarian is the function you are
 asking.** One of those survives your setup growing. The other does not.
 
-You will rarely call them by hand at first — `techne_recall` escalates across all four
-for you, and that is the right default. Reach for a name when you already know which
+You will rarely call them by hand at first — `techne_recall` escalates across memory, the archivist
+and the librarian for you (ask the architect and the codex by name), and that is the right default. Reach for a name when you already know which
 function you want.
 
 **→ [The four functions](four-functions.md)** — the tutorial: ask each one, read the
@@ -139,7 +141,7 @@ or not the grep text hit it.
 
 It's a `PreToolUse` hook, and it's built to be invisible when it has nothing to add:
 it never blocks the tool, degrades to a no-op on any error, and scopes symbols to the
-repo you're actually searching (never bleeds another project's code in). **Experimental,
+repo you're actually searching (it takes the repo from the path or a literal `cd`, and otherwise uses the session's repo). **Experimental,
 on by default** since #1020; it does nothing until a repo is indexed. To turn it off:
 
 ```yaml
@@ -164,8 +166,8 @@ handful of facts most relevant to it — the **dynamic** complement to the stabl
 session-start block. So "how did we decide the auth flow?" pulls the actual decision
 into context the moment you ask, without you running a recall by hand.
 
-Best-effort by design: it never blocks or delays your turn, and stays silent when
-nothing relevant turns up. **On by default** since #1020 — this is the one that makes
+Best-effort by design: it is bounded to 5 s and degrades to a no-op on timeout, and it injects
+up to 5 rows per prompt when the search finds any. **On by default** since #1020 — this is the one that makes
 memory feel present, and it has a limit worth knowing. It searches what arrives as a
 prompt: what you type, what you paste (on its question lines), and a subagent's
 hand-back (on the report, with the harness wrapper stripped). Tool results and files the
@@ -191,12 +193,12 @@ this*, *is this reachable*, *what's the full blast radius if I change it*.
 
 The part worth knowing: **each repo gets its own graph.** Index three projects and you
 get three independent databases at `~/.techne/codex/<repo>-<hash>.db` — indexing a
-second repo can never collide with, overwrite, or bleed into the first. The path is
+second repo is practically certain not to collide with, overwrite, or bleed into the first. The path is
 derived deterministically from the repo's absolute root, so same-named repos in
 different locations stay separate.
 
 ```bash
-pip install -e ".[codex]"                 # tree-sitter extraction (Python + TS)
+pip install -e ".[codex]"                 # tree-sitter extraction (Python, TypeScript and Go)
 techne codex index /path/to/repo          # build this repo's graph
 techne codex index-all                    # refresh every repo you've indexed
 techne codex stats --all                  # every indexed repo and its counts
@@ -207,8 +209,8 @@ techne codex blast-radius <symbol-id>     # what a change ripples into
 **Experimental, and honest about it:** the first index is manual. After that,
 `hooks.codex_reindex_on_edit` (on by default) re-indexes each file your agent edits, but
 changes made outside the agent — a `git pull`, your own editor — leave the graph behind
-until you re-run `codex index`. Every symbol injected by grep-assist
-carries a freshness marker if the graph is behind the working tree, so your agent
+until you re-run `codex index`. Every symbol grep-assist injects
+is checked against the file on disk and carries a freshness marker if the graph is behind, so your agent
 knows when to double-check. Since 0.17.0 you don't have to remember to look: the
 SessionStart banner's `codex:freshness` check compares the index's recorded HEAD
 against the repo's current one and says which commit it's stuck at, with the
@@ -241,7 +243,7 @@ mystery ("why isn't grep-assist firing?") into a one-line fix. Run `techne statu
 whenever something feels off.
 
 `techne doctor` asks the harder question — not "is it wired?" but "is it *working*?" —
-and prints every subsystem as LIVE / DORMANT / STALE / UNOBSERVABLE with a remedy you can
+and prints every subsystem as LIVE / DORMANT / STALE / UNOBSERVABLE / BROKEN / UNKNOWN with a remedy you can
 run. Two of those checks are about **staleness of the things techne answers from** (#937):
 
 ```
@@ -354,7 +356,7 @@ queue reviewed is an agent that *actually gets better at your work over time* �
 was the whole point.
 
 > **Contributor note:** running the test suite is safe — techne's tests are guarded so
-> they operate on a throwaway home and never clobber your real `~/.claude` settings.
+> they run against a throwaway home and do not touch your real `~/.claude` settings.
 
 ---
 
