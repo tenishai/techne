@@ -409,9 +409,9 @@ _POST_CONVENTION = "2026-09-28 10:00:00"
         # unrelated knowledge 621 (a grep-assist restart checklist).
         ("grep-assist restart checklist", "a correction to techne#{t}'s own rationale"),
         # The second: knowledge 3537 read "CORRECTS techne#896's ... framing"
-        # (meaning issue #896) and matched knowledge 896 (the dev02 hardware
+        # (meaning issue #896) and matched knowledge 896 (the host-b hardware
         # profile, which never mentions the issue's subject at all).
-        ("dev02 hardware profile: 8 cores, 32G", "CORRECTS techne#{t}'s memory framing"),
+        ("host-b hardware profile: 8 cores, 32G", "CORRECTS techne#{t}'s memory framing"),
     ],
     ids=["knowledge-621-vs-issue-621", "knowledge-896-vs-issue-896"],
 )
@@ -435,7 +435,7 @@ def test_find_declared_supersessions_drops_bare_techne_ref_post_convention(cfg):
     declarer written then gets no knowledge-ref benefit of the doubt from it, so
     the pair must not be reported at all (techne#1065 option 2)."""
     db = cfg.db_path
-    t = store(db, "dev02 hardware profile: 8 cores, 32G")
+    t = store(db, "host-b hardware profile: 8 cores, 32G")
     _set_created_at(db, t, _PRE_CONVENTION)
     d = store(db, f"CORRECTS techne#{t}'s memory framing")
     _set_created_at(db, d, _POST_CONVENTION)
@@ -449,7 +449,7 @@ def test_find_declared_supersessions_drops_techne_list_continuation_post_convent
     db = cfg.db_path
     t1 = store(db, "grep-assist restart checklist")
     _set_created_at(db, t1, _PRE_CONVENTION)
-    t2 = store(db, "dev02 hardware profile: 8 cores, 32G")
+    t2 = store(db, "host-b hardware profile: 8 cores, 32G")
     _set_created_at(db, t2, _PRE_CONVENTION)
     d = store(db, f"a correction to techne#{t1} and #{t2}: the issue rationale was wrong")
     _set_created_at(db, d, _POST_CONVENTION)
@@ -500,7 +500,7 @@ def test_doctor_prints_no_command_for_a_techne_list_continuation_post_convention
     db = cfg.db_path
     t1 = store(db, "grep-assist restart checklist")
     _set_created_at(db, t1, _PRE_CONVENTION)
-    t2 = store(db, "dev02 hardware profile: 8 cores, 32G")
+    t2 = store(db, "host-b hardware profile: 8 cores, 32G")
     _set_created_at(db, t2, _PRE_CONVENTION)
     d = store(db, f"a correction to techne#{t1} and #{t2}: the issue rationale was wrong")
     _set_created_at(db, d, _POST_CONVENTION)
@@ -531,7 +531,7 @@ def test_doctor_prints_no_command_for_a_continuation_after_a_mid_list_techne_ref
     db = cfg.db_path
     ta = store(db, "runner is host-a")
     tb = store(db, "grep-assist restart checklist")
-    tc = store(db, "dev02 hardware profile: 8 cores, 32G")
+    tc = store(db, "host-b hardware profile: 8 cores, 32G")
     for t in (ta, tb, tc):
         _set_created_at(db, t, _PRE_CONVENTION)
     d = store(db, f"SUPERSEDES knowledge #{ta}, techne#{tb} and #{tc}: see the issues")
@@ -549,7 +549,7 @@ def test_doctor_check_line_quotes_an_inherited_continuation_as_written(cfg):
     has it, naming the `techne#B` it follows, not claim the text says `techne#C`."""
     db = cfg.db_path
     tb = store(db, "grep-assist restart checklist")
-    tc = store(db, "dev02 hardware profile: 8 cores, 32G")
+    tc = store(db, "host-b hardware profile: 8 cores, 32G")
     for t in (tb, tc):
         _set_created_at(db, t, _PRE_CONVENTION)
     d = store(db, f"a correction to techne#{tb} and #{tc}: the issue rationale was wrong")

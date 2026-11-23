@@ -2,7 +2,7 @@
 
 ``import sqlite_vec`` runs the package's ``__init__``, which does
 ``import numpy.typing`` to offer ``register_numpy``. techne never calls that, and
-on the per-turn hook path the import cost ~55 ms (``-X importtime``, dev04), all
+on the per-turn hook path the import cost ~55 ms (``-X importtime``, workstation), all
 of it numpy. The extension itself is a shared library next to that ``__init__``:
 ``sqlite_vec.load(conn)`` is ``conn.load_extension(<package dir>/vec0)``. This
 module finds the package with ``importlib.util.find_spec`` and loads the same

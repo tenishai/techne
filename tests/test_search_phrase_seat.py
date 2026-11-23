@@ -682,7 +682,7 @@ def _long_row():
 
 @pytest.mark.parametrize("use_vectors", [True, False])
 def test_an_fts_only_page_windows_the_seat_row(db, monkeypatch, use_vectors):
-    """poe1's quickstart case: a fresh store has no embeddings, the vector channel
+    """agent-a's quickstart case: a fresh store has no embeddings, the vector channel
     comes back empty and search() returns the FTS page early. The row ranks first
     there, and before #1150 its phrase stayed hidden past the head cut."""
     (rid,) = _obs(db, [_LONG])

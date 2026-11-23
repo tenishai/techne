@@ -53,9 +53,9 @@ def _status(db, kid):
 
 def test_merge_into_collapses_n_to_one(config):
     db = config.db_path
-    a = store(db, "Richard uses dev04", type="fact", confidence="high")
-    b = store(db, "Primary machine is dev04", type="fact", confidence="medium")
-    new = merge_into(db, [a, b], "Richard's primary machine is dev04",
+    a = store(db, "Richard uses host-a", type="fact", confidence="high")
+    b = store(db, "Primary machine is host-a", type="fact", confidence="medium")
+    new = merge_into(db, [a, b], "Richard's primary machine is host-a",
                      type="fact", confidence="high")
     assert get(db, a)["superseded_by"] == new
     assert get(db, b)["superseded_by"] == new
@@ -365,7 +365,7 @@ def test_tier1_pairs_two_rows_stating_one_procedure_in_different_words(config):
     b = store(db, "To verify a new or changed test actually pins the behavior it claims, "
                   "apply a mutation to a copy of the source and confirm the test fails.",
               type="procedure")
-    store(db, "Richard's primary machine is dev04, an Intel Mac on macOS 15.", type="fact")
+    store(db, "Richard's primary machine is host-a, an Intel Mac on macOS 15.", type="fact")
     store(db, "Homebrew ships no Intel bottles, so brew upgrade may compile llvm for hours.",
           type="fact")
     store(db, "Backups are written as timestamped sets under the data dir backups folder.",

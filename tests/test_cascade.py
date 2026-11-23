@@ -59,12 +59,12 @@ def test_new_knowledge_defaults_to_current(db):
 def test_supersede_cascades_dependents_to_uncertain(db):
     """The headline #117 behavior: superseding a trigger flips its live dependents
     to `uncertain` (their basis changed; reconfirm before trusting)."""
-    trigger = store(db, "Richard's primary machine is dev04", type="fact")
-    derived = store(db, "the canonical techne.db lives on dev04", type="fact")
+    trigger = store(db, "Richard's primary machine is host-a", type="fact")
+    derived = store(db, "the canonical techne.db lives on host-a", type="fact")
     _write_dep_edge(db, dependent_id=derived, trigger_id=trigger)
 
     assert _status(db, derived) == "current"
-    supersede(db, trigger, "Richard's primary machine is dev05")
+    supersede(db, trigger, "Richard's primary machine is host-b")
     assert _status(db, derived) == "uncertain"
 
 

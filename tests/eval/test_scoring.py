@@ -85,7 +85,7 @@ def test_is_nonanswer_positive_cases():
 
 
 def test_is_nonanswer_negative_cases():
-    assert is_nonanswer("The deploy target is dev03.") is False
+    assert is_nonanswer("The deploy target is host-b.") is False
     assert is_nonanswer("According to memory, the path is /opt/eval/v2.") is False
     assert is_nonanswer("Techne does not support auto-bisect.") is False
 
