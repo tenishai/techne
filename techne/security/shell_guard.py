@@ -1,5 +1,9 @@
 """Two defensive gates for agent-issued shell execution (techne#120).
 
+**Status: no caller in techne.** techne has no shell-exec path, so nothing here runs
+in production; nothing in techne enforces these gates. The module is kept as a library
+helper for code that imports it (and for the tests), not as a gate on techne itself.
+
 This is **not a sandbox** — it is two high-leverage, independently-usable gates to
 place in front of a command before it reaches a subprocess:
 
@@ -19,8 +23,8 @@ place in front of a command before it reaches a subprocess:
 anti-chaining gate guarantees a single command, which is then executed via ``shlex.split``
 with ``shell=False`` so no metacharacter is ever interpreted by a shell.
 
-techne itself has no agent-shell-exec path today; this module exists so techne, cabal, or
-any caller can compose these gates the moment one is added. The gates are pure/independent
+techne itself has no agent-shell-exec path; this module is here so techne, cabal, or
+any caller can compose these gates if one is added. The gates are pure/independent
 (``check_command`` does no I/O) so they can be used à la carte.
 
 Sources (architect.db): Outfit "Shell operator anti-chaining gate";

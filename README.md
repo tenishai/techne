@@ -84,7 +84,7 @@ techne init
 > `pip install techne` gets you that one. It declares none of the extras below, so pip only
 > warns about them and installs nothing extra.
 >
-> `[recommended]` pulls semantic recall + the CVE pre-install audit (`vectors` + `security`).
+> `[recommended]` pulls semantic recall + `pip-audit` (`vectors` + `security`). techne does not call `pip-audit` itself; it is there for `shell_guard.audit_install`, a helper you can import.
 > With a vectors backend installed, `techne init` downloads the embedding model once (tens
 > of MB, then cached) so search is semantic from the first session; `--no-vectors` skips it.
 > Drop it for a **core-only** install, or swap in any other set — see the
@@ -224,12 +224,12 @@ gracefully** when absent (vector search returns empty, the CVE gate fails open, 
 |-------------------------|---------------------------------------------------------------|----------------------------------------------------|-------------------|
 | `.`                     | Core: capture, FTS5 recall, threads, knowledge, identity      | `click`, `pyyaml`, `structlog` (lightweight)       | Always — the baseline. |
 | `.[vectors]`            | Semantic (vector) recall alongside FTS                        | `sqlite-vec`, `numpy`, + `model2vec` (py≥3.14) / `fastembed` (py<3.14) | You want similarity search, not just keyword match. |
-| `.[security]`           | CVE pre-install audit for the shell gate (`shell_guard`)      | `pip-audit`                                         | Running the anti-chaining shell gate and you want the audit sharpened (fails open without). |
+| `.[security]`           | `pip-audit` for `shell_guard.audit_install`, a standalone helper techne does not call (nothing in techne runs shell commands through it) | `pip-audit`                                         | You import `techne.security.shell_guard` in your own code and want its CVE audit (fails open without). techne itself does not need it. |
 | `.[watch]`              | `techne watch <dir>` — continuous filesystem-change ingest    | `watchdog`                                          | You want a background daemon ingesting file changes (vs per-session hook capture). |
 | `.[llm]`                | Operator-model path for autonomous/headless reflect/consolidate | `litellm`                                        | Running headless/autonomous loops that can't use the agent's own model. |
 | `.[codex]`              | `techne codex index <repo>` — Tree-sitter code graph (experimental) | `tree-sitter`, `tree-sitter-python`, `tree-sitter-typescript`, `tree-sitter-go`, `watchdog` | Indexing a repo's symbols/edges for reachability/blast-radius queries. |
 | `.[rerank]`             | Opt-in cross-encoder reranking for architect search (`architect.rerank: minilm`) | `numpy`, `safetensors`, `tokenizers`, `huggingface_hub`; the 91 MB model downloads on first use | Architect search should rank by how well a pattern answers the query; ~5.6 s per search on one core. |
-| **`.[recommended]`**    | **`vectors` + `security`** as one bundle                      | union of those two                                 | **The blessed default** — semantic recall + the safety audit, skipping situational/experimental deps. |
+| **`.[recommended]`**    | **`vectors` + `security`** as one bundle                      | union of those two                                 | **The blessed default** — semantic recall + `pip-audit` (an unused-by-techne helper dependency), skipping situational/experimental deps. |
 | `.[dev]`                | Test/lint toolchain                                            | `pytest`, `pytest-cov`, `pytest-xdist`, `ruff`, `litellm`        | Developing techne itself. |
 
 Combine freely — extras compose: `pip install -e ".[vectors,watch,llm]"`. For the
