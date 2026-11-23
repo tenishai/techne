@@ -120,7 +120,7 @@ jobs:
       # explicitly, and every step below runs through the venv rather than relying
       # on PATH.
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -272,7 +272,7 @@ jobs:
       # eval-vec needs Python 3.14: the [vectors] extra resolves to model2vec only
       # on py>=3.14 (pyproject.toml:45), and model2vec is what the gate pins.
       - name: Set up Python 3.14
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: '3.14'
 
@@ -552,7 +552,7 @@ jobs:
       # and `git` is on every hosted image; the gate exits 2 with "git executable
       # not found" without it, i.e. loud, not green.
       - name: Set up Python 3.13
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: '3.13'
 
@@ -725,7 +725,7 @@ jobs:
           path: techne
 
       - name: Set up Python 3.13
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: '3.13'
 
@@ -782,7 +782,7 @@ jobs:
           path: techne
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: '3.12'
 
@@ -811,7 +811,7 @@ jobs:
           path: techne
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: '3.12'
 
