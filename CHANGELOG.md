@@ -7,6 +7,8 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Changed
 
+- **CI moves to GitHub-hosted runners.** Every job in `.github/workflows/test.yml` now runs on `ubuntu-latest` and installs its own Python (actions/setup-python) and uv; no workflow targets a self-hosted runner, and a test fails if one does. Fork PRs run the full suite, the card-freshness gate, crash recovery, acceptance and the vector gate, on the same matrix as in-repo PRs, instead of a reduced job set. A new `ci` job needs every other job and fails unless each succeeded (a skipped or cancelled job fails it too), so a ruleset can require that one check. The DCO check now serves fork PRs too, and its dependabot exemption applies only when dependabot opened the PR.
+
 - **Licence: MIT.** The project moves from AGPL-3.0-or-later to MIT, with the agreement of every contributor (tenishai/agora discussion 69). Releases already published keep the licence they shipped under.
 
 - **The investigating guide now requires walking the code, the tests and the issue

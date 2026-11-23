@@ -1,82 +1,26 @@
 name: test
 
 # Techne has no private sibling deps — full suite runs on every push/PR.
-# The contract job catches breaking renames before cabal/limenal CI fires.
 #
-# Every job on the TRUSTED path is self-hosted (#424, #461) — do not add a hosted
-# one there. Hosted jobs here can fail to START: July 2026 billing refusal reported
-# `failure` (probe 764f160, which also showed self-hosted unaffected), the
-# 2026-08-06 outage reported `cancelled` at 901s while the self-hosted legs of the
-# same runs queued and ran on recovery. Neither cleared by a rerun.
+# EVERY JOB RUNS ON A GITHUB-HOSTED RUNNER (`ubuntu-latest`), and none carries an
+# `if:` that skips fork PRs. The repo is public, or about to be, and the rule is:
+# a public repo runs CI on GitHub-hosted runners only, no runner of ours is
+# reachable from it, and a pull request from a fork runs the real tests. A fork
+# PR gets the same jobs and the same matrix as an in-repo PR.
+# tests/test_ci_workflow_triggers.py pins all three (no runner of ours in any
+# workflow's `runs-on`, no fork-excluding `if:`, a `ci` job that gates on the rest).
 #
-# THE ONE EXCEPTION IS `fork-pr`, AND IT IS A SECURITY BOUNDARY, NOT A REGRESSION
-# (#556): fork PRs must not execute on the self-hosted pool, so they are routed to a hosted runner
-# and accept the scheduling risk above. See the trust-split block below `env:`.
-# `techne-ci` is a POOL LABEL, not a host — deliberately NOT named after one.
-# It replaced a host-named label on 2026-09-06, which had outlived its host by
-# three weeks: that host was retired as a CI host on 2026-08-16 and the label
-# was kept so this file would not have to change. That saved one edit and cost a
-# long detour later, where the stale name and this comment sent a reader
-# reasoning about 2-physical-core boxes and cpus:"3" containers that no longer
-# existed.
+# THE `ci` JOB AT THE BOTTOM IS THE ONE A RULESET REQUIRES. It `needs:` every other
+# job and fails unless each result is `success`, so a skipped, failed or cancelled
+# job all read as red. Without it a required check on `test` alone would let a
+# skipped `eval-vec` look like a pass. Add a job here and the same test makes you
+# add it to `ci`'s `needs:`.
 #
-# "ROTS" IS THE WRONG WORD, and the right one is the point: the old label never
-# stopped working. Jobs routed correctly the whole time. What decayed was the
-# name's TRUTHFULNESS, silently, while every run stayed green — which is why it
-# cost a day rather than five minutes. A label that BROKE would have been fixed
-# the same afternoon. Name a pool for its role, so the name cannot quietly stop
-# describing the thing while continuing to work.
+# Hosted runners are a fresh VM per job. That is why every job installs its own
+# interpreter (actions/setup-python) and uv, and why the two model caches below
+# (actions/cache) matter: a cold model download is every job's problem, not a rare
+# one. See docs/go-public-runbook.md for the flip sequence.
 #
-# THE OLD LABEL STAYS ON THE RUNNERS PERMANENTLY as a compatibility label, and that is
-# a decision rather than an omission. All 14 tags carry it and every pre-merge
-# run would become non-re-runnable without it, so the exposure never resolves by
-# waiting. The harm was never the string: it was that HEAD TARGETED it, so a
-# reader of this file was reading a host name and reasoning about that host. A
-# label nothing at HEAD targets misleads nobody reading HEAD — inert, not lying.
-#
-# WHAT WOULD LET IT GO: nothing needs it once no reachable ref targets it, i.e.
-# when the last tag and workflow-run predating 2026-09-06 stops mattering.
-# WHAT IT DOES NOT BUY: it removes ONE reason an old re-run fails, not all of
-# them — that era's interpreters and pins come from a runner image rebuilt on a
-# different cadence by a different process than anything in this repo.
-#
-# THE POOL TODAY: TWO ephemeral runner instances on one host, each container
-# cpus:"12" and 24g. Host, hardware and paths are deliberately not in this file:
-# it ships with the public repo (#1005).
-#
-# The runner image bakes python 3.12/3.13/3.14 + uv, so the self-hosted jobs
-# deliberately use NO actions/setup-python.
-#
-# STATE THE COST HONESTLY (techne#780). This comment used to say the runner is
-# EPHEMERAL and that setup-python would re-download every interpreter ON EVERY JOB.
-# Both are false. The REGISTRATION is ephemeral -- the runner deregisters after each
-# job -- but the CONTAINER is not: `restart: unless-stopped` reuses it for hundreds
-# of jobs (RestartCount 847 before its last replacement). setup-python installs into
-# the runner tool cache, which is an ordinary directory in that container's writable
-# layer. The observation that carries this: the container has ZERO mounts, so
-# `_work/_tool` is in the writable layer and setup-python would download once per
-# CONTAINER, not once per job. (RUNNER_TOOL_CACHE being unset in a `docker exec`
-# shell proves nothing -- the runner sets it PER JOB -- and /opt/hostedtoolcache is
-# the hosted-runner path, expected to be absent. Do not lean on either.)
-#
-# THE REASON THAT SURVIVES IS PROVENANCE, NOT COST -- the cost argument is
-# falsified above and provenance is what is left standing. Stated that way on
-# purpose: the two claims this replaces were FALSIFIABLE ("ephemeral", "every
-# job") and were checked against RestartCount and mount state. "This is the
-# reason" is a claim about a decision, which the tree cannot witness -- and an
-# unfalsifiable claim written in the register of a verified one is how both of
-# the previous versions got their confidence. Specifically NOT the only-system pin:
-# `fork-pr` uses actions/setup-python under the SAME workflow-level
-# UV_PYTHON_PREFERENCE=only-system / UV_PYTHON_DOWNLOADS=never and passes, because
-# setup-python puts its interpreter on PATH as a SYSTEM one -- this file says so at
-# the fork-pr job. So "the interpreters must be on the system" is equally true of the
-# option it would be offered as a reason to reject. What distinguishes them is WHO
-# BUILT THEM: image-baked interpreters are the operator's, where setup-python
-# resolves `3.12` to whatever patch actions/python-versions serves at download time,
-# over network egress from a host this file already treats as a trust boundary
-# (techne#556). `fork-pr` DOES use it, because a
-# hosted runner bakes in neither uv nor the matrix interpreters — the reasoning
-# above is about this image, not a blanket ban (#556).
 # NO `branches:` FILTER ON pull_request, AND THAT ABSENCE IS LOAD-BEARING (#530).
 # The filter matches a PR's BASE, not its head, so `branches: [main]` meant a
 # STACKED PR (base = another feature branch) matched no trigger and got NO CI AT
@@ -86,10 +30,9 @@ name: test
 #
 # WHAT MAKES IT DANGEROUS RATHER THAN MERELY MISSING: there is no red X and no
 # skipped row. The Checks tab is EMPTY, which reads identically to "nothing to
-# report" (techne#488's shape, in our own CI config). And branch protection
-# cannot backstop it — required status checks are unavailable on this repo's plan
-# (`gh api .../branches/main/protection` -> 403 "Upgrade to GitHub Pro or make
-# this repository public"), so this trigger is the ONLY mechanism.
+# report" (techne#488's shape, in our own CI config). And a required check cannot
+# backstop it: a run that never started reports nothing for the ruleset to wait
+# on, so this trigger is the ONLY mechanism.
 #
 # STACKING IS FORCED BY OUR OWN CONVENTIONS, so this is not an edge case: two PRs
 # touching one card-anchored source file must both bump the same `anchor:` sha in
@@ -115,11 +58,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# Force uv to use the interpreters BAKED INTO THE RUNNER IMAGE and never fetch a
-# managed build of its own (#424 review — Prudence). Without this the matrix claims
-# to test 3.12/3.13/3.14 while potentially exercising whatever uv decided to
-# download, and `python -V` cannot tell the two apart — it prints the same string
-# either way.
+# Make uv use the interpreter actions/setup-python put on PATH and never fetch a
+# managed build of its own. Without this the matrix claims to test 3.12/3.13/3.14
+# while potentially exercising whatever uv decided to download, and `python -V`
+# cannot tell the two apart — it prints the same string either way.
+# setup-python installs its interpreter as a SYSTEM one, so `only-system` finds it.
 #
 # This has teeth on the eval-vec leg specifically. sqlite-vec is a loadable SQLite
 # extension, and search.py degrades GRACEFULLY when the interpreter lacks
@@ -132,162 +75,19 @@ env:
   UV_PYTHON_PREFERENCE: only-system
   UV_PYTHON_DOWNLOADS: never
 
-# >>> THE FLIP SEQUENCE LIVES IN docs/go-public-runbook.md. READ IT BEFORE MAKING
-# >>> THIS REPO PUBLIC. The single most important step happens BEFORE the flip and
-# >>> is not in this file: STOP THE RUNNER CONTAINER. A job whose labels match no
-# >>> ONLINE runner queues rather than executing, which is what actually closes the
-# >>> window between "public" and "approval policy applied" — being quick does not.
-#
-# TRUST SPLIT (#556). `pull_request:` above is deliberately unfiltered, so it fires
-# for FORK PRs too. Combined with `runs-on: [self-hosted, ...]` that is arbitrary
-# attacker code on the CI host the moment this repo goes public — GitHub's own guidance
-# is "only use self-hosted runners with private repositories".
-#
-# SCOPE — THIS IS DEFENCE IN DEPTH, NOT THE WHOLE CONTROL, and the distinction is
-# not modesty. The complementary control is GitHub's fork-PR contributor approval
-# policy, and it CANNOT BE PRE-STAGED: on a private repo the API refuses it.
-# Verified 2026-08-16 with an admin token:
-#     gh api repos/tenishai/techne/actions/permissions/fork-pr-contributor-approval
-#     -> 422 "Fork PR approval is not allowed for private repositories."
-# It only becomes settable AFTER the public flip — i.e. inside the very window it
-# is meant to protect. So it is a FIRST-ACTION-POST-FLIP runbook item on #556, not
-# a pre-flip checkbox.
-#
-# *** THIS GUARD IS ATTACKER-EDITABLE, AND THAT IS NOT A CAVEAT — IT IS THE SCOPE. ***
-# For `pull_request`, GitHub evaluates the workflow FROM THE PR'S REF, not from the
-# base. MEASURED on this branch: run 31971484190 (event `pull_request`, head_sha
-# 124040e) executed an `expr-probe` job that existed ONLY on the PR's branch. So a
-# fork PR runs the fork's copy of THIS FILE — an attacker deletes the three `if:`
-# guards, or simply adds their own `pwn.yml` targeting the pool, and none of the
-# machinery below applies to them.
-#
-# AGAINST A DELIBERATE ATTACKER THIS GUARD CONTRIBUTES NOTHING. What it does buy is
-# NON-ADVERSARIAL exposure: an honest fork PR that would otherwise run on the pool by
-# default, and CI coverage for fork contributors via `fork-pr`. That is worth having
-# and it is all this is.
-#
-# SO THE PRE-FLIP RUNBOOK ACTION IS NOT "RELY ON THIS GUARD" — that is the one thing
-# that does not work. It is: STOP THE RUNNER CONTAINER until the fork-PR approval
-# policy is settable (i.e. until after the flip), then start it again. De-registering
-# alone does not stick: an ephemeral runner's entrypoint re-registers on start
-# (docs/go-public-runbook.md). Unlike the approval policy, stopping IS available pre-flip.
-#
-# So: every self-hosted job carries the SAME fork guard, and fork PRs are served by
-# `fork-pr` on a GitHub-hosted runner instead. Non-fork PRs and `push` on main are
-# unchanged — which keeps the measured cost decision behind the self-hosted pool
-# (#461) intact rather than undoing it.
-#
-# THE GUARD FAILS CLOSED, AND THE SPELLING IS THE MECHANISM (#570 step 3). It is a
-# POSITIVE IDENTITY CHECK — `head.repo.full_name == github.repository` — not a negated
-# truthiness test on `head.repo.fork`.
-#
-# THESE VALUES ARE MEASURED, NOT DERIVED, and that matters because two rounds of
-# deriving them from the reference pages produced two different wrong answers. A
-# temporary job ran these expressions under a real `pull_request` event and emitted
-# toJSON of each; the output is checked in at
-# tests/fixtures/github/expression_truth_table.json with its provenance:
-#
-# EVERY ROW BELOW WAS MEASURED IN ONE CONTEXT: a NON-FORK `pull_request` on this repo.
-# TWO KINDS OF CONTEXT-DEPENDENCE, and they are NOT the same axis (techne#591 —
-# an earlier version of this table marked one row that cannot vary and omitted one
-# that does). [fork] varies with WHO opened the PR; [push] varies with WHICH EVENT.
-#
-#   an absent property is            null      (NOT the empty string)
-#   <absent> == github.repository    false     <- the NEW guard's comparison
-#   <absent> == false                true      <- why `fork == false` is NOT a fix
-#   head.repo.fork == false                                              true   [fork]
-#   OLD  !(event_name=='pull_request' && <absent>)                       true   FAIL OPEN
-#   NEW  event_name!='pull_request' || <absent>==github.repository       false  [push] FAIL CLOSED
-#   NEW  event_name!='pull_request' || full_name==github.repository      true   [fork] [push]
-#   FORK_ONLY event_name=='pull_request' && <absent>!=github.repository  true   [push]
-#
-# THE [fork] ROWS INVERT ON A FORK PR, and that inversion IS the feature: the NEW guard
-# reads `true` above only because this was a same-repo PR — on a fork it is FALSE, which
-# is what keeps fork code off the CI host. Do not "fix" it to true.
-#
-# FORK_ONLY IS *NOT* [fork], which is the correction #591 filed: both of its operands
-# are fork-invariant. `<absent> != github.repository` is `null != "tenishai/techne"` —
-# true in EVERY context, because the property is absent from the payload rather than
-# holding a fork's name. It varies only with the EVENT.
-#
-# THE THREE `<absent>` ROWS CARRYING `event_name` ARE NOT UNIFORM UNDER `push`, and the
-# old blanket "expected to be context-independent" hid the difference. Under `push`:
-#   NEW-with-<absent>  false -> TRUE   (the `event_name != 'pull_request'` disjunct wins)
-#   FORK_ONLY          true  -> FALSE  (the `event_name == 'pull_request'` conjunct fails)
-#   OLD                true  -> true   UNCHANGED — the negation absorbs it either way,
-#                                      which is exactly why the OLD guard failed open
-#                                      no matter what event arrived.
-#
-# AND THE ROW THE SECURITY CLAIM RESTS ON HAS NEVER BEEN MEASURED IN ANY CONTEXT:
-# nobody has yet observed `fork-pr` actually fire, because no fork of this repo exists.
-# The fork-side behaviour is a HAND TRACE. One fork PR from a personal account would
-# convert it to measured; until then, say "expected" rather than "verified" about it.
-#
-# So a typo'd property under the OLD guard ran fork code on the CI host, silently; under the
-# NEW guard the self-hosted job is SKIPPED. A mistake now costs a visibly missing job
-# instead of arbitrary code execution on a persistent host. `fork == false` looks like
-# the obvious fix and is not one: an absent property equals false, so it fails open too.
-#
-# THE GUARD IS AN ALLOW-LIST NOW, NOT A DENYLIST (techne#590, 2026-08-18). It reads
-# "push OR workflow_dispatch OR (pull_request AND head repo is us)". The old shape
-# opened with `event_name != 'pull_request'`, A DENYLIST OF ONE NAME: any other
-# event carrying a `pull_request` payload — notably `pull_request_target`, which
-# runs with full secrets — satisfied that disjunct and short-circuited the guard
-# TRUE, putting fork code on the self-hosted pool.
-#
-# #570 policed that with a hand-maintained list of fork-carrying event names in the
-# test file. That is the same hazard one level up, and it had already failed: the
-# list omitted `pull_request_review_thread`, whose payload carries `pull_request`
-# as a REQUIRED property (verified against GitHub's payload docs 2026-08-18). A
-# copy of a fact GitHub owns goes stale the first time GitHub adds an event — the
-# same reasoning this file already records for refusing a hand-maintained BRANCH
-# list (#530). The list is deleted; the allow-list makes it unnecessary.
-#
-# AN UNKNOWN EVENT NOW FAILS CLOSED — it satisfies no disjunct, so the self-hosted
-# job SKIPS and the hosted `fork-pr` job (the exact complement, `!(...)` of the same
-# string) picks it up. Proven by EVALUATION, not grep: tests/gha_expr.py implements
-# the expression semantics and is validated against this repo's measured truth
-# table, then tests/test_ci_workflow_triggers.py runs both guards over synthetic
-# contexts including events GitHub has not invented yet.
-#
-# The composite expression below has NOT itself been observed in a live run; its
-# primitives have. Treat it as hand-traced-from-measured-parts until a fork PR
-# exercises it.
-#
-# THE GUARD IS REPEATED THREE TIMES AND THAT IS A HAZARD, not a style choice: this
-# finding was first raised against TWO jobs on 2026-07-30 and had grown to THREE by
-# 2026-08-12, because a new job inherits the runner and not the guard. GitHub
-# Actions has no anchor/alias support to define it once, so the invariant is
-# enforced in the suite instead — tests/test_ci_workflow_triggers.py asserts that NO
-# fork-reachable job targets a self-hosted runner. Add a self-hosted job without the
-# guard and that test fails. Do not delete it in favour of a comment; a comment is
-# what let this regrow twice.
-
 jobs:
   test:
-    # Legs distribute across the pool: one host running TWO instances
-    # each with cpus:"12". Both get the full thread count rather than a 6/6
-    # split — what techne#769 measured was cgroup THROTTLING, and partitioning
-    # reintroduces it at a lower cap on both halves. A ceiling is not a
-    # reservation: one job alone bursts to 12, two are fair-shared.
-    #
-    # A THIRD INSTANCE WILL HELP LESS THAN THE SECOND DID. Measured 2026-09-06,
-    # two runs each: 1 runner 301s mean -> 2 runners 233s/232s, ~23%. The suite
-    # is CPU-bound, so concurrent jobs SHARE threads rather than each getting
-    # them (test 3.12: 92s alone, 145s contended). No idle CPU is left.
-    runs-on: [self-hosted, linux, x64, techne-ci]
-    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
-    # Bound it: a hung job starves the small pool (#424). Legs are ~6-12min.
+    runs-on: ubuntu-latest
+    # Bound it: a hung job burns billed minutes. Legs are ~6-12min.
     timeout-minutes: 45
     strategy:
       matrix:
         # 3.12 ONLY ON PULL REQUESTS; the full 3.12/3.13 matrix on main pushes and
-        # workflow_dispatch (issue 1233). Every PR push ran the full suite twice
-        # (3.12, 3.13) plus eval-vec's vector gate on the self-hosted pool; the suite
-        # is CPU-bound, so concurrent jobs share one host's threads. The cost: a break that only
-        # shows on 3.13 is caught on main after merge, not on the PR. To run 3.13
-        # for a PR branch on demand: `gh workflow run test.yml --ref <branch>`.
-        # fork-pr keeps both versions: it runs on GitHub-hosted runners, not ours.
+        # workflow_dispatch (issue 1233). Billed minutes are the constraint while
+        # the repo is private: every PR push would otherwise run the full suite
+        # twice. The cost: a break that only shows on 3.13 is caught on main after
+        # merge, not on the PR. To run 3.13 for a PR branch on demand:
+        # `gh workflow run test.yml --ref <branch>`. Fork PRs get the same matrix.
         python-version: ${{ fromJSON(github.event_name == 'pull_request' && '["3.12"]' || '["3.12", "3.13"]') }}
       fail-fast: false
 
@@ -302,15 +102,8 @@ jobs:
       # returns UNKNOWN when it fails (checks.py), which fails four test_cli_doctor
       # tests and the whole job. On a PUSH the checked-out ref IS main, so it
       # resolves; on a PULL_REQUEST actions/checkout fetches only the merge ref at
-      # depth 1 and `origin/main` does not exist locally.
-      #
-      # THIS PASSED FOR MONTHS ON LEFTOVER STATE, which is the part worth recording.
-      # `actions/checkout` fetches into an EXISTING repo dir rather than re-cloning,
-      # and the self-hosted runner container had been up for days with a `_work`
-      # clone that had accumulated `origin/main` from earlier main-branch runs. Every
-      # PR silently inherited that ref. Recreating the container on 2026-08-26 wiped
-      # `_work`, and every PR run failed from that moment while `main` stayed green —
-      # a clean before/after at 13:20Z across four branches.
+      # depth 1 and `origin/main` does not exist locally. A hosted runner starts
+      # from an empty workspace every time, so this fetch is always needed.
       #
       # One ref, depth 1: enough for the comparison, and not a full-history clone.
       # KNOWN COST of --depth=1 (Prudence, #779 Nit 3): the two histories are then
@@ -322,10 +115,18 @@ jobs:
         working-directory: techne
         run: git fetch --depth=1 origin +refs/heads/main:refs/remotes/origin/main
 
-      # uv + the interpreters are baked into the runner image. `uv venv --python`
-      # selects the matrix version explicitly — without setup-python, a bare
-      # `python` would NOT be the matrix version, so every step below runs through
-      # the venv rather than relying on PATH.
+      # A hosted runner bakes in neither uv nor every matrix interpreter, so both
+      # are installed here. `uv venv --python` then selects the matrix version
+      # explicitly, and every step below runs through the venv rather than relying
+      # on PATH.
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        run: python -m pip install --upgrade uv
+
       - name: Create venv on Python ${{ matrix.python-version }}
         working-directory: techne
         run: |
@@ -345,17 +146,14 @@ jobs:
         # which carry the eval_vec marker. Measured, not estimated.
         run: uv pip install --python .venv-ci/bin/python -e ".[dev,codex,vectors]"
 
+
       # THE EXTRA ALONE IS NOT THE FIX, and shipping it alone would have been
       # #535 again in a new costume: `backend_available()` only tests
       # IMPORTABILITY, so the extra un-skips the tests — but the ones that matter
       # then EMBED FOR REAL (test_cli_vectors.py:56 says so in as many words:
       # "exercises the real backfill_vectors() path, not a mock"), and an
-      # un-cached model means a re-download once per container per matrix entry --
-      # NOT once per job (techne#780). `~/.cache/fastembed` is in the container's
-      # writable layer, which survives every job on that container. This said "every
-      # job on every matrix entry" until 2026-08-26; the identical sentence in the
-      # fork-pr job IS true and should stay, because that job is ubuntu-latest -- a
-      # fresh VM per job.
+      # un-cached model means a fresh download on every job and matrix entry: a
+      # hosted runner is a new VM each time, so only actions/cache carries it over.
       # model2vec 0.8.2 defaults force_download=True (embeddings.py:271), so
       # without force_download=False a restored cache is dead weight — that is
       # Prudence's #403 finding, reused here rather than rediscovered.
@@ -411,37 +209,17 @@ jobs:
         working-directory: techne
         run: .venv-ci/bin/python -m ruff check techne tests || true  # advisory until strict pass is done
 
-      # Parallel test execution (#463). This step was 97.5% of the job — 654s of
-      # a 671s run, against ~5s for checkout+venv+install+ruff combined (the
-      # balance is GitHub Actions job setup/teardown).
-      #
-      # WHY IT IS SLOW, stated precisely — an earlier draft of this comment got
-      # it wrong and mispredicted this runner by 2x, so read the numbers before
-      # tuning. A local run measures real 102.05 / user 39.60 / sys 45.45:
-      # user+sys is 85s against 102s wall, i.e. ~83% CPU-BUSY with only ~17s of
-      # genuine waiting. The suite is syscall-heavy (per-test filesystem setup
-      # dominates), but kernel CPU time in getdents/mkdir/stat is CPU work — it
-      # COMPETES for cores, it does not overlap with itself. So this is not
-      # I/O-wait that parallelism hides; the speedup ceiling is CORE COUNT.
-      #
-      # The model held on the RETIRED 2-physical-core runner: 654s / 2 ~= 327s
-      # against 317s actual, where the discarded "overlap the I/O" model
-      # predicted ~165s. Those numbers are kept as the evidence FOR the model,
-      # not as a prediction for this pool — it has more cores, and the same jobs
-      # now run 102s and 122s. What transfers is the CLAIM (the ceiling is core
-      # count), not the figures.
+      # Parallel test execution (#463). The suite is syscall-heavy (per-test
+      # filesystem setup dominates) and kernel CPU time in getdents/mkdir/stat is
+      # CPU work: it COMPETES for cores rather than overlapping, so the speedup
+      # ceiling is the core count, not I/O wait.
       #
       # WORKER COUNT IS PINNED, not `auto`, for the same reason this workflow
       # pins UV_PYTHON_PREFERENCE above: CI must not silently run something
       # other than what it claims. `auto` resolves from the host at runtime and
-      # moves without anyone editing this file — inside a container it follows
-      # CPU AFFINITY, which `--cpus` does not constrain (only `--cpuset-cpus`
-      # does), and it drops to PHYSICAL cores if `psutil` ever arrives as a
-      # transitive dep. 4 matches what was measured here; change it
-      # deliberately. NOTE the pin does NOT bound total concurrency: two
-      # instances at -n 4 put 8 workers on one host at any pin (see the jobs
-      # comment above), so replicas are not an argument for pinning either way.
-      # On 12 threads that is fine; it was not on the retired 2-core hosts.
+      # moves without anyone editing this file. 4 was measured on the retired
+      # runner this workflow used before and has NOT been re-measured on hosted runners; change
+      # it deliberately once a hosted run shows a better number.
       #
       # NOT applied to the eval gates below or to eval-vec: both select exactly
       # 2 tests (verified via --collect-only), where worker startup costs more
@@ -465,15 +243,14 @@ jobs:
         working-directory: techne
         run: .venv-ci/bin/python -m pytest -m "eval or eval_gate"
 
+
   # (#398) Vector/hybrid retrieval gate (#399/#401) on its own leg: it pins
   # model2vec, which the [vectors] extra installs only on py>=3.14, so it can't
   # run on the 3.12/3.13 matrix above. Kept separate so the deterministic gates
   # stay fast and dep-free.
   eval-vec:
-    runs-on: [self-hosted, linux, x64, techne-ci]
-    # Fork guard (#556) — see the block above `jobs:`.
-    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
-    # Observed at ~30s on the runner; 20 bounds a hang without being tight.
+    runs-on: ubuntu-latest
+    # Observed at ~30s of gate time; 20 bounds a hang without being tight.
     timeout-minutes: 20
     steps:
       - name: Checkout techne
@@ -484,27 +261,23 @@ jobs:
       # MAKE `origin/main` RESOLVE, because a shipped check reads it (techne#690).
       # `doctor`'s `runtime:revision` runs `git rev-parse --short origin/main` and
       # returns UNKNOWN when it fails (checks.py), which fails four test_cli_doctor
-      # tests and the whole job. On a PUSH the checked-out ref IS main, so it
-      # resolves; on a PULL_REQUEST actions/checkout fetches only the merge ref at
-      # depth 1 and `origin/main` does not exist locally.
-      #
-      # THIS PASSED FOR MONTHS ON LEFTOVER STATE, which is the part worth recording.
-      # `actions/checkout` fetches into an EXISTING repo dir rather than re-cloning,
-      # and the self-hosted runner container had been up for days with a `_work`
-      # clone that had accumulated `origin/main` from earlier main-branch runs. Every
-      # PR silently inherited that ref. Recreating the container on 2026-08-26 wiped
-      # `_work`, and every PR run failed from that moment while `main` stayed green —
-      # a clean before/after at 13:20Z across four branches.
-      #
-      # One ref, depth 1: enough for the comparison, and not a full-history clone.
-      # KNOWN COST of --depth=1 (Prudence, #779 Nit 3): the two histories are then
-      # disjoint, `git merge-base` finds nothing, and `rev-list --left-right --count`
-      # returns 1 1. So the CI log's "N commit(s) behind origin/main" (checks.py) is
-      # an artifact, not a distance. The VERDICT is unaffected -- DORMANT is reached
-      # via the branch gate, not the count -- but do not read that number off a CI log.
+      # tests and the whole job. On a PULL_REQUEST actions/checkout fetches only the
+      # merge ref at depth 1, so `origin/main` does not exist locally. The
+      # `--depth=1` caveat (the commits-behind count is an artifact) is spelled out
+      # at the same step in the `test` job.
       - name: Fetch origin/main for runtime:revision
         working-directory: techne
         run: git fetch --depth=1 origin +refs/heads/main:refs/remotes/origin/main
+
+      # eval-vec needs Python 3.14: the [vectors] extra resolves to model2vec only
+      # on py>=3.14 (pyproject.toml:45), and model2vec is what the gate pins.
+      - name: Set up Python 3.14
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.14'
+
+      - name: Install uv
+        run: python -m pip install --upgrade uv
 
       - name: Create venv on Python 3.14
         working-directory: techne
@@ -530,44 +303,9 @@ jobs:
         # 0.8.2 defaults it to True — see embeddings.py:271); otherwise the
         # actions/cache step above would be dead weight. (#403 review — Prudence.)
         #
-        # The cache matters LESS here than on a hosted runner, and still matters --
-        # for a reason that is NOT just "replacements are rare".
-        #
-        # Hosted is a fresh VM per job: always cold, one cold job in one. Here the
-        # cache is in the container's writable layer and survives every job ON THAT
-        # CONTAINER -- RestartCount reached 847 in one container's life, and with an
-        # ephemeral registration a restart is roughly a job, so call it one cold job
-        # in 847. Eviction does not change that: GitHub's 7-day and 10 GB limits
-        # apply to the REMOTE entry, never to the writable-layer copy.
-        #
-        # TWO COLD TRIGGERS, NOT ONE. A container replacement is the obvious one —
-        # rare, not routine: see "one cold job in 847" above. (An earlier version
-        # of this line said "the runners are EPHEMERAL, so that is every job",
-        # which is the claim :534-536 records as CORRECTED TWICE. The
-        # REGISTRATION is ephemeral; the CONTAINER is not. Drawing the second
-        # from the first is exactly the inference this file already deleted.)
-        # The other is
-        # `techne-ci` being a POOL LABEL (see the top of this file): legs distribute
-        # across INSTANCES, so a job landing on one that has not served this matrix
-        # entry finds nothing, however warm its sibling is. Both instances sit on one
-        # host today, so this is instance-level rather than host-level — actions/cache
-        # is what carries a warm cache across either, and a second host would restore
-        # the cross-host case without changing anything here.
-        #
-        # CORRECTED TWICE (techne#780). It first said "dies with each job", the claim
-        # the 2026-08-26 incident falsified -- a container up three days discarded
-        # neither `_work` nor this cache. The first correction removed that premise
-        # but kept the "matters MORE" comparison it was the only support for, which
-        # inverts once the premise goes (Prudence, #779 r2 I2).
-        #
-        # Bears on the #535 analysis further up this FILE, in the `test` job (there
-        # is none in this one): cold-cache runs are RARER
-        # than that note assumes, so it understates its own case rather than
-        # overstating it. (An earlier version of this pointed at the actions/cache
-        # step itself, which makes no persistence claim at all -- the claim was in the
-        # fastembed pre-fetch comment in the `test` job, now corrected. Mis-aiming a
-        # pointer inside the very sentence recording a mis-aimed pointer is not a
-        # coincidence worth repeating; check the job bounds before writing "above".)
+        # A hosted runner is a fresh VM per job, so the cache is cold unless
+        # actions/cache restores it: GitHub's 7-day and 10 GB limits apply to the
+        # remote entry, and a miss costs one model download.
         working-directory: techne
         run: .venv-ci/bin/python -c "from model2vec import StaticModel; StaticModel.from_pretrained('minishlab/potion-base-8M', force_download=False)"
 
@@ -585,7 +323,7 @@ jobs:
           fi
 
       # Issue 1217 — the numpy-free query embed must match the numpy path byte for
-      # byte, on THIS runner's numpy build and CPU, at the real 256-dim table. Same
+      # byte, on THIS job's numpy build and CPU, at the real 256-dim table. Same
       # reason as above: only this job has the cached model, so a skip fails the step.
       - name: query_embed byte equality vs the numpy path (#1217)
         working-directory: techne
@@ -626,7 +364,7 @@ jobs:
       # printed in the log on every push, which is the thing #883 could not see.
       #
       # The real-content arm skips here: it reads ~/.techne/techne.db and the
-      # runner has none. That is by design (techne#945) — it borrows the
+      # job's VM has none. That is by design (techne#945) — it borrows the
       # operator's private rows as distractors and is local-only.
       - name: eval_scale arms (#883/#945 — retrieval at production scale)
         working-directory: techne
@@ -641,7 +379,7 @@ jobs:
       # reached main — PR #829's own body records the measurement, and its review
       # rounds ablated the draft before merge.
       #
-      # So run it AGAINST THE BASE ON THIS RUNNER and diff. Two runs on one
+      # So run it AGAINST THE BASE IN THIS JOB and diff. Two runs on one
       # machine need NO tolerance: the leg is byte-deterministic (model2vec/potion
       # is numpy-only static, and conftest's `pinned_model2vec` rebuilds the
       # singleton pinned to it) — confirmed across four processes under differing
@@ -715,33 +453,11 @@ jobs:
           BASE_REF: origin/main
         run: |
           set -euo pipefail
-          # Never inherit either leftover from an earlier job on this runner.
-          # These two lines are written under the SAME premise and must agree
-          # (#833 r2 I1): if runner.temp survives between jobs, both do real
-          # work; if it is wiped, both are free insurance.
+          # `rm -rf` is cheap insurance on a fresh VM and the real thing if this
+          # step is ever run by hand twice; it is safe because `set -u` aborts the
+          # step at expansion if BASE_WT is undefined, and the step-level `env:`
+          # always defines it.
           rm -f "$BASE_METRICS"
-          # `git worktree add --force` overrides "registered but MISSING". It does
-          # NOT override "the path already EXISTS" — that is a fatal (exit 128,
-          # reproduced with a POPULATED leftover; an EMPTY one is accepted), and
-          # under `set -e` it wedges this step for every subsequent PR until
-          # someone cleans the runner by hand.
-          #
-          # REACHABLE, but narrower than an earlier version of this comment said
-          # (#833 r3 nit 3): `git worktree remove` below is NOT the last statement
-          # of the happy path — the base-metrics check, the error block and the
-          # comparer all follow it. So a failure in the DIFF leaks nothing; only a
-          # cancellation, or the 20-minute timeout, landing at or before the base
-          # pytest leaks the directory and the registration together. Removing the
-          # directory heals both halves, and unlike a `trap` it also heals a runner
-          # that is ALREADY poisoned.
-          #
-          # WHY THIS `rm -rf` IS SAFE, stated correctly (#833 r3 nit 1): NOT
-          # because an unset var degrades to `rm -rf ""`. It cannot — the literal
-          # `/base-worktree` suffix is part of the expression, so an empty
-          # runner.temp would yield `rm -rf "/base-worktree"`, a different string.
-          # What actually protects it is `set -u` on line 1: an UNDEFINED BASE_WT
-          # aborts the step at expansion, before `rm` runs at all. The step-level
-          # `env:` always defines it, so no path reaches here unset.
           rm -rf "$BASE_WT"
           test -s "$HEAD_METRICS" || {
             echo "::error::the eval_vec step produced no head metrics (did it skip?)"
@@ -810,9 +526,8 @@ jobs:
   # (#383) Architecture-card freshness. Each card in ARCHITECTURE.md / docs/arch/*.md
   # pins the git blob sha of the seam file(s) it describes; this recomputes them and
   # fails when code drifted from its card — turning "detected staleness" into
-  # visible-at-PR staleness. NOTE it cannot BLOCK: branch protection is unavailable
-  # on this repo's plan (`gh api .../branches/main/protection` → 403), so no check
-  # here is required. Red means "stop" by convention, not by enforcement.
+  # visible-at-PR staleness. The `ci` job below makes a red result block a merge
+  # once a ruleset requires it.
   #
   # Same reasoning as the eval gates above: a regression gate that nothing invokes
   # protects nothing (Prudence, #397). This one was written 2026-07-20 and went
@@ -825,18 +540,7 @@ jobs:
   # happens — it is CI's copy of the same check, independent of a local pytest run.
   # Stdlib-only and deterministic: no pip install, no extras, ~0.3s.
   arch-cards:
-    # Do not move back to ubuntu-latest (#461): hosted jobs here can fail to
-    # SCHEDULE and never run, which no rerun clears. Failure mode now: no free
-    # runner = ~24h queued, then expiry. timeout-minutes cannot bound either
-    # case — it counts from job START (the 901s deaths above ran under the
-    # default 360min).
-    runs-on: [self-hosted, linux, x64, techne-ci]
-    # Fork guard (#556) — see the block above `jobs:`. NOTE this does NOT undo
-    # #461's "do not move back to ubuntu-latest": the non-fork path, which is
-    # every push and every in-repo PR, still runs here. Only fork PRs are routed
-    # away, and for those the scheduling risk #461 describes is the lesser of two
-    # evils against arbitrary code execution on the CI host.
-    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Checkout techne
@@ -850,19 +554,19 @@ jobs:
       # Runs before any step that executes the tree, so PR code cannot reach it
       # via GITHUB_PATH/GITHUB_ENV or refs/replace.
       #
-      # ARCH-CARDS-ONLY EXEMPTION (PR #1135): a commit authored EXACTLY as
-      # `dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>` is
-      # skipped rather than checked for a Signed-off-by trailer. Dependabot DOES
-      # sign off, but as `dependabot[bot] <support@github.com>` — that address
-      # never matches its noreply author email, and neither one is
-      # configurable — so every Dependabot PR failed this check until this
-      # exemption. Safe because same-repo writers are already trusted: anyone
-      # with `contents: write` can already push a commit authored as
-      # dependabot (or amend one without `--reset-author`), and could forge a
-      # matching Signed-off-by under any name just as easily, so skipping this
-      # one exact author adds no real capability. `fork-pr` gets no exemption —
-      # a fork PR is not a trusted writer and can forge any commit author,
-      # including this one, so a fork claiming to be dependabot still fails.
+      # THIS ONE STEP SERVES FORK PRs TOO, so each exemption has to hold up against
+      # a fork that writes its own commits and its own workflow copy.
+      #
+      # BOT EXEMPTION (PR #1135): a commit authored EXACTLY as
+      # `dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>`
+      # is skipped rather than checked for a Signed-off-by trailer, but ONLY when
+      # the PR itself was opened by `dependabot[bot]`. Dependabot DOES sign off, but
+      # as `dependabot[bot] <support@github.com>` — that address never matches its
+      # noreply author email, and neither one is configurable — so every Dependabot
+      # PR failed this check until this exemption. The commit author string alone
+      # is not enough: a fork can write a commit with any author, including this
+      # one. PR_AUTHOR is the PR opener's login, set by GitHub, which a fork cannot
+      # forge.
       #
       # WRITE-ACCESS EXEMPTION (#1182): a PR opened by someone with write
       # access to this repo (admin, maintain or write, from any source: repo,
@@ -872,18 +576,16 @@ jobs:
       # author_association is not used: the event payload reported a private
       # org member as COLLABORATOR here (PR #1183's run) and an org admin as
       # CONTRIBUTOR in other tenishai repos, and COLLABORATOR would also cover
-      # an outside collaborator with read access. If the lookup fails, the full
-      # check runs. The self-hosted runner has no `gh`, so the lookup is curl
-      # and jq; `--globoff` because curl would read the brackets in a bot login
-      # such as `dependabot[bot]` as a URL glob. Same lookup as the dco.yml in
-      # kobo, ladon, argus, gojira, bab and ergon. Per PR, not per commit: a
+      # an outside collaborator with read access. If the lookup fails (a fork PR's
+      # read-only token may not be allowed to ask), the full check runs. The lookup
+      # is curl and jq; `--globoff` because curl would read the brackets in a bot
+      # login such as `dependabot[bot]` as a URL glob. Same lookup as the dco.yml
+      # in kobo, ladon, argus, gojira, bab and ergon. Per PR, not per commit: a
       # writer's PR carrying an outsider's commits skips too, which is the same
-      # trusted-writer argument as the dependabot exemption. `fork-pr` gets no
-      # write-access exemption.
+      # trusted-writer argument as the dependabot exemption.
       #
-      # These two exemptions are the only places the two copies differ; see
-      # tests/test_ci_workflow_triggers.py::
-      # test_dco_check_runs_on_both_sides_of_the_trust_split.
+      # tests/test_ci_workflow_triggers.py::test_dco_check_runs_the_pinned_script
+      # pins this script, and the behavioural tests beside it run it.
       - name: DCO sign-off check
         if: ${{ !cancelled() && github.event_name == 'pull_request' }}
         working-directory: techne
@@ -925,7 +627,7 @@ jobs:
           skipped=0
           for c in $commits; do
             author=$(git log -1 --format='%an <%ae>' "$c")
-            if [ "$author" = "dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>" ]; then
+            if [ "$PR_AUTHOR" = "dependabot[bot]" ] && [ "$author" = "dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>" ]; then
               echo "DCO: skipping ${c:0:12} as a bot commit ($author)"
               skipped=$((skipped + 1))
               continue
@@ -942,10 +644,14 @@ jobs:
           fi
           echo "DCO: $(($(echo "$commits" | wc -l | tr -d ' ') - skipped)) commit(s) signed off by their authors$( [ "$skipped" -gt 0 ] && printf ' (%s skipped as bot commits)' "$skipped" )"
 
-      # Keep the versioned name: only python3.12/3.13/3.14 are proven present;
-      # a bare `python3` symlink is NOT implied by the image. This step also
-      # needs `git` on PATH (rev-parse/hash-object); without it the gate exits 2
-      # with "git executable not found", i.e. loud, not green.
+      # Setup-python provides the `python3.13` this gate invokes by versioned name,
+      # and `git` is on every hosted image; the gate exits 2 with "git executable
+      # not found" without it, i.e. loud, not green.
+      - name: Set up Python 3.13
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.13'
+
       - name: Architecture-card freshness gate
         working-directory: techne
         run: python3.13 scripts/check_arch_cards.py
@@ -954,7 +660,7 @@ jobs:
       # its two-arg form and committed a mode-160000 gitlink to a PR branch, caught
       # only by reading `git push` output — this repo has no submodules, so ANY
       # 160000 entry is a mistake by definition. Same posture as the gate above:
-      # reports, does not block (no branch protection on this plan).
+      # fails this job, and the `ci` job turns that into a red required check.
       - name: Stray gitlink guard
         working-directory: techne
         run: |
@@ -997,15 +703,18 @@ jobs:
   # assert on a shared on-disk store; order independence is not a property worth
   # buying here, and a random order that flakes would teach people to re-run CI.
   crash-recovery:
-    runs-on: [self-hosted, linux, x64, techne-ci]
-    # Fork guard (#556) — same rationale as every self-hosted job above.
-    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout techne
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           path: techne
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.13'
 
       - name: Create venv on Python 3.13
         working-directory: techne
@@ -1046,30 +755,12 @@ jobs:
   # PUBLISHED tag); it moves the packaging-defect signal from "after tagging" to
   # "on the PR".
   #
-  # SELF-HOSTED, NOT HOSTED — a deliberate departure from the issue's literal
-  # proposal ("hosted runner"), and worth recording why. The job's own needs
-  # would have been satisfied by `ubuntu-latest` (it only builds a wheel and
-  # installs it — nothing the self-hosted image bakes in is required). But
-  # this file's OWN RULE, stated at the top just below `jobs:`, is "every job
-  # on the TRUSTED path is self-hosted — do not add a hosted one there", with
-  # exactly one exception (`fork-pr`, a security boundary, not a preference).
-  # This job has no security reason to leave the trusted path, so it follows
-  # that rule rather than the issue text. MEASURED, not theoretical: the first
-  # version of this job WAS hosted, and its first two runs on this PR both hit
-  # "The job was not started because recent account payments have failed or
-  # your spending limit needs to be increased" — the exact `ubuntu-latest`
-  # failure mode this file's header already documents from July/August 2026.
-  # Self-hosted made it possible to actually observe this job pass on this PR.
-  #
-  # CARRIES THE SAME `if:` AS ITS SELF-HOSTED NEIGHBOURS, which is the ordinary
-  # case here (unlike a hosted job borrowing the expression for its trigger
-  # semantics alone) — `tests/test_ci_workflow_triggers.py::
-  # test_no_fork_reachable_job_runs_on_self_hosted` requires exactly this.
-  # THE PRICE: a fork PR does not get this job, same trade `eval-vec` and
-  # `arch-cards` already made — see `fork-pr`'s trailing comment.
+  # Hosted `ubuntu-latest` is all it needs: it builds a wheel and installs it. The
+  # job installs uv and a 3.12 interpreter (scripts/acceptance.sh defaults to 3.12
+  # and calls `uv build` / `uv venv` / `uv pip install` directly), and runs for
+  # fork PRs like every other job.
   acceptance:
-    runs-on: [self-hosted, linux, x64, techne-ci]
-    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - name: Checkout techne
@@ -1077,9 +768,14 @@ jobs:
         with:
           path: techne
 
-      # uv and the 3.12/3.13/3.14 interpreters are baked into this image
-      # (see the note above `jobs:`) — scripts/acceptance.sh calls `uv build` /
-      # `uv venv` / `uv pip install` directly and needs nothing set up first.
+      - name: Set up Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        run: python -m pip install --upgrade uv
+
       - name: Installed-artifact acceptance (core + recommended)
         working-directory: techne
         run: bash scripts/acceptance.sh
@@ -1087,14 +783,13 @@ jobs:
   # (#1319) PROVE THE INSTALL, NOT JUST THE WHEEL. `acceptance` builds the wheel
   # with uv; this follows the README as a user does (clone + pip -e, and pipx
   # [recommended]), runs `techne init`, then the hooks, the MCP server, a store
-  # and a recall, in a fresh $HOME with uv off PATH. The runner has no docker
-  # socket, so it runs on the runner's own python3, not
-  # a stock image; the script is also run by hand in python:3.12-slim.
+  # and a recall, in a fresh $HOME with uv off PATH. It uses the runner's own
+  # python3 (setup-python, 3.12) and installs no uv, so the script's PATH cleaning
+  # has nothing to remove. The script is also run by hand in python:3.12-slim.
   # The embedding model downloads cold on every run, on purpose: a user's
   # `techne init` does that, so no model cache is warmed here (unlike #535).
   install-e2e:
-    runs-on: [self-hosted, linux, x64, techne-ci]
-    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - name: Checkout techne
@@ -1102,186 +797,31 @@ jobs:
         with:
           path: techne
 
+      - name: Set up Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.12'
+
       - name: README install paths, end to end (source + pipx)
         working-directory: techne
         run: bash scripts/install-e2e.sh
 
-  # THE OTHER HALF OF THE TRUST SPLIT (#556). Fork PRs are skipped by every
-  # self-hosted job above, so without this they would get an EMPTY Checks tab —
-  # which is the exact failure #530 fought: nothing in CI can report a run that
-  # never started, and an empty tab reads as "nothing to report" rather than
-  # "unverified". A security fix that silently stops testing outside contributions
-  # trades one invisible failure for another.
-  #
-  # Runs on GitHub-hosted, so fork code never touches the self-hosted pool.
-  fork-pr:
-    if: ${{ !(github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) }}
+  # THE JOB A RULESET REQUIRES. `if: always()` makes it run even when a needed job
+  # failed, was skipped or was cancelled, and the step then fails unless EVERY
+  # needed job's result is exactly `success`. A bare `needs:` would instead SKIP this
+  # job when a dependency fails, and a skipped required check can read as passing.
+  # Keep this list equal to the jobs above:
+  # tests/test_ci_workflow_triggers.py fails if a job is missing from it.
+  ci:
+    if: ${{ always() }}
+    needs: [test, eval-vec, arch-cards, crash-recovery, acceptance, install-e2e]
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-    strategy:
-      matrix:
-        python-version: ['3.12', '3.13']
-      fail-fast: false
-
+    timeout-minutes: 5
     steps:
-      - name: Checkout techne
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          path: techne
-
-      # MAKE `origin/main` RESOLVE, because a shipped check reads it (techne#690).
-      # `doctor`'s `runtime:revision` runs `git rev-parse --short origin/main` and
-      # returns UNKNOWN when it fails (checks.py), which fails four test_cli_doctor
-      # tests and the whole job. On a PUSH the checked-out ref IS main, so it
-      # resolves; on a PULL_REQUEST actions/checkout fetches only the merge ref at
-      # depth 1 and `origin/main` does not exist locally.
-      #
-      # THIS PASSED FOR MONTHS ON LEFTOVER STATE, which is the part worth recording.
-      # `actions/checkout` fetches into an EXISTING repo dir rather than re-cloning,
-      # and the self-hosted runner container had been up for days with a `_work`
-      # clone that had accumulated `origin/main` from earlier main-branch runs. Every
-      # PR silently inherited that ref. Recreating the container on 2026-08-26 wiped
-      # `_work`, and every PR run failed from that moment while `main` stayed green —
-      # a clean before/after at 13:20Z across four branches.
-      #
-      # One ref, depth 1: enough for the comparison, and not a full-history clone.
-      # KNOWN COST of --depth=1 (Prudence, #779 Nit 3): the two histories are then
-      # disjoint, `git merge-base` finds nothing, and `rev-list --left-right --count`
-      # returns 1 1. So the CI log's "N commit(s) behind origin/main" (checks.py) is
-      # an artifact, not a distance. The VERDICT is unaffected -- DORMANT is reached
-      # via the branch gate, not the count -- but do not read that number off a CI log.
-      - name: Fetch origin/main for runtime:revision
-        working-directory: techne
-        run: git fetch --depth=1 origin +refs/heads/main:refs/remotes/origin/main
-
-      # DCO (CONTRIBUTING.md): each non-merge commit the PR adds needs a
-      # Signed-off-by line matching its author, anywhere in the message (a hook
-      # appending a trailer after it moves it out of git's trailer block).
-      # Runs before any step that executes the tree, so PR code cannot reach it
-      # via GITHUB_PATH/GITHUB_ENV or refs/replace.
-      #
-      # NO BOT EXEMPTION HERE, ON PURPOSE (PR #1135): `arch-cards` skips a
-      # commit authored exactly as
-      # `dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>`,
-      # because on that trusted same-repo path anyone who could push that
-      # author string already has write access and could forge a matching
-      # Signed-off-by too. A fork PR is not a trusted writer and can forge any
-      # commit author, including this one, so a fork claiming to be dependabot
-      # must still sign off — this check stays strict here. NO
-      # WRITE-ACCESS EXEMPTION either (#1182): this step gets no token and
-      # makes no permission lookup. The bot and write-access exemptions in `arch-cards` are the only places the
-      # two copies differ; see tests/test_ci_workflow_triggers.py::
-      # test_dco_check_runs_on_both_sides_of_the_trust_split.
-      - name: DCO sign-off check
-        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
-        working-directory: techne
+      - name: Fail unless every needed job succeeded
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          NEEDS: ${{ toJSON(needs) }}
         run: |
           set -euo pipefail
-          export GIT_NO_REPLACE_OBJECTS=1
-          if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
-            git fetch --no-tags --quiet --unshallow origin "$BASE_SHA" "$HEAD_SHA"
-          else
-            git fetch --no-tags --quiet origin "$BASE_SHA" "$HEAD_SHA"
-          fi
-          commits=$(git rev-list --no-merges "$BASE_SHA..$HEAD_SHA")
-          if [ -z "$commits" ]; then
-            echo "::error::DCO: no non-merge commits in $BASE_SHA..$HEAD_SHA, so nothing was checked"
-            exit 1
-          fi
-          bad=0
-          for c in $commits; do
-            author=$(git log -1 --format='%an <%ae>' "$c")
-            # no `grep -q`: an early exit SIGPIPEs `tr`, and pipefail reads that as a miss
-            if ! git log -1 --format=%B "$c" | tr -d '\r' | grep -Fxi -- "Signed-off-by: $author" >/dev/null; then
-              echo "::error::DCO: commit ${c:0:12} has no 'Signed-off-by: $author' trailer"
-              bad=1
-            fi
-          done
-          if [ "$bad" -ne 0 ]; then
-            echo "Sign off with 'git commit -s'. To fix existing commits, see 'Developer Certificate of Origin' in CONTRIBUTING.md."
-            exit 1
-          fi
-          echo "DCO: $(echo "$commits" | wc -l | tr -d ' ') commit(s) signed off by their authors"
-
-      # The self-hosted image bakes in both uv and the interpreters; a hosted
-      # runner has neither at the matrix versions, so they are provided here.
-      # setup-python puts the interpreter on PATH as a SYSTEM interpreter, which
-      # is what keeps the workflow-level `UV_PYTHON_PREFERENCE: only-system` +
-      # `UV_PYTHON_DOWNLOADS: never` pin meaningful rather than merely inert: uv
-      # still may not fetch a managed build of its own, so the leg cannot quietly
-      # test an interpreter nobody chose.
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
-        with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: Install uv
-        run: python -m pip install --upgrade uv
-
-      - name: Create venv on Python ${{ matrix.python-version }}
-        working-directory: techne
-        run: |
-          uv venv --python ${{ matrix.python-version }} .venv-ci
-          .venv-ci/bin/python -V
-
-      - name: Install
-        working-directory: techne
-        # NO `vectors` EXTRA, DELIBERATELY (#570 review). Installing it makes the
-        # vector-backed tests RUN in the suite below, and this job has no cache step
-        # and no pre-fetch — the exact configuration recorded near the top of this
-        # file as the #535 red build: an un-cached model re-downloaded by every job on
-        # every matrix entry.
-        #
-        # AND ADDING A CACHE IS THE WRONG FIX HERE ANYWAY, for a reason that does not
-        # depend on how GitHub scopes fork caches: this job runs ATTACKER-CONTROLLED
-        # CODE on GitHub's hosted account. Pulling a model down on both matrix legs to
-        # serve that is spending bandwidth and cache space on an untrusted contributor
-        # — the wrong place to add a resource, whatever the cache semantics turn out
-        # to be. (An earlier revision justified this by asserting GitHub isolates cache
-        # WRITES from fork PRs so a cache could never populate. That may well be true,
-        # but it was a HAND TRACE I did not verify, and the review flagged that reads
-        # are likely NOT isolated — a restore-only step would probably hit main's key.
-        # The argument above does not rest on either reading.)
-        #
-        # This also makes the install match what this job's own footer already
-        # claims: fork PRs get the suite and the deterministic gates, NOT the vector
-        # gate. Before this the footer said one thing and the extra did another —
-        # the vector tests ran here, cold. With `-rs` below they report as SKIPPED,
-        # which is visible rather than silent.
-        run: uv pip install --python .venv-ci/bin/python -e ".[dev,codex]"
-
-      # Same flags as the self-hosted leg, and for the same reasons: `-rs` so a
-      # skip is reported rather than counted, `-n 4` to match what was measured.
-      - name: Pytest (includes contract assertions)
-        working-directory: techne
-        run: .venv-ci/bin/python -m pytest -q -rs -n 4
-
-      - name: Deterministic eval gates (#68 recall, #385 retrieval-correctness)
-        working-directory: techne
-        run: .venv-ci/bin/python -m pytest -m "eval or eval_gate"
-
-      # NOT REPRODUCED HERE, deliberately, and this list is the honest cost of the
-      # split rather than an oversight:
-      #   - eval-vec  — needs Python 3.14 plus a warm model2vec cache. Hosted
-      #                 images ship neither, and `UV_PYTHON_DOWNLOADS: never`
-      #                 (correctly) forbids fetching one.
-      #   - arch-cards — invokes `python3.13` by versioned name against a runner
-      #                 image proven to carry it; that is a property of the
-      #                 self-hosted image, not of ubuntu-latest.
-      #   - acceptance (#1059) — self-hosted, like this job's neighbours, so it
-      #                 is excluded from fork PRs the same way they are. Its
-      #                 own steps (`uv build`, `uv venv`, `uv pip install`)
-      #                 would run fine on ubuntu-latest given the "Install uv"
-      #                 step above, but reproducing it here would mean
-      #                 building and installing the wheel twice in this one
-      #                 job — worth its own issue if a fork PR ever needs it.
-      # A fork PR therefore gets the full suite and the deterministic gates, but
-      # NOT the vector gate, the card-freshness gate, or the installed-artifact
-      # smoke test. All three still run on every push to main, so nothing merges
-      # unverified — a fork PR is simply verified less completely than an
-      # in-repo one, which is the trade the trust boundary buys. Widening it
-      # means re-platforming those gates: worth its own issue,
-      # not worth blocking a security fix behind.
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          echo "$NEEDS" | jq -e 'all(.[]; .result == "success")' >/dev/null

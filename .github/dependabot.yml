@@ -1,24 +1,13 @@
 # Dependabot version updates. Grouped so a week's bumps land as one PR, not
-# one per package — test.yml's self-hosted pool is small (techne#424/#461)
-# and does not need N near-identical runs.
+# one per package; every PR runs the full CI matrix on GitHub-hosted runners and
+# billed minutes are the cost (techne#424/#461), so N near-identical runs are
+# not wanted.
 #
-# Dependabot PRs from this config are SAME-REPO PRs (dependabot[bot] pushes to
-# a branch in tenishai/techne, not a fork), so they satisfy test.yml's
-# TRUSTED_POOL guard (tests/test_ci_workflow_triggers.py:703) exactly like a
-# human contributor's PR and run on the self-hosted pool. See the PR body for
-# what that means and why no guard change ships with this file.
-#
-# NO `pip` ECOSYSTEM YET. A dependency-version bump runs
-# arbitrary install-time code the day it's proposed, before review — the same
-# self-hosted-pool exposure as above, but for a much larger and more frequently
-# changing package set than the three pinned Actions. Add it once the repo is
-# public and `dependabot[bot]` PRs can be routed to the hosted `fork-pr` job
-# instead of the trusted pool — not before. The known mechanism is an actor
-# check on the guard (GitHub's docs gate on
-# `github.event.pull_request.user.login == 'dependabot[bot]'`); evaluate any
-# other routing option then. `dependabot-updates` is only the name of
-# Dependabot's own dynamic workflow run, not an environment a workflow here
-# can route on.
+# NO `pip` ECOSYSTEM YET. A dependency-version bump runs arbitrary install-time
+# code the day it is proposed, before review, on a hosted runner that gets the
+# job's read-only token. That is a smaller exposure than it was on a runner of our
+# own, but it is still a much larger and more frequently changing package set than
+# the three pinned Actions. Add it as a deliberate decision, not by default.
 version: 2
 updates:
   - package-ecosystem: "github-actions"

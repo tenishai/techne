@@ -4,18 +4,18 @@ WHY THIS IS A TEST AND NOT A COMMENT: the failure it guards is invisible by
 construction. A `pull_request: branches: [main]` filter matches the PR's BASE, so
 a stacked PR matches no trigger and gets NO run — no red X, no skipped row, just
 an EMPTY Checks tab that reads exactly like "nothing to report". Nothing in CI
-can report a CI run that never started, and branch protection cannot backstop it:
-required status checks are unavailable on this repo's plan (403 "Upgrade to
-GitHub Pro or make this repository public"). The trigger is the only mechanism,
-so it gets a guard that runs in the suite the trigger would have run.
+can report a CI run that never started, and a required check cannot backstop it:
+a run that never started reports nothing for a ruleset to wait on. The trigger is
+the only mechanism, so it gets a guard that runs in the suite the trigger would
+have run.
 """
 
 from __future__ import annotations
 
-import difflib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -72,40 +72,33 @@ def test_pull_request_has_no_base_branch_filter():
 
 
 def test_the_go_public_runbook_exists_and_the_workflow_points_at_it():
-    """techne#556's actual complaint was that the one pre-flip action an operator
-    can take was written down NOWHERE THEY WOULD LOOK — it lived in an issue
-    comment. A control that exists only in a comment is not a control.
+    """The flip sequence must live in a file in the repo AND the workflow must point
+    at it. A control that exists only in an issue comment is not a control, and a
+    pointer to a file that has been renamed or deleted reads as coverage.
 
-    So the runbook is a file in the repo AND the workflow points at it, and both
-    halves are pinned here: a runbook nobody is directed to is the same failure
-    one step removed, and a pointer to a file that has been renamed or deleted is
-    worse than none because it reads as coverage.
+    CI no longer uses a runner of ours, so the runbook's job is the two things that
+    still matter at the flip: retire the old runners, and turn on the fork-PR
+    approval policy for outside collaborators. Both are pinned here.
     """
     runbook = WORKFLOW.parent.parent.parent / "docs" / "go-public-runbook.md"
-    assert runbook.exists(), (
-        "docs/go-public-runbook.md is missing — techne#556's flip sequence has no "
-        "home again, which is the exact failure that issue was filed about"
+    assert runbook.exists(), "docs/go-public-runbook.md is missing"
+
+    text = " ".join(runbook.read_text().split())  # line wraps must not matter
+    assert "Stop and deregister" in text, (
+        "the runbook no longer says to stop and deregister the old self-hosted "
+        "runners once CI has moved to hosted runners"
+    )
+    assert "all outside collaborators" in text, (
+        "the runbook no longer says the fork-PR approval policy must cover all "
+        "outside collaborators"
     )
 
-    text = runbook.read_text()
-    # The load-bearing step. If someone trims this down, this is what must
-    # survive: stopping the runner is what makes the post-flip window safe,
-    # rather than merely short.
-    assert "Stop the runner container" in text, (
-        "the runbook no longer states the stop-the-runner step in its own words "
-        "— API de-registration alone does NOT stick, because an ephemeral "
-        "runner's entrypoint re-registers on start"
-    )
-
-    # AND THE INVERSE, which is why the detailed runbook left this repo (#1005).
-    # This file ships with the public repo. The document it replaced named the
-    # CI host, its compose paths and what else ran beside it — a map of the
-    # machine the sequence exists to protect, handed over before an attacker
-    # needed to probe for it. Anything that names infrastructure belongs in the
+    # This file ships with the public repo (#1005), so it must not name the CI host,
+    # its paths or its runner names. Anything that names infrastructure belongs in the
     # private copy, and this assertion is what stops it coming back.
     # Host names that also appear as synthetic fixture text elsewhere in the tree,
     # so they are checked here rather than tree-wide (see INFRA_LEAKS below).
-    for leak in ("dev02", "dev04", "ssh "):
+    for leak in ("dev02", "dev04", "ssh ", "gha-runner"):
         assert leak not in text.lower(), (
             f"{leak!r} is back in docs/go-public-runbook.md. This file is public "
             "at the flip; infrastructure detail belongs in the private copy "
@@ -122,7 +115,7 @@ def test_every_job_still_lives_in_this_one_workflow():
     """The blast radius of the trigger, pinned.
 
     This file is the repo's ONLY workflow, which is precisely why the missing
-    trigger cost all three jobs rather than one. If a job ever moves to a second
+    trigger would cost every job rather than one. If a job ever moves to a second
     workflow file, that file needs its own trigger audit — and this assertion is
     what makes someone notice, rather than discovering it from an empty Checks
     tab on a PR that mattered.
@@ -136,27 +129,21 @@ def test_every_job_still_lives_in_this_one_workflow():
     )
 
     jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
-    # `crash-recovery` added 2026-08-17 (techne#388). It picked the SELF-HOSTED
-    # side of the #556 split and carries the same fork guard as its neighbours:
-    # the suite SIGKILLs child processes, which is not something to hand a fork
-    # PR on a shared runner.
-    # `acceptance` added 2026-09-29 (techne#1059): self-hosted, and carries
-    # `TRUSTED_POOL`'s exact guard expression, per
-    # test_no_fork_reachable_job_runs_on_self_hosted.
-    # `install-e2e` added 2026-10-25 (techne#1319): self-hosted, same guard.
+    # A new job must also be added to `ci`'s `needs:` (see
+    # test_ci_job_needs_every_other_job_and_always_runs).
     expected = {
-        "test", "eval-vec", "arch-cards", "crash-recovery", "acceptance", "install-e2e", "fork-pr",
+        "test", "eval-vec", "arch-cards", "crash-recovery", "acceptance", "install-e2e", "ci",
     }
     assert set(jobs) == expected, (
         f"job set changed: {sorted(jobs)}. All of them ride this one trigger — and "
-        "a new job must also pick a side of the techne#556 trust split."
+        "a new job must also be listed in `ci`'s `needs:`."
     )
 
 
 def test_push_filter_is_still_scoped_to_main():
     """The counterpart, so removing the PR filter is not mistaken for removing
     both. `push` SHOULD stay scoped: without it every branch push would run the
-    full matrix on a two-runner self-hosted pool, on top of the PR run. Measured
+    full matrix on every branch push, on top of the PR run. Measured
     2026-08-08: a base=main PR gets exactly one pull_request run per sha, and
     push fires only on main.
     """
@@ -180,8 +167,8 @@ def _matrix_versions(job: str) -> str | list:
 
 
 def test_pr_runs_test_on_312_only_and_main_runs_both():
-    """Every PR push ran the full suite twice on the shared self-hosted pool
-    (3.12, 3.13), plus eval-vec's vector gate. PRs now run 3.12; main pushes and workflow_dispatch
+    """Every PR push ran the full suite twice (3.12, 3.13), plus eval-vec's
+    vector gate, and hosted minutes are billed while the repo is private. PRs now run 3.12; main pushes and workflow_dispatch
     keep 3.13, so a 3.13-only break is caught on main after merge (issue 1233).
     """
     m = _MATRIX_TERNARY.match(str(_matrix_versions("test")))
@@ -194,10 +181,11 @@ def test_pr_runs_test_on_312_only_and_main_runs_both():
     assert json.loads(m["other"]) == ["3.12", "3.13"]
 
 
-def test_fork_prs_keep_both_versions():
-    """fork-pr runs on GitHub-hosted runners, so trimming it saves nothing on
-    our runners and would drop 3.13 coverage for outside contributions entirely."""
-    assert _matrix_versions("fork-pr") == ["3.12", "3.13"]
+def test_the_test_matrix_does_not_depend_on_where_the_pr_came_from():
+    """The matrix expression keys on the event name only, so a fork PR (also event
+    `pull_request`) gets 3.12 like any PR. No job-level `if:` or second job can give
+    it a different one: that is pinned by the fork-exclusion test further down."""
+    assert "head.repo" not in str(_matrix_versions("test"))
 
 
 # --- vector coverage in the test leg (techne#535) --------------------------
@@ -686,284 +674,122 @@ def test_the_default_suite_step_names_no_alternate_ini_or_plugin():
             )
 
 
-# ---- techne#556: fork PRs must never reach the self-hosted pool ---------------
+# ---- no runner of ours, no fork-excluding `if:`, one gating `ci` job -----------
+#
+# THESE REPLACE techne#556's FORK GUARD. That guard existed because jobs ran on a
+# self-hosted runner and `pull_request:` (unfiltered, on purpose: #530) fires for
+# fork PRs, so a fork PR would have run attacker code on the CI host. The fix was to
+# route forks to a hosted job. Now EVERY job is hosted, so the exposure is gone at
+# the root and the guard, its complement job and their expression tests are gone
+# with it. What is pinned instead:
+#   (a) no workflow file targets a runner of ours, in any `runs-on` spelling;
+#   (b) no job `if:` keeps a fork PR (or any event the workflow triggers on) out,
+#       because a skipped job must not be able to stand in for a tested one;
+#   (c) a `ci` job gates on all the others, which is what a ruleset requires.
 
-# The one guard expression, spelled once. Self-hosted jobs are compared against it
-# EXACTLY rather than fuzzily ("does the `if` mention fork?"), because the realistic
-# regression here is not a missing guard — it is a SUBTLY DIFFERENT one. Dropping the
-# `github.event_name` clause reads correct and fails open, which is why the clause is
-# load-bearing and why an exact match makes a reviewer justify any change.
-#
-# THE GUARD IS A POSITIVE IDENTITY CHECK, NOT A NEGATED TRUTHINESS TEST, AND THAT IS
-# THE POLARITY FIX (techne#570 step 3).
-#
-# THE VALUES BELOW WERE MEASURED, NOT DERIVED — see
-# tests/fixtures/github/expression_truth_table.json, captured from GitHub's own
-# evaluator under a real `pull_request` event. TWO SUCCESSIVE ATTEMPTS TO DERIVE THEM
-# FROM THE REFERENCE PAGES PRODUCED TWO DIFFERENT WRONG ANSWERS, which is the whole
-# argument for measuring:
-#   - I first wrote "a missing property yields null".
-#   - The contexts page says it "will evaluate to an empty string", so I corrected to
-#     empty string — and the review then reasoned from THAT, concluding the comparison
-#     is string-vs-string with no coercion at all.
-#   - GitHub actually returns `null` (toJSON of the absent property). My original
-#     wording was right and my correction made it worse.
-# The CONCLUSION survived every version because it is over-determined: null and empty
-# string both make the comparison false. Only the mechanism was wrong — which is
-# exactly the kind of error that reads as rigorous and teaches the next reader wrongly.
-#
-# Measured:  <absent> == github.repository        -> false
-#            <absent> == false                    -> true
-#            OLD  !(ev=='pull_request' && <absent>)                    -> true   OPEN
-#            NEW  ev!='pull_request' || <absent>==github.repository    -> false  CLOSED
-# So the OLD form ran fork code on the CI host for any unresolvable property, silently;
-# `head.repo.fork == false` is no better (an absent property equals false); and the
-# identity check is the one that fails closed.
-#
-# The earlier revision of this comment warned against `full_name != github.repository`
-# because it is empty on `push`. That warning was about the expression WITHOUT the
-# `github.event_name` clause; with the clause, `push` is decided by the first disjunct
-# and never reaches the comparison. The hazard was real, the remedy is the clause —
-# but note that clause is a DENYLIST OF ONE EVENT NAME, which is its own hole and is
-# why `test_no_trigger_is_added_without_deciding_the_fork_question` exists.
-# INVERTED TO AN ALLOW-LIST (techne#590, 2026-08-18, Richard: "we should invert").
-#
-# The old guard's first disjunct was `github.event_name != 'pull_request'` — A
-# DENYLIST OF ONE EVENT NAME. Any other event carrying a fork's payload satisfied
-# it, short-circuited the guard TRUE, and put fork code on the self-hosted pool.
-# #570 added a test that every DECLARED fork-carrying trigger must be named in the
-# guard, and that test works — but the list it checks, `_FORK_CARRYING_EVENTS`, is
-# hand-maintained here, which is the same hazard one level up. It was already
-# missing `pull_request_review_thread`, VERIFIED 2026-08-18 against GitHub's
-# payload docs: that event's payload carries `pull_request` as a REQUIRED
-# property. Not a hand trace any more.
-#
-# A hand-copied list of GitHub's event names fails silently the first time GitHub
-# adds an event — the same reasoning test.yml already records for refusing a
-# hand-maintained BRANCH list in #530.
-#
-# So: name what may reach the self-hosted pool, not what may not. An unknown event
-# now evaluates FALSE and the self-hosted job SKIPS — fail-closed by construction,
-# the same direction #570 established for property typos.
-TRUSTED_POOL = (
-    "github.event_name == 'push' "
-    "|| github.event_name == 'workflow_dispatch' "
-    "|| (github.event_name == 'pull_request' "
-    "&& github.event.pull_request.head.repo.full_name == github.repository)"
-)
-FORK_GUARD = "${{ " + TRUSTED_POOL + " }}"
-#: THE EXACT COMPLEMENT BY CONSTRUCTION — literally `!(...)` of the same string,
-#: not a hand-written mirror. The two cannot drift, which is what the old pair's
-#: `unserved` assertion was manually policing. It also fixes the gap that made a
-#: pure allow-list unsafe: an unknown event skips self-hosted AND is picked up
-#: here, so it runs on a hosted runner instead of leaving an empty Checks tab
-#: (techne#530's failure, which the trust split could otherwise reintroduce).
-FORK_ONLY = "${{ !(" + TRUSTED_POOL + ") }}"
+WORKFLOWS = sorted(WORKFLOW.parent.glob("*.y*ml"))
 
 
 def _jobs() -> dict:
     return yaml.safe_load(WORKFLOW.read_text())["jobs"]
 
 
-def _is_self_hosted(runs_on) -> bool:
-    """True when a `runs-on` targets the self-hosted pool, in either YAML spelling.
+def _all_jobs() -> dict[tuple[str, str], dict]:
+    """(workflow file, job name) -> job, over EVERY workflow file in the directory."""
+    out = {}
+    for path in WORKFLOWS:
+        doc = yaml.safe_load(path.read_text()) or {}
+        for name, job in (doc.get("jobs") or {}).items():
+            out[(path.name, name)] = job or {}
+    return out
+
+
+# GitHub's own hosted images, named by their label. This is an ALLOW-LIST on purpose:
+# a custom label such as a pool name, `self-hosted`, or anything this regex does not
+# recognise is treated as a runner of ours. Fail closed: a new spelling is reviewed,
+# not waved through.
+_HOSTED_LABEL = re.compile(r"^(ubuntu|windows|macos)-[a-z0-9._-]+$")
+
+
+def _targets_own_runner(runs_on) -> bool:
+    """True unless `runs-on` PROVABLY names only GitHub-hosted labels.
 
     `runs-on` accepts a bare string, a list of labels, or a mapping with `labels:`
-    / `group:`. Checking only the list form would let the same exposure return
-    through a spelling this repo does not use today.
+    and/or `group:`. A `group:` names a runner group, which this repo cannot show to
+    be hosted, and a `${{ ... }}` expression cannot be resolved without running the
+    workflow, so both count as ours. A missing or oddly typed value does too.
     """
     if isinstance(runs_on, str):
-        return "self-hosted" in runs_on
-    if isinstance(runs_on, list):
-        return "self-hosted" in runs_on
-    if isinstance(runs_on, dict):
-        labels = runs_on.get("labels") or []
-        if isinstance(labels, str):
-            labels = [labels]
-        return "self-hosted" in labels or bool(runs_on.get("group"))
-    return False
+        runs_on = [runs_on]
+    elif isinstance(runs_on, dict):
+        if runs_on.get("group"):
+            return True
+        labels = runs_on.get("labels")
+        runs_on = [labels] if isinstance(labels, str) else labels
+    if not isinstance(runs_on, list) or not runs_on:
+        return True
+    return not all(isinstance(label, str) and _HOSTED_LABEL.match(label) for label in runs_on)
 
 
-def test_no_fork_reachable_job_runs_on_self_hosted():
-    """THE INVARIANT (techne#556). `pull_request:` is unfiltered, so it fires for
-    FORK PRs; a self-hosted job reachable from one is arbitrary attacker code on
-    the CI host the moment this repo goes public.
+@pytest.mark.parametrize(
+    ("runs_on", "ours"),
+    [
+        ("ubuntu-latest", False),
+        (["ubuntu-latest"], False),
+        ({"labels": "ubuntu-24.04"}, False),
+        ({"labels": ["ubuntu-latest"]}, False),
+        ("self-hosted", True),
+        (["self-hosted", "linux", "x64"], True),
+        (["ubuntu-latest", "self-hosted"], True),
+        ({"labels": ["self-hosted", "linux"]}, True),
+        ({"labels": "self-hosted"}, True),
+        ({"group": "ci-pool"}, True),
+        ({"group": "ci-pool", "labels": ["ubuntu-latest"]}, True),
+        ("techne-ci", True),
+        ("${{ matrix.runner }}", True),
+        ("${{ github.event_name == 'push' && 'ubuntu-latest' || 'self-hosted' }}", True),
+        (["${{ vars.RUNNER }}"], True),
+        ({"labels": "${{ vars.RUNNER }}"}, True),
+        ([], True),
+        ({}, True),
+        (None, True),
+    ],
+)
+def test_the_runs_on_predicate_fails_closed(runs_on, ours):
+    assert _targets_own_runner(runs_on) is ours
 
-    WHY THIS IS A TEST AND NOT A COMMENT — the same reason as the trigger above,
-    and here there is evidence: this finding was raised against TWO jobs in a
-    2026-07-30 audit, re-verified unfixed on 07-31, and had grown to THREE by
-    08-12. A new job inherits `runs-on` from its neighbour and does not inherit the
-    guard, and nothing failed when it didn't. Now something does.
+
+def test_no_job_in_any_workflow_targets_a_runner_of_ours():
+    """THE INVARIANT. A public repo runs CI on GitHub-hosted runners only, and no
+    runner of ours may be reachable from it: `pull_request:` fires for fork PRs, so a
+    job on our runner is attacker-controlled code on our machine.
+
+    Covers EVERY workflow file, not only test.yml, because the file added next month
+    is the one nobody audited. A job that calls a reusable workflow (`uses:`) has no
+    `runs-on` of its own and is skipped here; the called workflow lives under
+    .github/workflows/ only if it is local, and is checked as its own file.
     """
+    assert WORKFLOWS, "no workflow files found — the glob is wrong, so nothing was checked"
     offenders = {
-        name: job.get("if")
-        for name, job in _jobs().items()
-        if _is_self_hosted(job.get("runs-on")) and job.get("if") != FORK_GUARD
+        f"{wf}:{name}": job.get("runs-on")
+        for (wf, name), job in _all_jobs().items()
+        if "uses" not in job and _targets_own_runner(job.get("runs-on"))
     }
     assert not offenders, (
-        "every self-hosted job must carry the exact techne#556 fork guard.\n"
-        f"expected: {FORK_GUARD}\n"
-        f"offending jobs (name -> its `if`): {offenders}\n"
-        "A fork PR reaching the CI host is RCE on a persistent host that also stores "
-        "runner paths in this file."
+        "these jobs target a runner that is not provably GitHub-hosted (workflow:job -> "
+        f"runs-on): {offenders}. A public repo runs CI on hosted runners only; fork PRs "
+        "reach every job."
     )
 
 
-def test_fork_prs_still_get_ci_on_a_hosted_runner():
-    """The other half. Guarding the self-hosted jobs without providing a hosted
-    path would leave a fork PR with an EMPTY Checks tab — techne#530's failure
-    exactly, where "no run" is indistinguishable from "nothing to report". A
-    security fix that silently stops testing outside contributions has traded one
-    invisible failure for another.
-    """
-    hosted_fork_jobs = {
-        name
-        for name, job in _jobs().items()
-        if not _is_self_hosted(job.get("runs-on")) and job.get("if") == FORK_ONLY
-    }
-    assert hosted_fork_jobs, (
-        "no job serves fork PRs on a hosted runner, so a fork PR would get zero "
-        f"checks. Expected some job with `if: {FORK_ONLY}` on a hosted `runs-on`."
-    )
-
-
-def test_the_two_guards_are_complements_not_overlaps():
-    """No job may match BOTH sides, and the fork-only job must not be self-hosted.
-
-    Belt-and-braces on the pair above: if the two expressions ever drift apart, a
-    job could satisfy both (running fork code on the CI host) or neither (silently never
-    running at all).
-    """
-    for name, job in _jobs().items():
-        cond = job.get("if")
-        if cond == FORK_ONLY:
-            assert not _is_self_hosted(job.get("runs-on")), (
-                f"job {name!r} runs ONLY on fork PRs but targets the self-hosted "
-                "pool — that is precisely the exposure, inverted"
-            )
-    assert FORK_GUARD != FORK_ONLY
-    # Every job carries one of the two, so none is accidentally unguarded.
-    unclassified = {
-        name: job.get("if")
-        for name, job in _jobs().items()
-        if job.get("if") not in (FORK_GUARD, FORK_ONLY)
-    }
-    assert not unclassified, (
-        f"jobs with neither trust-split guard: {unclassified}. Pick a side — "
-        "self-hosted jobs take FORK_GUARD, hosted fork jobs take FORK_ONLY."
-    )
-
-
-# ---- techne#556: the guard must name properties GitHub actually sends ---------
-
-PAYLOAD_SHAPE = Path(__file__).parent / "fixtures" / "github" / "pull_request_payload_shape.json"
-
-
-def _payload_shape() -> dict:
-    import json
-
-    return json.loads(PAYLOAD_SHAPE.read_text())
-
-
-def _referenced_payload_paths() -> set[str]:
-    """Every `github.event.pull_request.<path>` the WORKFLOW's `if:` expressions read.
-
-    READ FROM THE WORKFLOW, NOT FROM `FORK_GUARD`/`FORK_ONLY`. That is the entire
-    point of this test: the constants above are strings the TEST supplies, so a
-    rename applied consistently to both the workflow and the constants leaves an
-    exact-match assertion comparing two mutated values and agreeing. This function
-    deliberately never touches them.
-    """
-    import re
-
-    paths: set[str] = set()
-    for job in _jobs().values():
-        cond = job.get("if")
-        if isinstance(cond, str):
-            paths.update(re.findall(r"github\.event\.pull_request\.([A-Za-z0-9_.]+)", cond))
-    return paths
-
-
-def test_the_fork_guard_reads_properties_github_actually_sends():
-    """THE TEETH THE EXACT-MATCH TESTS CANNOT HAVE (techne#570 review).
-
-    A missing property in a GitHub Actions expression is **null**, not an error —
-    MEASURED, see tests/fixtures/github/expression_truth_table.json. It is falsy.
-
-    So `!(github.event_name == 'pull_request' && <missing>)` is `!(falsy)` — TRUE
-    unconditionally — and every self-hosted job runs for fork PRs. techne#556 and
-    techne#530 defeated at once, silently.
-
-    THE FORK-ONLY SIDE IS THE OPPOSITE OF WHAT THIS DOCSTRING USED TO SAY (techne#591).
-    It claimed the fork-only job's condition "is falsy and it NEVER fires" — true of an
-    EARLIER truthiness spelling, and stale since 45634e7. The SHIPPED spelling compares:
-    `event_name == 'pull_request' && <missing> != github.repository` measures TRUE
-    (see the fixture), because `null != "tenishai/techne"`. So a typo makes the
-    fork-only job fire on EVERY pull request, including same-repo ones — it
-    over-fires rather than never firing. Both jobs run, which is why the exact-match
-    tests could not see the difference.
-
-    MEASURED, and this is why this test exists: renaming `head.repo.fork` to
-    `head.repo.is_fork` in the workflow AND in both constants above gave 15 PASSED,
-    identical to baseline. The exact-match assertions could not tell a working guard
-    from a typo'd one, because both sides of their comparison came from this file.
-    Verified against the live API the same day: `head.repo` HAS `fork` and has no
-    `is_fork` — so it dereferences to null, and null is falsy.
-
-    So this anchors the property names to something the test does not author: the
-    key structure of a real payload, captured from the API (see the fixture's
-    `_provenance`). A guard naming a property GitHub does not send now fails here
-    even if every string in this file was renamed to match it.
-    """
-    shape = _payload_shape()
-    referenced = _referenced_payload_paths()
-    assert referenced, (
-        "no github.event.pull_request.* property found in any job's `if:`. Either the "
-        "trust split was removed, or it is now expressed in a form this test cannot "
-        "see — which would make the guard unverified rather than verified."
-    )
-
-    unknown = {}
-    for path in sorted(referenced):
-        node = shape
-        for segment in path.split("."):
-            if not isinstance(node, dict) or segment not in node:
-                unknown[path] = segment
-                break
-            node = node[segment]
-
-    assert not unknown, (
-        f"the workflow's fork guard reads properties GitHub does not send "
-        f"(path -> first missing segment): {unknown}\n"
-        "A missing property is NULL, not an error (measured — see the truth-table "
-        "fixture), and null is falsy — so the guard silently evaluates to a constant: "
-        "self-hosted jobs run for fork PRs (techne#556) AND the fork-only job fires on "
-        "EVERY pull request, same-repo included, since `null != <repo>` is true "
-        "(techne#530, corrected in techne#591 — it over-fires, it does not go silent).\n"
-        f"Known properties come from {PAYLOAD_SHAPE.name}, captured from a real "
-        "payload. If GitHub genuinely added or renamed a field, refresh the fixture "
-        "with the command in its `_provenance` — do NOT edit it by hand to make this "
-        "pass, which would restore exactly the blindness this test removes."
-    )
-
-
-# `_FORK_CARRYING_EVENTS` LIVED HERE AND IS DELETED (techne#590).
-#
-# It was a hand-maintained copy of a fact GitHub owns — the set of events whose
-# payload can carry a fork's head — and it existed only to police a guard whose
-# first disjunct was a denylist of one event name. Two failure modes, one of which
-# had already happened:
-#   1. It silently omitted `pull_request_review_thread`. VERIFIED 2026-08-18 against
-#      GitHub's payload docs: that event carries `pull_request` as a REQUIRED
-#      property, so the omission was real, not a hand trace.
-#   2. It could never be complete, because GitHub adds events on its own schedule
-#      and nothing here would notice. Exactly the reasoning test.yml already records
-#      for refusing a hand-maintained BRANCH list (#530).
-#
-# The allow-list makes the list unnecessary rather than more accurate: an event the
-# guard does not NAME as trusted fails closed, whether or not anyone wrote it down.
-# Keeping a list that nothing consults would be the worst of both — it reads as
-# coverage while enforcing nothing.
+def _normalised_if(cond) -> str | bool | None:
+    """The job's `if:` as a bare expression, whatever wrapper it was written in."""
+    if cond is None or isinstance(cond, bool):
+        return cond
+    text = str(cond).strip()
+    if text.startswith("${{") and text.endswith("}}"):
+        text = text[3:-2].strip()
+    return text
 
 
 def _ctx(event_name: str, *, head_repo: str | None = "tenishai/techne") -> dict:
@@ -975,84 +801,110 @@ def _ctx(event_name: str, *, head_repo: str | None = "tenishai/techne") -> dict:
     return {"github": gh}
 
 
-def test_an_unknown_event_cannot_reach_the_self_hosted_pool():
-    """THE PROPERTY THE INVERSION BUYS (techne#590), EVALUATED rather than grepped.
+# Every event the workflow triggers on, in the shapes a run context can take. A fork PR
+# is the one that matters; the rest prove nothing else was excluded either.
+def _contexts() -> dict[str, dict]:
+    return {
+        "push to main": _ctx("push", head_repo=None),
+        "workflow_dispatch": _ctx("workflow_dispatch", head_repo=None),
+        "same-repo pull_request": _ctx("pull_request", head_repo="tenishai/techne"),
+        "FORK pull_request": _ctx("pull_request", head_repo="someone/techne-fork"),
+    }
 
-    The old guard was a DENYLIST of one event name, so anything GitHub adds — or
-    anything we declare without thinking — short-circuited it TRUE and reached
-    the CI host. `_FORK_CARRYING_EVENTS` tried to police that with a hand-maintained
-    list, which is the same hazard one level up, and it was already missing
-    `pull_request_review_thread` (verified against GitHub's payload docs: that
-    event carries `pull_request` as a REQUIRED property).
 
-    Driven through `gha_expr.evaluate`, which is validated against GitHub's own
-    measured truth table. String matching cannot make this claim; evaluation can.
+def test_no_job_if_excludes_fork_prs_or_any_triggering_event():
+    """FORK PRs RUN THE REAL JOBS. A job-level `if:` that skips them is the shape
+    techne#556 used, and it leaves a fork PR with a green-looking subset of CI.
+
+    Evaluated, not grepped: each `if:` is run through tests/gha_expr.py against a
+    context per triggering event, a fork PR included. An expression the evaluator
+    cannot parse is treated as excluding, because it cannot be shown to run. The one
+    function allowed is `always()`, which is true by definition and is what the `ci`
+    job needs (a bare `needs:` would skip it behind a failure).
     """
-    for event in (
-        "pull_request_target",  # the dangerous one: fork code WITH secrets
-        "pull_request_review",
-        "pull_request_review_comment",
-        "pull_request_review_thread",  # the member the hand-maintained list missed
-        "issue_comment",
-        "merge_group",
-        "an_event_github_has_not_invented_yet",
-    ):
-        assert evaluate(FORK_GUARD, _ctx(event)) is False, (
-            f"{event!r} reaches the SELF-HOSTED pool — the guard is not fail-closed"
-        )
-        assert evaluate(FORK_ONLY, _ctx(event)) is True, (
-            f"{event!r} is kept off self-hosted but NO hosted job serves it, which is "
-            "techne#530's empty Checks tab reintroduced through the trust split"
-        )
-
-
-def test_the_trusted_events_still_reach_the_pool():
-    """Fail-closed is worthless if it closes on everything."""
-    for ctx in (
-        _ctx("push", head_repo=None),
-        _ctx("workflow_dispatch", head_repo=None),
-        _ctx("pull_request", head_repo="tenishai/techne"),  # same-repo PR
-    ):
-        assert evaluate(FORK_GUARD, ctx) is True
-        assert evaluate(FORK_ONLY, ctx) is False
-
-
-def test_a_fork_pr_goes_hosted_and_only_hosted():
-    """techne#556's whole point, unchanged by the inversion."""
-    fork = _ctx("pull_request", head_repo="someone/techne-fork")
-    assert evaluate(FORK_GUARD, fork) is False, "fork code reached the self-hosted pool"
-    assert evaluate(FORK_ONLY, fork) is True, "a fork PR would get no CI at all"
-
-
-def test_the_two_guards_are_exact_complements_under_every_shape():
-    """They are `X` and `!(X)` by construction; this proves the construction holds.
-    Exactly one side runs for every context — nothing double-runs, nothing is
-    unserved. That invariant used to be policed by a hand-written mirror string."""
-    for ctx in (
-        _ctx("push", head_repo=None),
-        _ctx("workflow_dispatch", head_repo=None),
-        _ctx("pull_request", head_repo="tenishai/techne"),
-        _ctx("pull_request", head_repo="someone/techne-fork"),
-        _ctx("pull_request_target", head_repo="someone/techne-fork"),
-        _ctx("schedule", head_repo=None),
-    ):
-        guard, fork_only = evaluate(FORK_GUARD, ctx), evaluate(FORK_ONLY, ctx)
-        assert guard != fork_only, (
-            f"both sides agree for {ctx['github']['event_name']!r} — that event would "
-            "either run twice or not at all"
-        )
-
-
-def test_the_guard_never_regrows_a_denylist():
-    """One-line explanation for whoever breaks the evaluator tests above: an
-    `!=` on event_name is the denylist shape #590 removed, and it is unsatisfiable
-    to police with a list."""
-    assert "!=" not in FORK_GUARD, (
-        "FORK_GUARD contains `!=` — that is the DENYLIST shape techne#590 removed; "
-        "any event it does not name satisfies it and reaches the self-hosted pool"
+    offenders = {}
+    for (wf, name), job in _all_jobs().items():
+        cond = _normalised_if(job.get("if"))
+        if cond is None or cond == "always()" or cond is True:
+            continue
+        skipped_on = []
+        for label, ctx in _contexts().items():
+            try:
+                runs = cond is not False and bool(evaluate(str(cond), ctx))
+            except ValueError:
+                runs = False
+            if not runs:
+                skipped_on.append(label)
+        if skipped_on:
+            offenders[f"{wf}:{name}"] = {"if": job.get("if"), "skipped on": skipped_on}
+    assert not offenders, (
+        "job-level `if:` keeps these jobs from running on some triggering event "
+        f"(fork PRs included): {offenders}. Every job serves every event; a skipped "
+        "job must not stand in for a tested one."
     )
-    for literal in ("'push'", "'workflow_dispatch'", "'pull_request'"):
-        assert literal in FORK_GUARD, f"the allow-list stopped naming {literal}"
+
+
+def _ci_job() -> dict:
+    jobs = _jobs()
+    assert "ci" in jobs, (
+        "no `ci` job: nothing gives a ruleset one check to require, so a skipped or "
+        "cancelled job could read as passing"
+    )
+    return jobs["ci"]
+
+
+def test_ci_job_needs_every_other_job_and_always_runs():
+    jobs = _jobs()
+    ci = _ci_job()
+    needs = ci.get("needs") or []
+    needs = {needs} if isinstance(needs, str) else set(needs)
+    others = set(jobs) - {"ci"}
+    assert needs == others, (
+        f"`ci` must need every other job. missing: {sorted(others - needs)}; "
+        f"unknown: {sorted(needs - others)}"
+    )
+    assert _normalised_if(ci.get("if")) == "always()", (
+        "`ci` must carry `if: always()`; without it a failed dependency SKIPS the "
+        f"job, and a skipped required check can read as passing. Found: {ci.get('if')!r}"
+    )
+    assert not _targets_own_runner(ci.get("runs-on"))
+    assert not ci.get("continue-on-error"), "a failing `ci` would read green"
+    steps = ci.get("steps") or []
+    assert len(steps) == 1 and "run" in steps[0], (
+        "`ci` does nothing but check the results of the jobs it needs"
+    )
+    assert "if" not in steps[0] and not steps[0].get("continue-on-error")
+
+
+def _run_ci_gate(results: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    """Run `ci`'s own script with `needs` shaped the way GitHub renders it."""
+    step = _ci_job()["steps"][0]
+    needs = {name: {"result": result, "outputs": {}} for name, result in results.items()}
+    return subprocess.run(
+        ["bash", "-c", step["run"]],
+        env={**os.environ, "NEEDS": json.dumps(needs)},
+        capture_output=True,
+        text=True,
+    )
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="the ci gate script uses jq (on every hosted image)")
+class TestCiGateScript:
+    def test_the_step_reads_the_needs_context_as_json(self):
+        assert _ci_job()["steps"][0]["env"] == {"NEEDS": "${{ toJSON(needs) }}"}
+
+    def test_passes_only_when_every_job_succeeded(self):
+        r = _run_ci_gate({n: "success" for n in _jobs() if n != "ci"})
+        assert r.returncode == 0, r.stdout + r.stderr
+
+    @pytest.mark.parametrize("bad", ["failure", "cancelled", "skipped"])
+    def test_any_other_result_fails(self, bad):
+        names = [n for n in _jobs() if n != "ci"]
+        for victim in names:
+            results = {n: "success" for n in names} | {victim: bad}
+            r = _run_ci_gate(results)
+            assert r.returncode != 0, f"{victim}={bad!r} did not fail the gate:\n{r.stdout}"
+            assert f"{victim}: {bad}" in r.stdout, "the log must name the job that broke it"
 
 
 #: Package names that PULL IN A VECTOR BACKEND. `backend_available()` tests
@@ -1088,8 +940,8 @@ def test_any_job_pulling_a_vector_backend_must_warm_the_model_cache():
     """ENUMERATED BY EFFECT, NOT BY NAME — and with the SAME contract the by-name
     tests impose, which the first version of this did not (#570 r2).
 
-    The two #535 guards iterate the literal pair ("test", "eval-vec"), so `fork-pr`
-    escaped both BY CONSTRUCTION when it was added: it installed the backend and ran
+    The two #535 guards iterate the literal pair ("test", "eval-vec"), so a job
+    added later escapes both BY CONSTRUCTION, as the old fork-only job did: it installed the backend and ran
     the suite with no cache and no pre-fetch, which is the #535 red build.
 
     THE FIRST GENERALISATION WAS WEAKER THAN WHAT IT GENERALISED, and the review found
@@ -1171,9 +1023,8 @@ def test_every_default_suite_job_fetches_origin_main():
     `test_cli_doctor` tests. On a push the checked-out ref IS main; on a
     pull_request `actions/checkout` fetches only the merge ref at depth 1.
 
-    THE INVARIANT LIVES IN THREE JOBS, which this file already calls a hazard at
-    the fork guard: "Do not delete it in favour of a comment; a comment is what let
-    this regrow twice." A comment is what held this together until now.
+    THE INVARIANT LIVES IN EVERY DEFAULT-SUITE JOB, and a comment is what held
+    this together until it got a test.
 
     BOTH HALVES PARSE RATHER THAN SCAN -- the detector via `_pytest_argv` /
     `_is_default_suite`, the assertion via `_fetches_origin_main`. An earlier
@@ -1205,7 +1056,7 @@ def test_every_default_suite_job_fetches_origin_main():
         return any(_fetches_origin_main(step) for step in job.get("steps", []))
 
     needs = {name for name, job in jobs.items() if runs_default_suite(job)}
-    assert needs == {"test", "eval-vec", "fork-pr"}, (
+    assert needs == {"test", "eval-vec"}, (
         f"the set of default-suite jobs changed: {sorted(needs)}. Each one runs "
         "tests/test_cli_doctor.py and so needs origin/main fetched."
     )
@@ -1325,7 +1176,7 @@ def test_no_tracked_file_names_ci_infrastructure():
 # --- DCO sign-off check -----------------------------------------------------
 
 DCO_STEP = "DCO sign-off check"
-DCO_JOBS = ("arch-cards", "fork-pr")
+DCO_JOBS = ("arch-cards",)
 
 
 def _dco_step(job: str) -> dict:
@@ -1337,99 +1188,41 @@ def _dco_step(job: str) -> dict:
 BOT_AUTHOR = "dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>"
 
 
-def test_dco_check_runs_on_both_sides_of_the_trust_split():
-    """In-repo PRs reach only `arch-cards`, fork PRs only `fork-pr`, so the check
-    lives in both and the two copies must stay identical except for two
-    documented exemptions. PR #1135: `arch-cards` skips a commit authored
-    exactly as dependabot[bot], `fork-pr` does not, because a fork PR can forge
-    any commit author and dependabot[bot]'s is no exception. #1182: `arch-cards`
-    skips a PR whose author has write access (a repository-permission lookup);
-    `fork-pr` has no such exemption and no token to look with."""
+def test_dco_check_runs_the_pinned_script():
+    """One DCO step serves in-repo PRs AND fork PRs, so it has to be safe against a
+    fork that writes any commit author it likes.
+
+    PR #1135: a commit authored exactly as dependabot[bot] is skipped, but only when
+    the PR itself was opened by dependabot[bot] (PR_AUTHOR, a login GitHub sets and a
+    fork cannot forge). The author string alone is forgeable, so it must not be the
+    only condition. #1182: a PR whose author has write access skips the check,
+    decided by a repository-permission lookup on that same login.
+    """
     jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
-    trusted, forked = (_dco_step(j) for j in DCO_JOBS)
+    step = _dco_step("arch-cards")
 
-    for key in set(trusted) | set(forked):
-        if key in ("run", "env"):
-            continue
-        assert trusted.get(key) == forked.get(key), (
-            f"DCO step {key!r} differs between arch-cards and fork-pr"
-        )
-    assert trusted["run"] != forked["run"], (
-        "arch-cards must carry the dependabot exemption that fork-pr does not"
-    )
-    assert BOT_AUTHOR in trusted["run"], (
-        "arch-cards must exempt dependabot[bot] by its exact author string"
-    )
-    assert BOT_AUTHOR not in forked["run"], (
-        "fork-pr must not exempt any author string — a fork can forge dependabot[bot]'s identity"
-    )
-
-    # Pin the EXACT difference, not just "they differ and the bot string is in
-    # one but not the other" — that weaker shape lets fork-pr's own strict
-    # matching drift (or break) undetected, as long as the change doesn't
-    # mention BOT_AUTHOR (Prudence, PR #1140 round 1, Important 1). A change to
-    # fork-pr outside these three hunks — the skip counter, the bot-skip
-    # block, or the summary line — now fails here even though it never
-    # touches the exemption text.
-    diff = list(
-        difflib.unified_diff(
-            forked["run"].splitlines(), trusted["run"].splitlines(), n=0, lineterm=""
-        )
-    )
-    hunks = [line for line in diff if not line.startswith(("--- ", "+++ "))]
-    assert hunks == [
-        "@@ -1,0 +2,16 @@",
-        "+perm=$(curl -fsS --globoff --max-time 15 \\",
-        '+  -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \\',
-        '+  "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/collaborators/$PR_AUTHOR/permission" \\',
-        "+  | jq -r '.permission // empty') || perm=",
-        '+case "$perm" in',
-        "+  admin|maintain|write)",
-        '+    echo "DCO: skipped, $PR_AUTHOR has $perm access to this repo"',
-        "+    exit 0",
-        "+    ;;",
-        '+  "")',
-        '+    echo "DCO: the permission lookup for $PR_AUTHOR failed; running the full check"',
-        "+    ;;",
-        "+  *)",
-        '+    echo "DCO: checking, $PR_AUTHOR has $perm access"',
-        "+    ;;",
-        "+esac",
-        "@@ -13,0 +30 @@",
-        "+skipped=0",
-        "@@ -15,0 +33,5 @@",
-        f'+  if [ "$author" = "{BOT_AUTHOR}" ]; then',
-        '+    echo "DCO: skipping ${c:0:12} as a bot commit ($author)"',
-        "+    skipped=$((skipped + 1))",
-        "+    continue",
-        "+  fi",
-        "@@ -26 +48 @@",
-        '-echo "DCO: $(echo "$commits" | wc -l | tr -d \' \') commit(s) signed off by their authors"',
-        '+echo "DCO: $(($(echo "$commits" | wc -l | tr -d \' \') - skipped)) commit(s) signed off '
-        'by their authors$( [ "$skipped" -gt 0 ] && printf \' (%s skipped as bot commits)\' '
-        '"$skipped" )"',
-    ], "arch-cards' script diverges from fork-pr's by more than the documented exemption:\n" + "\n".join(
-        diff
-    )
-
-    for job in DCO_JOBS:
-        assert not jobs[job].get("continue-on-error"), f"{job} swallows a failing DCO check"
-    shas = {
+    assert step["env"] == {
         "BASE_SHA": "${{ github.event.pull_request.base.sha }}",
         "HEAD_SHA": "${{ github.event.pull_request.head.sha }}",
-    }
-    assert forked["env"] == shas, "fork-pr must get no token and no PR author"
-    assert trusted["env"] == shas | {
         "PR_AUTHOR": "${{ github.event.pull_request.user.login }}",
         "GH_TOKEN": "${{ github.token }}",
     }
-    for step in (trusted, forked):
-        assert step["if"] == "${{ !cancelled() && github.event_name == 'pull_request' }}"
-        assert not step.get("continue-on-error"), "a failing DCO check would read green"
-        assert "uses" not in step, "the check is inline shell reading git metadata, not an action"
-        # No `${{ }}` inside the script: PR-controlled values reach it through env only.
-        assert "${{" not in step["run"]
-        assert "export GIT_NO_REPLACE_OBJECTS=1" in step["run"], "refs/replace could rewrite history"
+    run = step["run"]
+    assert BOT_AUTHOR in run, "arch-cards must exempt dependabot[bot] by its exact author string"
+    gate = f'[ "$PR_AUTHOR" = "dependabot[bot]" ] && [ "$author" = "{BOT_AUTHOR}" ]'
+    assert gate in run, (
+        "the bot exemption must require BOTH the PR opener and the commit author to be "
+        "dependabot[bot]; the commit author alone can be forged by a fork"
+    )
+    assert "--globoff" in run and "/collaborators/$PR_AUTHOR/permission" in run
+
+    assert not jobs["arch-cards"].get("continue-on-error"), "arch-cards swallows a failing DCO check"
+    assert step["if"] == "${{ !cancelled() && github.event_name == 'pull_request' }}"
+    assert not step.get("continue-on-error"), "a failing DCO check would read green"
+    assert "uses" not in step, "the check is inline shell reading git metadata, not an action"
+    # No `${{ }}` inside the script: PR-controlled values reach it through env only.
+    assert "${{" not in run
+    assert "export GIT_NO_REPLACE_OBJECTS=1" in run, "refs/replace could rewrite history"
 
 
 def _runs_no_tree_code(step: dict) -> bool:
@@ -1472,8 +1265,7 @@ def _run_dco(
 ) -> subprocess.CompletedProcess[str]:
     """Build a repo with `build(work, commit, env)`, shallow-clone it the way
     actions/checkout does, fetch origin/main at depth 1 like arch-cards, then run
-    `job`'s own DCO script (default `arch-cards`; pass `job="fork-pr"` to run the
-    strict copy instead). A stub `curl` answers the permission lookup for PR
+    `job`'s own DCO script (default `arch-cards`). A stub `curl` answers the permission lookup for PR
     author `author` with `permission`, or fails like a 404 when it is None; the
     default `read` is an outside contributor, so the check runs. The stub writes
     its arguments to tmp_path/curl-args, one per line."""
@@ -1623,13 +1415,6 @@ def test_dco_lookup_turns_off_curl_globbing_for_bot_logins(tmp_path):
     assert any(a.endswith("/collaborators/dependabot[bot]/permission") for a in args)
 
 
-def test_fork_pr_makes_no_permission_lookup(tmp_path):
-    """fork-pr is checked whoever opened it: it never calls the lookup."""
-    r = _run_dco(tmp_path, _unsigned, job="fork-pr", permission="admin")
-    assert r.returncode == 1, r.stdout + r.stderr
-    assert not (tmp_path / "curl-args").exists()
-
-
 def test_dco_check_fails_a_signoff_that_does_not_match_the_author(tmp_path):
     r = _run_dco(
         tmp_path,
@@ -1695,62 +1480,56 @@ def test_dco_check_ignores_replace_refs(tmp_path):
     assert r.returncode == 1, r.stdout + r.stderr
 
 
-def test_dco_check_exempts_dependabot_in_arch_cards_only(tmp_path):
+def test_dco_check_exempts_a_dependabot_pr_but_not_a_forged_author(tmp_path):
     """A dependabot[bot]-authored commit with no Signed-off-by (PR #1135's exact
-    failure) must pass in arch-cards (same-repo PRs) but still fail in fork-pr,
-    where a fork could forge that author string on a commit it wrote itself."""
+    failure) passes when dependabot[bot] opened the PR. The same commit in a PR from
+    anyone else fails: a fork can write a commit with that author string itself."""
 
     def build(w, c, e):
         return _history(
             w, c, e, feature=[{"msg": "bump foo", "signoff": None, "author": BOT_AUTHOR}]
         )
 
-    trusted = _run_dco(tmp_path / "trusted", build, job="arch-cards")
-    assert trusted.returncode == 0, trusted.stdout + trusted.stderr
-    assert "skipping" in trusted.stdout and "bot commit" in trusted.stdout
-    assert "0 commit(s) signed off" in trusted.stdout, (
+    real = _run_dco(tmp_path / "real", build, author="dependabot[bot]")
+    assert real.returncode == 0, real.stdout + real.stderr
+    assert "skipping" in real.stdout and "bot commit" in real.stdout
+    assert "0 commit(s) signed off" in real.stdout, (
         "the lone commit was skipped as a bot commit, not signed off"
     )
 
-    forked = _run_dco(tmp_path / "forked", build, job="fork-pr")
-    assert forked.returncode == 1, forked.stdout + forked.stderr
-    assert "has no" in forked.stdout and BOT_AUTHOR in forked.stdout
+    forged = _run_dco(tmp_path / "forged", build, author="mallory")
+    assert forged.returncode == 1, forged.stdout + forged.stderr
+    assert "has no" in forged.stdout and BOT_AUTHOR in forged.stdout
+    assert "skipping" not in forged.stdout
 
 
-def test_dco_check_still_requires_signoff_from_a_human_in_both_jobs(tmp_path):
+def test_dco_check_still_requires_signoff_from_a_human(tmp_path):
     """The exemption is scoped to the exact dependabot[bot] author string — an
-    unsigned human commit must still fail in arch-cards and in fork-pr."""
-
-    def build(w, c, e):
-        return _history(w, c, e, feature=[{"msg": "a", "signoff": None}])
-
-    for job in DCO_JOBS:
-        r = _run_dco(tmp_path / job, build, job=job)
-        assert r.returncode == 1, f"{job}: {r.stdout + r.stderr}"
+    unsigned human commit must still fail."""
+    r = _run_dco(tmp_path, lambda w, c, e: _history(w, c, e, feature=[{"msg": "a", "signoff": None}]))
+    assert r.returncode == 1, r.stdout + r.stderr
 
 
-def test_dco_check_fork_pr_passes_a_correctly_signed_human_commit(tmp_path):
-    """fork-pr's own strict copy, not just arch-cards, must still pass an
-    ordinary signed-off commit — the behavioural tests above never ran this
-    script on a passing case (Prudence, PR #1140 round 1, Important 1)."""
+def test_dco_check_passes_a_correctly_signed_human_commit_from_an_outsider(tmp_path):
+    """The passing case, as a fork PR sees it: the default permission is `read`, an
+    outside contributor, so the full check runs and two signed commits pass."""
     r = _run_dco(
-        tmp_path, lambda w, c, e: _history(w, c, e, feature=[{"msg": "a"}, {"msg": "b"}]),
-        job="fork-pr",
+        tmp_path, lambda w, c, e: _history(w, c, e, feature=[{"msg": "a"}, {"msg": "b"}])
     )
     assert r.returncode == 0, r.stdout + r.stderr
     assert "2 commit(s) signed off" in r.stdout
 
 
-def test_dco_check_fork_pr_fails_a_mismatched_signoff(tmp_path):
+def test_dco_check_fails_a_mismatched_signoff_address(tmp_path):
     """The real Dependabot failure mode (PR #1135's commit 91b9728e2d5a): a
     Signed-off-by present but under a different address than the commit's
     author — `dependabot[bot] <support@github.com>` vs. its noreply author
-    email — not a missing trailer. fork-pr carries no exemption for this."""
+    email — not a missing trailer. A PR from anyone but dependabot gets no
+    exemption for this."""
     r = _run_dco(
         tmp_path,
         lambda w, c, e: _history(
             w, c, e, feature=[{"msg": "a", "signoff": "Ann Author <support@example.com>"}]
         ),
-        job="fork-pr",
     )
     assert r.returncode == 1, r.stdout + r.stderr
