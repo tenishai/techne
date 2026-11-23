@@ -144,14 +144,14 @@ Because domains live in separate files, cross-db invariants are maintained by re
 
 ---
 
-## Security gate  ·  *defensive, fail-open*
+## Shell guard helper  ·  *standalone, not wired in*
 
-`shell_guard` blocks command-chaining (`;`, `|`, backticks, `$()`, …) and, with the `security` extra, runs a **CVE pre-install audit** (`pip-audit`) before a package install proceeds.
+`techne.security.shell_guard` is a library helper: `check_command` rejects command-chaining (`;`, `|`, backticks, `$()`, …) and `audit_install` runs `pip-audit` before a package install. **techne does not call it.** It has no shell-exec path, so nothing in techne runs a command through this module; it is kept for code that imports it. It is not a gate on anything techne does.
 
-**Why it's different:** the audit **fails open** — absent the auditor, the anti-chaining gate still holds; the CVE check only ever *sharpens* it, never blocks the basics.
+`audit_install` fails open: with no `pip-audit` on the path it warns and allows.
 
 ```bash
-pipx install --force "tenish-techne[security] @ git+https://github.com/tenishai/techne.git@v0.19.1"   # adds the CVE pre-install audit
+pipx install --force "tenish-techne[security] @ git+https://github.com/tenishai/techne.git@v0.19.1"   # adds pip-audit, used only by the shell_guard helper (techne does not call it)
 ```
 
 ---
@@ -172,7 +172,7 @@ techne is delivered as an **MCP server**, so its tools (`store`, `recall`, `sear
 | Semantic recall | `tenish-techne[vectors]` | `fastembed` (Python <3.14) or `model2vec` (3.14+), plus `sqlite-vec` |
 | Autonomous/headless model passes | `tenish-techne[llm]` | operator-model gateway |
 | Code-graph | `tenish-techne[codex]` | tree-sitter + grammars |
-| CVE pre-install audit | `tenish-techne[security]` | `pip-audit` |
+| `pip-audit` for the `shell_guard` helper (not called by techne) | `tenish-techne[security]` | `pip-audit` |
 | Continuous filesystem ingest | `tenish-techne[watch]` | `watchdog` |
 
 Install any row from git: `pipx install "tenish-techne[<extras>] @ git+https://github.com/tenishai/techne.git@v0.19.1"`. **The PyPI package named

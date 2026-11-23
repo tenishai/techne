@@ -53,9 +53,10 @@ vectors = [
 # reflect/consolidate/claims. The default resident emit/ingest path needs no
 # model dep.
 llm = ["litellm>=1.0"]
-# `security` wires the pre-install CVE auditor for techne.security.shell_guard
-# (techne#120). Optional: the gate FAILS OPEN when pip-audit is absent, so this
-# only sharpens the audit — it is never required for the anti-chaining gate.
+# `security` installs pip-audit for techne.security.shell_guard.audit_install
+# (techne#120), a standalone helper. Nothing in techne calls shell_guard (techne has
+# no shell-exec path), so this extra changes nothing techne does; it is for code that
+# imports the helper. audit_install fails open when pip-audit is absent (#1263).
 security = ["pip-audit>=2.7"]
 # `watch` enables `techne watch <dir>` — continuous-ingest mode that
 # observes filesystem changes and adds them as observations. Useful for
@@ -76,8 +77,8 @@ codex = [
     "watchdog>=4.0",
 ]
 # `recommended` is the convenience bundle behind the blessed pipx install in the
-# README. Semantic recall + the CVE pre-install audit — the two extras most users
-# benefit from, minus the situational (watch daemon), headless-only (llm), and
+# README. Semantic recall + pip-audit (for the shell_guard helper, which techne does
+# not call) — bundled together, minus the situational (watch daemon), headless-only (llm), and
 # experimental (codex) ones. Self-referencing extra: pip (>=21.2) resolves
 # `tenish-techne[...]` to the sibling extras above, so the set lives in exactly one place.
 recommended = ["tenish-techne[vectors,security]"]
