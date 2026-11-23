@@ -132,7 +132,7 @@ def test_every_job_still_lives_in_this_one_workflow():
     # A new job must also be added to `ci`'s `needs:` (see
     # test_ci_job_needs_every_other_job_and_always_runs).
     expected = {
-        "test", "eval-vec", "arch-cards", "crash-recovery", "acceptance", "install-e2e", "ci",
+        "test", "eval-vec", "arch-cards", "dco", "crash-recovery", "acceptance", "install-e2e", "ci",
     }
     assert set(jobs) == expected, (
         f"job set changed: {sorted(jobs)}. All of them ride this one trigger — and "
@@ -1176,7 +1176,7 @@ def test_no_tracked_file_names_ci_infrastructure():
 # --- DCO sign-off check -----------------------------------------------------
 
 DCO_STEP = "DCO sign-off check"
-DCO_JOBS = ("arch-cards",)
+DCO_JOBS = ("dco",)
 
 
 def _dco_step(job: str) -> dict:
@@ -1199,7 +1199,7 @@ def test_dco_check_runs_the_pinned_script():
     decided by a repository-permission lookup on that same login.
     """
     jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
-    step = _dco_step("arch-cards")
+    step = _dco_step("dco")
 
     assert step["env"] == {
         "BASE_SHA": "${{ github.event.pull_request.base.sha }}",
@@ -1208,7 +1208,7 @@ def test_dco_check_runs_the_pinned_script():
         "GH_TOKEN": "${{ github.token }}",
     }
     run = step["run"]
-    assert BOT_AUTHOR in run, "arch-cards must exempt dependabot[bot] by its exact author string"
+    assert BOT_AUTHOR in run, "dco must exempt dependabot[bot] by its exact author string"
     gate = f'[ "$PR_AUTHOR" = "dependabot[bot]" ] && [ "$author" = "{BOT_AUTHOR}" ]'
     assert gate in run, (
         "the bot exemption must require BOTH the PR opener and the commit author to be "
@@ -1216,7 +1216,7 @@ def test_dco_check_runs_the_pinned_script():
     )
     assert "--globoff" in run and "/collaborators/$PR_AUTHOR/permission" in run
 
-    assert not jobs["arch-cards"].get("continue-on-error"), "arch-cards swallows a failing DCO check"
+    assert not jobs["dco"].get("continue-on-error"), "dco swallows a failing DCO check"
     assert step["if"] == "${{ !cancelled() && github.event_name == 'pull_request' }}"
     assert not step.get("continue-on-error"), "a failing DCO check would read green"
     assert "uses" not in step, "the check is inline shell reading git metadata, not an action"
@@ -1259,13 +1259,13 @@ def _run_dco(
     tmp_path: Path,
     build,
     tamper=None,
-    job: str = "arch-cards",
+    job: str = "dco",
     permission: str | None = "read",
     author: str = "ann",
 ) -> subprocess.CompletedProcess[str]:
     """Build a repo with `build(work, commit, env)`, shallow-clone it the way
-    actions/checkout does, fetch origin/main at depth 1 like arch-cards, then run
-    `job`'s own DCO script (default `arch-cards`). A stub `curl` answers the permission lookup for PR
+    actions/checkout does, fetch origin/main at depth 1, then run
+    `job`'s own DCO script (default `dco`). A stub `curl` answers the permission lookup for PR
     author `author` with `permission`, or fails like a 404 when it is None; the
     default `read` is an outside contributor, so the check runs. The stub writes
     its arguments to tmp_path/curl-args, one per line."""
