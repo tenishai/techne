@@ -26,8 +26,6 @@ CI's `install-e2e` job follows the README's source and pipx installs from a fres
 backfill. If you change the install path, `init` or doctor, run
 `scripts/install-e2e.sh --path source` locally; the pipx path takes about 11 minutes.
 
-To see how long CI jobs queue for the self-hosted runners, run `python3 scripts/ci_queue_wait.py` (read-only, needs an authenticated `gh`; see its docstring).
-
 Everyone taking part in this project is expected to follow the
 [Code of Conduct](CODE_OF_CONDUCT.md). Report security problems privately, as
 [SECURITY.md](SECURITY.md) describes, not in a public issue.
