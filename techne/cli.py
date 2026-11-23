@@ -3144,7 +3144,7 @@ def _vector_lines(config, setup_vectors: bool) -> list[str]:
     "setup_vectors",
     default=True,
     show_default=True,
-    help="Download the embedding model (one time, tens of MB) and embed what is stored, "
+    help="Download the embedding model (one time, 59 to 87 MB) and embed what is stored, "
     "so search is semantic from the start. --no-vectors keeps search keyword-only until "
     "`techne vectors backfill` (techne#1021).",
 )
@@ -6255,7 +6255,7 @@ def _import_resolve_pass(db_path: Path) -> dict:
 )
 @click.pass_context
 def codex_index(ctx, repo, languages, lsp, rebuild):
-    """Walk REPO and index Python + TypeScript symbols into its per-repo db.
+    """Walk REPO and index Python, TypeScript and Go symbols into its per-repo db.
 
     Uses tree-sitter for parsing; requires the tenish-techne[codex] extra.
     Incremental: files whose SHA-256 hash is unchanged are skipped — pass

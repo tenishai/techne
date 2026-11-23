@@ -1626,7 +1626,9 @@ TOOLS = [
             "One of techne's four knowledge domains (archivist, librarian, architect, "
             "codex), addressable by name. Every answer carries the `binding` it "
             "resolved to, so the same call keeps working as the domain grows from a "
-            "local store into a persona or a service. For 'what do we know about X' "
+            "local store into a persona or a service. With `architect.rerank` set, the top "
+            "hits are reordered by a cross-encoder and the answer carries a `rerank` field. "
+            "For 'what do we know about X' "
             "across all four, use techne_recall instead — it escalates."
         ),
         "inputSchema": {
@@ -1646,7 +1648,9 @@ TOOLS = [
             "borrowing' store. Optionally scope to patterns that apply to a project "
             "(target=<one of your configured architect.pattern_targets — run "
             "`techne architect targets` to see them>); with a target and no query, lists "
-            "all patterns for that project."
+            "all patterns for that project. With `architect.rerank` set, the top hits are "
+            "reordered by a cross-encoder and the result carries a `rerank` field (model, "
+            "applied, seconds, and a reason when it was not applied)."
         ),
         "inputSchema": {
             "type": "object",

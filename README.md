@@ -85,8 +85,8 @@ techne init
 > warns about them and installs nothing extra.
 >
 > `[recommended]` pulls semantic recall + `pip-audit` (`vectors` + `security`). techne does not call `pip-audit` itself; it is there for `shell_guard.audit_install`, a helper you can import.
-> With a vectors backend installed, `techne init` downloads the embedding model once (tens
-> of MB, then cached) so search is semantic from the first session; `--no-vectors` skips it.
+> With a vectors backend installed, `techne init` downloads the embedding model once (59 to
+> 87 MB depending on the backend, then cached) so search is semantic from the first session; `--no-vectors` skips it.
 > Drop it for a **core-only** install, or swap in any other set — see the
 > [extras matrix](#extras--what-to-install) for the full possibility space.
 >
@@ -228,7 +228,7 @@ gracefully** when absent (vector search returns empty, the CVE gate fails open, 
 | `.[watch]`              | `techne watch <dir>` — continuous filesystem-change ingest    | `watchdog`                                          | You want a background daemon ingesting file changes (vs per-session hook capture). |
 | `.[llm]`                | Operator-model path for autonomous/headless reflect/consolidate | `litellm`                                        | Running headless/autonomous loops that can't use the agent's own model. |
 | `.[codex]`              | `techne codex index <repo>` — Tree-sitter code graph (experimental) | `tree-sitter`, `tree-sitter-python`, `tree-sitter-typescript`, `tree-sitter-go`, `watchdog` | Indexing a repo's symbols/edges for reachability/blast-radius queries. |
-| `.[rerank]`             | Opt-in cross-encoder reranking for architect search (`architect.rerank: minilm`) | `numpy`, `safetensors`, `tokenizers`, `huggingface_hub`; the 91 MB model downloads on first use | Architect search should rank by how well a pattern answers the query; ~5.6 s per search on one core. |
+| `.[rerank]`             | Opt-in cross-encoder reranking for architect search (`architect.rerank: minilm`) | `numpy`, `safetensors`, `tokenizers`, `huggingface_hub`; the 91 MB model downloads on first use | Architect search should rank by how well a pattern answers the query; ~5.6 s per search on one core (measured 2026-11-23: 5.6 to 5.8 s to rerank 20 patterns at 512 tokens, `OPENBLAS_NUM_THREADS=1`, Python 3.13). |
 | **`.[recommended]`**    | **`vectors` + `security`** as one bundle                      | union of those two                                 | **The blessed default** — semantic recall + `pip-audit` (an unused-by-techne helper dependency), skipping situational/experimental deps. |
 | `.[dev]`                | Test/lint toolchain                                            | `pytest`, `pytest-cov`, `pytest-xdist`, `ruff`, `litellm`        | Developing techne itself. |
 
@@ -250,16 +250,18 @@ search:
 
 `model2vec` works on **every supported Python (3.11+)**, not only 3.14 — the `<3.14` fastembed default exists because `onnxruntime` had no 3.14 wheel, which is a fact about *onnxruntime*, not a judgment that fastembed is better below it. Verified 2026-08-17: `model2vec` 0.9.0 installs and runs on 3.13.
 
-**It costs disk, and the difference is large.** Measured on a clean venv with the blessed command:
+**It costs disk, and the difference is large.** Measured 2026-11-23 at main `d10cf4a` (the 0.19.1 release plus the unreleased changes), each in a fresh `python -m venv` with `pip install ".[recommended]"`, sizes from `du -sm` (MiB) on a `python:3.x-bookworm` image, with pip's own ~13 MB counted:
 
 | backend | install | why |
 |---|---|---|
-| `fastembed` (py<3.14 default) | **290 MB** | `onnxruntime` 74M + `sympy` 72M + `numpy` 37M + `PIL` 15M + `tokenizers` 8.8M |
-| `model2vec` (py3.14 default) | **85 MB** | numpy-only static embeddings; no onnxruntime, no sympy, no PIL |
+| `fastembed` (py<3.14 default; measured on 3.13, fastembed 0.9.1) | **267 MB** | `onnxruntime` 78M + `numpy` 43M (+ 23M `numpy.libs`) + `pillow.libs` 15M + `tokenizers` 12M + `hf_xet` 11M |
+| `model2vec` (py3.14 default; measured on 3.14, model2vec 0.9.0) | **172 MB** | numpy-only static embeddings; no onnxruntime, no PIL; `numpy` 43M (+ 23M `numpy.libs`) + `tokenizers` 12M + `hf_xet` 11M |
 
-The fastembed row is re-measured at **v0.15.0 on py3.13** (`techne[recommended] @ v0.15.0`, 290 MB — it was 289 MB at v0.14.0). The model2vec row is **still the v0.14.0 py3.14 measurement and has not been reproduced**: a py3.13 venv with `[security]` + `sqlite-vec` + `model2vec` came to 127 MB, which is a DIFFERENT construction (different interpreter, different extras) and so is not a like-for-like replacement for 85 MB. Two numbers measured differently do not belong in one column, so the older one stands until someone re-runs it on py3.14.
+fastembed no longer pulls in `sympy` (it was 72 MB in the v0.15.0 measurement, 290 MB). The model2vec row was 85 MB in the v0.14.0 measurement; that figure did not reproduce and is gone. The two rows differ in interpreter as well as backend, since each is its backend's default interpreter, so read the gap as the cost of the stock install on each, not as a clean backend-versus-backend comparison.
 
-The techne wheel itself is **676 KB**; effectively all of the difference is the embedding backend's dependency tree.
+The model files come on top, in each backend's model cache: 87 MB for fastembed's `all-MiniLM-L6-v2` (ONNX), 59 MB for model2vec's `potion-base-8M`.
+
+The techne wheel itself is **1.3 MB** (1,326,816 bytes, `pip wheel --no-deps`); effectively all of the difference between the two installs is the embedding backend's dependency tree.
 
 **Choosing `model2vec` on py<3.14 is a real decision with a real cost:** it is 256-d against fastembed's 384-d, so the same "not comparable vector spaces" warning above applies — an existing store must be re-embedded (`techne vectors backfill`) or semantic search silently degrades to FTS-only. Set it before you build up a vector channel, or budget for the re-embed. On a fresh install it is free.
 
@@ -297,7 +299,7 @@ the same confidence as a correct miss, so it now says so on the way in:
 `cards:freshness` does the same for architecture cards: every `anchor: <file> sha=<blob>` line
 in `ARCHITECTURE.md` and `docs/arch/*.md` is compared against the seam it vouches for, using the
 same globs as the pre-push gate so the banner and the gate cannot disagree. Both are cheap by
-construction rather than deferred — 32 checks in 0.149s against the hook's 5s budget, measured at 0.17.0.
+construction rather than deferred — 29 checks in 0.02s warm against the hook's 5s budget (measured 2026-11-23 at `d10cf4a` on Python 3.13 with a fresh home and no store; the first call in a new process took 0.18 to 0.6s, and the count depends on what is configured).
 
 Inspect what's been captured:
 
