@@ -5,9 +5,11 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.20.0] — 2026-11-24
+
 ### Upgrading
 
-- **Licence: MIT.** The next release is MIT-licensed (`LICENSE` and `license = "MIT"` in `pyproject.toml`). 0.19.1 and earlier stay AGPL-3.0-or-later.
+- **Licence: MIT.** This release is MIT-licensed (`LICENSE` and `license = "MIT"` in `pyproject.toml`). 0.19.1 and earlier stay AGPL-3.0-or-later.
 - **Schema migrations run on first open, with no flag.** `architect.db` goes from user_version 6 to 9 (`pattern_applies.origin`, `patterns.retired_reason`, `patterns.source_commit`; no row is rewritten, no pattern id changes) and each per-repo codex db goes from 6 to 7 (`edges.call_sites`). If you may want to go back to 0.19.1, run `techne backup` first and also copy `<data_dir>/codex/`: `techne backup` covers `architect.db` but not the per-repo codex dbs. Going back was not tested.
 - **Re-parse after upgrade:** the first `techne codex index` of each repo re-parses every file once, because pre-v7 call rows have no call-site lines.
 - **Snapshot digest changes once.** `techne architect snapshot` now covers hand-set applies rows and the new columns, so compare before-and-after snapshots on the same version only.
@@ -24,9 +26,7 @@ All notable changes to techne are documented here. Format loosely follows
 - **README and the welcome guide corrected against the code.** `techne_recall` escalates across memory, the archivist and the librarian (not the architect or codex); the codex extra and the dev extra list `tree-sitter-go` and `pytest-xdist`; `techne doctor` has six verdicts; `knowledge list --type` takes all nine types; `conflict.model` is documented as having no effect; the install-size, model-download and `cards:freshness` timing figures are re-measured (2026-11-23: fastembed venv 266 MB, model2vec venv 172 MB, wheel 1.3 MB, model downloads 59 to 87 MB, 29 cheap checks in 0.02s warm), and the 85 MB model2vec figure, which did not reproduce, is gone; the welcome guide no longer says the loop needs no hand, that nothing touches the live store, or that per-turn recall and grep-assist never delay or misscope.
 - **CI: a separate `dco` job.** The DCO sign-off check moves out of `arch-cards` into its own job, so it reports as `dco`, the check name the branch rulesets require (tenishai/agora discussion 71). `ci` now needs it too. The script itself is unchanged.
 - **CI moves to GitHub-hosted runners.** Every job in `.github/workflows/test.yml` now runs on `ubuntu-latest` and installs its own Python (actions/setup-python) and uv; no workflow targets a self-hosted runner, and a test fails if one does. Fork PRs run the full suite, the card-freshness gate, crash recovery, acceptance and the vector gate, on the same matrix as in-repo PRs, instead of a reduced job set. A new `ci` job needs every other job and fails unless each succeeded (a skipped or cancelled job fails it too), so a ruleset can require that one check. The DCO check now serves fork PRs too, and its dependabot exemption applies only when dependabot opened the PR.
-
 - **Licence: MIT.** The project moves from AGPL-3.0-or-later to MIT, with the agreement of every contributor (tenishai/agora discussion 69). Releases already published keep the licence they shipped under.
-
 - **The investigating guide now requires walking the code, the tests and the issue
   tracker.** Step 4.5 treats README, docs and doc comments as claims: each pattern cites
   the line of logic that implements it, and docs are cited only as stated rationale or
@@ -37,6 +37,7 @@ All notable changes to techne are documented here. Format loosely follows
   reason. The surveying guide points borrowed ideas at the same step. Prompted by a
   pi-durable investigation where three of four patterns rested on docs and two were stored
   without the defects in the project's own tracker.
+- **House details removed from the working tree (#1373).** Test fixtures, code comments and architecture cards no longer name the maintainers' machines, home paths or networks; generic example hosts replace them.
 
 ### Added
 
@@ -93,7 +94,6 @@ All notable changes to techne are documented here. Format loosely follows
   `codex callers` prints each line a caller calls from, and `codex_blast_radius` gives direct
   callers a `call_lines` field. The v7 upgrade makes the next `codex index` of each repo
   re-parse every file once.
-
 - **A pattern keeps its code citation and the commit it was read at** (architect schema
   v9). Ingest kept only the first URL on a `- **Source**:` line and dropped the rest as
   "decorative", so the citation the investigating guide asks for never reached the store:
@@ -114,13 +114,10 @@ All notable changes to techne are documented here. Format loosely follows
 - **A drained thread stays delivered after the #900 heal (#1359).** When an empty `reflect emit` pass healed the cursor, threads waiting in an un-ingested `emit -o` file dropped out of it; ingest then drained them, but the next emit rendered them again and asked for the same answers twice. The emit cursor now counts a session's drained queue rows as delivered, whatever the marker says.
 - **`techne reflect` and `techne reflect ingest` report the write mode they actually use (#1360).** Under `posture.mode: spool-primary`, `effective_write_to` forces candidates, but both commands printed `reflect.write_to`, so ingest said candidates were promoted to knowledge while they sat pending. Both now name the posture when it overrides `reflect.write_to`. The `techne_reflect_ingest` tool description and the `techne-promote` skill say the same (the skill's shipped text changed).
 - **The per-turn recall hook redacts what it logs (#1354).** `context_injections.trigger_snippet`, the first 200 characters of the recall query built from the typed prompt, was stored raw, so a token pasted into a prompt landed in the store though the prompt's own observation was redacted. It is now redacted before the 200-character cut. Rows written earlier keep what they hold; `techne scrub-credentials` covers them.
-
 - **Outbox payloads are redacted when queued; a test now enforces redaction on every free-text write (#1238).** `enqueue` now runs every string in the payload through `redact_credentials`. The thread-summary payloads `run_session_end` and `redetect_threads` queue (label, summary, resume points) went into `outbox.data_json` and on to the sink raw, though the same text was redacted on its way into `threads`. `tests/test_redaction_coverage.py` scans `techne/` for SQL INSERT/UPDATE literals and fails when a free-text TEXT column is written by a function that does not call `redact_credentials`, unless the column or site is on a reasoned allowlist. It reads string literals only; SQL built at runtime is listed by hand in the test.
-
 - **A Source line ending in a bare separator stores no citation** (follow-up to #1368).
   `- **Source**: <url> — ` used to store the dash as the pattern's `source_path`, so
   `architect show` printed `cites: —`. The separator is now dropped when nothing follows it.
-
 - **Reactivating a superseded pattern undoes the supersession** (#1348). `techne architect
   tag <id> --status active` on a superseded pattern now also clears `superseded_by` and
   `invalid_at` and removes its `supersedes` edge, in one write (`unsupersede()`). Before, only
