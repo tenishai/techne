@@ -8,7 +8,7 @@ All notable changes to techne are documented here. Format loosely follows
 ### Upgrading
 
 - **Licence: MIT.** The next release is MIT-licensed (`LICENSE` and `license = "MIT"` in `pyproject.toml`). 0.19.1 and earlier stay AGPL-3.0-or-later.
-- **Schema migrations run on first open, with no flag.** `architect.db` goes from user_version 6 to 9 (`pattern_applies.origin`, `patterns.retired_reason`, `patterns.source_commit`; no row is rewritten, no pattern id changes) and each per-repo codex db goes from 6 to 7 (`edges.call_sites`). Run `techne backup` first if you may want to go back to 0.19.1; going back was not tested.
+- **Schema migrations run on first open, with no flag.** `architect.db` goes from user_version 6 to 9 (`pattern_applies.origin`, `patterns.retired_reason`, `patterns.source_commit`; no row is rewritten, no pattern id changes) and each per-repo codex db goes from 6 to 7 (`edges.call_sites`). If you may want to go back to 0.19.1, run `techne backup` first and also copy `<data_dir>/codex/`: `techne backup` covers `architect.db` but not the per-repo codex dbs. Going back was not tested.
 - **Re-parse after upgrade:** the first `techne codex index` of each repo re-parses every file once, because pre-v7 call rows have no call-site lines.
 - **Snapshot digest changes once.** `techne architect snapshot` now covers hand-set applies rows and the new columns, so compare before-and-after snapshots on the same version only.
 - **Run once:** `techne reflect reconcile --apply`, to park a reflection queue row already held by a thread of only rail calls (the #1283 entry under Fixed).
