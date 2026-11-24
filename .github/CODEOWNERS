@@ -1,5 +1,5 @@
-# Code changes need Prudence's review before they merge (agents REVIEW-PROCESS.md,
-# tenishai/agora discussion 71); docs changes don't. Last match wins:
+# The team's rule (2026-11-23): code changes need Prudence's review before they
+# merge; docs-only changes don't. Last match wins:
 #   1. everything is owned, so a path added later starts out reviewed;
 #   2. Markdown is unowned: docs;
 #   3. Markdown that works as instructions is owned again: AGENTS.md and
