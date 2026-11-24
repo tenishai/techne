@@ -168,8 +168,8 @@ def resolve_symbol_id(db_path: Path, arg: str) -> str:
     common unambiguous case.
     """
     # Heuristic: a full symbol id contains "::" (file::name::kind::line), and a
-    # bare name cannot — the indexer handles only Python/TypeScript, whose
-    # identifiers are "::"-free. If a "::"-using language (Rust/C++/Ruby, e.g.
+    # bare name cannot — the indexer handles only Python, TypeScript and Go,
+    # whose identifiers are "::"-free. If a "::"-using language (Rust/C++/Ruby, e.g.
     # Foo::bar) is ever indexed, tighten this to a full-id shape check so such a
     # name isn't misrouted into the id branch. See techne#300 review.
     if "::" in arg:

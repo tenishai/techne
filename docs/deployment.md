@@ -245,7 +245,7 @@ init prints, and set it again after init if you meant it. The CHANGELOG's Upgrad
 section lists which defaults moved.
 
 **`techne init` downloads the embedding model and embeds what is stored (0.18+, #1021).**
-The first run after an upgrade can make a network fetch (tens of MB, then cached) and
+The first run after an upgrade can make a network fetch (59 to 87 MB depending on the backend, then cached) and
 take a while on a large store. Pass `--no-vectors` to skip it; search then stays
 keyword-only until you run `techne vectors backfill`. A failed download prints how to
 finish later and does not fail init.
