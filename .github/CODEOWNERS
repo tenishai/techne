@@ -2,9 +2,10 @@
 # tenishai/agora discussion 71); docs changes don't. Last match wins:
 #   1. everything is owned, so a path added later starts out reviewed;
 #   2. Markdown is unowned: docs;
-#   3. Markdown that code or agents load and act on is owned again: agent
-#      instructions, and the guides, skills and agent definitions the package ships.
-# Keep group 3 in step with the package data in pyproject.toml.
+#   3. Markdown that works as instructions is owned again: AGENTS.md and
+#      CLAUDE.md, which coding agents load, and the guides, skills and agent
+#      definitions the package ships. Keep that second part in step with the
+#      package data in pyproject.toml.
 * @prudence-tenishai
 
 *.md
