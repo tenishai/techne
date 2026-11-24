@@ -129,13 +129,13 @@ def seed(db_path: Path) -> dict[str, str]:
     # filtering would surface a stale revision and fail this task's must_exclude.
     _v1 = store(
         db_path,
-        "The eval-stack deploy target is host host-old (initial).",
+        "The eval-stack deploy target is host-old (initial).",
         type="fact",
         tags="deploy",
         source="eval",
     )
-    _v2 = supersede(db_path, _v1, "The eval-stack deploy target is host host-mid (migrated).")
-    _v3 = supersede(db_path, _v2, "The eval-stack deploy target is host host-current (live).")
+    _v2 = supersede(db_path, _v1, "The eval-stack deploy target is host-mid (migrated).")
+    _v3 = supersede(db_path, _v2, "The eval-stack deploy target is host-current (live).")
     gold["deploy_target"] = "knowledge:%d" % _v3
 
     # --- GOLD: aggregation (one topic, N pieces — ALL must be recalled) ---
@@ -273,7 +273,7 @@ def seed(db_path: Path) -> dict[str, str]:
     supersede(
         db_path,
         _trigger_id,
-        "Eval deploy pipeline config (v2): deploy path is /opt/eval/v2 on host-b "
+        "Eval deploy pipeline config (v2): deploy path is /opt/eval/v2 on host-c "
         "(migrated from host-b in the infra reshuffle).",
         source="eval",
     )
