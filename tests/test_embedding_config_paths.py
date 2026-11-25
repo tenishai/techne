@@ -49,19 +49,29 @@ def built(monkeypatch):
     emb._reset_embedding_model()
 
 
+def _force_auto_to_model2vec(monkeypatch):
+    """Make AUTO pick model2vec, so the override is the only reason the answer can
+    be fastembed. CI installs fastembed, and there AUTO picks it anyway."""
+    monkeypatch.setattr(emb, "_fastembed_importable", lambda: False)
+    monkeypatch.setattr(emb, "_model2vec_importable", lambda: True)
+
+
 def test_query_path_uses_configured_backend(built, monkeypatch):
     from techne.core import vec_ext
 
     pytest.importorskip("numpy")
     monkeypatch.setattr(vec_ext, "available", lambda: True)
     monkeypatch.setattr(emb, "backend_available", lambda: True)
+    _force_auto_to_model2vec(monkeypatch)
     search_mod._query_embedding("which deploy method")
     assert built == [CUSTOM]
 
 
-def test_numpy_free_query_path_defers_to_the_configured_backend(built):
+def test_numpy_free_query_path_defers_to_the_configured_backend(built, monkeypatch):
     """The potion fast path must not answer for an operator who chose fastembed."""
     from techne.core import query_embed
+
+    _force_auto_to_model2vec(monkeypatch)
 
     assert query_embed._model_name(None) is None
 
