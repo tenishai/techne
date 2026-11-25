@@ -7,7 +7,7 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
-- **`techne restore` works when a live db is corrupt (#1258).** Restore first snapshots the live dbs with SQLite's online backup API, which raises `database disk image is malformed` on a corrupt source, so restore stopped with a traceback before touching anything, the one case it is most needed (reproduced with a db cut to half its size). The pre-restore snapshot now falls back to a raw copy of the db and its `-wal`/`-shm`, marks it `raw_copy` in the set's manifest, and `restore` prints a note naming it. A plain `techne backup` still fails on a corrupt db. The second half of #1258, locking out live writers during a restore, is not in this change.
+- **`techne restore` works when a live db is corrupt (#1258).** Restore first snapshots the live dbs with SQLite's online backup API, which raises `database disk image is malformed` on a corrupt source, so restore stopped with a traceback before touching anything, the one case it is most needed (reproduced with a db cut to half its size). The pre-restore snapshot now falls back to a raw copy of the db and its `-wal`/`-shm`, marks it `raw_copy` in the set's manifest, and `restore` prints a note naming it. Restoring from such a set puts its `-wal` and `-shm` back beside the db, because rows not yet checkpointed exist only there. A plain `techne backup` still fails on a corrupt db. The second half of #1258, locking out live writers during a restore, is not in this change.
 
 ## [0.20.0] — 2026-11-24
 

@@ -183,6 +183,13 @@ def _online_copy(src: Path, dst: Path) -> None:
         src_conn.close()
 
 
+def _unlink_staged(temp: Path) -> None:
+    """Remove a staged restore temp and any staged sidecars beside it."""
+    temp.unlink(missing_ok=True)
+    for sc in _WAL_SIDECARS:
+        temp.with_name(temp.name + sc).unlink(missing_ok=True)
+
+
 def _raw_copy(src: Path, dst: Path) -> list[str]:
     """File-for-file copy of *src* and any ``-wal``/``-shm`` beside it. Returns the
     sidecar file names written next to *dst*."""
@@ -994,16 +1001,27 @@ def restore_all_dbs(
         if problem:  # pragma: no cover - read_manifest already rejected these
             raise RestoreError(f"malformed manifest: {problem}")
         src_file = src_dir / name
-        plan.append((domain, src_file, target, target.with_name(target.name + ".restore-tmp")))
+        # A raw-copy set (techne#1258) carries the source's -wal/-shm beside the main
+        # file, and its un-checkpointed pages live only there. Restore them with it. The
+        # names are rebuilt from `name`, never taken from the manifest as paths.
+        listed = set(meta.get("sidecars") or []) if meta.get("raw_copy") else set()
+        sides = [sc for sc in _WAL_SIDECARS if name + sc in listed]
+        plan.append(
+            (domain, src_file, target, target.with_name(target.name + ".restore-tmp"), sides)
+        )
 
     # STAGE — copy all sources to temps beside their targets. Live is UNTOUCHED until commit.
     try:
-        for _domain, src_file, target, temp in plan:
+        for _domain, src_file, target, temp, sides in plan:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src_file, temp)
+            for sc in sides:
+                shutil.copy2(
+                    src_file.with_name(src_file.name + sc), temp.with_name(temp.name + sc)
+                )
     except OSError as e:
-        for *_, temp in plan:
-            temp.unlink(missing_ok=True)
+        for _d, _s, _t, temp, _sides in plan:
+            _unlink_staged(temp)
         msg = f"restore staging failed ({e}); live DBs untouched."
         if pre:
             msg += f" Prior state: {pre}"
@@ -1012,10 +1030,12 @@ def restore_all_dbs(
     # COMMIT — corruption-safe order: drop stale WAL sidecars, then atomic rename into place.
     restored: list[str] = []
     try:
-        for domain, _src_file, target, temp in plan:
+        for domain, _src_file, target, temp, sides in plan:
             for sidecar in _WAL_SIDECARS:
                 target.with_name(target.name + sidecar).unlink(missing_ok=True)
             os.replace(temp, target)
+            for sc in sides:
+                os.replace(temp.with_name(temp.name + sc), target.with_name(target.name + sc))
             restored.append(domain)
     except OSError as e:
         msg = (
@@ -1028,8 +1048,8 @@ def restore_all_dbs(
     finally:
         # On success every temp was consumed by os.replace (these unlinks no-op); on a
         # commit-pass failure this clears the orphan temps of the failing/unreached domains.
-        for *_, temp in plan:
-            temp.unlink(missing_ok=True)
+        for _d, _s, _t, temp, _sides in plan:
+            _unlink_staged(temp)
 
     return RestoreResult(
         restored=restored,

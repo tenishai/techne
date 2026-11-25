@@ -2090,3 +2090,39 @@ def test_cli_restore_says_the_snapshot_is_raw(config, monkeypatch):
     out = _run_cli(config, monkeypatch, ["restore", str(res.dest), "--yes"])
     assert out.exit_code == 0, out.output
     assert "raw file copy" in out.output
+
+
+def test_restoring_a_raw_copy_set_brings_back_its_wal(config, monkeypatch):
+    """A raw-copy set holds the source's -wal beside the main file. Rows not yet
+    checkpointed exist only in that -wal, so restore must put it back too."""
+    import sqlite3
+
+    import techne.core.maintenance as m
+
+    _add_knowledge(config.db_path, "BASE")
+    conn = sqlite3.connect(config.db_path)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA wal_autocheckpoint=0")
+    conn.execute(
+        "INSERT INTO knowledge (type, content, confidence) VALUES ('fact', 'WAL-ONLY', 'high')"
+    )
+    conn.commit()
+
+    def _refuse(src, out):
+        raise sqlite3.DatabaseError("database disk image is malformed")
+
+    monkeypatch.setattr(m, "_online_copy", _refuse)
+    res = backup_all_dbs(config, raw_fallback=True)
+    conn.close()
+    monkeypatch.undo()
+    meta = json.loads((res.dest / "manifest.json").read_text())["databases"]["techne"]
+    assert "techne.db-wal" in meta["sidecars"], meta
+
+    db = config.db_path
+    _add_knowledge(db, "LATER")
+    rr = restore_all_dbs(config, res.dest)
+    assert rr.restored == ["techne"]
+    contents = _knowledge_contents(db)
+    assert "WAL-ONLY" in contents and "BASE" in contents, contents
+    assert "LATER" not in contents, contents
+    assert not list(db.parent.glob("*.restore-tmp*"))
