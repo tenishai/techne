@@ -5,6 +5,11 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **`consolidate emit` no longer goes quiet once the first batch is judged (#1355).** `max_clusters` was applied before the already-judged filter, and the cluster walk always starts at the same rows, so once the first 20 clusters had a verdict every emit returned nothing (measured: 10 built, 10 judged, 0 fresh on a store of about 5,150 rows). The judged hashes are now skipped during the walk, so the cap counts fresh clusters.
+- **An unparseable answer is no longer recorded as a judgement (#1246).** A refusal or truncated reply to a consolidate, dream or conflict prompt wrote the same discarded marker as a real `keep`, `none` or empty verdict list, and the cluster was never offered again. Only a parsed answer writes the marker now; anything else writes nothing, counts as `unparsed` in the ingest result, and is offered on the next emit.
+
 ## [0.20.0] — 2026-11-24
 
 ### Upgrading

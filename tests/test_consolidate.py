@@ -413,3 +413,74 @@ def test_ingest_refuses_a_merge_over_document_cards(config):
         conn.close()
     assert [r["status"] for r in rows] == ["discarded"]
     assert get(db, a)["superseded_by"] is None and get(db, b)["superseded_by"] is None
+
+
+# ---- techne#1355 / techne#1246 ---------------------------------------------
+
+
+def _store_dup_pairs(db, n):
+    """n exact-duplicate pairs, each its own Tier-0 cluster."""
+    for i in range(n):
+        store(db, f"duplicate statement number {i}", type="fact")
+        store(db, f"duplicate statement number {i}", type="fact")
+
+
+def test_emit_cap_counts_fresh_clusters_only(config):
+    """techne#1355: judging the first max_clusters clusters must not silence the rail.
+    The cap applied before the judged filter, so emit returned [] forever."""
+    db = config.db_path
+    _store_dup_pairs(db, 5)
+    first = consolidate_emit(config, max_clusters=2)
+    assert len(first) == 2
+    for item in first:
+        consolidate_ingest(config, item["target_ids"], item["cluster_hash"],
+                           json.dumps({"verdict": "keep"}))
+    second = consolidate_emit(config, max_clusters=2)
+    assert len(second) == 2
+    judged = {item["cluster_hash"] for item in first}
+    assert not judged & {item["cluster_hash"] for item in second}
+
+
+def test_clusters_skip_hashes_keeps_judged_rows_out_of_new_pairs(config):
+    """A skipped cluster is still formed, so its rows do not leak into other pairs."""
+    db = config.db_path
+    _store_dup_pairs(db, 3)
+    everything = consolidate_clusters(config, max_clusters=10)
+    skip = {_hash(everything[0]["target_ids"])}
+    rest = consolidate_clusters(config, max_clusters=10, skip_hashes=skip)
+    assert [c["target_ids"] for c in rest] == [c["target_ids"] for c in everything[1:]]
+
+
+def _hash(ids):
+    from techne.core.sleepdream import _cluster_hash
+
+    return _cluster_hash(ids)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "I cannot help with that.",
+        '{"verdict": "merge", "content": "truncated',
+        json.dumps({"verdict": "merge"}),  # merge with no content
+    ],
+)
+def test_unparseable_answer_is_not_recorded_as_keep(config, answer):
+    """techne#1246: an unparseable answer writes no marker, so a later valid merge for
+    the same cluster is still accepted instead of skipped."""
+    db = config.db_path
+    a = store(db, "frozen cluster", type="fact")
+    b = store(db, "frozen cluster", type="fact")
+    counts = consolidate_ingest(config, [a, b], "h", answer)
+    assert counts["kept"] == 0 and counts["unparsed"] == 1
+    conn = connect(db)
+    try:
+        n = conn.execute(
+            "SELECT count(*) FROM knowledge_candidates WHERE origin='consolidate'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert n == 0
+    assert any(set(c["target_ids"]) == {a, b} for c in consolidate_emit(config))
+    again = consolidate_ingest(config, [a, b], "h", _MERGE_VERDICT)
+    assert again["written"] == 1 and again["skipped"] == 0
