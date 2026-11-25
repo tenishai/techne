@@ -15,7 +15,7 @@ failures — the person cutting each release knew the step existed and did not r
 
 ## What has actually gone wrong
 
-Four distinct failures, four different releases, none caught at the time:
+Four distinct failures, none caught at the time:
 
 - **v0.9.0 and v0.10.0 were tagged with no GitHub Release published at all.** Releases had
   stalled at 0.8.0 and nobody noticed for weeks. `git tag` does not create a Release
