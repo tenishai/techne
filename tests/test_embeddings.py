@@ -132,66 +132,81 @@ class TestModel2VecAllowDownloadFalse:
     blocked past the hook's SIGALRM-based timeout budget (see
     embeddings.py's "Cold-cache downloads and hooks" docstring section)."""
 
-    def test_cached_model_builds_fast_with_allow_download_false(self):
+    def test_cached_model_builds_without_the_network(self, monkeypatch):
         """Requires the default model already warm in the local HF cache —
         which it will be after any earlier test/call in this suite has built
         the AUTO-selected backend at least once. If genuinely cold, skip
-        rather than let this test itself perform a real network fetch."""
+        rather than let this test itself perform a real network fetch.
+
+        Asserts what the old 3 s ceiling stood in for: no DNS lookup and no
+        connect happen while the model builds (issue 1383: the ceiling could
+        fail on a loaded runner, and could pass a fast network fetch)."""
         pytest.importorskip("model2vec")
         from model2vec.persistence.hf import maybe_get_cached_model_path
 
         if maybe_get_cached_model_path(embeddings._DEFAULT_MODEL2VEC_MODEL) is None:
             pytest.skip("default model2vec model not present in local HF cache")
 
-        import time
+        import socket
+
+        attempts = []
+
+        def refuse(*a, **k):
+            attempts.append(a[1:] or a)
+            raise OSError("network refused by test")
+
+        monkeypatch.setattr(socket, "getaddrinfo", refuse)
+        monkeypatch.setattr(socket.socket, "connect", refuse)
+        monkeypatch.setattr(socket.socket, "connect_ex", refuse)
 
         with patch.object(
             embeddings, "_select_backend", return_value=("model2vec", embeddings._DEFAULT_MODEL2VEC_MODEL)
         ):
-            t0 = time.monotonic()
             model = embeddings._get_embedding_model(allow_download=False)
-            elapsed = time.monotonic() - t0
         assert model.dim > 0
-        # Generous ceiling: a local safetensors+tokenizer load should be well
-        # under a second; 3s leaves headroom for slow CI disks without
-        # letting a real network fetch (multiple seconds, observed ~8s cold)
-        # sneak through undetected.
-        assert elapsed < 3.0, f"allow_download=False took {elapsed:.2f}s — looks like it hit the network"
+        assert attempts == [], f"allow_download=False touched the network: {attempts}"
 
-    def test_uncached_model_raises_fast_instead_of_downloading(self):
+    def test_uncached_model_raises_instead_of_downloading(self):
         """Run in a FRESH subprocess with HOME pointed at an empty temp dir,
         so huggingface_hub's cache-dir resolution (frozen as a module-level
         constant at its own first import — same-process monkeypatching can't
         reach it, since huggingface_hub is already imported by the time any
         test runs) genuinely sees no cache. Confirms allow_download=False
-        raises quickly rather than downloading — this is the exact scenario
+        raises rather than downloading — this is the exact scenario
         that broke tests/test_hook_timeout.py before the allow_download fix
         (a cold-cache post_tool_use hook invocation blocking past its SIGALRM
         budget); reproduced directly here against embeddings.py rather than
         through the hook subprocess.
+
+        The subprocess refuses every DNS lookup and connect and prints a marker
+        when one is tried, so "did not download" is asserted directly instead of
+        through an elapsed-time ceiling (issue 1383). The subprocess timeout is a
+        hang guard only.
         """
         pytest.importorskip("model2vec")
         import subprocess
         import tempfile
-        import time
 
         script = (
+            "import socket, sys\n"
+            "def refuse(*a, **k):\n"
+            "    print('NETWORK-ATTEMPTED', a[1:] or a, file=sys.stderr, flush=True)\n"
+            "    raise OSError('network refused by test')\n"
+            "socket.getaddrinfo = refuse\n"
+            "socket.socket.connect = refuse\n"
+            "socket.socket.connect_ex = refuse\n"
             "from techne.core import embeddings\n"
             "embeddings._get_embedding_model(allow_download=False)\n"
         )
         with tempfile.TemporaryDirectory() as fake_home:
-            t0 = time.monotonic()
             result = subprocess.run(
                 [sys.executable, "-c", script],
                 env={"HOME": fake_home, "PATH": os.environ.get("PATH", "")},
                 capture_output=True,
-                timeout=10,
+                timeout=60,
             )
-            elapsed = time.monotonic() - t0
-        # Must fail fast (local cache miss under a genuinely empty HOME), not
-        # hang trying to download. Cold-download was observed at ~8s; this
-        # ceiling is well below that while leaving CI headroom.
-        assert elapsed < 4.0, f"allow_download=False took {elapsed:.2f}s — looks like it hit the network"
+        stderr = result.stderr.decode(errors="replace")
+        assert "NETWORK-ATTEMPTED" not in stderr, f"allow_download=False tried the network:\n{stderr}"
         assert result.returncode != 0, "expected the uncached model2vec build to raise, not succeed"
 
 

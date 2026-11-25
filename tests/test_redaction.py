@@ -462,13 +462,15 @@ def test_pem_bounded_span_no_redos_on_unterminated_opener():
     # matching would rescan to EOF per opener; the {0,8192} bound caps it.
     junk = "-----BEGIN RSA PRIVATE KEY-----\n" + ("A" * 200 + "\n") * 50
     payload = junk * 50  # ~0.5 MB of opener-heavy, closer-free text
-    start = time.perf_counter()
+    # CPU time of this thread, not wall time: the bound is about regex work, and a
+    # loaded runner descheduling the worker must not count against it (issue 1383).
+    start = time.thread_time()
     result = redact_credentials(payload)
-    elapsed = time.perf_counter() - start
+    elapsed = time.thread_time() - start
     # No END marker anywhere → nothing to redact for this pattern.
     assert "<redacted:pem-private-key>" not in result
     # Bounded work: comfortably under a second even on slow CI.
-    assert elapsed < 2.0, f"PEM matching took {elapsed:.3f}s — bound may be ineffective"
+    assert elapsed < 2.0, f"PEM matching took {elapsed:.3f}s of CPU — bound may be ineffective"
 
 
 # ---------------------------------------------------------------------------
@@ -589,9 +591,10 @@ def test_a_long_underscore_run_is_linear():
     every `_` and rescan the word, 17.5s on 20,000 underscores."""
     import time
 
-    t = time.perf_counter()
+    # CPU time of this thread, not wall time, as in the PEM test above (issue 1383).
+    t = time.thread_time()
     redact_credentials("_" * 20000)
-    assert time.perf_counter() - t < 1.0
+    assert time.thread_time() - t < 1.0
 
 
 def test_safe_cut_on_the_at_sign_keeps_no_url_password():
