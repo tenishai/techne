@@ -533,3 +533,19 @@ def test_dream_ingest_logs_on_insert_failure(config, caplog):
     assert any(
         "dream_ingest" in r.message for r in caplog.records
     ), "log.exception must emit a record naming the function"
+
+
+def test_dream_ingest_unparseable_writes_no_marker(config):
+    """techne#1246: a refusal is not a 'none'; the group must be offered again."""
+    db = config.db_path
+    a, b = _store_pair(db)
+    gh = _cluster_hash([a, b])
+    counts = dream_ingest(config, [a, b], gh, "I cannot help with that.")
+    assert counts["kept"] == 0 and counts["unparsed"] == 1
+    conn = connect(db)
+    try:
+        assert not _already_proposed_dream(conn, gh)
+    finally:
+        conn.close()
+    again = dream_ingest(config, [a, b], gh, _CONNECT_VERDICT)
+    assert again["written"] == 1 and again["skipped"] == 0

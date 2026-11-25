@@ -12,6 +12,10 @@ All notable changes to techne are documented here. Format loosely follows
 ### Docs
 
 - **`docs/releasing.md` has a step for publishing the wheel to `pypi.tenish.ai` (#1386).** v0.20.0 was released without one on the index. New step 8 builds the wheel from the tag twice with `SOURCE_DATE_EPOCH` set to the tag commit's time and checks the hashes match, publishes it with tenish-pypi's `publish.py` (maintainers only), checks the sha256 the index serves, and attaches the wheel and a `SHA256SUMS` file to the GitHub Release. The outside checks now resolve `tenish-techne==X.Y.Z` against the index and list the Release's assets.
+### Fixed
+
+- **`consolidate emit` no longer goes quiet once the first batch is judged (#1355).** `max_clusters` was applied before the already-judged filter, and the cluster walk always starts at the same rows, so once the first 20 clusters had a verdict every emit returned nothing (measured: 10 built, 10 judged, 0 fresh on a store of about 5,150 rows). The judged hashes are now skipped during the walk, so the cap counts fresh clusters.
+- **An unparseable answer is no longer recorded as a judgement (#1246).** A refusal or truncated reply to a consolidate, dream or conflict prompt wrote the same discarded marker as a real `keep`, `none` or empty verdict list, and the cluster was never offered again. Only a parsed answer writes the marker now; anything else writes nothing, counts as `unparsed` in the ingest result, and is offered on the next emit.
 
 ## [0.20.0] — 2026-11-24
 

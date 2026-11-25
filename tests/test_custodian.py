@@ -1067,6 +1067,9 @@ def test_the_no_verdict_row_is_also_labelled(config):
     re-judged forever. It is the least interesting row in the system and exactly the
     kind that gets missed — mutation showed it was the last unguarded forward, and no
     test exercised the branch at all.
+
+    The answer is a parsed array with no usable verdicts. Prose with no array at all
+    no longer writes this marker (techne#1246): it is not a judgement.
     """
     from techne.core.conflict import conflict_check_emit, conflict_check_ingest
     from techne.core.database import connect
@@ -1083,7 +1086,7 @@ def test_the_no_verdict_row_is_also_labelled(config):
 
     counts = conflict_check_ingest(
         config, item["focus_id"], item["comparison_ids"], item["check_hash"],
-        "the model replied with prose and no verdicts at all",
+        '[{"id": "not-an-id", "verdict": "MAYBE"}]',
         model_used="ollama/llama3.2",
     )
     assert counts["errors"] == 0, f"the no-verdict path raised instead of recording: {counts}"
