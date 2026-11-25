@@ -277,7 +277,10 @@ def _model_name(config) -> str | None:
     if current is not None:
         backend, _, name = str(getattr(current, "name", "")).partition(":")
         return name if backend == "model2vec" and name else None
-    backend, name = embeddings._select_backend(config)
+    # The ambient Config, like the resolver (techne#1260): without it an operator's
+    # fastembed or custom-model override was ignored here, and the query embedded
+    # with the AUTO potion model whatever the index was built with.
+    backend, name = embeddings._select_backend(embeddings._ambient_config(config))
     return name if backend == "model2vec" else None
 
 
