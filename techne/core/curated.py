@@ -206,7 +206,13 @@ def retire_missing_memory(db_path: Path, *, slug: str, present: set[str]) -> int
                 """INSERT INTO curated_memory
                        (source_path, slug, title, content, content_hash, provenance)
                    VALUES (?, ?, ?, '', ?, ?)""",
-                (r["source_path"], slug, r["title"], _RETIRED_HASH, RETIRED_PROVENANCE),
+                (
+                    r["source_path"],
+                    slug,
+                    redact_credentials(r["title"] or ""),
+                    _RETIRED_HASH,
+                    RETIRED_PROVENANCE,
+                ),
             )
             conn.execute(
                 """UPDATE curated_memory
