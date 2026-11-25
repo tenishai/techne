@@ -7015,6 +7015,12 @@ def restore_cmd(ctx, backup_dir, yes, no_pre_backup):
         click.echo(f"skipped (domains not in this techne): {', '.join(res.skipped_unknown)}")
     if res.pre_restore_backup:
         click.echo(f"prior state snapshotted at: {res.pre_restore_backup}")
+    if res.pre_restore_raw:
+        click.echo(
+            f"note: [{', '.join(res.pre_restore_raw)}] could not be read by SQLite's backup "
+            "API (corrupt?), so the prior-state snapshot holds a raw file copy of "
+            "them, with any -wal/-shm"
+        )
 
 
 @main.command()

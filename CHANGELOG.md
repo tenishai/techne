@@ -19,6 +19,9 @@ All notable changes to techne are documented here. Format loosely follows
 ### Fixed
 
 - **A deleted Claude Code memory file is no longer treated as current memory (#1290).** The memory walk ingested each file it found but never compared that set against the stored rows, so a deleted memory kept its live `curated_memory` row and `memory_claims emit` kept judging it. After a walk that finds files, rows for that project whose file is gone are now retired behind a tombstone row (`provenance = 'retired'`), so history stays, and a file that comes back is live again. A walk that finds no files, or no directory, retires nothing.
+### Fixed
+
+- **`techne restore` works when a live db is corrupt (#1258).** Restore first snapshots the live dbs with SQLite's online backup API, which raises `database disk image is malformed` on a corrupt source, so restore stopped with a traceback before touching anything, the one case it is most needed (reproduced with a db cut to half its size). The pre-restore snapshot now falls back to a raw copy of the db and its `-wal`/`-shm`, marks it `raw_copy` in the set's manifest, and `restore` prints a note naming it. Restoring from such a set puts its `-wal` and `-shm` back beside the db, because rows not yet checkpointed exist only there. A plain `techne backup` still fails on a corrupt db. The second half of #1258, locking out live writers during a restore, is not in this change.
 
 ## [0.20.0] — 2026-11-24
 
