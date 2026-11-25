@@ -971,6 +971,30 @@ carrying it still load, and the block is written back unchanged.
 never passed to any search function, so setting it was a silent no-op. Existing configs
 carrying the key still load; it is ignored, as it was in effect before.
 
+### What credential redaction does not catch
+
+`redact_credentials()` (`techne/core/redaction.py`) finds secrets by their shape: a known
+token prefix (`sk-ant-`, `ghp_`, `AKIA`), a PEM block, an `Authorization:` header, a
+password in a URL, or a value assigned to a name like `*_TOKEN`, `*_PASSWORD` or
+`api_key`. A secret with no shape it recognises is stored as captured. For example:
+
+- a value under a name the patterns don't list, such as `DB_PASS=…`;
+- a bare value with no name next to it, such as the output of `cat` on a token file;
+- `password=` followed by fewer than 8 characters;
+- a webhook URL whose secret is a path segment.
+
+Such a value lands in the `observations` table of `techne.db`. From there it can reach
+anything built from observations, such as thread summaries and knowledge reflected from a
+session, and through those it can leave the machine: the outbox sync, and the archivist
+publish lane when the row carries a tag in `archivist_publish_tags`. Redaction is a best-effort
+filter, not a confidentiality guarantee. Keep secrets out of tool output where you can (read
+them into environment variables instead of printing them). `techne scrub-credentials`
+re-applies the current patterns to stored rows, so it catches a shape only once a pattern
+for it exists.
+
+Matching known secret values by hash, so that a shapeless secret is caught too, is
+proposed in issue #1364 and not built yet.
+
 ## Model use — the agent's own model by default
 
 techne's "thinking" features — reflecting a session into durable memory, deduping/merging knowledge ("sleep"), evidence-checking claims — **default to the model already running the agent.** techne renders a prompt, the agent answers it with its own model, and feeds the result back (the `*_emit` / `*_ingest` MCP tools). **No API key, no second model, no extra inference bill.** This is the recommended path and needs no extra dependency.

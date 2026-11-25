@@ -5,6 +5,10 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Docs
+
+- **README: what credential redaction does not catch (#1364).** A new section says redaction works by shape, lists secrets it misses (a value under an unlisted name such as `DB_PASS`, a bare value, a short `password=`, a webhook path secret), and says where a missed value goes: `observations` in `techne.db`, then anything built from it, including the outbox sync and the archivist publish lane. Known-value matching stays open in issue #1364.
+
 ## [0.20.0] — 2026-11-24
 
 ### Upgrading
