@@ -896,3 +896,28 @@ def test_insert_candidate_redacts_both_fields_for_both_origins(config):
         assert "<redacted:" in (row["decision_reason"] or ""), (
             f"[{row['origin']}] decision_reason should carry the redaction marker"
         )
+
+
+def test_conflict_ingest_unparseable_writes_no_marker(config):
+    """techne#1246: a refusal is not 'no verdicts'; the group must be offered again."""
+    db = config.db_path
+    a = store(db, "we deploy with ansible", type="fact")
+    b = store(db, "we deploy with terraform", type="fact")
+    ch = _check_hash(a, [b])
+    counts = conflict_check_ingest(config, a, [b], ch, "I cannot help with that.")
+    assert counts["unparsed"] == 1
+    assert _all_conflict_candidates(db) == []
+    again = conflict_check_ingest(
+        config, a, [b], ch, json.dumps([{"id": b, "verdict": "DISTINCT", "reason": "x"}])
+    )
+    assert again["skipped"] == 0 and again["distinct"] == 1
+
+
+def test_conflict_ingest_empty_array_still_records_marker(config):
+    """A parsed array with no usable verdicts is an answer, and keeps its marker."""
+    db = config.db_path
+    a = store(db, "alpha fact", type="fact")
+    b = store(db, "beta fact", type="fact")
+    counts = conflict_check_ingest(config, a, [b], _check_hash(a, [b]), "[]")
+    assert counts["unparsed"] == 0
+    assert len(_all_conflict_candidates(db)) == 1

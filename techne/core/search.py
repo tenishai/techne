@@ -1193,6 +1193,7 @@ def _vec_channel_rows(
     row_chars: int | None,
 ) -> list[dict]:
     """``search_vec``'s ANN queries on a connection with sqlite-vec loaded."""
+    global _VEC_CHANNEL_ERROR
     # The caller's cap wins for KNOWLEDGE rows; the ledger tables keep
     # `_ROW_CHAR_CAP` regardless (techne#842).
     _cap = row_chars if row_chars is not None else _ROW_CHAR_CAP
@@ -1318,7 +1319,7 @@ def _vec_channel_rows(
         results.sort(key=lambda x: x.get("distance", 999))
         return results[:limit]
 
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as exc:
         # A stale vec0 cache embedded by a *different* backend raises here on the
         # `embedding MATCH ?` — most importantly "Dimension mismatch: expected N
         # ... received M" when a DB embedded at 384-d (fastembed/MiniLM) is queried
@@ -1328,6 +1329,11 @@ def _vec_channel_rows(
         # actually reconciles them; until an operator re-embeds we must NEVER crash
         # the top-level recall path — degrade to FTS-only, matching this module's
         # existing extension-load fallback in `_ensure_sqlite_vec`.
+        #
+        # DEGRADE, BUT SAY SO (techne#1253). This returned [] with no flag, so every
+        # caller, hooks included, read an FTS-only answer as a full one.
+        _VEC_CHANNEL_ERROR = f"vector index query failed: {exc}; run techne vectors backfill"
+        logger.debug("search_vec: vector channel degraded to FTS: %s", exc)
         return []
 
 
@@ -2837,6 +2843,10 @@ def backfill_vectors(
     sqlite_vec, or an interpreter that cannot load extensions — and a caller must
     not report hygiene as having happened. An empty dict is ambiguous across
     three different outcomes; the key is the discriminator.
+
+    The resolver reads the embedding backend/model override from the process's
+    loaded Config (`embeddings._ambient_config`, techne#1260), so this embeds with
+    the backend `init` stamped the index with.
     """
     try:
         import numpy as np

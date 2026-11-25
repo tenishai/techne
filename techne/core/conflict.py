@@ -26,7 +26,7 @@ import logging
 from pathlib import Path
 
 from techne.config import Config
-from techne.core._resident import extract_json_array
+from techne.core._resident import extract_json_array, extract_json_array_or_none
 from techne.core.database import connect
 from techne.core.knowledge import LESSON_TYPES_SQL
 from techne.core.redaction import redact_credentials
@@ -624,6 +624,7 @@ def conflict_check_ingest(
         "distinct": 0,
         "skipped": 0,
         "errors": 0,
+        "unparsed": 0,
     }
 
     all_ids = sorted([focus_id] + list(comparison_ids))
@@ -644,9 +645,17 @@ def conflict_check_ingest(
         focus_row = _fetch_row(conn, focus_id)
         comp_by_id = {cid: _fetch_row(conn, cid) for cid in comparison_ids}
 
+        if not decisions and extract_json_array_or_none(response or "") is None:
+            # NO ARRAY AT ALL IS NOT A JUDGEMENT (techne#1246). A refusal or a
+            # truncated reply used to fall into the marker below and hide the group
+            # forever. Write nothing, so the next emit offers it again.
+            log.debug("conflict_ingest: unparseable answer for %s, not recorded", ch)
+            counts["unparsed"] += 1
+            return counts
+
         if not decisions:
-            # No parseable verdicts — record a discarded marker so this group isn't
-            # re-proposed on every emit run.
+            # A parsed array with no usable verdicts — record a discarded marker so
+            # this group isn't re-proposed on every emit run.
             _insert_candidate(
                 conn,
                 action="add",

@@ -85,7 +85,11 @@ def _cluster_hash(target_ids: list[int]) -> str:
 
 
 def consolidate_clusters(
-    config: Config, *, max_clusters: int = 20, fts_neighbors: int = 3
+    config: Config,
+    *,
+    max_clusters: int = 20,
+    fts_neighbors: int = 3,
+    skip_hashes: set[str] | frozenset[str] = frozenset(),
 ) -> list[dict]:
     """Find candidate duplicate/overlapping clusters of LIVE knowledge.
 
@@ -103,6 +107,12 @@ def consolidate_clusters(
     written with empty tags, so `knowledge.card_type_or_fact` demotes the result to a `fact`
     with no pointer. Measured 2026-08-29: a 9-way cluster over nine distinct `doc:`
     ids, judged `keep` by hand, recurring on every drain since.
+
+    *skip_hashes* are cluster hashes already on record (techne#1355). A cluster whose
+    hash is in it is still formed, so its rows stay out of later pairs exactly as
+    before, but it is not returned and does not count toward *max_clusters*. The cap
+    used to apply first and the filter after, so once the first *max_clusters* were
+    judged every emit came back empty however many fresh clusters lay further down.
     """
     conn = connect(config.db_path)
     try:
@@ -116,6 +126,7 @@ def consolidate_clusters(
 
     clusters: list[dict] = []
     seen_keys: set[str] = set()
+    clustered_ids: set[int] = set()
 
     def _add(ids: list[int], via: str) -> None:
         ids = sorted(set(ids))
@@ -125,6 +136,9 @@ def consolidate_clusters(
         if key in seen_keys:
             return
         seen_keys.add(key)
+        clustered_ids.update(ids)
+        if key in skip_hashes:
+            return
         clusters.append({"target_ids": ids, "rows": [by_id[i] for i in ids], "via": via})
 
     # Tier 0 — exact content_fingerprint dup buckets (copy-paste dups; free, deterministic).
@@ -147,7 +161,6 @@ def consolidate_clusters(
     # highest tf-idf terms that some OTHER live row also holds, OR-joined, so BM25
     # ranks neighbours by the distinctive words they share.
     df = Counter(t for r in live for t in set(_terms(r["content"])))
-    clustered_ids = {i for c in clusters for i in c["target_ids"]}
     conn = connect(config.db_path)
     try:
         for r in live:
@@ -165,9 +178,7 @@ def consolidate_clusters(
                 if h["id"] != r["id"] and h["id"] in by_id and h["id"] not in clustered_ids
             ]
             if neighbors:
-                pair = [r["id"], neighbors[0]]
-                _add(pair, "fts")
-                clustered_ids.update(pair)
+                _add([r["id"], neighbors[0]], "fts")
     finally:
         conn.close()
 
@@ -230,6 +241,18 @@ def _already_proposed(conn, cluster_hash: str) -> bool:
     )
 
 
+def _proposed_hashes(conn) -> set[str]:
+    """Every cluster hash `_already_proposed` would match, in one query."""
+    return {
+        r[0]
+        for r in conn.execute(
+            """SELECT DISTINCT prompt_hash FROM knowledge_candidates
+                WHERE origin = 'consolidate' AND prompt_hash IS NOT NULL
+                  AND status IN ('pending', 'promoted', 'discarded')"""
+        )
+    }
+
+
 CONSOLIDATE_PROMPT = """These knowledge entries may be duplicates or overlapping.
 Decide whether to collapse them into a single entry.
 
@@ -268,7 +291,15 @@ def consolidate_emit(config: Config, *, max_clusters: int = 20) -> list[dict]:
     ``[{"cluster_hash", "target_ids", "prompt"}]``; the agent answers each `prompt` and
     feeds it back via consolidate_ingest with the same cluster_hash + target_ids."""
     _ensure_system_session(config.db_path)
-    clusters = consolidate_clusters(config, max_clusters=max_clusters)
+    conn = connect(config.db_path)
+    try:
+        judged = _proposed_hashes(conn)
+    finally:
+        conn.close()
+    # The judged set goes INTO the walk, so the cap counts fresh clusters only
+    # (techne#1355). The per-cluster check below stays as the authority.
+    clusters = consolidate_clusters(config, max_clusters=max_clusters, skip_hashes=judged)
+    log.debug("consolidate_emit: %d judged hash(es) skipped, %d fresh", len(judged), len(clusters))
     conn = connect(config.db_path)
     try:
         batch = []
@@ -286,6 +317,16 @@ def consolidate_emit(config: Config, *, max_clusters: int = 20) -> list[dict]:
     finally:
         conn.close()
     return batch
+
+
+def _explicit_verdict(raw: str, verdict: str) -> bool:
+    """True when *raw* parses to a JSON object whose ``verdict`` is *verdict*.
+
+    The parsers return None for both an explicit abstention and a parse failure;
+    this tells the two apart, so only a real answer is recorded as judged.
+    """
+    obj = extract_json_object(raw or "")
+    return isinstance(obj, dict) and obj.get("verdict") == verdict
 
 
 def parse_consolidation_response(raw: str) -> dict | None:
@@ -373,15 +414,20 @@ def consolidate_ingest(
     """Process one cluster's agent verdict.
 
     A 'merge' verdict writes a pending action='merge' candidate (origin='consolidate',
-    target_ids set) for review. A 'keep' (or unparseable) verdict writes a *discarded*
-    marker recording that the agent judged the cluster distinct — so the anti-re-proposal
+    target_ids set) for review. An explicit 'keep' verdict writes a *discarded* marker
+    recording that the agent judged the cluster distinct — so the anti-re-proposal
     guard won't re-judge the same cluster on every future sleep run (techne#108 review).
+    An unparseable or invalid answer writes nothing and counts as ``unparsed``, so the
+    cluster is offered again (techne#1246).
 
     The cluster_hash is RECOMPUTED from target_ids — never trusted from the caller — so a
     stored prompt_hash always corresponds to its real target ids and can't silently defeat
     `_already_proposed`. Returns counts.
     """
-    counts = {"proposed": 0, "written": 0, "kept": 0, "errors": 0, "skipped": 0, "refused": 0}
+    counts = {
+        "proposed": 0, "written": 0, "kept": 0, "errors": 0, "skipped": 0, "refused": 0,
+        "unparsed": 0,
+    }
     ch = _cluster_hash(target_ids)  # recompute; the passed cluster_hash is advisory only
     verdict = parse_consolidation_response(response)
     _ensure_system_session(config.db_path)
@@ -433,6 +479,12 @@ def consolidate_ingest(
                 model_used=model_used,
             )
             counts["refused"] += 1
+        elif verdict is None and not _explicit_verdict(response, "keep"):
+            # UNPARSEABLE IS NOT A KEEP (techne#1246). A refusal, a truncated reply or
+            # an invalid merge used to write the keep marker, and `_already_proposed`
+            # then hid the cluster forever. No marker: the next emit offers it again.
+            log.debug("consolidate_ingest: unparseable answer for %s, not recorded", ch)
+            counts["unparsed"] += 1
         elif verdict is None:
             _insert_consolidation_candidate(
                 conn,
@@ -749,15 +801,16 @@ def dream_ingest(
     confidence='low' forced — speculative by construction, never trust the model's
     confidence, target_ids=group_ids for provenance/audit) for human review.
 
-    A 'none' (or unparseable) verdict writes a *discarded* keep-memory marker
-    (origin='dream') so the group is never re-judged on future dream runs — same
-    pattern as consolidate's 'keep' marker.
+    An explicit 'none' verdict writes a *discarded* keep-memory marker (origin='dream')
+    so the group is never re-judged on future dream runs — same pattern as
+    consolidate's 'keep' marker. An unparseable answer writes nothing and counts as
+    ``unparsed``, so the group is offered again (techne#1246).
 
     The group_hash is RECOMPUTED from group_ids — never trusted from the caller — so a
     stored prompt_hash always corresponds to its real group ids and can't silently defeat
     _already_proposed_dream. Returns counts.
     """
-    counts = {"proposed": 0, "written": 0, "kept": 0, "errors": 0, "skipped": 0}
+    counts = {"proposed": 0, "written": 0, "kept": 0, "errors": 0, "skipped": 0, "unparsed": 0}
     gh = _cluster_hash(group_ids)  # recompute; caller-supplied hash is advisory only
     verdict = parse_dream_response(response)
     _ensure_system_session(config.db_path)
@@ -768,7 +821,11 @@ def dream_ingest(
         if _already_proposed_dream(conn, gh):
             counts["skipped"] += 1
             return counts
-        if verdict is None:
+        if verdict is None and not _explicit_verdict(response, "none"):
+            # Unparseable is not a 'none' (techne#1246): no marker, offered again.
+            log.debug("dream_ingest: unparseable answer for %s, not recorded", gh)
+            counts["unparsed"] += 1
+        elif verdict is None:
             _insert_dream_candidate(
                 conn,
                 group_ids=group_ids,

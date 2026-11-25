@@ -1117,6 +1117,13 @@ def search(ctx, query, table, limit):
         identifier_rare_fraction=config.search.identifier_rare_fraction,
         phrase_seat=True,  # techne#1142: explicit query, like techne_search
     )
+    # techne#1253: a vector-channel failure degrades to FTS silently; name it, so a
+    # thin result over a broken index is not read as "nothing known".
+    from techne.core.search import take_vec_channel_error
+
+    vec_error = take_vec_channel_error()
+    if vec_error:
+        click.echo(f"degraded: {vec_error}", err=True)
     if not results:
         click.echo("No results.")
         return
@@ -7015,6 +7022,12 @@ def restore_cmd(ctx, backup_dir, yes, no_pre_backup):
         click.echo(f"skipped (domains not in this techne): {', '.join(res.skipped_unknown)}")
     if res.pre_restore_backup:
         click.echo(f"prior state snapshotted at: {res.pre_restore_backup}")
+    if res.pre_restore_raw:
+        click.echo(
+            f"note: [{', '.join(res.pre_restore_raw)}] could not be read by SQLite's backup "
+            "API (corrupt?), so the prior-state snapshot holds a raw file copy of "
+            "them, with any -wal/-shm"
+        )
 
 
 @main.command()

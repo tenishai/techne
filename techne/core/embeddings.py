@@ -504,6 +504,36 @@ def model_cached(config: "Config | None" = None) -> bool | None:
     return None
 
 
+#: The process's own Config, loaded the first time a caller passes none (techne#1260).
+#: Cached for the same reason the singleton is: a config change needs a restart.
+_AMBIENT_CONFIG: "Config | None" = None
+
+
+def _ambient_config(config: "Config | None") -> "Config | None":
+    """*config*, or the process's loaded Config when the caller passed none.
+
+    The query path (``search._query_embedding``, which has a db path and no Config),
+    the MMR rerank and the vector-status probe called the resolver with no config, so
+    ``search.embedding_backend`` / ``.embedding_model`` reached only ``init`` and
+    inference: the index was stamped with the override and every query embedded with
+    the AUTO default, which ``_index_backend_mismatch`` then reported as a stale index
+    (techne#1260). Loading here covers every such site, the numpy-free query path
+    included. A load failure falls back to AUTO, as before.
+    """
+    if config is not None:
+        return config
+    global _AMBIENT_CONFIG
+    if _AMBIENT_CONFIG is None:
+        try:
+            from techne.config import Config
+
+            _AMBIENT_CONFIG = Config.load()
+        except Exception as exc:  # noqa: BLE001 - AUTO selection is the old behaviour
+            _log.debug("embeddings: config not loadable, using AUTO backend: %r", exc)
+            return None
+    return _AMBIENT_CONFIG
+
+
 def _get_embedding_model(
     config: "Config | None" = None, *, allow_download: bool = True
 ) -> EmbeddingBackend:
@@ -517,8 +547,10 @@ def _get_embedding_model(
     calling.
 
     `config` is optional and only consulted on the FIRST call (to build the
-    singleton); passing it is how callers opt into an explicit backend/model
-    override via `config.search.embedding_backend` / `.embedding_model`.
+    singleton); it carries the backend/model override in
+    `config.search.embedding_backend` / `.embedding_model`. Without it the
+    process's loaded Config is used (`_ambient_config`, techne#1260), so a caller
+    with no Config in hand still honours the operator's override.
 
     `allow_download=False` (pass this from any hook-reachable call site — see
     inference.py) refuses a cold-cache network fetch and raises instead,
@@ -530,7 +562,8 @@ def _get_embedding_model(
     """
     global _embedding_model
     if _embedding_model is None:
-        backend, model_name = _select_backend(config)
+        backend, model_name = _select_backend(_ambient_config(config))
+        _log.debug("embeddings: building %s/%s", backend, model_name)
         _embedding_model = _build_backend(backend, model_name, allow_download=allow_download)
     return _embedding_model
 
@@ -538,11 +571,14 @@ def _get_embedding_model(
 def _reset_embedding_model() -> None:
     """Test-only: clear the process singleton so the next call rebuilds it.
 
+    Also drops the cached ambient Config (techne#1260).
+
     Also forgets which model the numpy-free query path last served (issue 1217),
     since the vec-index guard treats that as the live model when no singleton exists.
     """
-    global _embedding_model
+    global _embedding_model, _AMBIENT_CONFIG
     _embedding_model = None
+    _AMBIENT_CONFIG = None
     query_embed = sys.modules.get("techne.core.query_embed")
     if query_embed is not None:
         query_embed._SERVED = None
