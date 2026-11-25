@@ -441,3 +441,78 @@ def test_curated_memory_meta_stored(db, tmp_path):
     assert "mtime" in meta
     assert "size" in meta
     assert meta["size"] > 0
+
+
+# ---------------------------------------------------------------------------
+# techne#1290 -- a deleted memory file retires its row
+# ---------------------------------------------------------------------------
+
+
+def _walk(cfg, cwd):
+    from techne.sync.cc_memory import CCMemorySource
+
+    return CCMemorySource(cfg, cwd=cwd).initial_walk()
+
+
+def test_initial_walk_retires_deleted_file(project, db, monkeypatch):
+    """Ingest two files, delete one, re-walk: only the survivor is live, and the
+    deleted row is kept as history behind a tombstone."""
+    import shutil
+
+    from techne.config import Config
+
+    cwd, config_dir = project
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+    cfg = Config()
+    cfg.db_path = db
+    keep = _write_memory(config_dir, cwd, "# kept\n", "KEEP.md")
+    gone = _write_memory(config_dir, cwd, "# wrong, deleted\n", "GONE.md")
+    assert _walk(cfg, cwd) == 2
+
+    gone.unlink()
+    _walk(cfg, cwd)
+    assert [r["title"] for r in live_curated_memory(db)] == ["KEEP.md"]
+    conn = connect(db)
+    try:
+        old = conn.execute(
+            "SELECT superseded_by FROM curated_memory WHERE source_path=? AND content != ''",
+            (str(gone),),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert old["superseded_by"] is not None
+
+    # Removing the whole directory retires nothing.
+    shutil.rmtree(keep.parent)
+    _walk(cfg, cwd)
+    assert [r["title"] for r in live_curated_memory(db)] == ["KEEP.md"]
+
+
+def test_retired_file_that_reappears_is_live_again(project, db, monkeypatch):
+    from techne.config import Config
+
+    cwd, config_dir = project
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+    cfg = Config()
+    cfg.db_path = db
+    _write_memory(config_dir, cwd, "# a\n", "A.md")
+    b = _write_memory(config_dir, cwd, "# b\n", "B.md")
+    _walk(cfg, cwd)
+    b.unlink()
+    _walk(cfg, cwd)
+    _write_memory(config_dir, cwd, "# b\n", "B.md")
+    _walk(cfg, cwd)
+    assert sorted(r["title"] for r in live_curated_memory(db)) == ["A.md", "B.md"]
+
+
+def test_retire_is_scoped_to_the_walked_slug(db, tmp_path):
+    from techne.core.curated import retire_missing_memory
+
+    a = tmp_path / "a.md"
+    a.write_text("a")
+    b = tmp_path / "b.md"
+    b.write_text("b")
+    ingest_memory_file(db, a, slug="proj-a")
+    ingest_memory_file(db, b, slug="proj-b")
+    assert retire_missing_memory(db, slug="proj-a", present=set()) == 1
+    assert [r["slug"] for r in live_curated_memory(db)] == ["proj-b"]

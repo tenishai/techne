@@ -5,6 +5,10 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **A deleted Claude Code memory file is no longer treated as current memory (#1290).** The memory walk ingested each file it found but never compared that set against the stored rows, so a deleted memory kept its live `curated_memory` row and `memory_claims emit` kept judging it. After a walk that finds files, rows for that project whose file is gone are now retired behind a tombstone row (`provenance = 'retired'`), so history stays, and a file that comes back is live again. A walk that finds no files, or no directory, retires nothing.
+
 ## [0.20.0] — 2026-11-24
 
 ### Upgrading

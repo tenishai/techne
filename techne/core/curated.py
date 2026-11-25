@@ -169,12 +169,76 @@ def ingest_memory_file(
         conn.close()
 
 
+#: Provenance of a tombstone row: the file it supersedes is gone from disk (techne#1290).
+RETIRED_PROVENANCE = "retired"
+#: Never a real `_content_hash` (those are hex), so a file that comes back with any
+#: content, even empty, supersedes the tombstone instead of matching it.
+_RETIRED_HASH = "retired"
+
+
+def retire_missing_memory(db_path: Path, *, slug: str, present: set[str]) -> int:
+    """Retire live rows for *slug* whose ``source_path`` is not in *present*.
+
+    A deleted memory file kept its live row forever, and memory_claims kept judging
+    it as current memory (techne#1290). Retiring follows the supersede chain the
+    rest of this module uses: a tombstone row (provenance ``'retired'``, empty
+    content) is inserted and the old row points at it, so history stays and a file
+    that reappears supersedes the tombstone through `ingest_memory_file` as usual.
+    ``live_curated_memory`` leaves tombstones out.
+
+    Scoped to one slug, so one project's walk never retires another's rows. The
+    caller must not call this for an empty walk: a missing or unmounted directory
+    would otherwise retire everything. Returns the number of rows retired.
+    """
+    conn = connect(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute(
+            """SELECT id, source_path, title FROM curated_memory
+               WHERE superseded_by IS NULL AND slug = ? AND provenance != ?""",
+            (slug, RETIRED_PROVENANCE),
+        ).fetchall()
+        retired = 0
+        for r in rows:
+            if r["source_path"] in present:
+                continue
+            cur = conn.execute(
+                """INSERT INTO curated_memory
+                       (source_path, slug, title, content, content_hash, provenance)
+                   VALUES (?, ?, ?, '', ?, ?)""",
+                (r["source_path"], slug, r["title"], _RETIRED_HASH, RETIRED_PROVENANCE),
+            )
+            conn.execute(
+                """UPDATE curated_memory
+                   SET superseded_by = ?, updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ?""",
+                (cur.lastrowid, r["id"]),
+            )
+            retired += 1
+            log.info(
+                "curated_memory_retired",
+                path=r["source_path"],
+                old_id=r["id"],
+                tombstone_id=cur.lastrowid,
+            )
+        conn.commit()
+        return retired
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def live_curated_memory(
     db_path: Path,
     *,
     slug: str | None = None,
 ) -> list[dict]:
     """Return current (non-superseded) curated memory rows, optionally scoped to a slug.
+
+    Tombstones (``provenance = 'retired'``, a deleted file) are not memory and are
+    left out (techne#1290).
 
     Used by the PR3 claim-gate and any other consumer that needs the active drain
     snapshot.  Returns rows as plain dicts ordered by ``source_path``.
@@ -186,17 +250,18 @@ def live_curated_memory(
                 """SELECT id, source_path, slug, title, content, content_hash,
                           provenance, session_id, meta, captured_at, created_at, updated_at
                    FROM curated_memory
-                   WHERE superseded_by IS NULL AND slug = ?
+                   WHERE superseded_by IS NULL AND slug = ? AND provenance != ?
                    ORDER BY source_path""",
-                (slug,),
+                (slug, RETIRED_PROVENANCE),
             ).fetchall()
         else:
             rows = conn.execute(
                 """SELECT id, source_path, slug, title, content, content_hash,
                           provenance, session_id, meta, captured_at, created_at, updated_at
                    FROM curated_memory
-                   WHERE superseded_by IS NULL
+                   WHERE superseded_by IS NULL AND provenance != ?
                    ORDER BY source_path""",
+                (RETIRED_PROVENANCE,),
             ).fetchall()
         return [dict(r) for r in rows]
     finally:
