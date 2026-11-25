@@ -271,6 +271,32 @@ def _local_search(config: Config, query: str, **kwargs) -> list[dict]:
     )
 
 
+def _reports_vec_degraded(fn):
+    """Add a ``degraded`` field when the vector channel failed during *fn* (techne#1253).
+
+    The vector channel degrades to FTS rather than raising, and only the hooks read
+    `take_vec_channel_error()`, so an explicit search or recall over a broken index
+    returned thin FTS-only rows that read as "nothing known". The flag is cleared
+    first so a failure from an earlier call is not blamed on this one.
+    """
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(args: dict, config: Config) -> dict:
+        from techne.core.search import take_vec_channel_error
+
+        take_vec_channel_error()
+        out = fn(args, config)
+        err = take_vec_channel_error()
+        if err and isinstance(out, dict):
+            log.debug("%s: vector channel degraded: %s", fn.__name__, err)
+            out["degraded"] = err
+        return out
+
+    return wrapper
+
+
+@_reports_vec_degraded
 def _techne_search(args: dict, config: Config) -> dict:
     query = args.get("query", "")
     table = args.get("table", "all")
@@ -870,6 +896,7 @@ def _with_ladder(
     return out
 
 
+@_reports_vec_degraded
 def _techne_recall(args: dict, config: Config) -> dict:
     """Retrieve context for a specific topic — searches all layers.
 

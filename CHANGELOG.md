@@ -22,6 +22,9 @@ All notable changes to techne are documented here. Format loosely follows
 ### Fixed
 
 - **`techne restore` works when a live db is corrupt (#1258).** Restore first snapshots the live dbs with SQLite's online backup API, which raises `database disk image is malformed` on a corrupt source, so restore stopped with a traceback before touching anything, the one case it is most needed (reproduced with a db cut to half its size). The pre-restore snapshot now falls back to a raw copy of the db and its `-wal`/`-shm`, marks it `raw_copy` in the set's manifest, and `restore` prints a note naming it. Restoring from such a set puts its `-wal` and `-shm` back beside the db, because rows not yet checkpointed exist only there. A plain `techne backup` still fails on a corrupt db. The second half of #1258, locking out live writers during a restore, is not in this change.
+### Fixed
+
+- **`techne_recall`, `techne_search` and `techne search` say when the vector channel failed (#1253).** Only the hooks read the vector-failure flag, and the ANN query's `OperationalError` handler (a stale-width or corrupt vector index) returned no rows without setting it, so recall over a broken index returned FTS-only rows with nothing to say they were partial. That handler now sets the flag; the two MCP tools return a `degraded` field with the reason, and `techne search` prints a `degraded:` line on stderr.
 
 ## [0.20.0] — 2026-11-24
 
