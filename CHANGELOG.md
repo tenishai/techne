@@ -5,6 +5,10 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Changed
+
+- **CI: seven more wall-clock assertions are gone (#1383).** The slow-source and slow-constructor recall tests block on an event instead of sleeping 2 s against a 1.5 s ceiling. The session_end budget test runs the hook in-process with a teardown that blocks until the budget cuts it off; the old one timed a subprocess, interpreter start-up included, and its `TECHNE_HOOK_TIMEOUT` never reached session_end. The two `allow_download=False` tests refuse DNS and connect and assert none was tried, instead of a 3 s and a 4 s ceiling. The two redaction ReDoS bounds keep their limits but measure the thread's CPU time, so a descheduled worker no longer counts.
+
 ## [0.20.0] — 2026-11-24
 
 ### Upgrading
