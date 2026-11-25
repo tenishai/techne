@@ -164,6 +164,9 @@ class BackupResult:
     dest: Path
     backed_up: list[str]
     skipped_absent: list[str]
+    #: Domains copied file-for-file because the backup API could not read them
+    #: (``raw_fallback``, techne#1258). Also in ``backed_up``.
+    raw_copied: list[str] = field(default_factory=list)
 
 
 def _online_copy(src: Path, dst: Path) -> None:
@@ -180,14 +183,39 @@ def _online_copy(src: Path, dst: Path) -> None:
         src_conn.close()
 
 
+def _raw_copy(src: Path, dst: Path) -> list[str]:
+    """File-for-file copy of *src* and any ``-wal``/``-shm`` beside it. Returns the
+    sidecar file names written next to *dst*."""
+    shutil.copy2(src, dst)
+    sidecars: list[str] = []
+    for sidecar in _WAL_SIDECARS:
+        side = src.with_name(src.name + sidecar)
+        if side.exists():
+            out = dst.with_name(dst.name + sidecar)
+            shutil.copy2(side, out)
+            sidecars.append(out.name)
+    return sidecars
+
+
 def backup_all_dbs(
-    config: Config, dest_dir: Path | None = None, *, label: str = "backup"
+    config: Config,
+    dest_dir: Path | None = None,
+    *,
+    label: str = "backup",
+    raw_fallback: bool = False,
 ) -> BackupResult:
     """Snapshot every PRESENT domain DB together into one timestamped directory.
 
     Each db is copied via the online backup API (consistent even if written concurrently),
     and a manifest records the set so a restore can validate it. Absent domains are skipped
     (recorded in the manifest), not created. Returns the destination + which domains landed.
+
+    *raw_fallback* is for the pre-restore snapshot (techne#1258). The backup API raises
+    ``sqlite3.DatabaseError`` on a corrupt source, which aborted a restore in exactly the
+    case it is needed. With the flag set, such a db is copied file-for-file with its
+    ``-wal``/``-shm`` instead, marked ``"raw_copy": true`` in the manifest and listed in
+    ``raw_copied``. An ordinary backup keeps raising: a backup that silently copied a
+    corrupt file would look like a good one.
     """
     # `dest_dir` IS THE BACKUPS ROOT, NOT THE SET — which is what `--out`'s help text has
     # always said ("Destination dir (default: <data_dir>/backups/)") and what this code did
@@ -229,6 +257,7 @@ def backup_all_dbs(
     paths = domain_db_paths(config)
     backed_up: list[str] = []
     skipped: list[str] = []
+    raw_copied: list[str] = []
     manifest_dbs: dict[str, dict] = {}
     # A FAILED BACKUP USED TO LEAVE A SET NOTHING WOULD EVER RECLAIM (Prudence, #755 round 5
     # Important 1). The manifest is written LAST — correctly, since a set is not a set until
@@ -247,7 +276,25 @@ def backup_all_dbs(
                 skipped.append(domain)
                 continue
             out = dest_dir / f"{domain}.db"
-            _online_copy(src, out)
+            try:
+                _online_copy(src, out)
+            except sqlite3.DatabaseError as e:
+                if not raw_fallback:
+                    raise
+                logger.warning(
+                    "backup: %s unreadable by the backup API (%s); raw copy", domain, e
+                )
+                sidecars = _raw_copy(src, out)
+                raw_copied.append(domain)
+                backed_up.append(domain)
+                manifest_dbs[domain] = {
+                    "file": out.name,
+                    "size_bytes": out.stat().st_size,
+                    "raw_copy": True,
+                    "raw_copy_reason": str(e),
+                    "sidecars": sidecars,
+                }
+                continue
             backed_up.append(domain)
             manifest_dbs[domain] = {"file": out.name, "size_bytes": out.stat().st_size}
 
@@ -271,7 +318,9 @@ def backup_all_dbs(
     except BaseException:
         shutil.rmtree(dest_dir, ignore_errors=True)
         raise
-    return BackupResult(dest=dest_dir, backed_up=backed_up, skipped_absent=skipped)
+    return BackupResult(
+        dest=dest_dir, backed_up=backed_up, skipped_absent=skipped, raw_copied=raw_copied
+    )
 
 
 #: The one shape `_now_iso()` emits, and the only one that sorts chronologically as
@@ -849,6 +898,9 @@ class RestoreResult:
     restored: list[str]
     pre_restore_backup: Path | None
     skipped_unknown: list[str] = field(default_factory=list)
+    #: Domains the pre-restore snapshot copied raw because they were unreadable
+    #: (techne#1258).
+    pre_restore_raw: list[str] = field(default_factory=list)
 
 
 def read_manifest(src_dir: Path) -> dict:
@@ -915,10 +967,14 @@ def restore_all_dbs(
     manifest = read_manifest(src_dir)  # validates the whole set first
 
     pre: Path | None = None
+    pre_raw: list[str] = []
     if pre_restore_backup:
         # Label, do not name the directory: `dest_dir` is the backups ROOT now, so passing
         # a set path here would nest the set inside it and hide it from retention.
-        pre = backup_all_dbs(config, label="pre-restore").dest
+        # RAW FALLBACK (techne#1258): a corrupt live db is the usual reason to restore,
+        # and the backup API raises on one, so without it the restore aborted first.
+        snap = backup_all_dbs(config, label="pre-restore", raw_fallback=True)
+        pre, pre_raw = snap.dest, snap.raw_copied
 
     live = domain_db_paths(config)
     plan: list[tuple[str, Path, Path, Path]] = []  # (domain, src_file, target, temp)
@@ -975,4 +1031,9 @@ def restore_all_dbs(
         for *_, temp in plan:
             temp.unlink(missing_ok=True)
 
-    return RestoreResult(restored=restored, pre_restore_backup=pre, skipped_unknown=skipped_unknown)
+    return RestoreResult(
+        restored=restored,
+        pre_restore_backup=pre,
+        skipped_unknown=skipped_unknown,
+        pre_restore_raw=pre_raw,
+    )

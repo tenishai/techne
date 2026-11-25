@@ -2032,3 +2032,61 @@ def test_a_set_with_two_problems_reports_both(tmp_path):
     )
     assert RETENTION_REFUSAL_PHRASES[7] in only_missing.refusal
     assert RETENTION_REFUSAL_PHRASES[6] not in only_missing.refusal, only_missing.refusal
+
+
+# ---------------------------------------------------------------------------
+# techne#1258 -- restore over a corrupt live db
+# ---------------------------------------------------------------------------
+
+
+def _truncate_live(config):
+    """Corrupt the live db the way a crash or disk fault does: cut it in half."""
+    db = config.db_path
+    for sidecar in ("-wal", "-shm"):
+        db.with_name(db.name + sidecar).unlink(missing_ok=True)
+    size = db.stat().st_size
+    with open(db, "r+b") as f:
+        f.truncate(size // 2)
+    return size // 2
+
+
+def test_restore_recovers_a_truncated_live_db(config):
+    """The pre-restore snapshot used the backup API, which raises DatabaseError on a
+    corrupt source, so restore aborted in the one case it is needed."""
+    for i in range(400):
+        _add_knowledge(config.db_path, f"FILLER-{i} " + "x" * 200)
+    _add_knowledge(config.db_path, "RESTORE-ME")
+    res = backup_all_dbs(config)
+    cut = _truncate_live(config)
+
+    rr = restore_all_dbs(config, res.dest)
+    assert rr.restored == ["techne"]
+    assert "RESTORE-ME" in _knowledge_contents(config.db_path)
+    # The corrupt state was still kept, raw, and the manifest says so.
+    assert rr.pre_restore_raw == ["techne"]
+    snap = rr.pre_restore_backup
+    assert (snap / "techne.db").stat().st_size == cut
+    meta = json.loads((snap / "manifest.json").read_text())["databases"]["techne"]
+    assert meta["raw_copy"] is True and "malformed" in meta["raw_copy_reason"]
+
+
+def test_ordinary_backup_still_raises_on_a_corrupt_db(config):
+    """Only the pre-restore snapshot falls back; a plain backup must not quietly
+    produce a set holding a corrupt file."""
+    import sqlite3
+
+    for i in range(400):
+        _add_knowledge(config.db_path, f"FILLER-{i} " + "x" * 200)
+    _truncate_live(config)
+    with pytest.raises(sqlite3.DatabaseError):
+        backup_all_dbs(config)
+
+
+def test_cli_restore_says_the_snapshot_is_raw(config, monkeypatch):
+    for i in range(400):
+        _add_knowledge(config.db_path, f"FILLER-{i} " + "x" * 200)
+    res = backup_all_dbs(config)
+    _truncate_live(config)
+    out = _run_cli(config, monkeypatch, ["restore", str(res.dest), "--yes"])
+    assert out.exit_code == 0, out.output
+    assert "raw file copy" in out.output
