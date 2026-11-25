@@ -3,7 +3,7 @@ card: arch-card:techne-search-embeddings
 updated: 2026-10-24
 anchor: techne/core/embeddings.py sha=475319b241d266cec740bc8e27f3c4d13a817ff5
 anchor: techne/core/static_direct.py sha=a70c7baba16383dae6c588849f7abc9cc1058698
-anchor: techne/core/search.py sha=e3b6111f5c4079b9868c1f331da355a234acfc5b
+anchor: techne/core/search.py sha=7870328f6daa7e623e520c41885c8b1867680b89
 anchor: techne/core/query_embed.py sha=5055d672359d25abbb59b9bf8cbacb6335a47799
 anchor: techne/core/vec_ext.py sha=4de2d7c72a9fcd3f11fd7ed58a5d988e43da1ba4
 anchor: techne/platforms/claude_code/hooks.py sha=9eb04ed9d6b5bcde846c28a220c3292f0b14453b
@@ -75,6 +75,8 @@ A DEAD VECTOR CHANNEL IS NO LONGER RECORDED AS A HEALTHY TURN **AT THE ONE EXIT 
 AND THE MARKER IS THE ONLY SIGNAL THAT CAN EXIST ON THAT PATH — the stderr line is not its second half. `user_prompt_submit` is a `UserPromptSubmit` hook and it exits 0, and Claude Code's hook documentation is explicit that "stderr from a hook that exits 0 goes to the debug log only, never the transcript, and Claude never sees it". Only exit 2 surfaces stderr, and exit 2 BLOCKS the prompt and erases it, which is not on the table for a recall rail. Relatedly, `_EMBED_UNAVAILABLE_WARNED`'s "once per process" is NOT once per turn here: the hook runs as a fresh subprocess per prompt, so the flag starts `False` every turn. The dedupe earns its keep only in a long-lived process (a CLI backfill loop, the MCP server). Verified against the docs rather than assumed, because the answer decides how much of the "less silent" claim survives — and it is: none of it, on the hook path.
 
 `_VEC_CHANNEL_ERROR` IS SET ON ONE OF `search_vec`'s FOUR `return []` EXITS, AND THAT IS NOT AN UNFINISHED JOB (Prudence, #728 r4 nit 2 / r5 Important 1 / r6 Important 1). THE CLAIM IS CHECKABLE AGAINST GIT RATHER THAN AGAINST A TAXONOMY: on `main`, `search.py:633` is a bare `model = _get_embedding_model()` with no `try`, so its failure PROPAGATED and `_record` wrote `failed`. #708 is what silenced that exit. The other three returned `[]` silently before #708 and still do. The marker restores the signal at the one exit #708 removed it from, and claims nothing beyond that.
+
+THE ANN QUERY EXIT NOW SETS IT TOO, AND THE MARKER REACHES THE EXPLICIT SURFACES (techne#1253). `_vec_channel_rows` caught `sqlite3.OperationalError` on `embedding MATCH ?` (a stale-width index, a corrupt vec0 table) and returned `[]` with no flag. That is a channel the operator turned on that is broken, the case `liveness.md` says must not read as healthy, so the handler now sets `_VEC_CHANNEL_ERROR` before degrading. And only the two hooks drained the flag: `techne_recall` and `techne_search` (`mcp_server._reports_vec_degraded`, which clears a stale flag before the call and returns `degraded` after) and `techne search` (a `degraded:` line on stderr) now do as well. The paragraph above still holds for the other exits: this adds one exit, it does not sort the rest.
 
 DO NOT "CLOSE THE GAP" AT THE `backend_available()` GATE. `test_a_healthy_turn_still_records_ok` patches it to False and asserts `ok`; setting the marker there fails that test, and it would mark EVERY healthy turn on an install that never enabled vectors.
 

@@ -1117,6 +1117,13 @@ def search(ctx, query, table, limit):
         identifier_rare_fraction=config.search.identifier_rare_fraction,
         phrase_seat=True,  # techne#1142: explicit query, like techne_search
     )
+    # techne#1253: a vector-channel failure degrades to FTS silently; name it, so a
+    # thin result over a broken index is not read as "nothing known".
+    from techne.core.search import take_vec_channel_error
+
+    vec_error = take_vec_channel_error()
+    if vec_error:
+        click.echo(f"degraded: {vec_error}", err=True)
     if not results:
         click.echo("No results.")
         return
