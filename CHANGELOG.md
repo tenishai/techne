@@ -8,14 +8,12 @@ All notable changes to techne are documented here. Format loosely follows
 ### Docs
 
 - **README: what credential redaction does not catch (#1364).** A new section says redaction works by shape, lists secrets it misses (a value under an unlisted name such as `DB_PASS`, a bare value, a short `password=`, a webhook path secret), and says where a missed value goes: `observations` in `techne.db`, then anything built from it, including the outbox sync and the archivist publish lane. Known-value matching stays open in issue #1364.
+- **`docs/releasing.md` has a step for publishing the wheel to `pypi.tenish.ai` (#1386).** v0.20.0 was released without one on the index. New step 8 builds the wheel from the tag twice with `SOURCE_DATE_EPOCH` set to the tag commit's time and checks the hashes match, publishes it with tenish-pypi's `publish.py` (maintainers only), checks the sha256 the index serves, and attaches the wheel and a `SHA256SUMS` file to the GitHub Release. The outside checks now resolve `tenish-techne==X.Y.Z` against the index and list the Release's assets.
+
 ### Changed
 
 - **CI: the duplicate-team-row recall test no longer depends on the clock (#1184).** Its duplicate was one of twelve notes that tie on BM25 for ten seats, so a one-second `CURRENT_TIMESTAMP` boundary falling just after the fourth or fifth note was stored pushed it off memory's page and the team copy survived. The duplicate is now the strongest and newest match, which is on the page whatever the timestamps.
 - **CI: seven more wall-clock assertions are gone (#1383).** The slow-source and slow-constructor recall tests block on an event instead of sleeping 2 s against a 1.5 s ceiling. The session_end budget test runs the hook in-process with a teardown that blocks until the budget cuts it off; the old one timed a subprocess, interpreter start-up included, and its `TECHNE_HOOK_TIMEOUT` never reached session_end. The two `allow_download=False` tests refuse DNS and connect and assert none was tried, instead of a 3 s and a 4 s ceiling. The two redaction ReDoS bounds keep their limits but measure the thread's CPU time, so a descheduled worker no longer counts.
-
-### Docs
-
-- **`docs/releasing.md` has a step for publishing the wheel to `pypi.tenish.ai` (#1386).** v0.20.0 was released without one on the index. New step 8 builds the wheel from the tag twice with `SOURCE_DATE_EPOCH` set to the tag commit's time and checks the hashes match, publishes it with tenish-pypi's `publish.py` (maintainers only), checks the sha256 the index serves, and attaches the wheel and a `SHA256SUMS` file to the GitHub Release. The outside checks now resolve `tenish-techne==X.Y.Z` against the index and list the Release's assets.
 
 ### Fixed
 
