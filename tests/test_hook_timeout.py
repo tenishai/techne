@@ -252,28 +252,48 @@ class TestSessionEndHookTimeout:
             f"stderr: {result.stderr.decode()}"
         )
 
-    def test_does_not_hang_longer_than_budget_plus_margin(self, tmp_path: Path):
-        """session_end must not run longer than budget + a generous margin."""
-        budget = 0.5  # half a second
-        margin = 3.0  # generous to avoid flakiness on slow CI
+    def test_blocked_teardown_is_cut_off_by_the_budget(self, tmp_path: Path, monkeypatch, capsys):
+        """session_end's work is cut off by its own budget, and the hook exits 0.
 
-        start = time.monotonic()
-        result = _run_hook(
-            "techne.hooks.session_end",
-            {"session_id": "sess-no-hang"},
-            env_overrides={
-                "HOME": str(tmp_path),
-                "TECHNE_HOOK_TIMEOUT": str(budget),
-            },
-            timeout=budget + margin + 2.0,
-        )
-        elapsed = time.monotonic() - start
+        The teardown is made to block until it is interrupted, so the only way the
+        hook can return is through the budget. Issue 1383: this used to time a
+        subprocess against budget + 3 s, which counted interpreter start-up on a
+        loaded runner, and its TECHNE_HOOK_TIMEOUT never reached session_end (the
+        budget comes from `config.hooks.timeout_s`).
+        """
+        if not hasattr(signal, "SIGALRM"):
+            pytest.skip("SIGALRM not available on this platform")
+        import io
 
-        assert result.returncode == 0
-        assert elapsed < budget + margin, (
-            f"session_end ran for {elapsed:.2f}s (budget {budget}s + margin {margin}s) — "
-            "hook did not respect its timeout"
+        from techne.config import Config
+        from techne.core.database import init_db
+        from techne.hooks import session_end
+
+        cfg = Config()
+        cfg.db_path = tmp_path / "techne.db"
+        init_db(cfg.db_path).close()
+        cfg.hooks.timeout_s = 0.3
+
+        returned = []
+
+        def blocks(*a, **k):
+            time.sleep(60)  # interrupted by SIGALRM; returning means the budget never fired
+            returned.append(1)
+            return {}
+
+        monkeypatch.setattr("techne.config.Config.load", classmethod(lambda cls, *a, **k: cfg))
+        monkeypatch.setattr(
+            "techne.platforms.claude_code.transcript_import.backfill_uncaptured", blocks
         )
+        monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({"session_id": "sess-no-hang"})))
+
+        with pytest.raises(SystemExit) as exc:
+            session_end.main()
+
+        assert exc.value.code == 0
+        assert returned == [], "the blocked teardown ran to completion: the budget never fired"
+        err = capsys.readouterr().err
+        assert "session_end exceeded its 0.3s budget" in err, err
 
 
 class TestHookTimeoutExitZeroInvariant:
