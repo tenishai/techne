@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import time
+import threading
 
 import pytest
 
@@ -11,18 +11,22 @@ from techne.config import Config, RecallOrderEntry
 
 
 class FakeSource:
-    def __init__(self, name, rows=None, *, escalation=False, healthy=True, delay=0.0):
+    def __init__(self, name, rows=None, *, escalation=False, healthy=True, gate=None):
         self.name = name
         self.escalation = escalation
         self._rows = rows if rows is not None else [{"content": f"{name} says hi", "id": 1}]
         self._healthy = healthy
-        self._delay = delay
+        # A threading.Event the search blocks on until the test sets it: a call that
+        # cannot finish before the test lets it, with no sleep and no wall clock.
+        self._gate = gate
         self.calls = 0
+        self.finished = 0
 
     def search(self, topic, limit):
         self.calls += 1
-        if self._delay:
-            time.sleep(self._delay)
+        if self._gate is not None:
+            self._gate.wait(30)
+        self.finished += 1
         return self._rows[:limit]
 
     def health(self):
@@ -209,16 +213,21 @@ def test_a_fallback_librarian_is_not_queried_once_memory_fills(cfg, monkeypatch)
 
 
 def test_a_slow_source_times_out_and_recall_still_returns(cfg, monkeypatch):
-    src = FakeSource("slow", delay=2.0)
+    # The source cannot finish until the gate opens, so recall returning at all
+    # proves it did not wait for the source (issue 1383: this used to sleep 2 s and
+    # assert elapsed < 1.5 s, which a loaded runner could fail).
+    gate = threading.Event()
+    src = FakeSource("slow", gate=gate)
     _install(monkeypatch, FakeEntryPoint("slow", lambda: src))
     cfg.recall.allowed_sources = ["slow"]
     cfg.recall.source_timeout_s = 0.2
 
-    t0 = time.monotonic()
-    out = _recall(cfg)
-    elapsed = time.monotonic() - t0
+    try:
+        out = _recall(cfg)
+        assert src.finished == 0, "recall waited for the source to finish"
+    finally:
+        gate.set()
 
-    assert elapsed < 1.5
     rung = _tier(out, "slow")
     assert rung["state"] == "unavailable" and "timed out" in rung["detail"]
     assert any(r.get("origin") == "memory" for r in out["search_results"])
@@ -414,8 +423,6 @@ def test_a_fallback_remote_that_is_not_reached_is_never_fanned_out_to(busy_cfg, 
 
 
 def test_one_hung_source_never_starves_a_healthy_one(cfg, monkeypatch):
-    import threading
-
     release = threading.Event()
     hung = FakeSource("hung")
     hung.search = lambda topic, limit: release.wait(30) and []
@@ -765,11 +772,18 @@ def test_a_constructor_that_fails_once_is_retried(cfg, monkeypatch):
 def test_a_slow_constructor_cannot_block_recall(cfg, monkeypatch):
     import techne.sync.adapter as ad
 
+    # The constructor blocks until the gate opens, so recall returning with the
+    # adapter still unbuilt proves construction ran outside the recall thread
+    # (issue 1383: this used to sleep 2 s and assert elapsed < 1.5 s).
+    gate = threading.Event()
+    built = []
+
     class Slow:
         supports_pull = True
 
         def __new__(cls, **kw):
-            time.sleep(2.0)
+            gate.wait(30)
+            built.append(1)
             return PullAdapter()
 
     _install(monkeypatch)
@@ -777,10 +791,12 @@ def test_a_slow_constructor_cannot_block_recall(cfg, monkeypatch):
     cfg.sync.adapter = "teamstore"
     cfg.recall.source_timeout_s = 0.2
 
-    t0 = time.monotonic()
-    out = _recall(cfg)
+    try:
+        out = _recall(cfg)
+        assert built == [], "recall waited for the adapter constructor"
+    finally:
+        gate.set()
 
-    assert time.monotonic() - t0 < 1.5
     assert _tier(out, "team")["state"] == "unavailable"
 
 
