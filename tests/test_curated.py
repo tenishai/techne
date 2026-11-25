@@ -489,6 +489,8 @@ def test_initial_walk_retires_deleted_file(project, db, monkeypatch):
 
 
 def test_retired_file_that_reappears_is_live_again(project, db, monkeypatch):
+    """A tombstone must not block the file coming back. The middle assertion makes
+    this fail without the fix too: on main the deleted file is never retired."""
     from techne.config import Config
 
     cwd, config_dir = project
@@ -500,6 +502,7 @@ def test_retired_file_that_reappears_is_live_again(project, db, monkeypatch):
     _walk(cfg, cwd)
     b.unlink()
     _walk(cfg, cwd)
+    assert [r["title"] for r in live_curated_memory(db)] == ["A.md"]
     _write_memory(config_dir, cwd, "# b\n", "B.md")
     _walk(cfg, cwd)
     assert sorted(r["title"] for r in live_curated_memory(db)) == ["A.md", "B.md"]
