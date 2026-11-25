@@ -154,11 +154,14 @@ Check that the version resolves from the index, and that the Release carries the
 
 ```sh
 echo 'tenish-techne==X.Y.Z' > release.in
-uv pip compile --index https://pypi.tenish.ai/simple release.in
+uv pip compile --index tenish=https://pypi.tenish.ai/simple release.in
 gh release view vX.Y.Z --json assets --jq '.assets[].name'
 ```
 
-A resolution failure means step 8 was skipped or failed, which is what happened to v0.20.0.
+The index must be named (`tenish=`): uv reads `UV_INDEX_TENISH_USERNAME` and
+`UV_INDEX_TENISH_PASSWORD`, the tester token from step 8, only for a named index. A 401 means
+the credentials are missing, not the wheel. Any other resolution failure means step 8 was
+skipped or failed, which is what happened to v0.20.0.
 
 **Then install the tag as a user would** (techne#1319): both README paths, from the tag
 over https, through `techne init`, the hooks, MCP and a store and recall:
