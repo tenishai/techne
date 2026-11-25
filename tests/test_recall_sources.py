@@ -489,12 +489,20 @@ def test_an_excluded_memory_is_never_searched_and_drops_no_team_rows(busy_cfg, m
 
 
 def test_with_memory_in_the_order_a_duplicate_team_row_is_still_dropped(busy_cfg, monkeypatch):
+    from techne.core.knowledge import store
+
+    # The duplicate must be a row memory's page certainly holds. The twelve busy
+    # notes tie on BM25 and fill 10 seats, so which of them make the page depends
+    # on CURRENT_TIMESTAMP's one-second resolution: a second boundary falling just
+    # after "note 3" or "note 4" was stored pushed note 3 off it (issue 1184). This
+    # row is the shortest match, so the strongest BM25 hit, and the newest.
+    store(busy_cfg.db_path, "deploy runbook kafka", type="fact", source="t")
     _install(monkeypatch)
     _federated(
         busy_cfg,
         monkeypatch,
         [
-            {"id": 901, "content": "deploy runbook kafka note 3"},
+            {"id": 901, "content": "deploy runbook kafka"},
             {"id": 902, "content": "team only"},
         ],
     )
