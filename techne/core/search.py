@@ -2837,6 +2837,10 @@ def backfill_vectors(
     sqlite_vec, or an interpreter that cannot load extensions — and a caller must
     not report hygiene as having happened. An empty dict is ambiguous across
     three different outcomes; the key is the discriminator.
+
+    The resolver reads the embedding backend/model override from the process's
+    loaded Config (`embeddings._ambient_config`, techne#1260), so this embeds with
+    the backend `init` stamped the index with.
     """
     try:
         import numpy as np

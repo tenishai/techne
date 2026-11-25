@@ -5,6 +5,10 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **`search.embedding_backend` and `search.embedding_model` apply to queries and backfill, not only `init` (#1260).** The query path, `techne vectors backfill`, the MMR rerank and the vector-status probe built the embedding model without the config, and the numpy-free query path picked the AUTO model the same way. With an override set, `init` stamped the index with it, every query embedded with the default, the vector channel switched itself off as a backend mismatch, and the next backfill re-embedded the whole store with the default. The embedding resolver now reads the process's loaded config when a caller passes none; a config passed explicitly still wins.
+
 ## [0.20.0] — 2026-11-24
 
 ### Upgrading
