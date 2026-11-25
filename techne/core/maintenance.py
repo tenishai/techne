@@ -984,7 +984,8 @@ def restore_all_dbs(
         pre, pre_raw = snap.dest, snap.raw_copied
 
     live = domain_db_paths(config)
-    plan: list[tuple[str, Path, Path, Path]] = []  # (domain, src_file, target, temp)
+    # (domain, src_file, target, temp, sidecars)
+    plan: list[tuple[str, Path, Path, Path, list[str]]] = []
     skipped_unknown: list[str] = []
     for domain, meta in manifest["databases"].items():
         if domain not in live:  # a backup from a future techne with a new domain
