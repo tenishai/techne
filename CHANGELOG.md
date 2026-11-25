@@ -5,6 +5,9 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Docs
+
+- **README: what credential redaction does not catch (#1364).** A new section says redaction works by shape, lists secrets it misses (a value under an unlisted name such as `DB_PASS`, a bare value, a short `password=`, a webhook path secret), and says where a missed value goes: `observations` in `techne.db`, then anything built from it, including the outbox sync and the archivist publish lane. Known-value matching stays open in issue #1364.
 ### Changed
 
 - **CI: the duplicate-team-row recall test no longer depends on the clock (#1184).** Its duplicate was one of twelve notes that tie on BM25 for ten seats, so a one-second `CURRENT_TIMESTAMP` boundary falling just after the fourth or fifth note was stored pushed it off memory's page and the team copy survived. The duplicate is now the strongest and newest match, which is on the page whatever the timestamps.
