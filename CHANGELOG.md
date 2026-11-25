@@ -16,6 +16,9 @@ All notable changes to techne are documented here. Format loosely follows
 
 - **`consolidate emit` no longer goes quiet once the first batch is judged (#1355).** `max_clusters` was applied before the already-judged filter, and the cluster walk always starts at the same rows, so once the first 20 clusters had a verdict every emit returned nothing (measured: 10 built, 10 judged, 0 fresh on a store of about 5,150 rows). The judged hashes are now skipped during the walk, so the cap counts fresh clusters.
 - **An unparseable answer is no longer recorded as a judgement (#1246).** A refusal or truncated reply to a consolidate, dream or conflict prompt wrote the same discarded marker as a real `keep`, `none` or empty verdict list, and the cluster was never offered again. Only a parsed answer writes the marker now; anything else writes nothing, counts as `unparsed` in the ingest result, and is offered on the next emit.
+### Fixed
+
+- **A deleted Claude Code memory file is no longer treated as current memory (#1290).** The memory walk ingested each file it found but never compared that set against the stored rows, so a deleted memory kept its live `curated_memory` row and `memory_claims emit` kept judging it. After a walk that finds files, rows for that project whose file is gone are now retired behind a tombstone row (`provenance = 'retired'`), so history stays, and a file that comes back is live again. A walk that finds no files, or no directory, retires nothing.
 
 ## [0.20.0] — 2026-11-24
 

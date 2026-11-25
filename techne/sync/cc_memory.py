@@ -18,7 +18,7 @@ from typing import ClassVar
 
 from techne._log import get_logger
 from techne.config import Config
-from techne.core.curated import ingest_memory_file
+from techne.core.curated import ingest_memory_file, retire_missing_memory
 from techne.core.memory_doctor import find_curated_memory_files
 
 log = get_logger(__name__)
@@ -58,6 +58,10 @@ class CCMemorySource:
         ``ingest_memory_file`` for each, and returns the count of rows
         STORED (new inserts + supersessions).  Re-running on unchanged
         files returns 0 (all content-hash no-ops).
+
+        After a walk that found files, live rows for this slug whose file is no
+        longer in the directory are retired (``retire_missing_memory``). An empty
+        walk retires nothing.
         """
         # Lazy rather than structural (techne#626). This module IS named for Claude
         # Code, so the import is honest — but #57 asks that MOVING it under
@@ -84,12 +88,20 @@ class CCMemorySource:
             if was_stored:
                 stored += 1
 
+        # A file gone from the directory retires its row (techne#1290). Only after a
+        # walk that found files: the early return above covers a missing or empty
+        # directory, so an unmounted one never retires everything.
+        retired = retire_missing_memory(
+            self._config.db_path, slug=slug, present={str(p) for p in files}
+        )
+
         log.info(
             "cc_memory_walk_done",
             cwd=str(cwd),
             slug=slug,
             found=len(files),
             stored=stored,
+            retired=retired,
         )
         return stored
 
