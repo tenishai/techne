@@ -5,6 +5,10 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Docs
+
+- **`docs/releasing.md` has a step for publishing the wheel to `pypi.tenish.ai` (#1386).** v0.20.0 was released without one on the index. New step 8 builds the wheel from the tag twice with `SOURCE_DATE_EPOCH` set to the tag commit's time and checks the hashes match, publishes it with tenish-pypi's `publish.py` (maintainers only), checks the sha256 the index serves, and attaches the wheel and a `SHA256SUMS` file to the GitHub Release. The outside checks now resolve `tenish-techne==X.Y.Z` against the index and list the Release's assets.
+
 ## [0.20.0] — 2026-11-24
 
 ### Upgrading
