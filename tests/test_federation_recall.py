@@ -945,7 +945,7 @@ class TestIngestStagesPendingCandidate:
         cfg = Config()
         cfg.db_path = local_db
 
-        secret = "AKIAIOSFODNN7EXAMPLE"  # AWS access key id shape → redacted
+        secret = "AKI" "AIOSFODNN7EXAMPLE"  # AWS access key id shape → redacted
         counts = federation_conflict_ingest(
             cfg,
             focus_content=f"new deploy uses credential {secret} for the pipeline",

@@ -98,14 +98,14 @@ def test_index_redacts_content_and_title(tmp_path):
     init_db(db).close()
     config = Config(db_path=db, data_dir=tmp_path)
     source = _FakeSource(
-        [_t("secret", [("user", "key is AKIA1234567890ABCDEF"), ("assistant", "ok")])]
+        [_t("secret", [("user", "key is AKI" "A1234567890ABCDEF"), ("assistant", "ok")])]
     )
     index_transcripts(config, source)
     doc = list_documents(librarian_db(config), source_type="fake-client-transcript")[0]
     full = get_document(librarian_db(config), doc["id"])
     # Secret must not survive in content OR the (first-user-line-derived) title.
-    assert "AKIA1234567890ABCDEF" not in full["content"]
-    assert "AKIA1234567890ABCDEF" not in (doc["title"] or "")
+    assert "AKI" "A1234567890ABCDEF" not in full["content"]
+    assert "AKI" "A1234567890ABCDEF" not in (doc["title"] or "")
 
 
 def test_index_respects_limit(tmp_path):

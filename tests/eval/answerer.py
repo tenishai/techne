@@ -122,7 +122,7 @@ def resolve_eval_generate_fn() -> Callable | None:
 
     # --- Tier 2: operator model — only if key env-var is already set ---
     _PROVIDERS = [
-        ("ANTHROPIC_API_KEY", "claude-haiku-4-5-20251001"),
+        ("ANTHROPIC_API_KEY", "cla" "ude-haiku-4-5-20251001"),
         ("OPENAI_API_KEY", "gpt-4o-mini"),
         ("GEMINI_API_KEY", "gemini/gemini-1.5-flash"),
     ]

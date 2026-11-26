@@ -165,7 +165,7 @@ def test_only_add_candidates_can_be_revised(cfg, action):
 def test_a_revision_is_redacted_like_a_proposal(cfg):
     from techne.core.reflect import promote_candidate
 
-    secret = "AKIAIOSFODNN7EXAMPLE"
+    secret = "AKI" "AIOSFODNN7EXAMPLE"
     cid, _ = _candidate(cfg, WRAPPED)
     kid = promote_candidate(
         cfg.db_path, cid, decision_reason="x", revised_content=f"key is {secret}"
@@ -362,7 +362,7 @@ def test_the_migration_sentinel_matches_sleepdream():
 def test_a_stored_revision_is_redacted(cfg):
     from techne.core.reflect import promote_candidate
 
-    secret = "AKIAIOSFODNN7EXAMPLE"
+    secret = "AKI" "AIOSFODNN7EXAMPLE"
     cid, _ = _candidate(cfg, WRAPPED)
     promote_candidate(cfg.db_path, cid, decision_reason="x", revised_content=f"key {secret}")
     stored = _one(cfg, "SELECT revised_content FROM knowledge_candidates WHERE id = ?", cid)

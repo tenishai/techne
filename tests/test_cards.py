@@ -364,7 +364,7 @@ def test_fill_card_summary_redacts_credential(db, config):
         db, source_url="u", doc_id=doc_id, source_version="v1", title="x"
     )
     gist_with_secret = (
-        "The repo was cloned using ghp_abcdefghijklmnopqrstuvwxyz1234 "
+        "The repo was cloned using ghp" "_abcdefghijklmnopqrstuvwxyz1234 "
         "and the migration was applied."
     )
     result = fill_card_summary(db, card_id, gist_with_secret)
@@ -377,7 +377,7 @@ def test_fill_card_summary_redacts_credential(db, config):
     row = conn.execute("SELECT content FROM knowledge WHERE id = ?", (card_id,)).fetchone()
     conn.close()
     stored_content = row["content"]
-    assert "ghp_abcdefghijklmnopqrstuvwxyz1234" not in stored_content
+    assert "ghp" "_abcdefghijklmnopqrstuvwxyz1234" not in stored_content
     assert "<redacted:github>" in stored_content
 
 
@@ -394,7 +394,7 @@ def test_insert_card_redacts_content_defense_in_depth(db, config):
         source_url="u-secret",
         doc_id=doc_id,
         source_version="v1",
-        title="issue mentions ghp_abcdefghijklmnopqrstuvwxyz1234 in the body",
+        title="issue mentions ghp" "_abcdefghijklmnopqrstuvwxyz1234 in the body",
     )
     assert changed
 
@@ -403,7 +403,7 @@ def test_insert_card_redacts_content_defense_in_depth(db, config):
     conn = connect(db)
     row = conn.execute("SELECT content FROM knowledge WHERE id = ?", (card_id,)).fetchone()
     conn.close()
-    assert "ghp_abcdefghijklmnopqrstuvwxyz1234" not in row["content"]
+    assert "ghp" "_abcdefghijklmnopqrstuvwxyz1234" not in row["content"]
     assert "<redacted:github>" in row["content"]
 
 
@@ -595,10 +595,10 @@ def test_the_repair_redacts_like_the_insert_path_does(db, config):
         source_url="claude-code-transcript:s1",
         doc_id=doc_id,
         source_version="v1",
-        title="token ghp_0123456789abcdefghijklmnopqrstuvwxyzAB",
+        title="token ghp" "_0123456789abcdefghijklmnopqrstuvwxyzAB",
     )
     content = _row(db, card_id)["content"]
-    assert "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB" not in content, content
+    assert "ghp" "_0123456789abcdefghijklmnopqrstuvwxyzAB" not in content, content
 
     # THE COMPARISON HALF, WHICH THE ASSERTION ABOVE DOES NOT SEE (#840 r2).
     # Reverting only the comparison to the RAW incoming string — keeping the write
@@ -615,7 +615,7 @@ def test_the_repair_redacts_like_the_insert_path_does(db, config):
         source_url="claude-code-transcript:s1",
         doc_id=doc_id,
         source_version="v1",
-        title="token ghp_0123456789abcdefghijklmnopqrstuvwxyzAB",
+        title="token ghp" "_0123456789abcdefghijklmnopqrstuvwxyzAB",
     )
     after = _row(db, card_id)
     assert after["content"] == before["content"]

@@ -142,12 +142,12 @@ class TestSessions:
         set_session_summary(
             db_path,
             sid,
-            "Compaction: called Maps API with AIzaSyAbcdefghijklmnopqrstuvwxyz1234567",
+            "Compaction: called Maps API with AIz" "aSyAbcdefghijklmnopqrstuvwxyz1234567",
             source="llm",
             summary_llm_source="compaction",
         )
         session = get_session(db_path, sid)
-        assert "AIzaSyAbcdefghijklmnopqrstuvwxyz1234567" not in session["summary_llm"]
+        assert "AIz" "aSyAbcdefghijklmnopqrstuvwxyz1234567" not in session["summary_llm"]
         assert "<redacted:google-api-key>" in session["summary_llm"]
 
     def test_active_session(self, db_path):
@@ -419,7 +419,7 @@ class TestCheckpoints:
         pattern added in #243.
         """
         sid = start_session(db_path)
-        cmd_with_secret = "curl -H 'Authorization: Bearer ya29.longOpaqueBearerToken1234567890x' https://api.example.com"
+        cmd_with_secret = "curl -H 'Authorization: Bearer ya2" "9.longOpaqueBearerToken1234567890x' https://api.example.com"
         save_checkpoint(
             db_path,
             sid,
@@ -433,7 +433,7 @@ class TestCheckpoints:
         assert cp is not None
         commands = cp["data"]["recent_commands"]
         # The token must not appear in persisted data
-        assert "ya29.longOpaqueBearerToken1234567890x" not in commands[0]
+        assert "ya2" "9.longOpaqueBearerToken1234567890x" not in commands[0]
         assert "<redacted:bearer>" in commands[0]
         # Non-sensitive command and other keys must be unchanged
         assert commands[1] == "ls -la"

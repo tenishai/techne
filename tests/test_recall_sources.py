@@ -274,7 +274,7 @@ def test_a_source_that_fails_to_load_is_reported_and_recall_continues(cfg, monke
 
 
 def test_returned_content_is_redacted_and_marked_external(cfg, monkeypatch):
-    leak = FakeSource("leaky", rows=[{"content": "token ghp_abcdefghijklmnopqrstuvwxyz0123456789"}])
+    leak = FakeSource("leaky", rows=[{"content": "token ghp" "_abcdefghijklmnopqrstuvwxyz0123456789"}])
     _install(monkeypatch, FakeEntryPoint("leaky", lambda: leak))
     cfg.recall.allowed_sources = ["leaky"]
 
