@@ -82,13 +82,12 @@ jobs:
     timeout-minutes: 45
     strategy:
       matrix:
-        # 3.12 ONLY ON PULL REQUESTS; the full 3.12/3.13 matrix on main pushes and
-        # workflow_dispatch (issue 1233). Billed minutes are the constraint while
-        # the repo is private: every PR push would otherwise run the full suite
-        # twice. The cost: a break that only shows on 3.13 is caught on main after
-        # merge, not on the PR. To run 3.13 for a PR branch on demand:
-        # `gh workflow run test.yml --ref <branch>`. Fork PRs get the same matrix.
-        python-version: ${{ fromJSON(github.event_name == 'pull_request' && '["3.12"]' || '["3.12", "3.13"]') }}
+        # The full matrix on every event, pull requests included. PRs ran 3.12
+        # only from issue 1233 (CPU load on the self-hosted runners), a limit
+        # kept after the move to hosted runners because minutes were billed
+        # while the repo was private. Standard hosted runners are free on public
+        # repos, so the limit no longer saves anything.
+        python-version: ['3.12', '3.13']
       fail-fast: false
 
     steps:
