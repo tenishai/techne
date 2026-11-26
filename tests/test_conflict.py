@@ -812,7 +812,7 @@ def test_conflict_ingest_decision_reason_redacted(config):
     # a logged header from tool output).
     reason_with_secret = (
         "Different caching backends; no conflict. "
-        "Verified using token xoxb-123456789012-abcdefghijklmnop."
+        "Verified using token xox" "b-123456789012-abcdefghijklmnop."
     )
     verdict = json.dumps(
         [{"id": comp_id, "verdict": "DISTINCT", "reason": reason_with_secret}]
@@ -831,7 +831,7 @@ def test_conflict_ingest_decision_reason_redacted(config):
 
     assert rows, "Expected at least one conflict candidate row"
     decision_reason_stored = rows[-1]["decision_reason"]
-    assert "xoxb-123456789012-abcdefghijklmnop" not in decision_reason_stored
+    assert "xox" "b-123456789012-abcdefghijklmnop" not in decision_reason_stored
     assert "<redacted:slack>" in decision_reason_stored
 
 
@@ -855,7 +855,7 @@ def test_insert_candidate_redacts_both_fields_for_both_origins(config):
     db = config.db_path
     _ensure_system_session(db)
 
-    secret = "AKIAIOSFODNN7EXAMPLE"  # AWS access key id shape
+    secret = "AKI" "AIOSFODNN7EXAMPLE"  # AWS access key id shape
     conn = connect(db)
 
     for origin in ("conflict", "federation-conflict"):

@@ -299,7 +299,7 @@ class TestTechneObserve:
 
         self._call(
             config,
-            {"session_id": "oc-4", "content": "key AKIAIOSFODNN7EXAMPLE here", "platform": "x"},
+            {"session_id": "oc-4", "content": "key AKI" "AIOSFODNN7EXAMPLE here", "platform": "x"},
         )
         conn = connect(config.db_path)
         try:
@@ -308,7 +308,7 @@ class TestTechneObserve:
             ).fetchone()["content"]
         finally:
             conn.close()
-        assert "AKIAIOSFODNN7EXAMPLE" not in content
+        assert "AKI" "AIOSFODNN7EXAMPLE" not in content
 
 
 class TestTechneStatus:

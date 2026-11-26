@@ -44,13 +44,13 @@ def test_index_document_redacts(tmp_path):
         db,
         source_type="docs",
         source_url="docs:secret.md",
-        title="AKIA1234567890ABCDEF",
-        content="key AKIA1234567890ABCDEF here",
+        title="AKI" "A1234567890ABCDEF",
+        content="key AKI" "A1234567890ABCDEF here",
     )
     doc = list_documents(_lib(db), source_type="docs")[0]
     full = get_document(_lib(db), doc["id"])
-    assert "AKIA1234567890ABCDEF" not in full["content"]
-    assert "AKIA1234567890ABCDEF" not in (doc["title"] or "")
+    assert "AKI" "A1234567890ABCDEF" not in full["content"]
+    assert "AKI" "A1234567890ABCDEF" not in (doc["title"] or "")
 
 
 def test_index_document_make_card_false(tmp_path):

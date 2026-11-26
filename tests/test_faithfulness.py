@@ -550,7 +550,7 @@ def test_faithfulness_ingest_redacts_warning_at_rest(config):
     b = store(db, "source B", type="fact")
     cid = _insert_candidate(db, target_ids=[a, b], content="replacement drops something")
 
-    secret = "AKIAIOSFODNN7EXAMPLE"
+    secret = "AKI" "AIOSFODNN7EXAMPLE"
     response = json.dumps({
         "verdict": "unfaithful",
         "reason": f"dropped the credential {secret}",

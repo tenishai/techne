@@ -793,7 +793,7 @@ class TestGitHubIssuesSource:
                 "title": "Update Maps integration",
                 "body": (
                     "The Maps widget broke after rotating the key. "
-                    "New key: AIzaSyAbcdefghijklmnopqrstuvwxyz1234567"
+                    "New key: AIz" "aSyAbcdefghijklmnopqrstuvwxyz1234567"
                 ),
                 "url": "https://github.com/acme/testrepo/issues/99",
                 "state": "OPEN",
@@ -810,7 +810,7 @@ class TestGitHubIssuesSource:
         docs = list_documents(lib_db, source_type="github_issue")
         assert len(docs) == 1
         stored_content = get_document(lib_db, docs[0]["id"])["content"]
-        assert "AIzaSyAbcdefghijklmnopqrstuvwxyz1234567" not in stored_content
+        assert "AIz" "aSyAbcdefghijklmnopqrstuvwxyz1234567" not in stored_content
         assert "<redacted:google-api-key>" in stored_content
 
 

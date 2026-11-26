@@ -28,7 +28,7 @@ def _db(tmp_path):
     )
     conn.execute(
         "INSERT INTO checkpoints (session_id, trigger, data_json) VALUES (?, 'auto', ?)",
-        ("s1", json.dumps({"recent_commands": [f"curl -u admin:{SECRET} x"], "n": 3})),
+        ("s1", json.dumps({"recent_commands": [f"cur" f"l -u admin:{SECRET} x"], "n": 3})),
     )
     conn.commit()
     conn.close()

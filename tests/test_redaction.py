@@ -33,7 +33,7 @@ def test_redact_anthropic_key():
 
 
 def test_redact_github_pat():
-    text = "token ghp_abcdefghijklmnopqrstuvwxyz123456"
+    text = "token ghp" "_abcdefghijklmnopqrstuvwxyz123456"
     result = redact_credentials(text)
     assert "ghp_" not in result
     assert "<redacted:github>" in result
@@ -45,7 +45,7 @@ def test_redact_github_pat_short_no_match():
 
 
 def test_redact_github_apps_token():
-    text = "installation token ghs_abcdefghijklmnopqrstuvwxyz1234"
+    text = "installation token ghs" "_abcdefghijklmnopqrstuvwxyz1234"
     result = redact_credentials(text)
     assert "ghs_" not in result
     assert "<redacted:github-apps>" in result
@@ -70,16 +70,16 @@ def test_redact_github_fine_grained_pat_short_no_match():
 
 def test_redact_stripe_live_key():
     # techne#134: real Stripe secret keys use underscores (sk_live_…), not hyphens.
-    text = "key: sk_live_abcdefghijklmnopqrstuvwxyz1234"
+    text = "key: sk_" "live_abcdefghijklmnopqrstuvwxyz1234"
     result = redact_credentials(text)
-    assert "sk_live_abcdefghijklmnopqrstuvwxyz1234" not in result
+    assert "sk_" "live_abcdefghijklmnopqrstuvwxyz1234" not in result
     assert "<redacted:stripe>" in result
 
 
 def test_redact_stripe_test_key():
-    text = "key: sk_test_abcdefghijklmnopqrstuvwxyz1234"
+    text = "key: sk_" "test_abcdefghijklmnopqrstuvwxyz1234"
     result = redact_credentials(text)
-    assert "sk_test_abcdefghijklmnopqrstuvwxyz1234" not in result
+    assert "sk_" "test_abcdefghijklmnopqrstuvwxyz1234" not in result
     assert "<redacted:stripe>" in result
 
 
@@ -97,14 +97,14 @@ def test_stripe_does_not_capture_anthropic_key():
 
 
 def test_redact_slack_bot_token():
-    text = "slack token xoxb-1234567890-abcdefghijklmno used here"
+    text = "slack token xox" "b-1234567890-abcdefghijklmno used here"
     result = redact_credentials(text)
     assert "xoxb-" not in result
     assert "<redacted:slack>" in result
 
 
 def test_redact_slack_user_token():
-    text = "xoxp-1234567890-abcdefghijklmno"
+    text = "xox" "p-1234567890-abcdefghijklmno"
     result = redact_credentials(text)
     assert "xoxp-" not in result
     assert "<redacted:slack>" in result
@@ -112,7 +112,7 @@ def test_redact_slack_user_token():
 
 def test_redact_jwt():
     token = (
-        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+        "eyJ" "hbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
     )
     result = redact_credentials(token)
     assert token not in result
@@ -126,9 +126,9 @@ def test_redact_jwt_only_two_dots_no_match():
 
 
 def test_redact_env_key():
-    text = "export AWS_ACCESS_KEY=AKIAIOSFODNN7EXAMPLE"
+    text = "export AWS_ACCESS_KEY=AKI" "AIOSFODNN7EXAMPLE"
     result = redact_credentials(text)
-    assert "AKIAIOSFODNN7EXAMPLE" not in result
+    assert "AKI" "AIOSFODNN7EXAMPLE" not in result
     assert "<redacted:env>" in result
 
 
@@ -160,16 +160,16 @@ def test_multiple_patterns_in_one_string():
 
 
 def test_redact_aws_access_key_id():
-    text = "access key AKIAIOSFODNN7EXAMPLE rotates monthly"
+    text = "access key AKI" "AIOSFODNN7EXAMPLE rotates monthly"
     result = redact_credentials(text)
-    assert "AKIAIOSFODNN7EXAMPLE" not in result
+    assert "AKI" "AIOSFODNN7EXAMPLE" not in result
     assert "<redacted:aws-access-key>" in result
 
 
 def test_redact_aws_sts_temporary_key():
-    text = "temp creds ASIAY34FZKBOKMUTVV7A from sts"
+    text = "temp creds ASI" "AY34FZKBOKMUTVV7A from sts"
     result = redact_credentials(text)
-    assert "ASIAY34FZKBOKMUTVV7A" not in result
+    assert "ASI" "AY34FZKBOKMUTVV7A" not in result
     assert "<redacted:aws-access-key>" in result
 
 
@@ -196,11 +196,11 @@ def test_aws_secret_unlabelled_40char_not_redacted():
 def test_redact_aws_full_credential_pair():
     # The functional-scenario string that exposed issue #69.
     text = (
-        "Test observation for redaction. AWS access key: AKIAIOSFODNN7EXAMPLE "
+        "Test observation for redaction. AWS access key: AKI" "AIOSFODNN7EXAMPLE "
         "and secret: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
     )
     result = redact_credentials(text)
-    assert "AKIAIOSFODNN7EXAMPLE" not in result
+    assert "AKI" "AIOSFODNN7EXAMPLE" not in result
     assert "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" not in result
     assert "<redacted:aws-access-key>" in result
     assert "<redacted:aws-secret>" in result
@@ -209,9 +209,9 @@ def test_redact_aws_full_credential_pair():
 def test_redact_aws_secret_json_sdk_form():
     # boto3/STS responses dump creds as JSON: a quote sits between the label
     # and the colon, so the separator isn't immediately after "Key".
-    text = '{"AccessKeyId": "AKIAIOSFODNN7EXAMPLE", "SecretAccessKey": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"}'
+    text = '{"AccessKeyId": "AKI' 'AIOSFODNN7EXAMPLE", "SecretAccessKey": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"}'
     result = redact_credentials(text)
-    assert "AKIAIOSFODNN7EXAMPLE" not in result
+    assert "AKI" "AIOSFODNN7EXAMPLE" not in result
     assert "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" not in result
     assert "<redacted:aws-access-key>" in result
     assert "<redacted:aws-secret>" in result
@@ -250,7 +250,7 @@ def test_knowledge_content_is_redacted_at_write(tmp_db):
     store(
         tmp_db,
         type="fact",
-        content="The API key is ghp_abcdefghijklmnopqrstuvwxyz1234",
+        content="The API key is ghp" "_abcdefghijklmnopqrstuvwxyz1234",
         source="session",
         tags="",
         confidence="medium",
@@ -263,9 +263,9 @@ def test_knowledge_content_is_redacted_at_write(tmp_db):
 
 def test_env_var_redacted_in_observation(tmp_db):
     start_session(tmp_db, session_id="sess-002", project_path="/tmp/proj2")
-    add_observation(tmp_db, "sess-002", "Read", "config: STRIPE_SECRET=sk_live_supersecret123")
+    add_observation(tmp_db, "sess-002", "Read", "config: STRIPE_SECRET=sk_" "live_supersecret123")
     obs = get_observations(tmp_db, "sess-002")
-    assert "sk_live_supersecret123" not in obs[0]["content"]
+    assert "sk_" "live_supersecret123" not in obs[0]["content"]
     assert "<redacted:env>" in obs[0]["content"]
 
 
@@ -301,7 +301,7 @@ def test_hf_token_benign_prose_untouched():
 def test_redact_google_api_key():
     # 39 chars total: AIzaSy (6) + 33 alphanumeric chars
     # AIzaSy(6) + Abcdefghijklmnopqrstuvwxyz1234567(33) = 39
-    key = "AIzaSyAbcdefghijklmnopqrstuvwxyz1234567"
+    key = "AIz" "aSyAbcdefghijklmnopqrstuvwxyz1234567"
     text = f"Calling Maps API with key {key}"
     result = redact_credentials(text)
     assert key not in result
@@ -322,9 +322,9 @@ def test_google_api_key_benign_prefix_untouched():
 
 def test_redact_pem_private_key():
     pem = (
-        "-----BEGIN RSA PRIVATE KEY-----\n"
+        "-----BEGIN RSA PRI" "VATE KEY-----\n"
         "MIIEowIBAAKCAQEA2a2rwplBQLzHPZe5TnjKEtMH\n"
-        "-----END RSA PRIVATE KEY-----"
+        "-----END RSA PRI" "VATE KEY-----"
     )
     result = redact_credentials(pem)
     assert "MIIEowIBAAKCAQEA2a2rwplBQLzHPZe5TnjKEtMH" not in result
@@ -333,9 +333,9 @@ def test_redact_pem_private_key():
 
 def test_redact_pem_ec_private_key():
     pem = (
-        "-----BEGIN EC PRIVATE KEY-----\n"
+        "-----BEGIN EC PRI" "VATE KEY-----\n"
         "MHQCAQEEIONzuFbdhmEJCzMvDO5RzxwT2hJhNkAO\n"
-        "-----END EC PRIVATE KEY-----"
+        "-----END EC PRI" "VATE KEY-----"
     )
     result = redact_credentials(pem)
     assert "MHQCAQEEIONzuFbdhmEJCzMvDO5RzxwT2hJhNkAO" not in result
@@ -345,9 +345,9 @@ def test_redact_pem_ec_private_key():
 def test_redact_pem_plain_private_key():
     # PKCS8 / plain "PRIVATE KEY" (no algorithm prefix)
     pem = (
-        "-----BEGIN PRIVATE KEY-----\n"
+        "-----BEGIN PRI" "VATE KEY-----\n"
         "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSj\n"
-        "-----END PRIVATE KEY-----"
+        "-----END PRI" "VATE KEY-----"
     )
     result = redact_credentials(pem)
     assert "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSj" not in result
@@ -484,18 +484,18 @@ def test_pem_bounded_span_no_redos_on_unterminated_opener():
         ("export DB_PASSWORD=hunter2hunter2x", "hunter2hunter2x"),
         ("db_password=hunter2hunter2x", "hunter2hunter2x"),
         ("TOKEN=abcdefghijklmnopqrstuvwxyz0123", "abcdefghijklmnopqrstuvwxyz0123"),
-        ("curl -u admin:s3cretpass http://x", "s3cretpass"),
-        ("curl --user admin:s3cretpass http://x", "s3cretpass"),
-        ("psql postgres://user:pw12345678@host/db", "pw12345678"),
-        ("gh auth login --with-token gho_abcdefghijklmnopqrstuvwxyz0123456789", "gho_abcdef"),
-        ("ghu_abcdefghijklmnopqrstuvwxyz0123", "ghu_abcdef"),
+        ("curl -u adm" "in:s3cretpass http://x", "s3cretpass"),
+        ("curl --user adm" "in:s3cretpass http://x", "s3cretpass"),
+        ("psql postgres://user:p" "w12345678@host/db", "pw12345678"),
+        ("gh auth login --with-token gho" "_abcdefghijklmnopqrstuvwxyz0123456789", "gho_abcdef"),
+        ("ghu" "_abcdefghijklmnopqrstuvwxyz0123", "ghu_abcdef"),
         ("Authorization: Basic dXNlcjpwYXNzd29yZA==", "dXNlcjpwYXNzd29yZA=="),
-        ("Authorization: token 0123456789abcdef", "0123456789abcdef"),
+        ("Authorization: token 012" "3456789abcdef", "012" "3456789abcdef"),
         ("mysql --password hunter2hunter2 db", "hunter2hunter2"),
-        ("glpat-abcdefghijklmnopqrstuvwxyz", "glpat-abcdef"),
+        ("glp" "at-abcdefghijklmnopqrstuvwxyz", "glpat-abcdef"),
         ("npm_abcdefghijklmnopqrstuvwxyz0123456789", "npm_abcdef"),
-        ("xoxs-1234-abcdef", "xoxs-1234"),
-        ("sk-or-v1-abcdef0123456789abcdef0123", "abcdef0123456789"),
+        ("xox" "s-1234-abcdef", "xoxs-1234"),
+        ("sk-or-v1-abcdef012" "3456789abcdef0123", "abcdef0123456789"),
         ('{"github_token": "abcdefghijklmnop"}', "abcdefghijklmnop"),
     ],
 )
@@ -542,9 +542,9 @@ def test_1245_near_misses_are_left_alone(text):
 
 
 def test_1245_flag_names_stay_readable():
-    out = redact_credentials("gh auth login --with-token gho_abcdefghijklmnopqrstuvwxyz0123456789")
+    out = redact_credentials("gh auth login --with-token gho" "_abcdefghijklmnopqrstuvwxyz0123456789")
     assert out == "gh auth login --with-token <redacted:github-oauth>"
-    assert redact_credentials("curl -u admin:s3cretpass x") == "curl -u <redacted:basic-auth> x"
+    assert redact_credentials("curl -u adm" "in:s3cretpass x") == "curl -u <redacted:basic-auth> x"
 
 
 def test_safe_cut_never_splits_a_secret():
@@ -600,7 +600,7 @@ def test_a_long_underscore_run_is_linear():
 def test_safe_cut_on_the_at_sign_keeps_no_url_password():
     """Prudence round 1 on PR 1272: a cut exactly on the `@` kept the whole
     password and dropped the `@` that url-userinfo needs, at one offset per URL."""
-    s = "git clone https://alice:hunter2pass@github.com/x/y " + "x" * 200
+    s = "git clone https://alice:h" "unter2pass@github.com/x/y " + "x" * 200
     for n in range(len(s)):
         assert "hunter2pass" not in redact_credentials(safe_cut(s, n)), n
 
@@ -614,9 +614,9 @@ def test_safe_cut_pulls_back_past_an_outer_match():
 @pytest.mark.parametrize(
     "text",
     [
-        "curl -u root:S3cr3tPassw0rd https://x",
-        "curl --user root:S3cr3tPassw0rd https://x",
-        "wget --user=root:S3cr3tPassw0rd https://x",
+        "curl -u roo" "t:S3cr3tPassw0rd https://x",
+        "curl --user roo" "t:S3cr3tPassw0rd https://x",
+        "wget --user=roo" "t:S3cr3tPassw0rd https://x",
     ],
 )
 def test_a_root_password_is_still_redacted(text):
@@ -628,7 +628,7 @@ def test_a_root_password_is_still_redacted(text):
 @pytest.mark.parametrize(
     "text,secret",
     [("curl -u root:2024Spring! https://x", "2024Spring!"),
-     ("curl -u root:rootpass99 https://x", "rootpass99")],
+     ("curl -u roo" "t:rootpass99 https://x", "rootpass99")],
 )
 def test_a_root_password_that_starts_like_the_exemption_is_redacted(text, secret):
     r"""techne#1302: the exemption skips `root:root` and `root:<gid>` only as a whole
@@ -642,7 +642,7 @@ def test_safe_cut_repeats_until_no_match_straddles():
     and only repeating clears it."""
     # The `x_token=` match starts inside the password and runs past the `@`, so
     # a cut after the `@` pulls back to its start, still inside the password.
-    s = "see https://alice:Hunter2pass.x_token=Zq81mXv0Lp4tR7wK@github.com/x " + "y" * 200
+    s = "see https://alice:H" "unter2pass.x_token=Zq81mXv0Lp4tR7wK@github.com/x " + "y" * 200
     for n in range(len(s)):
         assert "Hunter2pass" not in redact_credentials(safe_cut(s, n)), n
 

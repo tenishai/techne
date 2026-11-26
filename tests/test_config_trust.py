@@ -797,7 +797,7 @@ class TestTheDetailNeverLeaksACredential:
     ):
         monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
         (tmp_path / "config.yaml").write_text(
-            yaml.dump({"llm_api_base": "https://user:pa55@proxy.internal"})
+            yaml.dump({"llm_api_base": "https://user:p" "a55@proxy.internal"})
         )
 
         detail = self._detail(Config.load())
@@ -859,7 +859,7 @@ class TestTheDetailNeverLeaksACredential:
         and simultaneously broke `model: vertex_ai/...@20240620`."""
         monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
         (tmp_path / "config.yaml").write_text(
-            yaml.dump({"archivist_db_path": "postgres://user:pa55@db.internal/archivist"})
+            yaml.dump({"archivist_db_path": "postgres://user:p" "a55@db.internal/archivist"})
         )
 
         detail = self._detail(Config.load())
