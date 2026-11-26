@@ -83,8 +83,10 @@ jobs:
     strategy:
       matrix:
         # The full matrix on every event, pull requests included. PRs ran 3.12
-        # only while the repo was private and hosted minutes were billed
-        # (issue 1233); standard hosted runners are free on public repos.
+        # only from issue 1233 (CPU load on the self-hosted runners), a limit
+        # kept after the move to hosted runners because minutes were billed
+        # while the repo was private. Standard hosted runners are free on public
+        # repos, so the limit no longer saves anything.
         python-version: ['3.12', '3.13']
       fail-fast: false
 
