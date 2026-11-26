@@ -150,42 +150,27 @@ def test_push_filter_is_still_scoped_to_main():
     assert _triggers()["push"] == {"branches": ["main"]}
 
 
-# --- the test matrix: 3.12 on PRs, 3.12 and 3.13 on main (issue 1233) -------
-
-# GitHub's ternary idiom, `cond && a || b`. tests/gha_expr.py models `&&`/`||` as
-# booleans, not GitHub's value-returning form, so this reads the one shape the
-# workflow uses instead of extending the measured evaluator. Any other shape
-# fails the match, which is the point: a reworded matrix gets re-checked here.
-_MATRIX_TERNARY = re.compile(
-    r"^\$\{\{\s*fromJSON\(github\.event_name == 'pull_request' && '(?P<pr>[^']*)' "
-    r"\|\| '(?P<other>[^']*)'\)\s*\}\}$"
-)
+# --- the test matrix: 3.12 and 3.13 on every event --------------------------
 
 
 def _matrix_versions(job: str) -> str | list:
     return yaml.safe_load(WORKFLOW.read_text())["jobs"][job]["strategy"]["matrix"]["python-version"]
 
 
-def test_pr_runs_test_on_312_only_and_main_runs_both():
-    """Every PR push ran the full suite twice (3.12, 3.13), plus eval-vec's
-    vector gate, and hosted minutes are billed while the repo is private. PRs now run 3.12; main pushes and workflow_dispatch
-    keep 3.13, so a 3.13-only break is caught on main after merge (issue 1233).
-    """
-    m = _MATRIX_TERNARY.match(str(_matrix_versions("test")))
-    assert m, (
-        "the test job's python-version matrix is no longer the "
-        "`fromJSON(github.event_name == 'pull_request' && '[...]' || '[...]')` form "
-        f"this test reads: {_matrix_versions('test')!r}"
-    )
-    assert json.loads(m["pr"]) == ["3.12"]
-    assert json.loads(m["other"]) == ["3.12", "3.13"]
+def test_every_event_runs_test_on_312_and_313():
+    """PRs ran 3.12 only from issue 1233 (CPU load on the self-hosted runners) and
+    then to save billed hosted minutes while the repo was private. Standard hosted
+    runners are free on public repos, so PRs, main pushes and workflow_dispatch all
+    run both, and a 3.13-only break is caught on the PR."""
+    assert _matrix_versions("test") == ["3.12", "3.13"]
 
 
-def test_the_test_matrix_does_not_depend_on_where_the_pr_came_from():
-    """The matrix expression keys on the event name only, so a fork PR (also event
-    `pull_request`) gets 3.12 like any PR. No job-level `if:` or second job can give
-    it a different one: that is pinned by the fork-exclusion test further down."""
-    assert "head.repo" not in str(_matrix_versions("test"))
+def test_the_test_matrix_does_not_depend_on_the_event_or_where_the_pr_came_from():
+    """A plain list, with no expression: a fork PR gets the same two legs as any
+    other run. No job-level `if:` or second job can give it a different set: that is
+    pinned by the fork-exclusion test further down."""
+    m = str(_matrix_versions("test"))
+    assert "github.event_name" not in m and "head.repo" not in m
 
 
 # --- vector coverage in the test leg (techne#535) --------------------------

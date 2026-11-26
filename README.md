@@ -188,8 +188,8 @@ techne init
 techne is in alpha — installed from source. The PyPI name `techne` belongs to an unrelated
 project, so a PyPI release would need a different package name; until then, install from git.
 
-**Requires:** Python 3.11+, git. CI runs the suite on 3.12 for pull requests and on 3.12
-and 3.13 for main, and the vector eval on 3.14; 3.11 is supported but not in CI.
+**Requires:** Python 3.11+, git. CI runs the suite on 3.12 and 3.13 for pull requests
+and main, and the vector eval on 3.14; 3.11 is supported but not in CI.
 
 Use a virtual environment — required on Debian/Ubuntu (PEP 668), recommended everywhere else.
 On Debian/Ubuntu, `venv` isn't preinstalled: `sudo apt update && sudo apt install python3-venv`.

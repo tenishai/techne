@@ -14,9 +14,8 @@ ruff check techne tests    # ADVISORY — see below
 Then: branch, commit with `git commit -s` (see [Developer Certificate of
 Origin](#developer-certificate-of-origin)), open a PR. Before pushing, run the tests
 that cover what you changed, and show any new test fails without your fix. CI is the
-full gate: it runs the whole suite on 3.12 for every PR push, and on 3.12 and 3.13
-for every push to main, so a 3.13-only break shows up on main after merge. To run
-3.13 on a PR branch, use `gh workflow run test.yml --ref <branch>`. Run the full suite
+full gate: it runs the whole suite on 3.12 and 3.13 for every PR push and every
+push to main. Run the full suite
 locally only when CI can't, for example when you are changing CI itself.
 CI's `acceptance` job also builds the wheel and tests the
 installed copy, which catches a module or package-data file missing from the package;
