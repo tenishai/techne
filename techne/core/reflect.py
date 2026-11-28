@@ -392,8 +392,13 @@ def _insert_candidate(
     model_used: str,
     prompt_hash: str,
     raw_response: str | None,
+    conn=None,
 ) -> int | None:
-    conn = connect(db_path)
+    """Insert one reflect candidate, or None when the exactly-once guard skips it.
+    With `conn`, the insert joins the caller's transaction (techne#1261)."""
+    owned = conn is None
+    if owned:
+        conn = connect(db_path)
     try:
         # FK safety net (techne#106): never let a stale/missing thread id drop a
         # candidate — fall back to a NULL FK (loses provenance) rather than raising.
@@ -432,18 +437,25 @@ def _insert_candidate(
                 redact_credentials(raw_response) if raw_response else None,
             ),
         )
-        conn.commit()
+        if owned:
+            conn.commit()
         # rowcount==0 → the ON CONFLICT fired (already ingested). lastrowid is unreliable
         # after a skipped upsert (returns the prior insert's rowid), so gate on rowcount.
         if cur.rowcount == 0:
             return None
         return cur.lastrowid
     finally:
-        conn.close()
+        if owned:
+            conn.close()
 
 
 def _write_live(
-    db_path: Path, candidate: Candidate, source: str, session_id: str | None = None
+    db_path: Path,
+    candidate: Candidate,
+    source: str,
+    session_id: str | None = None,
+    *,
+    conn=None,
 ) -> int | None:
     """Write a knowledge candidate straight to the live knowledge table. Used only
     when config.reflect.write_to='live' — intended for after the test concludes.
@@ -462,6 +474,7 @@ def _write_live(
             confidence=candidate.confidence,
             source=source,
             provenance={"origin_session": session_id} if session_id else None,
+            conn=conn,
         )
     # Identity scope is not written here (techne#1267); the caller leaves those
     # candidates pending, and this refuses them as a second guard.
@@ -2237,7 +2250,19 @@ def ingest_reflection_response(
 
     raw_for_store = raw_response if config.reflect.log_raw_response else None
     for c in kept:
+        # ONE TRANSACTION PER CANDIDATE IN LIVE MODE (techne#1261). The candidate
+        # insert, the live knowledge row and the promoted mark were three commits on
+        # three connections, so a failure between them left a pending candidate
+        # that a retry skipped (the exactly-once guard) beside, or instead of, a
+        # live row. Now all three commit together or none does.
+        live = effective_write_to(config) == "live" and c.scope != "identity"
+        conn = None
         try:
+            # Inside the try (Prudence, #1261 round 1 nit): a failed connect is
+            # counted as an error and the loop goes on, as it did before.
+            if live:
+                conn = connect(config.db_path)
+                conn.execute("BEGIN IMMEDIATE")
             cand_id = _insert_candidate(
                 config.db_path,
                 c,
@@ -2246,26 +2271,35 @@ def ingest_reflection_response(
                 model_used=model_used,
                 prompt_hash=prompt_hash,
                 raw_response=raw_for_store,
+                conn=conn,
             )
             # None → the exactly-once guard skipped a duplicate (techne#236): don't
             # count it as written and don't re-promote it into live knowledge.
             if cand_id is None:
+                if conn is not None:
+                    conn.rollback()
                 continue
-            counts["candidates_written"] += 1
             # Identity is never auto-written, even in live mode (techne#1267): an
             # observation (a fetched page, a peer message) could steer a reflection
             # to replace user.name or any other key, and set_value keeps no
             # history. Identity candidates stay pending for reviewed promotion.
-            if effective_write_to(config) == "live" and c.scope != "identity":
+            if conn is not None:
                 promoted_id = _write_live(
                     config.db_path,
                     c,
                     source=f"reflect:{thread_id or 'unknown'}",
                     session_id=session_id,
+                    conn=conn,
                 )
-                _mark_promoted(config.db_path, cand_id, promoted_id)
+                _mark_promoted(config.db_path, cand_id, promoted_id, conn=conn)
+                conn.commit()
+                counts["candidates_written"] += 1
                 counts["candidates_promoted"] += 1
+            else:
+                counts["candidates_written"] += 1
         except Exception:
+            if conn is not None:
+                conn.rollback()
             log.exception(
                 "ingest_reflection_response: failed to insert/promote candidate"
                 " (session=%s thread=%s)",
@@ -2273,6 +2307,9 @@ def ingest_reflection_response(
                 thread_id,
             )
             counts["errors"] += 1
+        finally:
+            if conn is not None:
+                conn.close()
     return counts
 
 
@@ -2492,12 +2529,17 @@ def _stamp_origin_session(conn, knowledge_id: int, session_id: str) -> None:
     )
 
 
-def _mark_promoted(db_path: Path, candidate_id: int, promoted_to_id: int | None) -> None:
+def _mark_promoted(
+    db_path: Path, candidate_id: int, promoted_to_id: int | None, *, conn=None
+) -> None:
     """Mark a candidate promoted by the write_to='live' auto-path. Stamps
     decided_by='reflect-auto' for the audit trail (techne#108) — no human reviewed it.
     A separate UPDATE from promote_candidate's dispatch (this path never applies an
-    action); decision_reason is left NULL — there's no human reason on the auto-path."""
-    conn = connect(db_path)
+    action); decision_reason is left NULL — there's no human reason on the auto-path.
+    With `conn`, the update joins the caller's transaction (techne#1261)."""
+    owned = conn is None
+    if owned:
+        conn = connect(db_path)
     try:
         conn.execute(
             """UPDATE knowledge_candidates
@@ -2508,9 +2550,11 @@ def _mark_promoted(db_path: Path, candidate_id: int, promoted_to_id: int | None)
                 WHERE id = ?""",
             (promoted_to_id, candidate_id),
         )
-        conn.commit()
+        if owned:
+            conn.commit()
     finally:
-        conn.close()
+        if owned:
+            conn.close()
 
 
 # --- Read-side helpers used by the CLI -----------------------------------
