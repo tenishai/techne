@@ -1793,9 +1793,11 @@ TOOLS = [
         "name": "techne_consolidate_ingest",
         "description": (
             "Feed back one cluster's consolidation verdict from techne_consolidate_emit. "
+            "Ids no emit could have produced (missing, superseded or archived, repeated, not integers, fewer than two) are refused with `invalid: 1` and a `reason`, and nothing is written. "
             "`response` is your JSON verdict object; `target_ids` + `cluster_hash` come "
             "from the emit batch item. A 'merge' verdict queues a proposal for review "
-            "(promoting it collapses the rows); a 'keep' verdict writes nothing."
+            "(promoting it collapses the rows); a 'keep' verdict writes a discarded "
+            "marker so the cluster is not offered again."
         ),
         "inputSchema": {
             "type": "object",
@@ -1839,6 +1841,7 @@ TOOLS = [
         "name": "techne_dream_ingest",
         "description": (
             "Feed back one group's dream verdict from techne_dream_emit. "
+            "Ids no emit could have produced (missing, superseded or archived, repeated, not integers, fewer than two) are refused with `invalid: 1` and a `reason`, and nothing is written. "
             "`response` is your JSON verdict object (verdict='connect'|'none'); "
             "`group_ids` + `group_hash` come from the emit batch item. A 'connect' "
             "verdict queues a low-confidence pending candidate for human review "
@@ -1942,6 +1945,9 @@ TOOLS = [
         "name": "techne_conflict_ingest",
         "description": (
             "Feed back one conflict verdict from techne_conflict_emit (techne#213). "
+            "Ids no emit could have produced (a focus or comparison that is missing, "
+            "superseded or archived, repeated, or not an integer) are refused with "
+            "`invalid: 1` and a `reason`, and nothing is written. "
             "`response` is your JSON verdict array; `focus_id`, `comparison_ids`, and "
             "`check_hash` come from the emit batch item. SUPERSEDE → pending 'retire' "
             "candidate linking the older entry (by event_at) into the newer survivor "

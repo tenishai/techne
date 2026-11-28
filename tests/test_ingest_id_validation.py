@@ -63,13 +63,18 @@ def _bad_sets(rows) -> dict[str, list]:
         "duplicate": [a, a],
         "superseded": [a, rows["old"]],
         "archived": [a, rows["archived"]],
+        # Paired with rows that the other checks would pass (Prudence round 1):
+        # `str(b)` matched row b through SQLite's integer affinity, and `True`
+        # beside row 1 tripped the duplicate check instead of the type check.
         "not an int": [a, str(b)],
-        "bool": [a, True],
+        "bool": [b, True],
+        "float": [a, float(b)],
     }
 
 
 @pytest.mark.parametrize(
-    "case", ["nonexistent", "one id", "duplicate", "superseded", "archived", "not an int", "bool"]
+    "case",
+    ["nonexistent", "one id", "duplicate", "superseded", "archived", "not an int", "bool", "float"],
 )
 @pytest.mark.parametrize("response", [MERGE, KEEP], ids=["merge", "keep"])
 def test_consolidate_refuses_and_writes_nothing(config, rows, case, response):
@@ -102,6 +107,17 @@ def test_a_refusal_leaves_the_valid_group_open(config, rows):
     counts = consolidate_ingest(config, [a, b], "advisory", MERGE)
     assert counts["proposed"] == 1 and counts["invalid"] == 0
     assert [c[:2] for c in _candidates(config)] == [("consolidate", "pending")]
+
+
+@pytest.mark.parametrize("case", ["not an int", "bool", "float"])
+def test_type_refusals_name_the_type_check(config, rows, case):
+    """Each type case is refused BY the type check, not by a later one."""
+    conn = connect(config.db_path)
+    try:
+        why = invalid_target_ids(conn, _bad_sets(rows)[case])
+    finally:
+        conn.close()
+    assert why is not None and why.startswith("ids must be integers"), why
 
 
 def test_valid_ids_pass(config, rows):

@@ -633,7 +633,6 @@ def conflict_check_ingest(
         "invalid": 0,
     }
 
-
     raw_for_store = response if _log_raw(config) else None
     decisions = parse_conflict_response(response)
 
