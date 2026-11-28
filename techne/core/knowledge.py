@@ -295,9 +295,14 @@ def _supersede_in_conn(
     *,
     operator: bool = False,
     lesson_path: bool = False,
+    carry_provenance: bool = True,
 ) -> int:
     """Core of supersede() on a caller-owned connection — no commit/close — so it can
     run inside another transaction (e.g. promote_candidate's action dispatch, #108).
+
+    `carry_provenance=False` writes the new revision with NULL writer provenance: for
+    content that did not come from the old row's writer, such as a team store's fact
+    superseding a local row (Prudence, #1244 round 3).
     Body is verbatim from the public supersede(); the caller owns the transaction.
 
     A lesson-type row (techne#1195) changes only through lessons.refine, which passes
@@ -358,10 +363,11 @@ def _supersede_in_conn(
             anchor_content_hash,
             anchor_git_sha,
             # Writer provenance is carried too (techne#1244): a revision is still
-            # the same writer's row, not an unattributed one.
-            old["written_by"],
-            old["origin_source"],
-            old["origin_session"],
+            # the same writer's row, not an unattributed one. Unless the caller says
+            # the content came from elsewhere: then unattributed, never guessed.
+            old["written_by"] if carry_provenance else None,
+            old["origin_source"] if carry_provenance else None,
+            old["origin_session"] if carry_provenance else None,
         ),
     )
     new_id = cur.lastrowid
@@ -850,8 +856,10 @@ def _merge_in_conn(
     if capped != confidence:
         confidence, numeric = capped, CONFIDENCE_NUMERIC[capped]
     anchor = _agreed(sources, ("anchor_path", "anchor_symbol"))
-    written_by, origin_source, origin_session = (
-        _agreed(sources, (col,))[0] for col in ("written_by", "origin_source", "origin_session")
+    # One triple, agreed as a whole (Prudence round 3 nit): agreeing column by column
+    # could write a writer and a session no single source carried together.
+    written_by, origin_source, origin_session = _agreed(
+        sources, ("written_by", "origin_source", "origin_session")
     )
     confirmed = [r["last_confirmed_at"] for r in sources if r["last_confirmed_at"]]
     anchor_content_hash: str | None = None

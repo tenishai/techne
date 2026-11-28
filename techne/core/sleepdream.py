@@ -57,7 +57,10 @@ SYSTEM_SLEEP_SESSION = "system:sleep"
 #: The judge used to see each row cut to 300 characters and its merged content then
 #: replaced the full rows, so a long decision merged with a short restatement lost its
 #: rationale. Rows up to this length are shown whole; longer rows are not clustered.
-MAX_ENTRY_CHARS = 2000
+#: 4000 is measured, not argued: on the operator's store (2026-11-28) 3,885 of 4,299
+#: live rows exceed 300 characters, 695 exceed 2,000 and 120 exceed 4,000, so this
+#: limit leaves 2.8% of rows out of consolidation, and four whole rows stay ~16 KB.
+MAX_ENTRY_CHARS = 4000
 
 
 #: Default producer label. A candidate written by a RESIDENT agent answering an emitted

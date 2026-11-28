@@ -542,8 +542,18 @@ def test_merge_carries_agreed_anchor_and_provenance_and_drops_disputed(config):
     new = merge_into(db, [a, b, c], "merged", type="fact", confidence="medium")
     row = _row(db, new)
     assert (row["anchor_path"], row["anchor_symbol"]) == ("techne/core/x.py", "f")
-    assert (row["written_by"], row["origin_source"]) == ("poe2", "session")
-    assert row["origin_session"] is None, "two sessions disagree: honestly unattributed"
+    # The triple is agreed as a whole (Prudence round 3): one source's session
+    # differs, so none of the three is claimed.
+    assert (row["written_by"], row["origin_source"], row["origin_session"]) == (None, None, None)
+
+    d = store(db, "fourth", type="fact")
+    e = store(db, "fifth", type="fact")
+    _set(db, d, written_by="poe2", origin_source="session", origin_session="s-1")
+    _set(db, e, written_by="poe2", origin_source="session", origin_session="s-1")
+    row = _row(db, merge_into(db, [d, e], "merged", type="fact", confidence="medium"))
+    assert (row["written_by"], row["origin_source"], row["origin_session"]) == (
+        "poe2", "session", "s-1"
+    )
 
 
 def test_merge_with_one_anchored_source_carries_it(config):

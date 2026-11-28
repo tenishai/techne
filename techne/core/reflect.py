@@ -2571,7 +2571,16 @@ def _apply_supersede(conn, row, db_path: Path) -> int | None:
             f"supersede candidate {row['id']} needs exactly one target_id, got {targets}"
         )
     source = f"consolidate-supersede:{row['id']}"
-    return _supersede_in_conn(conn, targets[0], redact_credentials(row["content"]), source)
+    # A federation-conflict supersede writes ANOTHER store's fact over the local row,
+    # so the local row's writer and session must not be stamped on it (#1244 r3).
+    foreign = row["origin"] == "federation-conflict"
+    return _supersede_in_conn(
+        conn,
+        targets[0],
+        redact_credentials(row["content"]),
+        source,
+        carry_provenance=not foreign,
+    )
 
 
 def _apply_retire(conn, row, db_path: Path) -> int | None:

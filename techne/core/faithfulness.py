@@ -42,8 +42,8 @@ CHECKED_ACTIONS = frozenset({"merge", "supersede"})
 # The gate must see what the merge judge saw, and the whole replacement (techne#1244):
 # consolidation renders entries up to sleepdream.MAX_ENTRY_CHARS whole, and a merge of
 # two of them can be twice as long.
-MAX_SOURCE_CHARS = 2000
-MAX_REPLACEMENT_CHARS = 4000
+MAX_SOURCE_CHARS = 4000
+MAX_REPLACEMENT_CHARS = 8000
 
 # Default cap on the emit batch, mirroring the sibling passes' bounded batches
 # (consolidate_emit's max_clusters=20). Prevents an unbounded prompt batch on a
