@@ -403,6 +403,40 @@ def _has_document_card(conn, target_ids: list[int]) -> bool:
     return _has_type(conn, target_ids, "('document_card')")
 
 
+def invalid_target_ids(conn, ids: list, *, min_count: int = 2) -> str | None:
+    """Why *ids* cannot be ingested, or None when they can (techne#1257).
+
+    The ingest tools take their ids from the caller, so nothing upstream proves the
+    ids were emitted. Refuse a set that no emit could have produced: fewer than
+    *min_count* ids, a non-integer or repeated id, an id with no row, or a row that is
+    no longer live (superseded or archived; the emit selectors only offer live rows,
+    and a row can go stale between emit and ingest). A refusal writes nothing, not
+    even a marker, so a stale group is simply offered again on the next emit."""
+    if not all(isinstance(i, int) and not isinstance(i, bool) for i in ids):
+        return f"ids must be integers, got {ids!r}"[:200]
+    if len(set(ids)) != len(ids):
+        return f"duplicate ids in {sorted(ids)}"
+    if len(ids) < min_count:
+        return f"needs at least {min_count} ids, got {len(ids)}"
+    placeholders = ",".join("?" * len(ids))
+    rows = {
+        r[0]: (r[1], r[2])
+        for r in conn.execute(
+            f"SELECT id, superseded_by, status FROM knowledge WHERE id IN ({placeholders})",
+            list(ids),
+        )
+    }
+    missing = sorted(set(ids) - set(rows))
+    if missing:
+        return f"no knowledge row for ids {missing}"
+    stale = sorted(
+        i for i, (sup, status) in rows.items() if sup is not None or status == "archived"
+    )
+    if stale:
+        return f"ids {stale} are superseded or archived"
+    return None
+
+
 def consolidate_ingest(
     config: Config,
     target_ids: list[int],
@@ -426,9 +460,8 @@ def consolidate_ingest(
     """
     counts = {
         "proposed": 0, "written": 0, "kept": 0, "errors": 0, "skipped": 0, "refused": 0,
-        "unparsed": 0,
+        "unparsed": 0, "invalid": 0,
     }
-    ch = _cluster_hash(target_ids)  # recompute; the passed cluster_hash is advisory only
     verdict = parse_consolidation_response(response)
     _ensure_system_session(config.db_path)
     raw_for_store = response if config.reflect.log_raw_response else None
@@ -438,6 +471,14 @@ def consolidate_ingest(
         # skips already-proposed clusters, but a direct ingest — or a duplicate ingest of
         # the same cluster — bypasses that and would re-add a candidate the agent/human
         # already judged. Re-check on the recomputed hash; no-op if already on record.
+        # Ids first (techne#1257): the hash below sorts them, which a non-integer
+        # id would crash.
+        if (why := invalid_target_ids(conn, target_ids)) is not None:
+            log.warning("consolidate_ingest: refused ids %s: %s", target_ids, why)
+            counts["invalid"] += 1
+            counts["reason"] = why
+            return counts
+        ch = _cluster_hash(target_ids)  # recompute; the passed cluster_hash is advisory only
         if _already_proposed(conn, ch):
             counts["skipped"] += 1
             return counts
@@ -810,14 +851,22 @@ def dream_ingest(
     stored prompt_hash always corresponds to its real group ids and can't silently defeat
     _already_proposed_dream. Returns counts.
     """
-    counts = {"proposed": 0, "written": 0, "kept": 0, "errors": 0, "skipped": 0, "unparsed": 0}
-    gh = _cluster_hash(group_ids)  # recompute; caller-supplied hash is advisory only
+    counts = {
+        "proposed": 0, "written": 0, "kept": 0, "errors": 0, "skipped": 0, "unparsed": 0,
+        "invalid": 0,
+    }
     verdict = parse_dream_response(response)
     _ensure_system_session(config.db_path)
     raw_for_store = response if config.reflect.log_raw_response else None
     conn = connect(config.db_path)
     try:
         # Anti-churn: enforce at ingest too (mirrors consolidate_ingest techne#170 fix).
+        if (why := invalid_target_ids(conn, group_ids)) is not None:
+            log.warning("dream_ingest: refused ids %s: %s", group_ids, why)
+            counts["invalid"] += 1
+            counts["reason"] = why
+            return counts
+        gh = _cluster_hash(group_ids)  # recompute; caller-supplied hash is advisory only
         if _already_proposed_dream(conn, gh):
             counts["skipped"] += 1
             return counts
