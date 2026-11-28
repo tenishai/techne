@@ -1870,3 +1870,110 @@ def test_chars_dropped_still_moves_with_the_cap(tmp_path):
     assert seen[200] > seen[2000], (
         f"a tighter cap must drop MORE: {seen}"
     )
+
+
+# ---- coord messages at the start of a turn (techne#1328) ----------------------
+
+
+def _additional_context(out: str) -> str:
+    return json.loads(out)["hookSpecificOutput"]["additionalContext"] if out.strip() else ""
+
+
+def test_a_peer_message_arrives_at_the_start_of_a_turn_once(home, monkeypatch, capsys):
+    """A turn with no tool calls never saw a peer's message: only PostToolUse
+    delivered them. UserPromptSubmit now does too, sharing the surfaced-set, so the
+    next tool call does not deliver it a second time."""
+    from techne.config import Config
+    from techne.core import coord
+    from techne.core.database import init_db
+    from techne.hooks.post_tool_use import _inject_coord_messages
+
+    _write_config(home, per_turn_recall=False)
+    cfg = Config.load()
+    init_db(cfg.db_path).close()
+    coord.send(cfg.db_path, "peer-session", "claiming branch feat/x", from_name="poe1")
+
+    ctx = _additional_context(_run(monkeypatch, capsys, {"session_id": "me", "prompt": "hi"}))
+    assert "claiming branch feat/x" in ctx
+
+    assert _inject_coord_messages(cfg, "me") is None, "already surfaced this session"
+    ctx = _additional_context(_run(monkeypatch, capsys, {"session_id": "me", "prompt": "again"}))
+    assert "claiming branch feat/x" not in ctx
+
+
+def test_coord_on_prompt_off_leaves_it_to_post_tool_use(home, monkeypatch, capsys):
+    from techne.config import Config
+    from techne.core import coord
+    from techne.core.database import init_db
+
+    # per_turn_recall stays on (its default) so the hook does not exit at its gate
+    # and the coord block's own switch is what keeps the message out (round 2 nit).
+    _write_config(home, coord_on_prompt=False)
+    cfg = Config.load()
+    init_db(cfg.db_path).close()
+    coord.send(cfg.db_path, "peer-session", "claiming branch feat/y", from_name="poe1")
+    out = _run(monkeypatch, capsys, {"session_id": "me", "prompt": "hi"})
+    assert "claiming branch feat/y" not in _additional_context(out)
+
+
+
+def _arm_inbound(home, monkeypatch):
+    """Arm inbound recall and fake only the search, so the real slot logic runs:
+    the fake honours `claim`, which is where the once-per-prompt slot is taken."""
+    from techne.config import Config
+    from techne.core.database import init_db
+
+    _write_config(home, per_turn_recall=False, inbound_recall=True,
+                  inbound_recall_floor_vec_distance=0.9)
+    cfg = Config.load()
+    init_db(cfg.db_path).close()
+
+    def fake_recall_block(config, session_id, query, *, claim=None, **kw):
+        if claim is not None and not claim():
+            return "", []
+        return f"INBOUND[{query}]", []
+
+    monkeypatch.setattr(user_prompt_submit, "recall_block", fake_recall_block)
+    return cfg
+
+
+def _seed_slot(cfg, session_id, delivered: bool):
+    from techne.core.database import connect
+    from techne.core.extension_state import set_state
+
+    conn = connect(cfg.db_path)
+    try:
+        set_state(conn, f"{user_prompt_submit.INBOUND_TURN_PREFIX}:{session_id}",
+                  {"delivered": delivered})
+    finally:
+        conn.close()
+
+
+def test_inbound_recall_searches_a_coord_body_delivered_at_the_prompt(home, monkeypatch, capsys):
+    """Prudence, #1328 round 2: a message delivered at the prompt is marked surfaced,
+    so PostToolUse would never search its body. The previous prompt's slot is spent;
+    this prompt opens a fresh one and the body is searched in it."""
+    from techne.core import coord
+
+    cfg = _arm_inbound(home, monkeypatch)
+    _seed_slot(cfg, "me", delivered=True)
+    coord.send(cfg.db_path, "peer-session", "migrating the archivist schema", from_name="poe1")
+    ctx = _additional_context(_run(monkeypatch, capsys, {"session_id": "me", "prompt": "hi"}))
+    # The search ran on the coord body itself, not just on something (round 4 nit).
+    assert "INBOUND[migrating the archivist schema" in ctx
+
+
+def test_a_notification_turn_still_searches_the_coord_body_it_delivered(
+    home, monkeypatch, capsys
+):
+    """Prudence, #1328 round 3: a task-notification turn opens no slot but still
+    delivers coord; the search runs in the slot the last prompt left open."""
+    from techne.core import coord
+
+    cfg = _arm_inbound(home, monkeypatch)
+    _seed_slot(cfg, "me", delivered=False)
+    coord.send(cfg.db_path, "peer-session", "migrating the archivist schema", from_name="poe1")
+    prompt = "<task-notification><task-id>x</task-id></task-notification>"
+    ctx = _additional_context(_run(monkeypatch, capsys, {"session_id": "me", "prompt": prompt}))
+    # The search ran on the coord body itself, not just on something (round 4 nit).
+    assert "INBOUND[migrating the archivist schema" in ctx

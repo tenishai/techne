@@ -3,8 +3,9 @@
 Lets concurrent Claude Code sessions converse without a human router. A message
 targets a **channel** (default ``'coord'``, a broadcast everyone watches) or a
 specific ``session_id`` (direct). Delivery is push: the post_tool_use hook injects
-unread messages into the agent's context on its next tool call, and the
-session-start banner surfaces unread + who's live.
+unread messages into the agent's context on its next tool call, user_prompt_submit
+does so at the start of each turn (techne#1328), and the session-start banner
+surfaces unread + who's live.
 
 Identity is the **self-asserted** session_id (``CLAUDE_CODE_SESSION_ID`` or a
 caller-supplied value), consistent with the rest of techne — NO bearer token. The

@@ -439,3 +439,32 @@ def test_outside_repo_reason(home, monkeypatch):
     monkeypatch.setattr("techne.core.repo.primary_repo_root", lambda _p: other)
     monkeypatch.setattr("techne.core.codex.resolve_repo_db_for_query", lambda *_a: db)
     assert _edit_rail_outcome(cfg, "b", "Edit", ti).declined_because == "outside_repo"
+
+
+# ---- the joined context: priority order and budget (techne#1239) --------------
+
+
+def test_coord_comes_first_and_reminders_get_what_is_left(home, monkeypatch, capsys):
+    """Claude Code cuts an oversized additionalContext from the end, so coord goes
+    first and reminders last, given the budget the others left."""
+    from techne.hooks import post_tool_use as ptu
+
+    _write_config(home)
+    budgets: list[int | None] = []
+    monkeypatch.setattr(ptu, "_inject_coord_messages", lambda c, s, b=None: "COORD")
+    monkeypatch.setattr(ptu, "_inject_inbound_recall", lambda *a, **k: "INBOUND")
+    monkeypatch.setattr(ptu, "_inject_edit_blast_radius", lambda *a, **k: "EDIT")
+
+    def reminders(config, session_id, budget=None):
+        budgets.append(budget)
+        return "REMINDERS"
+
+    monkeypatch.setattr(ptu, "_inject_due_reminders", reminders)
+    repo, _db = _make_indexed_repo(home)
+    out = _run(monkeypatch, capsys, _edit_payload(repo))
+    ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+    assert ctx.split("\n\n") == ["COORD", "INBOUND", "EDIT", "REMINDERS"]
+    from techne.config import Config
+
+    max_chars = Config.load().hooks.context_max_chars
+    assert budgets == [max_chars - sum(len(p) + 2 for p in ("COORD", "INBOUND", "EDIT"))]

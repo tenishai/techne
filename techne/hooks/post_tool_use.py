@@ -712,8 +712,18 @@ def summarize(tool_name: str, tool_input: dict, tool_output) -> str:
         return f"Tool: {tool_name}\nInput: {input_summary}\nOutput: {output_preview}"
 
 
-def _inject_due_reminders(config: Config, session_id: str) -> str | None:
+#: Characters kept free in the reminder budget for the overflow line (techne#1239).
+_REMINDER_OVERFLOW_RESERVE = 120
+
+
+def _inject_due_reminders(
+    config: Config, session_id: str, budget: int | None = None
+) -> str | None:
     """Return an additionalContext string for any due, un-throttled reminders.
+
+    ``budget`` (techne#1239) caps the characters returned. Reminders that fit are
+    shown; the rest collapse into one "N more reminders due" line and are NOT
+    marked surfaced, so they come back on a later call.
 
     Hot-path design (techne#207):
     - Single indexed SELECT on (status, due_at) — no heavy work.
@@ -762,6 +772,8 @@ def _inject_due_reminders(config: Config, session_id: str) -> str | None:
         lines: list[str] = []
         newly_surfaced: list[int] = []
         now_dt = datetime.now(timezone.utc)
+        used = 0
+        overflow = 0
 
         for reminder in due:
             rid = reminder["id"]
@@ -785,7 +797,15 @@ def _inject_due_reminders(config: Config, session_id: str) -> str | None:
             if in_session and within_throttle:
                 continue  # throttled for this session
 
-            lines.append(f"⏰ Reminder: {reminder['note']}")
+            line = f"⏰ Reminder: {reminder['note']}"
+            # Keep scanning past a line that does not fit (Prudence, #1239 round 2):
+            # stopping at the first one let a single long reminder hide every
+            # reminder due after it, on every call. Room is kept for the overflow line.
+            if budget is not None and used + len(line) + 1 > budget - _REMINDER_OVERFLOW_RESERVE:
+                overflow += 1
+                continue
+            lines.append(line)
+            used += len(line) + 1
             newly_surfaced.append(rid)
 
         if newly_surfaced:
@@ -807,6 +827,11 @@ def _inject_due_reminders(config: Config, session_id: str) -> str | None:
             finally:
                 conn.close()
 
+        if overflow:
+            lines.append(
+                f"⏰ {overflow} more reminder(s) due, not shown here to keep peer "
+                "messages visible: `techne_reminder_list`"
+            )
         return "\n".join(lines) if lines else None
     except Exception as exc:  # noqa: BLE001 — reminders must never break the hook
         print(f"techne: reminder injection failed (non-fatal): {exc}", file=sys.stderr)
@@ -1112,7 +1137,8 @@ def _inject_coord_messages(
     Surface-once-per-session: each message id is injected at most once per session
     (tracked in extension_state "coord:surfaced:<session_id>", mirroring the reminder
     surfaced-set — and pruned the same way so the rows don't accumulate), so a peer's
-    message lands promptly on the next tool call without re-nagging every call. The
+    message lands promptly on the next tool call, or at the start of the next turn
+    through UserPromptSubmit (techne#1328), without re-nagging every call. The
     message stays UNREAD in the ledger until the agent calls techne_mark_read — so it
     still shows in the banner / techne_inbox if the agent doesn't act on the injected
     copy. Fail-safe: any error returns None.
@@ -1605,26 +1631,20 @@ def main():
     # best-effort and returns None to add nothing. (#207, #335)
     context_parts: list[str] = []
 
-    # Codex edit rail: blast-radius of the edited symbol (techne#335).
-    edit_rail_context = _inject_edit_blast_radius(config, session_id, tool_name, tool_input)
-    if edit_rail_context:
-        context_parts.append(edit_rail_context)
+    # PRIORITY ORDER, UNDER ONE BUDGET (techne#1239). Claude Code saves an
+    # additionalContext over its cap to a file and shows the model a short preview,
+    # so what comes last is what gets cut. Coord messages come first (a peer's claim
+    # must not be hidden), then inbound recall, then the edit rail; none of those is
+    # cut. Reminders fill what is left, and the rest collapse to one line.
 
-    # Due reminders — runs outside bounded_hook so a slow reminder check doesn't
-    # count against the observation-capture timeout, but errors are always
-    # swallowed so the hook exit code stays 0. (#207)
-    reminder_context = _inject_due_reminders(config, session_id)
-    if reminder_context:
-        context_parts.append(reminder_context)
-
-    # Unread inter-session coordination messages (techne#376) — same rail, so a
-    # peer's message reaches the agent on its next tool call with no prompting.
+    # Unread inter-session coordination messages (techne#376) — a peer's message
+    # reaches the agent on its next tool call with no prompting.
     coord_bodies: list[str] = []
     coord_context = _inject_coord_messages(config, session_id, coord_bodies)
     if coord_context:
         context_parts.append(coord_context)
 
-    # Inbound recall (techne#1018) — LAST, after the coord block, because it also
+    # Inbound recall (techne#1018) — after the coord block, because it also
     # searches the bodies of the messages that block just delivered. Behind the
     # subagent gate above like the other rails (#930): a subagent's own tool
     # calls never reach here. The Agent result it hands back fires this hook in
@@ -1638,6 +1658,21 @@ def main():
     )
     if inbound_context:
         context_parts.append(inbound_context)
+
+    # Codex edit rail: blast-radius of the edited symbol (techne#335).
+    edit_rail_context = _inject_edit_blast_radius(config, session_id, tool_name, tool_input)
+    if edit_rail_context:
+        context_parts.append(edit_rail_context)
+
+    # Due reminders — runs outside bounded_hook so a slow reminder check doesn't
+    # count against the observation-capture timeout, but errors are always
+    # swallowed so the hook exit code stays 0. (#207) Last, with what is left.
+    used = sum(len(p) + 2 for p in context_parts)
+    reminder_context = _inject_due_reminders(
+        config, session_id, budget=max(0, config.hooks.context_max_chars - used)
+    )
+    if reminder_context:
+        context_parts.append(reminder_context)
 
     if context_parts:
         print(
