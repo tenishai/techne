@@ -87,7 +87,7 @@ Record an observation into memory from any client. The platform-agnostic capture
 
 ### `techne_reflect_emit`
 
-Consolidate a finished session into durable memory using YOUR OWN model (no API key, no sampling). techne renders one reflection prompt per thread of work; answer each `prompt` in the returned batch as a JSON candidate array (scope/type/content/tags/confidence), then call techne_reflect_ingest once per thread with your answer. Run this when wrapping up a chunk of work, or when the SessionStart…
+Consolidate a finished session into durable memory using YOUR OWN model (no API key, no sampling). techne renders one reflection prompt per thread of work; answer each `prompt` in the returned batch as a JSON candidate array (scope/type/content/tags/confidence), then call techne_reflect_ingest once per thread with your answer. Run this when wrapping up a chunk of work, or when the…
 
 ### `techne_reflect_ingest`
 
@@ -99,7 +99,7 @@ Find duplicate/overlapping knowledge entries and judge them with YOUR OWN model 
 
 ### `techne_consolidate_ingest`
 
-Feed back one cluster's consolidation verdict from techne_consolidate_emit. `response` is your JSON verdict object; `target_ids` + `cluster_hash` come from the emit batch item. A 'merge' verdict queues a proposal for review (promoting it collapses the rows); a 'keep' verdict writes nothing.
+Feed back one cluster's consolidation verdict from techne_consolidate_emit. Ids no emit could have produced (missing, superseded or archived, repeated, not integers, fewer than two) are refused with `invalid: 1` and a `reason`, and nothing is written. `response` is your JSON verdict object; `target_ids` + `cluster_hash` come from the emit batch item. A 'merge' verdict queues a proposal for…
 
 ### `techne_faithfulness_emit`
 
@@ -115,7 +115,7 @@ Recombine pass (techne#108 'dream'): find non-obvious connections across stored 
 
 ### `techne_dream_ingest`
 
-Feed back one group's dream verdict from techne_dream_emit. `response` is your JSON verdict object (verdict='connect'|'none'); `group_ids` + `group_hash` come from the emit batch item. A 'connect' verdict queues a low-confidence pending candidate for human review (the basis facts stay live — this is a new derived insight, not a merge); a 'none' verdict writes a keep-memory marker so the group…
+Feed back one group's dream verdict from techne_dream_emit. Ids no emit could have produced (missing, superseded or archived, repeated, not integers, fewer than two) are refused with `invalid: 1` and a `reason`, and nothing is written. `response` is your JSON verdict object (verdict='connect'|'none'); `group_ids` + `group_hash` come from the emit batch item. A 'connect' verdict queues a…
 
 ### `techne_conflict_emit`
 
@@ -123,7 +123,7 @@ Contradiction detection pass (techne#213 D1 — coherence layer): find live know
 
 ### `techne_conflict_ingest`
 
-Feed back one conflict verdict from techne_conflict_emit (techne#213). `response` is your JSON verdict array; `focus_id`, `comparison_ids`, and `check_hash` come from the emit batch item. SUPERSEDE → pending 'retire' candidate linking the older entry (by event_at) into the newer survivor (no row minted; operator reviews before promote). UPDATE → pending 'retire' candidate folding the new…
+Feed back one conflict verdict from techne_conflict_emit (techne#213). Ids no emit could have produced (a focus or comparison that is missing, superseded or archived, repeated, or not an integer) are refused with `invalid: 1` and a `reason`, and nothing is written. `response` is your JSON verdict array; `focus_id`, `comparison_ids`, and `check_hash` come from the emit batch item. SUPERSEDE →…
 
 ### `techne_federation_conflict_ingest`
 

@@ -1714,8 +1714,10 @@ TOOLS = [
             "work; answer each `prompt` in the returned batch as a JSON candidate array "
             "(scope/type/content/tags/confidence), then call techne_reflect_ingest once per "
             "thread with your answer. Run this when wrapping up a chunk of work, or when the "
-            "SessionStart banner flags a session with unreflected threads. Defaults to the "
-            "most recent session with unreflected work (skipping empty/already-emitted ones)."
+            "SessionStart banner flags a session with unreflected threads. With no "
+            "session_id it reflects on YOUR session, or an earlier session with your "
+            "session name that ended unreflected; never a peer's. any_session=true takes "
+            "the newest pending session on the machine instead."
         ),
         "inputSchema": {
             "type": "object",
@@ -1723,10 +1725,17 @@ TOOLS = [
                 "session_id": {
                     "type": "string",
                     "description": (
-                        "Session to reflect on (default: most recent). Prefer passing an "
-                        "explicit id — e.g. the one from the SessionStart nudge — when "
-                        "consolidating a FINISHED session, so a freshly-started session "
-                        "isn't reflected while still empty."
+                        "Session to reflect on. Default: your own session, or the newest "
+                        "earlier session with your session name that has unreflected work. "
+                        "Pass an explicit id (e.g. from the SessionStart nudge) to reflect "
+                        "on another session."
+                    ),
+                },
+                "any_session": {
+                    "type": "boolean",
+                    "description": (
+                        "With no session_id, take the newest session on the machine with "
+                        "unreflected work, whoever's it is: for a deliberate bulk drain."
                     ),
                 },
                 "limit": {
@@ -1793,9 +1802,13 @@ TOOLS = [
         "name": "techne_consolidate_ingest",
         "description": (
             "Feed back one cluster's consolidation verdict from techne_consolidate_emit. "
+            "Ids no emit could have produced (missing, superseded or archived, repeated, "
+            "not integers, fewer than two) are refused with `invalid: 1` and a `reason`, "
+            "and nothing is written. "
             "`response` is your JSON verdict object; `target_ids` + `cluster_hash` come "
             "from the emit batch item. A 'merge' verdict queues a proposal for review "
-            "(promoting it collapses the rows); a 'keep' verdict writes nothing."
+            "(promoting it collapses the rows); a 'keep' verdict writes a discarded "
+            "marker so the cluster is not offered again."
         ),
         "inputSchema": {
             "type": "object",
@@ -1839,6 +1852,9 @@ TOOLS = [
         "name": "techne_dream_ingest",
         "description": (
             "Feed back one group's dream verdict from techne_dream_emit. "
+            "Ids no emit could have produced (missing, superseded or archived, repeated, "
+            "not integers, fewer than two) are refused with `invalid: 1` and a `reason`, "
+            "and nothing is written. "
             "`response` is your JSON verdict object (verdict='connect'|'none'); "
             "`group_ids` + `group_hash` come from the emit batch item. A 'connect' "
             "verdict queues a low-confidence pending candidate for human review "
@@ -1942,6 +1958,9 @@ TOOLS = [
         "name": "techne_conflict_ingest",
         "description": (
             "Feed back one conflict verdict from techne_conflict_emit (techne#213). "
+            "Ids no emit could have produced (a focus or comparison that is missing, "
+            "superseded or archived, repeated, or not an integer) are refused with "
+            "`invalid: 1` and a `reason`, and nothing is written. "
             "`response` is your JSON verdict array; `focus_id`, `comparison_ids`, and "
             "`check_hash` come from the emit batch item. SUPERSEDE → pending 'retire' "
             "candidate linking the older entry (by event_at) into the newer survivor "
@@ -2891,7 +2910,25 @@ def _techne_reflect_emit(args: dict, config: Config) -> dict:
     """
     from techne.core.reflect import emit_reflection_pass
 
-    return emit_reflection_pass(config, args.get("session_id"), limit=args.get("limit"))
+    caller: str | None = None
+    if not args.get("session_id") and not args.get("any_session"):
+        # A bare emit is the CALLER's (techne#1333): it used to take the newest
+        # pending session on the machine, usually a peer's. If the caller can't be
+        # resolved, refuse rather than guess, as the coord tools do.
+        try:
+            caller = _resolve_session_id(args)
+        except ValueError as exc:
+            raise ValueError(
+                f"{exc}; pass session_id, or any_session=true for a machine-wide drain"
+            ) from exc
+        if not caller:
+            raise ValueError(
+                "techne_reflect_emit: could not tell which session is calling; pass "
+                "session_id, or any_session=true for a machine-wide drain"
+            )
+    return emit_reflection_pass(
+        config, args.get("session_id"), limit=args.get("limit"), caller_session=caller
+    )
 
 
 def _techne_reflect_ingest(args: dict, config: Config) -> dict:

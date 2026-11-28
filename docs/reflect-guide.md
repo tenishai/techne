@@ -151,9 +151,10 @@ procedure telling you to go again. The CLI does echo `note` to stderr — read i
 the newest session that still has unreflected work, however old (techne#1158; it used to look
 only at the five most recent sessions). Each call still covers one session, so the same loop
 works its way back through the backlog. When nothing is owed, the CLI prints
-`No session to reflect on.` and exits 1, so a script stops on that exit code (over MCP,
-`techne_reflect_emit` returns an empty batch with the note "no session with unreflected
-work"):
+`No session to reflect on.` and exits 1, so a script stops on that exit code. Over MCP, a bare
+`techne_reflect_emit` reflects on the calling session's own work only (techne#1333); pass
+`any_session: true` for this every-session drain, which returns an empty batch with the note
+"no session with unreflected work" when nothing is owed:
 
 ```sh
 techne reflect emit -o /tmp/batch.json &&   # the newest owed session, any age
