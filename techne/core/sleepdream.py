@@ -53,7 +53,11 @@ from techne.core.search import build_or_fts_query
 # .source_session_id is NOT NULL). Additive: INSERT OR IGNORE, no migration.
 SYSTEM_SLEEP_SESSION = "system:sleep"
 
-MAX_ENTRY_CHARS = 300
+#: The longest entry consolidation clusters, and so the longest it renders (techne#1244).
+#: The judge used to see each row cut to 300 characters and its merged content then
+#: replaced the full rows, so a long decision merged with a short restatement lost its
+#: rationale. Rows up to this length are shown whole; longer rows are not clustered.
+MAX_ENTRY_CHARS = 2000
 
 
 #: Default producer label. A candidate written by a RESIDENT agent answering an emitted
@@ -191,7 +195,7 @@ def consolidate_clusters(
 # lesson_meta, and lessons are retired by the operator, not by a rail.
 _CLUSTERABLE = (
     "k.superseded_by IS NULL AND k.status != 'archived' AND k.type != 'document_card' "
-    f"AND k.type NOT IN {LESSON_TYPES_SQL}"
+    f"AND k.type NOT IN {LESSON_TYPES_SQL} AND length(k.content) <= {MAX_ENTRY_CHARS}"
 )
 _LIVE_CLUSTERABLE_SQL = (
     f"SELECT k.id, k.type, k.content, k.tags, k.confidence FROM knowledge k WHERE {_CLUSTERABLE}"
@@ -263,13 +267,14 @@ Decide whether to collapse them into a single entry.
 Return ONLY a JSON object:
   {{
     "verdict": "merge" | "keep",
-    "content": "<the single merged fact, one sentence>",   // required for merge
+    "content": "<the merged entry>",                       // required for merge
     "type": "{types}",                                      // required for merge
     "confidence": "low" | "medium" | "high",               // required for merge
     "reason": "<one line>"
   }}
-- "merge": the entries say the same thing — collapse them into ONE. Write the clearest,
-  most complete single statement as `content`; pick the strongest `confidence`.
+- "merge": the entries say the same thing — collapse them into ONE. Write `content` so it
+  keeps every claim, reason and caveat any entry carries: it replaces all of them. Use
+  the highest `confidence` any entry has, no higher.
 - "keep": they are genuinely distinct — do nothing.
 Be conservative: when unsure, "keep". Output the JSON object and nothing else.
 """
@@ -279,8 +284,7 @@ def _render_cluster(rows: list[dict]) -> str:
     lines = []
     for r in rows:
         content = (r["content"] or "").replace("\n", " ")
-        if len(content) > MAX_ENTRY_CHARS:
-            content = content[:MAX_ENTRY_CHARS] + "…"
+        # Whole: _CLUSTERABLE admits only rows up to MAX_ENTRY_CHARS (techne#1244).
         lines.append(f"- (#{r['id']}, {r['type']}, {r['confidence']}) {content}")
     return "\n".join(lines)
 

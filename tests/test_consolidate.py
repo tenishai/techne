@@ -484,3 +484,122 @@ def test_unparseable_answer_is_not_recorded_as_keep(config, answer):
     assert any(set(c["target_ids"]) == {a, b} for c in consolidate_emit(config))
     again = consolidate_ingest(config, [a, b], "h", _MERGE_VERDICT)
     assert again["written"] == 1 and again["skipped"] == 0
+
+
+# ---- what a merged row inherits (techne#1244) ------------------------------
+
+
+def _set(db, kid, **cols):
+    conn = connect(db)
+    try:
+        sets = ", ".join(f"{c} = ?" for c in cols)
+        conn.execute(f"UPDATE knowledge SET {sets} WHERE id = ?", (*cols.values(), kid))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _row(db, kid):
+    conn = connect(db)
+    try:
+        return dict(conn.execute("SELECT * FROM knowledge WHERE id = ?", (kid,)).fetchone())
+    finally:
+        conn.close()
+
+
+def test_merge_unions_tags_caps_confidence_and_keeps_confirmation_time(config):
+    """The issue's scenario: two `low` rows tagged `alpha,beta` and `alpha`, merged with
+    a model answer of `high`, became one `high`, untagged row confirmed today."""
+    db = config.db_path
+    a = store(db, "first", type="fact", confidence="low", tags="alpha,beta")
+    b = store(db, "second", type="fact", confidence="low", tags="alpha")
+    _set(db, a, last_confirmed_at="2026-01-02 03:04:05")
+    _set(db, b, last_confirmed_at="2026-02-03 04:05:06")
+    new = merge_into(db, [a, b], "merged", type="fact", confidence="high", tags="")
+    row = _row(db, new)
+    assert row["tags"] == "alpha,beta"
+    assert row["confidence"] == "low"
+    assert row["confidence_numeric"] == pytest.approx(0.3)
+    assert row["last_confirmed_at"] == "2026-02-03 04:05:06"
+
+
+def test_merge_keeps_a_lower_confidence_than_the_sources():
+    from techne.core.knowledge import _cap_confidence
+
+    assert _cap_confidence("medium", ["high", "low"]) == "medium"
+    assert _cap_confidence("high", ["medium", "low"]) == "medium"
+
+
+def test_merge_carries_agreed_anchor_and_provenance_and_drops_disputed(config):
+    db = config.db_path
+    a = store(db, "first", type="fact")
+    b = store(db, "second", type="fact")
+    c = store(db, "third", type="fact")
+    for kid in (a, b, c):
+        _set(db, kid, anchor_path="techne/core/x.py", anchor_symbol="f",
+             written_by="poe2", origin_source="session", origin_session="s-1")
+    _set(db, c, origin_session="s-2")
+    new = merge_into(db, [a, b, c], "merged", type="fact", confidence="medium")
+    row = _row(db, new)
+    assert (row["anchor_path"], row["anchor_symbol"]) == ("techne/core/x.py", "f")
+    assert (row["written_by"], row["origin_source"]) == ("poe2", "session")
+    assert row["origin_session"] is None, "two sessions disagree: honestly unattributed"
+
+
+def test_merge_with_one_anchored_source_carries_it(config):
+    db = config.db_path
+    a = store(db, "anchored", type="fact")
+    b = store(db, "not anchored", type="fact")
+    _set(db, a, anchor_path="README.md")
+    new = merge_into(db, [a, b], "merged", type="fact", confidence="medium")
+    assert _row(db, new)["anchor_path"] == "README.md"
+
+
+def test_supersede_carries_writer_provenance(config):
+    db = config.db_path
+    a = store(db, "v1", type="fact")
+    _set(db, a, written_by="poe2", origin_source="session", origin_session="s-1")
+    new = supersede(db, a, "v2")
+    row = _row(db, new)
+    assert (row["written_by"], row["origin_source"], row["origin_session"]) == (
+        "poe2", "session", "s-1"
+    )
+
+
+def test_promoted_merge_inherits_through_the_rail(config):
+    """End to end: consolidate emit -> ingest a `high` merge -> promote."""
+    db = config.db_path
+    a = store(db, "duplicated knowledge", type="fact", confidence="low", tags="alpha")
+    b = store(db, "duplicated knowledge", type="fact", confidence="low", tags="beta")
+    item = next(c for c in consolidate_emit(config) if set(c["target_ids"]) == {a, b})
+    consolidate_ingest(config, item["target_ids"], item["cluster_hash"], _MERGE_VERDICT)
+    conn = connect(db)
+    try:
+        cid = conn.execute(
+            "SELECT id FROM knowledge_candidates WHERE origin='consolidate' AND status='pending'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    row = _row(db, promote_candidate(db, cid))
+    assert set(row["tags"].split(",")) >= {"alpha", "beta"}
+    assert row["confidence"] == "low"
+
+
+def test_long_rows_are_rendered_whole_and_overlong_rows_are_not_clustered(config):
+    """The judge saw each row cut to 300 characters, then its merge replaced the
+    full rows. Rows up to MAX_ENTRY_CHARS are now shown whole; longer ones are left
+    out of clustering rather than merged from a partial view."""
+    from techne.core.sleepdream import MAX_ENTRY_CHARS
+
+    db = config.db_path
+    tail = "the rationale that must survive"
+    long_text = "decision " + "x" * 900 + " " + tail
+    a = store(db, long_text, type="decision")
+    b = store(db, long_text, type="decision")
+    item = next(c for c in consolidate_emit(config) if set(c["target_ids"]) == {a, b})
+    assert tail in item["prompt"]
+
+    huge = "y" * (MAX_ENTRY_CHARS + 1)
+    c = store(db, huge, type="fact")
+    d = store(db, huge, type="fact")
+    assert not any({c, d} & set(i["target_ids"]) for i in consolidate_emit(config))

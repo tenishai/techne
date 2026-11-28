@@ -133,10 +133,12 @@ def test_build_faithfulness_prompt_includes_sources_and_replacement():
 
 
 def test_build_faithfulness_prompt_truncates_long_content():
-    long_content = "x" * 1000
+    from techne.core.faithfulness import MAX_SOURCE_CHARS
+
+    long_content = "x" * (MAX_SOURCE_CHARS + 500)
     source_rows = [{"id": 1, "content": long_content}]
     prompt = build_faithfulness_prompt(source_rows, "short replacement")
-    # Truncated at MAX_SOURCE_CHARS (300) + ellipsis
+    # Truncated at MAX_SOURCE_CHARS + ellipsis
     assert "…" in prompt
     # Full content should NOT appear verbatim
     assert long_content not in prompt
