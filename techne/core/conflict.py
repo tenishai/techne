@@ -864,8 +864,11 @@ def _handle_update(
     raw: str | None,
     model_used: str,
 ) -> None:
-    """Stage a RETIRE-LINK candidate for an UPDATE verdict: the focus (the augmenting
-    NEW entry) is retired into the comparison (the canonical EXISTING entry it refines).
+    """Stage an UPDATE verdict: a MERGE candidate when the model gave merged wording
+    that differs from the canonical row (techne#1261), else a RETIRE-LINK candidate,
+    where the focus (the augmenting NEW entry) is retired into the comparison (the
+    canonical EXISTING entry it refines). The rest of this docstring describes the
+    retire case.
 
     UPDATE means the new entry augments the existing WITHOUT contradiction. Like
     SUPERSEDE, both rows are already live, so we link rather than mint — retiring the
@@ -883,28 +886,55 @@ def _handle_update(
         log.debug("conflict: UPDATE skipped — focus row not found")
         return
 
-    update_content = (suggested_content or "").strip() or (comp_row.get("content") or "")
+    merged = (suggested_content or "").strip()
+    if merged and merged != (comp_row.get("content") or "").strip():
+        # THE MERGED WORDING IS THE POINT OF AN UPDATE (techne#1261). Staged as a
+        # retire, the applier only linked the rows and never wrote it, so a claim
+        # only the focus carried left the live set. Staged as a MERGE of the two
+        # rows with the merged wording, promoting it mints the row the verdict
+        # described; merge candidates pass the faithfulness gate before promote
+        # (`_FAITHFULNESS_GATED_ACTIONS`), which checks it kept both rows' claims.
+        log.debug(
+            "conflict: staging MERGE candidate (update) — focus id=%s + canonical id=%s",
+            focus_row["id"],
+            comp_row["id"],
+        )
+        _insert_candidate(
+            conn,
+            action="merge",
+            content=merged,
+            ktype=comp_row.get("type", "fact"),
+            confidence=comp_row.get("confidence", "medium"),
+            target_ids=[focus_row["id"], comp_row["id"]],
+            check_hash=check_hash,
+            status="pending",
+            decided_by=None,
+            decision_reason=f"update (merged wording replaces both rows): {reason or ''}",
+            raw=raw,
+            origin="conflict",
+            model_used=model_used,
+        )
+        return
 
+    # No new wording: the focus adds nothing the canonical row lacks, so linking it
+    # in loses nothing.
     log.debug(
         "conflict: staging RETIRE candidate (update/refinement) — retire focus id=%s into"
-        " canonical id=%s content='%.60s…'",
+        " canonical id=%s",
         focus_row["id"],
         comp_row["id"],
-        update_content,
     )
-
     _insert_candidate(
         conn,
         action="retire",
-        content=update_content,
+        content=comp_row.get("content") or "",
         ktype=comp_row.get("type", "fact"),
         confidence=comp_row.get("confidence", "medium"),
         target_ids=[focus_row["id"], comp_row["id"]],
         check_hash=check_hash,
         status="pending",
         decided_by=None,
-        decision_reason=f"update (refinement — apply merged wording as an edit if desired): "
-        f"{reason or ''}",
+        decision_reason=f"update (refinement, no new wording): {reason or ''}",
         raw=raw,
         origin="conflict",
         model_used=model_used,

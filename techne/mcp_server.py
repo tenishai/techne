@@ -1945,9 +1945,10 @@ TOOLS = [
             "`response` is your JSON verdict array; `focus_id`, `comparison_ids`, and "
             "`check_hash` come from the emit batch item. SUPERSEDE → pending 'retire' "
             "candidate linking the older entry (by event_at) into the newer survivor "
-            "(no row minted; operator reviews before promote). UPDATE → pending 'retire' "
-            "candidate folding the new refinement into the canonical existing entry, with "
-            "the merged wording kept for optional edit. NOOP/DISTINCT → discarded markers "
+            "(no row minted; operator reviews before promote). UPDATE with new wording → "
+            "pending 'merge' of the two rows carrying it (faithfulness-gated before promote); "
+            "without new wording → pending 'retire' of the focus into the canonical entry. "
+            "NOOP/DISTINCT → discarded markers "
             "(group not re-judged unless its membership changes). Nothing auto-applies — "
             "sovereignty preserved."
         ),

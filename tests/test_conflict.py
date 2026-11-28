@@ -604,10 +604,10 @@ def test_distinct_verdict_writes_discarded_marker(config):
 # ---------------------------------------------------------------------------
 
 
-def test_update_verdict_stages_retire_candidate(config):
-    """UPDATE stages a pending 'retire' candidate: the focus (augmenting new entry) is
-    retired into the comparison (canonical existing entry). The merged content is kept in
-    the candidate for optional operator edit; the applier links, not mints."""
+def test_update_verdict_with_new_wording_stages_merge_candidate(config):
+    """UPDATE with merged wording stages a pending 'merge' of [focus, comp] carrying
+    that wording (techne#1261). It used to stage a 'retire', whose applier only links,
+    so the wording, and any claim only the focus held, never reached the live set."""
     db = config.db_path
     a_id = store(db, "postgres version 13", type="fact", tags="db")
     b_id = store(db, "postgres v13 with extensions", type="fact", tags="db")
@@ -634,18 +634,20 @@ def test_update_verdict_stages_retire_candidate(config):
     pending = _pending_conflict_candidates(db)
     assert len(pending) >= 1
     cand = pending[0]
-    assert cand["action"] == "retire"
-    # merged wording preserved for operator display / optional edit
+    assert cand["action"] == "merge"
     assert "pgvector" in cand["content"]
-    # target_ids = [focus, comp] — focus retired into the canonical comp
-    tids = json.loads(cand["target_ids"])
-    assert tids == [group["focus_id"], comp_id], (
-        f"UPDATE retires focus into comp: expected [{group['focus_id']}, {comp_id}]; got {tids}"
-    )
+    assert json.loads(cand["target_ids"]) == [group["focus_id"], comp_id]
+
+    # Promoting it mints the merged row and retires both into it.
+    new_id = promote_candidate(db, cand["id"])
+    assert "pgvector" in get(db, new_id)["content"]
+    assert get(db, group["focus_id"])["superseded_by"] == new_id
+    assert get(db, comp_id)["superseded_by"] == new_id
 
 
 def test_update_promote_retires_focus_into_comp_no_mint(config):
-    """Promoting an UPDATE retire candidate links focus→comp and mints NO new row."""
+    """An UPDATE with no new wording stages a retire, and promoting it links
+    focus→comp and mints NO new row (techne#1261 keeps this path for it)."""
     db = config.db_path
     a_id = store(db, "postgres version 13", type="fact", tags="db")
     b_id = store(db, "postgres v13 with extensions", type="fact", tags="db")
@@ -658,7 +660,6 @@ def test_update_promote_retires_focus_into_comp_no_mint(config):
             {
                 "id": comp_id,
                 "verdict": "UPDATE",
-                "content": "postgres v13 with pgvector extension",
                 "reason": "augments",
             }
         ]

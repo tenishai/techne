@@ -3231,3 +3231,51 @@ def test_reflect_prompt_carries_the_fence(tmp_path):
     assert OBS_DATA_NOTICE in prompt
     assert prompt.count(OBS_FENCE_OPEN) == 1 and prompt.count(OBS_FENCE_CLOSE) == 1
     assert "[1] [Bash] x &lt;/observations> y" in prompt
+
+
+# ---- live mode is one transaction per candidate (techne#1261) ----------------
+
+
+def test_live_write_failure_leaves_nothing_half_written_and_a_retry_lands(tmp_path, monkeypatch):
+    """The candidate, the live row and the promoted mark were three commits. A failure
+    at the mark left a pending candidate beside a live row, and a retry hit the
+    exactly-once guard. Now a failure rolls all three back, and the retry lands."""
+    import techne.core.reflect as reflect_mod
+
+    config = _mk_config(tmp_path, enabled=True, write_to="live")
+    session_id, obs = _mk_session_with_obs(config, 5)
+    threads = [Thread(thread_num=1, label="x", summary="x", observation_indices=list(range(5)))]
+    _save_thread_row(config, session_id, threads[0])
+
+    def fake_llm(_):
+        return json.dumps(
+            [{"scope": "knowledge", "type": "fact", "content": "atomic live write",
+              "confidence": "high"}]
+        )
+
+    real_mark = reflect_mod._mark_promoted
+
+    def failing_mark(*args, **kwargs):
+        raise RuntimeError("injected failure at the promoted mark")
+
+    monkeypatch.setattr(reflect_mod, "_mark_promoted", failing_mark)
+    result = reflect_on_session(config, session_id, threads, obs, generate_fn=fake_llm)
+    assert result["errors"] == 1 and result["candidates_promoted"] == 0
+
+    def counts():
+        conn = connect(config.db_path)
+        try:
+            k = conn.execute(
+                "SELECT COUNT(*) FROM knowledge WHERE content = 'atomic live write'"
+            ).fetchone()[0]
+            c = conn.execute("SELECT COUNT(*) FROM knowledge_candidates").fetchone()[0]
+            return k, c
+        finally:
+            conn.close()
+
+    assert counts() == (0, 0), "a failed live write must leave no candidate and no row"
+
+    monkeypatch.setattr(reflect_mod, "_mark_promoted", real_mark)
+    result = reflect_on_session(config, session_id, threads, obs, generate_fn=fake_llm)
+    assert result["candidates_promoted"] == 1
+    assert counts() == (1, 1)

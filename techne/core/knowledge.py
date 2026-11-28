@@ -120,8 +120,14 @@ def store(
     anchor: str | None = None,
     provenance: dict | None = None,
     supersedes: Iterable[int] | None = None,
+    *,
+    conn=None,
 ) -> int:
     """Store a knowledge entry. Returns the new entry's id.
+
+    `conn` (techne#1261): write on a caller-owned connection inside the caller's
+    transaction, with no BEGIN, commit, rollback or close here, so a caller can make
+    this insert atomic with its own writes. Omitted, store() owns its connection.
 
     `supersedes` (techne#887) retires existing entries INTO the new one, in the
     same transaction as the insert: each id gets `superseded_by = <new id>` and
@@ -191,9 +197,11 @@ def store(
     retire_ids = _normalize_ids(supersedes)
 
     numeric = CONFIDENCE_NUMERIC[confidence]
-    conn = connect(db_path)
+    owned = conn is None
+    if owned:
+        conn = connect(db_path)
     try:
-        if retire_ids:
+        if retire_ids and owned:
             # Write lock before the liveness reads in _retire_in_conn (TOCTOU guard,
             # same as supersede()).
             conn.execute("BEGIN IMMEDIATE")
@@ -222,13 +230,16 @@ def store(
         new_id = cur.lastrowid
         for old_id in retire_ids:
             _retire_in_conn(conn, old_id, new_id)
-        conn.commit()
+        if owned:
+            conn.commit()
         return new_id
     except Exception:
-        conn.rollback()
+        if owned:
+            conn.rollback()
         raise
     finally:
-        conn.close()
+        if owned:
+            conn.close()
 
 
 def _normalize_ids(ids: Iterable[int] | int | None) -> list[int]:

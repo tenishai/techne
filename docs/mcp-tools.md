@@ -123,7 +123,7 @@ Contradiction detection pass (techne#213 D1 — coherence layer): find live know
 
 ### `techne_conflict_ingest`
 
-Feed back one conflict verdict from techne_conflict_emit (techne#213). `response` is your JSON verdict array; `focus_id`, `comparison_ids`, and `check_hash` come from the emit batch item. SUPERSEDE → pending 'retire' candidate linking the older entry (by event_at) into the newer survivor (no row minted; operator reviews before promote). UPDATE → pending 'retire' candidate folding the new…
+Feed back one conflict verdict from techne_conflict_emit (techne#213). `response` is your JSON verdict array; `focus_id`, `comparison_ids`, and `check_hash` come from the emit batch item. SUPERSEDE → pending 'retire' candidate linking the older entry (by event_at) into the newer survivor (no row minted; operator reviews before promote). UPDATE with new wording → pending 'merge' of the two…
 
 ### `techne_federation_conflict_ingest`
 
