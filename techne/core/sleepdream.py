@@ -53,7 +53,14 @@ from techne.core.search import build_or_fts_query
 # .source_session_id is NOT NULL). Additive: INSERT OR IGNORE, no migration.
 SYSTEM_SLEEP_SESSION = "system:sleep"
 
-MAX_ENTRY_CHARS = 300
+#: The longest entry consolidation clusters, and so the longest it renders (techne#1244).
+#: The judge used to see each row cut to 300 characters and its merged content then
+#: replaced the full rows, so a long decision merged with a short restatement lost its
+#: rationale. Rows up to this length are shown whole; longer rows are not clustered.
+#: 4000 is measured, not argued: on the operator's store (2026-11-28) 3,885 of 4,299
+#: live rows exceed 300 characters, 695 exceed 2,000 and 120 exceed 4,000, so this
+#: limit leaves 2.8% of rows out of consolidation, and four whole rows stay ~16 KB.
+MAX_ENTRY_CHARS = 4000
 
 
 #: Default producer label. A candidate written by a RESIDENT agent answering an emitted
@@ -191,7 +198,7 @@ def consolidate_clusters(
 # lesson_meta, and lessons are retired by the operator, not by a rail.
 _CLUSTERABLE = (
     "k.superseded_by IS NULL AND k.status != 'archived' AND k.type != 'document_card' "
-    f"AND k.type NOT IN {LESSON_TYPES_SQL}"
+    f"AND k.type NOT IN {LESSON_TYPES_SQL} AND length(k.content) <= {MAX_ENTRY_CHARS}"
 )
 _LIVE_CLUSTERABLE_SQL = (
     f"SELECT k.id, k.type, k.content, k.tags, k.confidence FROM knowledge k WHERE {_CLUSTERABLE}"
@@ -263,24 +270,34 @@ Decide whether to collapse them into a single entry.
 Return ONLY a JSON object:
   {{
     "verdict": "merge" | "keep",
-    "content": "<the single merged fact, one sentence>",   // required for merge
+    "content": "<the merged entry>",                       // required for merge
     "type": "{types}",                                      // required for merge
     "confidence": "low" | "medium" | "high",               // required for merge
     "reason": "<one line>"
   }}
-- "merge": the entries say the same thing — collapse them into ONE. Write the clearest,
-  most complete single statement as `content`; pick the strongest `confidence`.
+- "merge": the entries say the same thing — collapse them into ONE. Write `content` so it
+  keeps every claim, reason and caveat any entry carries: it replaces all of them. Use
+  the highest `confidence` any entry has, no higher.
 - "keep": they are genuinely distinct — do nothing.
 Be conservative: when unsure, "keep". Output the JSON object and nothing else.
 """
 
 
-def _render_cluster(rows: list[dict]) -> str:
+#: Dream renders each row cut to this many characters, as before techne#1244. Its rows
+#: come from recombine_groups, not _CLUSTERABLE, so they have no length bound, and a
+#: dream candidate is a new derived row that replaces nothing.
+DREAM_ENTRY_CHARS = 300
+
+
+def _render_cluster(rows: list[dict], *, limit: int = MAX_ENTRY_CHARS) -> str:
+    """One line per row, each cut to *limit* characters. Consolidation passes the
+    default, which `_CLUSTERABLE` already bounds its rows to, so they render whole
+    (techne#1244); dream passes DREAM_ENTRY_CHARS."""
     lines = []
     for r in rows:
         content = (r["content"] or "").replace("\n", " ")
-        if len(content) > MAX_ENTRY_CHARS:
-            content = content[:MAX_ENTRY_CHARS] + "…"
+        if len(content) > limit:
+            content = content[:limit] + "…"
         lines.append(f"- (#{r['id']}, {r['type']}, {r['confidence']}) {content}")
     return "\n".join(lines)
 
@@ -760,7 +777,8 @@ def dream_emit(config: Config, *, max_groups: int = 10) -> list[dict]:
 
             prompt = render_prompt(
                 config, "dream", DREAM_PROMPT,
-                entries=_render_cluster(g["rows"]), types=", ".join(VALID_TYPES),
+                entries=_render_cluster(g["rows"], limit=DREAM_ENTRY_CHARS),
+                types=", ".join(VALID_TYPES),
             )
             batch.append({"group_hash": gh, "group_ids": g["group_ids"], "prompt": prompt})
     finally:
