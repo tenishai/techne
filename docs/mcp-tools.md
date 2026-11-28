@@ -87,7 +87,7 @@ Record an observation into memory from any client. The platform-agnostic capture
 
 ### `techne_reflect_emit`
 
-Consolidate a finished session into durable memory using YOUR OWN model (no API key, no sampling). techne renders one reflection prompt per thread of work; answer each `prompt` in the returned batch as a JSON candidate array (scope/type/content/tags/confidence), then call techne_reflect_ingest once per thread with your answer. Run this when wrapping up a chunk of work, or when the SessionStart…
+Consolidate a finished session into durable memory using YOUR OWN model (no API key, no sampling). techne renders one reflection prompt per thread of work; answer each `prompt` in the returned batch as a JSON candidate array (scope/type/content/tags/confidence), then call techne_reflect_ingest once per thread with your answer. Run this when wrapping up a chunk of work, or when the…
 
 ### `techne_reflect_ingest`
 

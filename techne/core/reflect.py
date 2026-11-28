@@ -1665,13 +1665,36 @@ def _owed_first(config: Config, session_id: str, batch: list[dict]) -> list[dict
     return sorted(batch, key=lambda i: i.get("thread_id") not in owed)
 
 
+def _callers_pending_session(caller_session: str, pend: list[dict]) -> str | None:
+    """The newest pending session that is `caller_session` or shares its session
+    name (techne#1333), or None. `pend` is pending_reflection's newest-first list.
+    A session whose name can't be read matches only by id."""
+    from techne.core.coord import _session_records, session_name
+
+    records = _session_records()
+    name = session_name(caller_session, records)
+    for row in pend:
+        sid = row["session_id"]
+        if sid == caller_session or (name and session_name(sid, records) == name):
+            return sid
+    return None
+
+
 def emit_reflection_pass(
     config: Config,
     session_id: str | None = None,
     *,
     limit: int | None = None,
+    caller_session: str | None = None,
 ) -> dict:
     """Render one cursor-aware pass of a session's reflection prompts.
+
+    With no `session_id`: given `caller_session`, the pass is the caller's own
+    (techne#1333): the newest pending session that IS the caller's, or that carries
+    the caller's session name (an earlier run of the same facet that ended without
+    reflecting). It never falls back to another caller's session. Without
+    `caller_session` (the CLI, `reflect-drain`, or an explicit machine-wide drain),
+    it takes the newest pending session on the machine, as before.
 
     THE ONE EMIT IMPLEMENTATION. Both `techne_reflect_emit` (MCP) and
     `techne reflect emit` (CLI) call this — #645 exists because they did not, and
@@ -1693,7 +1716,18 @@ def emit_reflection_pass(
         # the default window of 5 hid every older pending session, so a bulk drain
         # was told "no session with unreflected work" while sessions were still owed.
         pend = pending_reflection(config, limit=None)
-        session_id = pend[0]["session_id"] if pend else None
+        if caller_session:
+            session_id = _callers_pending_session(caller_session, pend)
+            if not session_id:
+                return {
+                    "batch": [],
+                    "count": 0,
+                    "session_id": caller_session,
+                    "note": "no unreflected work for this session or its name; "
+                    "pass any_session=true to drain other sessions",
+                }
+        else:
+            session_id = pend[0]["session_id"] if pend else None
     if not session_id:
         return {"batch": [], "count": 0, "note": "no session with unreflected work"}
 
