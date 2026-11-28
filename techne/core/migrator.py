@@ -627,18 +627,37 @@ def reconcile_fts_backfill(
     supplied because the rowid source + COALESCE wrapping can't be derived from DDL.
     """
     for fts_table, (src_table, src_cols) in fts_backfill.items():
-        fts_indexed = conn.execute(f"SELECT COUNT(*) FROM {fts_table}_docsize").fetchone()[0]
-        if fts_indexed > 0:
-            continue
-        src_count = conn.execute(f"SELECT COUNT(*) FROM {src_table}").fetchone()[0]
-        if src_count == 0:
-            continue
-        insert_cols = ", ".join(fts_insert_cols[fts_table])
-        select_cols = ", ".join(src_cols)
-        conn.execute(
-            f"INSERT INTO {fts_table}({insert_cols}) SELECT {select_cols} FROM {src_table}"
-        )
-        conn.commit()
+        # CHECK AND INSERT UNDER ONE WRITE LOCK (techne#1259). This runs on every
+        # connect that finds the db unreconciled, which after an upgrade is several
+        # hooks at once, outside the migration flock. With a deferred transaction
+        # two processes could both see an empty index and both insert, and a
+        # doubled backfill leaves the external-content FTS5 index failing its
+        # integrity-check. BEGIN IMMEDIATE takes the write lock before the check,
+        # so the loser waits, then sees the winner's rows and skips.
+        if conn.in_transaction:
+            conn.commit()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            fts_indexed = conn.execute(
+                f"SELECT COUNT(*) FROM {fts_table}_docsize"
+            ).fetchone()[0]
+            src_count = (
+                conn.execute(f"SELECT COUNT(*) FROM {src_table}").fetchone()[0]
+                if fts_indexed == 0
+                else 0
+            )
+            if src_count == 0:
+                conn.rollback()
+                continue
+            insert_cols = ", ".join(fts_insert_cols[fts_table])
+            select_cols = ", ".join(src_cols)
+            conn.execute(
+                f"INSERT INTO {fts_table}({insert_cols}) SELECT {select_cols} FROM {src_table}"
+            )
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
         print(
             f"[techne] reconcile: backfill {fts_table} ({src_count} rows from {src_table})",
             file=sys.stderr,
