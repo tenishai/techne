@@ -905,8 +905,9 @@ def _handle_update(
             comp_row["id"],
         )
         # The merged row replaces both, so it keeps both rows' tags (Prudence,
-        # #1261 round 1): conflict pairs rows by shared tag, so an untagged merge
-        # could never be paired again and tag-scoped recall would lose it.
+        # #1261 round 1): conflict pairs rows by shared tag first, so an untagged
+        # merge would fall back to keyword overlap, and tag-scoped recall would
+        # lose it.
         merged_tags = ",".join(
             dict.fromkeys(
                 t.strip()
