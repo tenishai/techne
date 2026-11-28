@@ -1793,7 +1793,9 @@ TOOLS = [
         "name": "techne_consolidate_ingest",
         "description": (
             "Feed back one cluster's consolidation verdict from techne_consolidate_emit. "
-            "Ids no emit could have produced (missing, superseded or archived, repeated, not integers, fewer than two) are refused with `invalid: 1` and a `reason`, and nothing is written. "
+            "Ids no emit could have produced (missing, superseded or archived, repeated, "
+            "not integers, fewer than two) are refused with `invalid: 1` and a `reason`, "
+            "and nothing is written. "
             "`response` is your JSON verdict object; `target_ids` + `cluster_hash` come "
             "from the emit batch item. A 'merge' verdict queues a proposal for review "
             "(promoting it collapses the rows); a 'keep' verdict writes a discarded "
@@ -1841,7 +1843,9 @@ TOOLS = [
         "name": "techne_dream_ingest",
         "description": (
             "Feed back one group's dream verdict from techne_dream_emit. "
-            "Ids no emit could have produced (missing, superseded or archived, repeated, not integers, fewer than two) are refused with `invalid: 1` and a `reason`, and nothing is written. "
+            "Ids no emit could have produced (missing, superseded or archived, repeated, "
+            "not integers, fewer than two) are refused with `invalid: 1` and a `reason`, "
+            "and nothing is written. "
             "`response` is your JSON verdict object (verdict='connect'|'none'); "
             "`group_ids` + `group_hash` come from the emit batch item. A 'connect' "
             "verdict queues a low-confidence pending candidate for human review "
