@@ -1959,7 +1959,8 @@ def test_inbound_recall_searches_a_coord_body_delivered_at_the_prompt(home, monk
     _seed_slot(cfg, "me", delivered=True)
     coord.send(cfg.db_path, "peer-session", "migrating the archivist schema", from_name="poe1")
     ctx = _additional_context(_run(monkeypatch, capsys, {"session_id": "me", "prompt": "hi"}))
-    assert "INBOUND[" in ctx and "archivist" in ctx
+    # The search ran on the coord body itself, not just on something (round 4 nit).
+    assert "INBOUND[migrating the archivist schema" in ctx
 
 
 def test_a_notification_turn_still_searches_the_coord_body_it_delivered(
@@ -1974,4 +1975,5 @@ def test_a_notification_turn_still_searches_the_coord_body_it_delivered(
     coord.send(cfg.db_path, "peer-session", "migrating the archivist schema", from_name="poe1")
     prompt = "<task-notification><task-id>x</task-id></task-notification>"
     ctx = _additional_context(_run(monkeypatch, capsys, {"session_id": "me", "prompt": prompt}))
-    assert "INBOUND[" in ctx and "archivist" in ctx
+    # The search ran on the coord body itself, not just on something (round 4 nit).
+    assert "INBOUND[migrating the archivist schema" in ctx
