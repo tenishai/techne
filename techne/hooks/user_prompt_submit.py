@@ -984,7 +984,8 @@ def main() -> None:
             )
         sys.exit(0)
 
-    # per_turn_recall is ON by default (#1020); per_turn_seed stays opt-in. Neither on → no-op.
+    # The hook's five independent blocks; with none of them on it is a no-op. Doctor's
+    # `checks._user_prompt_submit_enabled` mirrors this gate (#1328).
     # No marker: see the note at the top of main().
     if not (
         config.hooks.per_turn_recall
@@ -1060,10 +1061,13 @@ def main() -> None:
     # slow search cannot leave the previous prompt's claim standing.
     if inbound_recall_armed(config) and not notification:
         _stamp_prompt_turn(config.db_path, data.get("session_id"))
-        # A coord message delivered just above is marked surfaced, so PostToolUse
-        # will not deliver it again, and its inbound search would have nothing to
-        # search (Prudence, #1328 round 2). Run that search here, on the bodies
-        # this hook delivered, in the slot just opened: one delivery per prompt.
+    # A coord message delivered just above is marked surfaced, so PostToolUse will
+    # not deliver it again, and its inbound search would have nothing to search
+    # (Prudence, #1328 round 2). Run that search here, on the bodies this hook
+    # delivered. Not gated on the notification check (round 3): a notification turn
+    # opens no slot, but it still delivers coord, and `_inbound_slot` decides
+    # whether a slot is open; using an open one does not reopen it.
+    if inbound_recall_armed(config):
         if coord_bodies:
             try:
                 from techne.hooks.post_tool_use import _inject_inbound_recall

@@ -1917,26 +1917,61 @@ def test_coord_on_prompt_off_leaves_it_to_post_tool_use(home, monkeypatch, capsy
 
 
 
-def test_inbound_recall_searches_a_coord_body_delivered_at_the_prompt(home, monkeypatch, capsys):
-    """Prudence, #1328 round 2: a message delivered at the prompt is marked surfaced,
-    so PostToolUse would never search its body. UPS runs the inbound search on it."""
+def _arm_inbound(home, monkeypatch):
+    """Arm inbound recall and fake only the search, so the real slot logic runs:
+    the fake honours `claim`, which is where the once-per-prompt slot is taken."""
     from techne.config import Config
-    from techne.core import coord
     from techne.core.database import init_db
-    import techne.hooks.post_tool_use as ptu
 
     _write_config(home, per_turn_recall=False, inbound_recall=True,
                   inbound_recall_floor_vec_distance=0.9)
     cfg = Config.load()
     init_db(cfg.db_path).close()
+
+    def fake_recall_block(config, session_id, query, *, claim=None, **kw):
+        if claim is not None and not claim():
+            return "", []
+        return f"INBOUND[{query}]", []
+
+    monkeypatch.setattr(user_prompt_submit, "recall_block", fake_recall_block)
+    return cfg
+
+
+def _seed_slot(cfg, session_id, delivered: bool):
+    from techne.core.database import connect
+    from techne.core.extension_state import set_state
+
+    conn = connect(cfg.db_path)
+    try:
+        set_state(conn, f"{user_prompt_submit.INBOUND_TURN_PREFIX}:{session_id}",
+                  {"delivered": delivered})
+    finally:
+        conn.close()
+
+
+def test_inbound_recall_searches_a_coord_body_delivered_at_the_prompt(home, monkeypatch, capsys):
+    """Prudence, #1328 round 2: a message delivered at the prompt is marked surfaced,
+    so PostToolUse would never search its body. The previous prompt's slot is spent;
+    this prompt opens a fresh one and the body is searched in it."""
+    from techne.core import coord
+
+    cfg = _arm_inbound(home, monkeypatch)
+    _seed_slot(cfg, "me", delivered=True)
     coord.send(cfg.db_path, "peer-session", "migrating the archivist schema", from_name="poe1")
-    seen: list = []
-
-    def fake_inbound(config, session_id, tool_name, tool_response, coord_bodies):
-        seen.append(list(coord_bodies))
-        return "INBOUND-BLOCK"
-
-    monkeypatch.setattr(ptu, "_inject_inbound_recall", fake_inbound)
     ctx = _additional_context(_run(monkeypatch, capsys, {"session_id": "me", "prompt": "hi"}))
-    assert seen and any("migrating the archivist schema" in b for b in seen[0])
-    assert "INBOUND-BLOCK" in ctx
+    assert "INBOUND[" in ctx and "archivist" in ctx
+
+
+def test_a_notification_turn_still_searches_the_coord_body_it_delivered(
+    home, monkeypatch, capsys
+):
+    """Prudence, #1328 round 3: a task-notification turn opens no slot but still
+    delivers coord; the search runs in the slot the last prompt left open."""
+    from techne.core import coord
+
+    cfg = _arm_inbound(home, monkeypatch)
+    _seed_slot(cfg, "me", delivered=False)
+    coord.send(cfg.db_path, "peer-session", "migrating the archivist schema", from_name="poe1")
+    prompt = "<task-notification><task-id>x</task-id></task-notification>"
+    ctx = _additional_context(_run(monkeypatch, capsys, {"session_id": "me", "prompt": prompt}))
+    assert "INBOUND[" in ctx and "archivist" in ctx
