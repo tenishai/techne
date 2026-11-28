@@ -1666,16 +1666,30 @@ def _owed_first(config: Config, session_id: str, batch: list[dict]) -> list[dict
 
 
 def _callers_pending_session(caller_session: str, pend: list[dict]) -> str | None:
-    """The newest pending session that is `caller_session` or shares its session
-    name (techne#1333), or None. `pend` is pending_reflection's newest-first list.
-    A session whose name can't be read matches only by id."""
-    from techne.core.coord import _session_records, session_name
+    """The caller's own pending session, else the newest pending session that is an
+    earlier run of the same facet (techne#1333), or None. `pend` is
+    pending_reflection's newest-first list.
 
+    The caller's own id wins wherever it sits in `pend`. A name match counts only when
+    the name is the caller's alone (`coord._durable_name`: no live or still-running
+    twin holds it) and the matched session is no longer present on this host: a
+    present session, even one sharing the name, is another caller doing its own work
+    (Prudence, #1333 round 1, reproduced with two live sessions both named `poe1`)."""
+    from techne.core.coord import _durable_name, _session_records, present_session_ids, session_name
+
+    if any(row["session_id"] == caller_session for row in pend):
+        return caller_session
     records = _session_records()
-    name = session_name(caller_session, records)
+    name = _durable_name(caller_session, records)
+    if not name:
+        return None
+    try:
+        present = present_session_ids(records=records)
+    except Exception:  # noqa: BLE001 -- unknown presence must not widen the match
+        return None
     for row in pend:
         sid = row["session_id"]
-        if sid == caller_session or (name and session_name(sid, records) == name):
+        if sid not in present and session_name(sid, records) == name:
             return sid
     return None
 
