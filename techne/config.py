@@ -520,7 +520,8 @@ class HookConfig:
     #: reports; issue #1239 saw a 17.5 KB context collapse to a ~2 KB preview, and a
     #: 22.3 KB one did the same in a 2026-11-28 session). Coord messages,
     #: inbound recall and the edit rail are placed first and never cut; reminders
-    #: fill what is left, and the rest collapse to one line.
+    #: fill what is left, and the rest collapse to one line. Not a hard ceiling: the
+    #: uncut parts alone can exceed it (coord is bounded by coord.INJECT_MAX_CHARS).
     context_max_chars: int = 9000
 
 

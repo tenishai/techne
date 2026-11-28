@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """UserPromptSubmit hook — recall (read) + seed (write) + startup (techne#109/#277/#643).
 
-The DYNAMIC per-turn complement to the STABLE SessionStart injection. Three
-independent, opt-in (default-OFF) blocks land in ``additionalContext`` after the
-stable prefix:
+The DYNAMIC per-turn complement to the STABLE SessionStart injection. Independent
+blocks land in ``additionalContext`` after the stable prefix: the three below are
+opt-in, and unread coord messages (``hooks.coord_on_prompt``, techne#1328) are on by
+default, placed before recall:
 
   - RECALL (``hooks.per_turn_recall``, techne#109): search knowledge scoped to
     the submitted prompt and inject the most relevant durable facts — the READ
@@ -1027,11 +1028,12 @@ def main() -> None:
     # claim on a branch is what this turn most needs to see before it starts work.
     # The same injector as PostToolUse, so the per-session surfaced-set keeps a
     # message from arriving twice. Best-effort like every block here.
+    coord_bodies: list[str] = []
     if config.hooks.coord_on_prompt and data.get("session_id"):
         try:
             from techne.hooks.post_tool_use import _inject_coord_messages
 
-            coord_block = _inject_coord_messages(config, data["session_id"])
+            coord_block = _inject_coord_messages(config, data["session_id"], coord_bodies)
             if coord_block:
                 blocks.append(coord_block)
         except Exception as e:  # noqa: BLE001
@@ -1058,6 +1060,21 @@ def main() -> None:
     # slow search cannot leave the previous prompt's claim standing.
     if inbound_recall_armed(config) and not notification:
         _stamp_prompt_turn(config.db_path, data.get("session_id"))
+        # A coord message delivered just above is marked surfaced, so PostToolUse
+        # will not deliver it again, and its inbound search would have nothing to
+        # search (Prudence, #1328 round 2). Run that search here, on the bodies
+        # this hook delivered, in the slot just opened: one delivery per prompt.
+        if coord_bodies:
+            try:
+                from techne.hooks.post_tool_use import _inject_inbound_recall
+
+                inbound_block = _inject_inbound_recall(
+                    config, data["session_id"], "", None, coord_bodies
+                )
+                if inbound_block:
+                    blocks.append(inbound_block)
+            except Exception as e:  # noqa: BLE001
+                print(f"techne: inbound recall on coord skipped: {e}", file=sys.stderr)
 
     # ------------------------------------------------------------------
     # Recall block (techne#109) — durable facts relevant to this prompt. Scope

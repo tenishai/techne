@@ -1906,9 +1906,37 @@ def test_coord_on_prompt_off_leaves_it_to_post_tool_use(home, monkeypatch, capsy
     from techne.core import coord
     from techne.core.database import init_db
 
-    _write_config(home, per_turn_recall=False, coord_on_prompt=False)
+    # per_turn_recall stays on (its default) so the hook does not exit at its gate
+    # and the coord block's own switch is what keeps the message out (round 2 nit).
+    _write_config(home, coord_on_prompt=False)
     cfg = Config.load()
     init_db(cfg.db_path).close()
     coord.send(cfg.db_path, "peer-session", "claiming branch feat/y", from_name="poe1")
     out = _run(monkeypatch, capsys, {"session_id": "me", "prompt": "hi"})
     assert "claiming branch feat/y" not in _additional_context(out)
+
+
+
+def test_inbound_recall_searches_a_coord_body_delivered_at_the_prompt(home, monkeypatch, capsys):
+    """Prudence, #1328 round 2: a message delivered at the prompt is marked surfaced,
+    so PostToolUse would never search its body. UPS runs the inbound search on it."""
+    from techne.config import Config
+    from techne.core import coord
+    from techne.core.database import init_db
+    import techne.hooks.post_tool_use as ptu
+
+    _write_config(home, per_turn_recall=False, inbound_recall=True,
+                  inbound_recall_floor_vec_distance=0.9)
+    cfg = Config.load()
+    init_db(cfg.db_path).close()
+    coord.send(cfg.db_path, "peer-session", "migrating the archivist schema", from_name="poe1")
+    seen: list = []
+
+    def fake_inbound(config, session_id, tool_name, tool_response, coord_bodies):
+        seen.append(list(coord_bodies))
+        return "INBOUND-BLOCK"
+
+    monkeypatch.setattr(ptu, "_inject_inbound_recall", fake_inbound)
+    ctx = _additional_context(_run(monkeypatch, capsys, {"session_id": "me", "prompt": "hi"}))
+    assert seen and any("migrating the archivist schema" in b for b in seen[0])
+    assert "INBOUND-BLOCK" in ctx

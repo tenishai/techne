@@ -798,12 +798,10 @@ def _inject_due_reminders(
                 continue  # throttled for this session
 
             line = f"⏰ Reminder: {reminder['note']}"
-            if budget is not None and overflow == 0:
-                # Room is kept for the overflow line itself.
-                if used + len(line) + 1 > budget - _REMINDER_OVERFLOW_RESERVE:
-                    overflow += 1
-                    continue
-            elif budget is not None:
+            # Keep scanning past a line that does not fit (Prudence, #1239 round 2):
+            # stopping at the first one let a single long reminder hide every
+            # reminder due after it, on every call. Room is kept for the overflow line.
+            if budget is not None and used + len(line) + 1 > budget - _REMINDER_OVERFLOW_RESERVE:
                 overflow += 1
                 continue
             lines.append(line)
@@ -1139,7 +1137,8 @@ def _inject_coord_messages(
     Surface-once-per-session: each message id is injected at most once per session
     (tracked in extension_state "coord:surfaced:<session_id>", mirroring the reminder
     surfaced-set — and pruned the same way so the rows don't accumulate), so a peer's
-    message lands promptly on the next tool call without re-nagging every call. The
+    message lands promptly on the next tool call, or at the start of the next turn
+    through UserPromptSubmit (techne#1328), without re-nagging every call. The
     message stays UNREAD in the ledger until the agent calls techne_mark_read — so it
     still shows in the banner / techne_inbox if the agent doesn't act on the injected
     copy. Fail-safe: any error returns None.

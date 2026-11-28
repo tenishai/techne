@@ -526,3 +526,17 @@ class TestReminderBudget:
         result = _inject_due_reminders(self._cfg(db_path), "s-all")
         assert result is not None and "more reminder" not in result
         assert len(result.splitlines()) == 3
+
+
+    def test_one_long_reminder_does_not_hide_the_ones_after_it(self, db_path: Path) -> None:
+        """Prudence, #1239 round 2: overflow used to stop the scan, so one reminder
+        longer than the budget hid every reminder due after it."""
+        from techne.hooks.post_tool_use import _inject_due_reminders
+
+        add(db_path, "y" * 9000, _iso(_utcnow() - timedelta(minutes=40)))
+        for i in range(3):
+            add(db_path, f"short {i}", _iso(_utcnow() - timedelta(minutes=30)))
+        result = _inject_due_reminders(self._cfg(db_path), "s-long", budget=2000)
+        assert result is not None
+        assert sum(ln.startswith("⏰ Reminder: short") for ln in result.splitlines()) == 3
+        assert "1 more reminder(s) due" in result
