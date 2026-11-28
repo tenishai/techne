@@ -2252,3 +2252,49 @@ def test_federated_recall_output_keeps_provenance_and_drops_match_pass(tmp_path)
         {k for r in rows for k in r if k.startswith("_") and k not in {"_store", "_role"}}
     )
     assert leaked == [], f"internal keys reached federated techne_recall output: {leaked}"
+
+
+def test_a_federation_supersede_is_not_stamped_with_the_local_writer(tmp_path):
+    """Prudence, #1244 round 3: supersede now carries the old row's writer
+    provenance, which is right for a revision of the same writer's row and wrong
+    when the new content is a team store's fact. That revision stays unattributed."""
+    from techne.core.federation import federation_conflict_ingest
+    from techne.core.knowledge import get
+    from techne.core.reflect import promote_candidate
+
+    local_db = tmp_path / "local.db"
+    _init_team_db(local_db)
+    team_content = "we switched to sqlite for this workload"
+    local_id = store(local_db, "use postgres for all services", type="fact", tags="datastore")
+    conn = connect(local_db)
+    conn.execute(
+        "UPDATE knowledge SET written_by='local-inst', origin_source='session', "
+        "origin_session='local-sess-1' WHERE id=?",
+        (local_id,),
+    )
+    conn.commit()
+    conn.close()
+    cfg = Config()
+    cfg.db_path = local_db
+    federation_conflict_ingest(
+        cfg,
+        focus_content=team_content,
+        focus_store="team-archivist",
+        focus_event_at="2030-01-01T00:00:00",
+        comparison_ids=[local_id],
+        check_hash="",
+        response=json.dumps([{"id": local_id, "verdict": "SUPERSEDE", "content": team_content,
+                              "reason": "team moved"}]),
+    )
+    cand = _pending_federation_candidates(local_db)[0]
+    new_id = promote_candidate(local_db, cand["id"], decided_by="test")
+    assert team_content in get(local_db, new_id)["content"]
+    conn = connect(local_db)
+    try:
+        prov = tuple(conn.execute(
+            "SELECT written_by, origin_source, origin_session FROM knowledge WHERE id=?",
+            (new_id,),
+        ).fetchone())
+    finally:
+        conn.close()
+    assert prov == (None, None, None)

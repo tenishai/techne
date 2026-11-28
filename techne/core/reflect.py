@@ -2619,7 +2619,16 @@ def _apply_supersede(conn, row, db_path: Path) -> int | None:
             f"supersede candidate {row['id']} needs exactly one target_id, got {targets}"
         )
     source = f"consolidate-supersede:{row['id']}"
-    return _supersede_in_conn(conn, targets[0], redact_credentials(row["content"]), source)
+    # A federation-conflict supersede writes ANOTHER store's fact over the local row,
+    # so the local row's writer and session must not be stamped on it (#1244 r3).
+    foreign = row["origin"] == "federation-conflict"
+    return _supersede_in_conn(
+        conn,
+        targets[0],
+        redact_credentials(row["content"]),
+        source,
+        carry_provenance=not foreign,
+    )
 
 
 def _apply_retire(conn, row, db_path: Path) -> int | None:
@@ -2646,8 +2655,9 @@ def _apply_retire(conn, row, db_path: Path) -> int | None:
 
 def _apply_merge(conn, row, db_path: Path) -> int | None:
     """Apply a 'merge' proposal (techne#108 consolidate): collapse N existing rows
-    (target_ids) into one merged row carrying the proposal's explicitly chosen
-    type/confidence/tags. Returns the new knowledge.id."""
+    (target_ids) into one merged row with the proposal's type and content. Tags,
+    confidence, anchor and provenance follow `_merge_in_conn`'s inheritance rules
+    (techne#1244). Returns the new knowledge.id."""
     from techne.core.knowledge import (
         CONFIDENCE_NUMERIC,
         VALID_CONFIDENCE,
