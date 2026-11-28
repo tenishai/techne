@@ -428,8 +428,12 @@ def _insert_candidate(
     # — omitting it must be a TypeError at the call, which is what no default buys.
     model_used: str,
     origin: str,
+    tags: str = "",
 ) -> None:
     """Insert one ingest result into knowledge_candidates for operator review.
+
+    ``tags`` are the tags a promoted merge mints with (techne#1261); markers and
+    retire links, which mint nothing, leave it empty.
 
     Shared by the local conflict path (origin='conflict') and the federation cross-store
     path (origin='federation-conflict').  The ``origin`` parameter isolates the two
@@ -450,11 +454,12 @@ def _insert_candidate(
              (scope, type, content, tags, confidence, source_session_id,
               source_thread_id, model_used, prompt_hash, raw_response,
               action, target_ids, origin, status, decided_by, decision_reason)
-           VALUES ('knowledge', ?, ?, '', ?, ?, NULL, ?, ?, ?,
+           VALUES ('knowledge', ?, ?, ?, ?, ?, NULL, ?, ?, ?,
                    ?, ?, ?, ?, ?, ?)""",
         (
             ktype,
             redact_credentials(content),
+            tags,
             confidence,
             SYSTEM_SLEEP_SESSION,
             model_used,
@@ -899,9 +904,21 @@ def _handle_update(
             focus_row["id"],
             comp_row["id"],
         )
+        # The merged row replaces both, so it keeps both rows' tags (Prudence,
+        # #1261 round 1): conflict pairs rows by shared tag, so an untagged merge
+        # could never be paired again and tag-scoped recall would lose it.
+        merged_tags = ",".join(
+            dict.fromkeys(
+                t.strip()
+                for row in (comp_row, focus_row)
+                for t in (row.get("tags") or "").split(",")
+                if t.strip()
+            )
+        )
         _insert_candidate(
             conn,
             action="merge",
+            tags=merged_tags,
             content=merged,
             ktype=comp_row.get("type", "fact"),
             confidence=comp_row.get("confidence", "medium"),

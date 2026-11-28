@@ -1921,10 +1921,11 @@ TOOLS = [
             "sqlite' with no shared tag) will NOT be compared. Returns prompts for YOUR "
             "OWN model to judge; answer each with a JSON verdict array "
             "(SUPERSEDE/UPDATE/NOOP/DISTINCT) and call techne_conflict_ingest. SUPERSEDE "
-            "retires the older entry (by event_at) into the newer one; UPDATE retires the "
-            "new refinement into the canonical existing entry. Both LINK existing rows via "
-            "superseded_by — no duplicate row minted. Proposals land in the review queue — "
-            "never auto-applied."
+            "retires the older entry (by event_at) into the newer one, linking the rows via "
+            "superseded_by with no row minted. UPDATE with new wording proposes a merge of "
+            "both rows into one carrying it (and both rows' tags); UPDATE without new "
+            "wording retires the refinement into the canonical entry. Proposals land in "
+            "the review queue — never auto-applied."
         ),
         "inputSchema": {
             "type": "object",

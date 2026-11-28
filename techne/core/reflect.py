@@ -2208,9 +2208,12 @@ def ingest_reflection_response(
         # that a retry skipped (the exactly-once guard) beside, or instead of, a
         # live row. Now all three commit together or none does.
         live = effective_write_to(config) == "live" and c.scope != "identity"
-        conn = connect(config.db_path) if live else None
+        conn = None
         try:
-            if conn is not None:
+            # Inside the try (Prudence, #1261 round 1 nit): a failed connect is
+            # counted as an error and the loop goes on, as it did before.
+            if live:
+                conn = connect(config.db_path)
                 conn.execute("BEGIN IMMEDIATE")
             cand_id = _insert_candidate(
                 config.db_path,

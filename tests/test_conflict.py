@@ -609,8 +609,8 @@ def test_update_verdict_with_new_wording_stages_merge_candidate(config):
     that wording (techne#1261). It used to stage a 'retire', whose applier only links,
     so the wording, and any claim only the focus held, never reached the live set."""
     db = config.db_path
-    a_id = store(db, "postgres version 13", type="fact", tags="db")
-    b_id = store(db, "postgres v13 with extensions", type="fact", tags="db")
+    a_id = store(db, "postgres version 13", type="fact", tags="db,infra")
+    b_id = store(db, "postgres v13 with extensions", type="fact", tags="db,extensions")
 
     batch = conflict_check_emit(config)
     group = next(i for i in batch if {i["focus_id"]} | set(i["comparison_ids"]) == {a_id, b_id})
@@ -641,6 +641,8 @@ def test_update_verdict_with_new_wording_stages_merge_candidate(config):
     # Promoting it mints the merged row and retires both into it.
     new_id = promote_candidate(db, cand["id"])
     assert "pgvector" in get(db, new_id)["content"]
+    # Both rows' tags survive (Prudence round 1): conflict pairs by shared tag.
+    assert set(get(db, new_id)["tags"].split(",")) == {"db", "infra", "extensions"}
     assert get(db, group["focus_id"])["superseded_by"] == new_id
     assert get(db, comp_id)["superseded_by"] == new_id
 
