@@ -30,7 +30,12 @@ from techne.core._resident import extract_json_array, extract_json_array_or_none
 from techne.core.database import connect
 from techne.core.knowledge import LESSON_TYPES_SQL
 from techne.core.redaction import redact_credentials
-from techne.core.sleepdream import SYSTEM_SLEEP_SESSION, _cluster_hash, _ensure_system_session
+from techne.core.sleepdream import (
+    SYSTEM_SLEEP_SESSION,
+    _cluster_hash,
+    _ensure_system_session,
+    invalid_target_ids,
+)
 
 log = logging.getLogger(__name__)
 
@@ -625,10 +630,9 @@ def conflict_check_ingest(
         "skipped": 0,
         "errors": 0,
         "unparsed": 0,
+        "invalid": 0,
     }
 
-    all_ids = sorted([focus_id] + list(comparison_ids))
-    ch = _cluster_hash(all_ids)  # recompute from ids; caller-supplied hash is advisory
 
     raw_for_store = response if _log_raw(config) else None
     decisions = parse_conflict_response(response)
@@ -637,6 +641,16 @@ def conflict_check_ingest(
 
     conn = connect(config.db_path)
     try:
+        # The focus and every comparison must be live rows an emit could have
+        # offered (techne#1257); otherwise nothing is written, not even a marker.
+        # Checked before the hash, which sorts the ids.
+        if (why := invalid_target_ids(conn, [focus_id, *comparison_ids])) is not None:
+            log.warning("conflict_ingest: refused ids %s: %s", [focus_id, *comparison_ids], why)
+            counts["invalid"] += 1
+            counts["reason"] = why
+            return counts
+        all_ids = sorted([focus_id] + list(comparison_ids))
+        ch = _cluster_hash(all_ids)  # recompute from ids; caller-supplied hash is advisory
         if _already_proposed(conn, ch, "conflict"):
             counts["skipped"] += 1
             return counts
