@@ -989,6 +989,7 @@ def main() -> None:
         config.hooks.per_turn_recall
         or config.hooks.per_turn_seed
         or config.hooks.startup_directive
+        or config.hooks.coord_on_prompt
         or inbound_recall_armed(config)
     ):
         sys.exit(0)
@@ -1020,6 +1021,21 @@ def main() -> None:
                 )
             except Exception as e:  # noqa: BLE001
                 print(f"techne: deferred-context log skipped: {e}", file=sys.stderr)
+
+    # techne#1328 — unread coord messages at the start of every turn, not only after
+    # a tool call. Right after the session-state block and before recall: a peer's
+    # claim on a branch is what this turn most needs to see before it starts work.
+    # The same injector as PostToolUse, so the per-session surfaced-set keeps a
+    # message from arriving twice. Best-effort like every block here.
+    if config.hooks.coord_on_prompt and data.get("session_id"):
+        try:
+            from techne.hooks.post_tool_use import _inject_coord_messages
+
+            coord_block = _inject_coord_messages(config, data["session_id"])
+            if coord_block:
+                blocks.append(coord_block)
+        except Exception as e:  # noqa: BLE001
+            print(f"techne: coord block skipped: {e}", file=sys.stderr)
     degraded: str | None = None
     rows: list = []
 

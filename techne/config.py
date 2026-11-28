@@ -509,6 +509,18 @@ class HookConfig:
     # both exist is the first prompt. Gated once per session via
     # extension_state; see `_startup_block`. Default OFF.
     startup_directive: bool = False
+    #: Surface unread coord messages at the start of every turn too (techne#1328),
+    #: not only after a tool call: a turn with no tool calls, or a session idle at
+    #: the prompt, never saw a peer's message. Shares PostToolUse's surfaced-set,
+    #: so a message is injected once per session whichever hook gets there first.
+    coord_on_prompt: bool = True
+    #: Total characters PostToolUse puts in one additionalContext (techne#1239).
+    #: Claude Code saves a larger value to a file and shows the model about a 2 KB
+    #: preview; the cap is reported at 10,000 characters (claude-code issue
+    #: reports; seen in this repo's sessions at 17.5 KB and 22.3 KB). Coord messages,
+    #: inbound recall and the edit rail are placed first and never cut; reminders
+    #: fill what is left, and the rest collapse to one line.
+    context_max_chars: int = 9000
 
 
 ReflectWriteTo = Literal["candidates", "live"]
@@ -1430,6 +1442,8 @@ class Config:
                 defer_session_start_context=_g("defer_session_start_context"),
                 per_turn_seed=_g("per_turn_seed"),
                 startup_directive=_g("startup_directive"),
+                coord_on_prompt=_g("coord_on_prompt"),
+                context_max_chars=int(_g("context_max_chars")),
             )
 
         if "heuristic" in raw and isinstance(raw["heuristic"], dict):
@@ -1737,6 +1751,8 @@ class Config:
                 "defer_session_start_context": self.hooks.defer_session_start_context,
                 "per_turn_seed": self.hooks.per_turn_seed,
                 "startup_directive": self.hooks.startup_directive,
+                "coord_on_prompt": self.hooks.coord_on_prompt,
+                "context_max_chars": self.hooks.context_max_chars,
             },
             "heuristic": {
                 "boundary_threshold": self.heuristic.boundary_threshold,

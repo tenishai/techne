@@ -484,3 +484,45 @@ class TestTouchSurfacedMany:
         active_ids = {r["id"] for r in list_due(db_path, now_str)}
         assert id1 in active_ids
         assert id2 in active_ids
+
+
+class TestReminderBudget:
+    """techne#1239: reminders fill only the budget the hook has left, and the ones
+    that do not fit collapse to one line and stay unsurfaced for a later call."""
+
+    def _cfg(self, db_path: Path):
+        from techne.config import Config
+
+        cfg = Config()
+        cfg.db_path = db_path
+        return cfg
+
+    def test_overflow_collapses_to_one_line_and_comes_back_later(self, db_path: Path) -> None:
+        from techne.hooks.post_tool_use import _REMINDER_OVERFLOW_RESERVE, _inject_due_reminders
+
+        past = _iso(_utcnow() - timedelta(minutes=30))
+        for i in range(6):
+            add(db_path, f"reminder number {i} " + "x" * 80, past)
+        cfg = self._cfg(db_path)
+        budget = _REMINDER_OVERFLOW_RESERVE + 2 * 120  # room for two
+        first = _inject_due_reminders(cfg, "s-budget", budget=budget)
+        assert first is not None
+        shown = [ln for ln in first.splitlines() if ln.startswith("⏰ Reminder:")]
+        assert len(shown) == 2
+        assert "4 more reminder(s) due" in first and "techne_reminder_list" in first
+        assert len(first) <= budget + _REMINDER_OVERFLOW_RESERVE
+
+        # The four not shown were not marked surfaced: the next call shows them.
+        second = _inject_due_reminders(cfg, "s-budget", budget=10_000)
+        assert second is not None
+        assert len([ln for ln in second.splitlines() if ln.startswith("⏰ Reminder:")]) == 4
+
+    def test_no_budget_shows_everything(self, db_path: Path) -> None:
+        from techne.hooks.post_tool_use import _inject_due_reminders
+
+        past = _iso(_utcnow() - timedelta(minutes=30))
+        for i in range(3):
+            add(db_path, f"note {i}", past)
+        result = _inject_due_reminders(self._cfg(db_path), "s-all")
+        assert result is not None and "more reminder" not in result
+        assert len(result.splitlines()) == 3

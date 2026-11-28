@@ -1761,6 +1761,7 @@ class TestCoreRailsAreInstrumented:
 
         config.hooks.per_turn_recall = False
         config.hooks.per_turn_seed = False
+        config.hooks.coord_on_prompt = False  # on by default since techne#1328
         self._run_hook(user_prompt_submit, {"prompt": "hello"}, config, monkeypatch)
         assert self._marker(config, "user_prompt_submit") == {}
 

@@ -1870,3 +1870,45 @@ def test_chars_dropped_still_moves_with_the_cap(tmp_path):
     assert seen[200] > seen[2000], (
         f"a tighter cap must drop MORE: {seen}"
     )
+
+
+# ---- coord messages at the start of a turn (techne#1328) ----------------------
+
+
+def _additional_context(out: str) -> str:
+    return json.loads(out)["hookSpecificOutput"]["additionalContext"] if out.strip() else ""
+
+
+def test_a_peer_message_arrives_at_the_start_of_a_turn_once(home, monkeypatch, capsys):
+    """A turn with no tool calls never saw a peer's message: only PostToolUse
+    delivered them. UserPromptSubmit now does too, sharing the surfaced-set, so the
+    next tool call does not deliver it a second time."""
+    from techne.config import Config
+    from techne.core import coord
+    from techne.core.database import init_db
+    from techne.hooks.post_tool_use import _inject_coord_messages
+
+    _write_config(home, per_turn_recall=False)
+    cfg = Config.load()
+    init_db(cfg.db_path).close()
+    coord.send(cfg.db_path, "peer-session", "claiming branch feat/x", from_name="poe1")
+
+    ctx = _additional_context(_run(monkeypatch, capsys, {"session_id": "me", "prompt": "hi"}))
+    assert "claiming branch feat/x" in ctx
+
+    assert _inject_coord_messages(cfg, "me") is None, "already surfaced this session"
+    ctx = _additional_context(_run(monkeypatch, capsys, {"session_id": "me", "prompt": "again"}))
+    assert "claiming branch feat/x" not in ctx
+
+
+def test_coord_on_prompt_off_leaves_it_to_post_tool_use(home, monkeypatch, capsys):
+    from techne.config import Config
+    from techne.core import coord
+    from techne.core.database import init_db
+
+    _write_config(home, per_turn_recall=False, coord_on_prompt=False)
+    cfg = Config.load()
+    init_db(cfg.db_path).close()
+    coord.send(cfg.db_path, "peer-session", "claiming branch feat/y", from_name="poe1")
+    out = _run(monkeypatch, capsys, {"session_id": "me", "prompt": "hi"})
+    assert "claiming branch feat/y" not in _additional_context(out)

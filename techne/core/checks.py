@@ -517,8 +517,8 @@ _HOOK_CONFIG_GATE = {
     # EITHER is on, so gating on one alone would report a working rail as
     # disabled (techne#479).
     "user_prompt_submit": (
-        "hooks.per_turn_recall / hooks.per_turn_seed",
-        lambda c: c.hooks.per_turn_recall or c.hooks.per_turn_seed,
+        "hooks.per_turn_recall / hooks.per_turn_seed / hooks.coord_on_prompt",
+        lambda c: c.hooks.per_turn_recall or c.hooks.per_turn_seed or c.hooks.coord_on_prompt,
     ),
     # Armed only with BOTH set (techne#1018 part 4): the flag alone leaves the
     # rail dormant for want of a floor, and that is what this reports.
