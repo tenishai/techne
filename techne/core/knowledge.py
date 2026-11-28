@@ -295,9 +295,14 @@ def _supersede_in_conn(
     *,
     operator: bool = False,
     lesson_path: bool = False,
+    carry_provenance: bool = True,
 ) -> int:
     """Core of supersede() on a caller-owned connection — no commit/close — so it can
     run inside another transaction (e.g. promote_candidate's action dispatch, #108).
+
+    `carry_provenance=False` writes the new revision with NULL writer provenance: for
+    content that did not come from the old row's writer, such as a team store's fact
+    superseding a local row (Prudence, #1244 round 3).
     Body is verbatim from the public supersede(); the caller owns the transaction.
 
     A lesson-type row (techne#1195) changes only through lessons.refine, which passes
@@ -306,7 +311,8 @@ def _supersede_in_conn(
     the old one's family entries are repointed at it. A grant or charter is also
     refused unless ``operator`` is set — only `techne lesson` passes it."""
     old = conn.execute(
-        "SELECT type, tags, confidence, anchor_path, anchor_symbol, superseded_by "
+        "SELECT type, tags, confidence, anchor_path, anchor_symbol, superseded_by, "
+        "written_by, origin_source, origin_session "
         "FROM knowledge WHERE id = ?",
         (old_id,),
     ).fetchone()
@@ -343,8 +349,8 @@ def _supersede_in_conn(
         """INSERT INTO knowledge
              (type, content, source, tags, confidence, confidence_numeric,
               anchor_path, anchor_symbol, content_hash, anchor_git_sha,
-              last_confirmed_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
+              written_by, origin_source, origin_session, last_confirmed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
         (
             old["type"],
             redact_credentials(new_content),
@@ -356,6 +362,12 @@ def _supersede_in_conn(
             old["anchor_symbol"],
             anchor_content_hash,
             anchor_git_sha,
+            # Writer provenance is carried too (techne#1244): a revision is still
+            # the same writer's row, not an unattributed one. Unless the caller says
+            # the content came from elsewhere: then unattributed, never guessed.
+            old["written_by"] if carry_provenance else None,
+            old["origin_source"] if carry_provenance else None,
+            old["origin_session"] if carry_provenance else None,
         ),
     )
     new_id = cur.lastrowid
@@ -739,9 +751,11 @@ def merge_into(
 ) -> int:
     """Collapse N live knowledge rows into one merged row (techne#108 consolidate).
 
-    Mints ONE new row carrying the *explicitly chosen* type/confidence/tags (the olds
-    may differ — the proposal decides, we never silently pick), then points every old
-    at it via `superseded_by` (N→1 is a plain per-row FK; legal and indexed). Each old
+    Mints ONE new row with the *explicitly chosen* type and content, plus what its
+    sources carried (techne#1244, see `_merge_in_conn`): the union of the given and
+    the sources' tags, the given confidence capped at the highest source's, the anchor
+    and writer provenance the sources agree on, and the newest source's
+    last_confirmed_at. Then it points every old at it via `superseded_by` (N→1 is a plain per-row FK; legal and indexed). Each old
     runs the #117 cascade (its dependents go `uncertain`).
 
     Reversible: `UPDATE knowledge SET superseded_by=NULL WHERE superseded_by=new_id`
@@ -801,12 +815,16 @@ def _merge_in_conn(
     """
     ktype = card_type_or_fact(ktype, tags)
     seen: set[int] = set()
+    sources: list = []
     for oid in old_ids:
         if oid in seen:
             raise ValueError(f"merge_into: duplicate old id {oid}")
         seen.add(oid)
         row = conn.execute(
-            "SELECT superseded_by, status, type FROM knowledge WHERE id = ?", (oid,)
+            "SELECT superseded_by, status, type, tags, confidence, anchor_path, anchor_symbol, "
+            "written_by, origin_source, origin_session, last_confirmed_at "
+            "FROM knowledge WHERE id = ?",
+            (oid,),
         ).fetchone()
         if row is None:
             raise ValueError(f"merge_into: knowledge entry {oid} not found")
@@ -821,13 +839,50 @@ def _merge_in_conn(
             )
         if row["status"] == "archived":
             raise ValueError(f"merge_into: entry {oid} is archived — merge live rows only")
+        sources.append(row)
+
+    # WHAT THE MERGED ROW INHERITS (techne#1244). It replaces its sources, so it
+    # keeps what they carried rather than only what the judge wrote:
+    #   - tags: the union of the caller's and every source's, in first-seen order
+    #     (tags select rows for conflict and dream, so an untagged merge dropped out);
+    #   - confidence: the caller's, capped at the highest source's, so two `low`
+    #     rows cannot become one `high` on the model's say-so;
+    #   - anchor and writer provenance: carried when every source that has one
+    #     agrees, else left NULL (honestly unattributed, as the schema intends);
+    #   - last_confirmed_at: the newest source's, not "now": merging is not a
+    #     confirmation of the content.
+    merged_tags = _union_tags([tags or "", *(r["tags"] or "" for r in sources)])
+    capped = _cap_confidence(confidence, [r["confidence"] for r in sources])
+    if capped != confidence:
+        confidence, numeric = capped, CONFIDENCE_NUMERIC[capped]
+    anchor = _agreed(sources, ("anchor_path", "anchor_symbol"))
+    # One triple, agreed as a whole (Prudence round 3 nit): agreeing column by column
+    # could write a writer and a session no single source carried together.
+    written_by, origin_source, origin_session = _agreed(
+        sources, ("written_by", "origin_source", "origin_session")
+    )
+    confirmed = [r["last_confirmed_at"] for r in sources if r["last_confirmed_at"]]
+    anchor_content_hash: str | None = None
+    anchor_git_sha: str | None = None
+    if anchor[0]:
+        from techne.core.anchor import resolve_anchor
+
+        resolved = resolve_anchor(anchor[0])
+        if resolved is not None:
+            anchor_content_hash = resolved["content_hash"]
+            anchor_git_sha = resolved["git_sha"]
 
     cur = conn.execute(
         """INSERT INTO knowledge
              (type, content, source, tags, confidence, confidence_numeric,
-              last_confirmed_at)
-           VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
-        (ktype, redact_credentials(merged_content), source, tags or "", confidence, numeric),
+              anchor_path, anchor_symbol, content_hash, anchor_git_sha,
+              written_by, origin_source, origin_session, last_confirmed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))""",
+        (
+            ktype, redact_credentials(merged_content), source, merged_tags, confidence, numeric,
+            anchor[0], anchor[1], anchor_content_hash, anchor_git_sha,
+            written_by, origin_source, origin_session, max(confirmed) if confirmed else None,
+        ),
     )
     new_id = cur.lastrowid
     for oid in old_ids:
@@ -837,6 +892,35 @@ def _merge_in_conn(
         )
         _cascade_uncertain(conn, oid)
     return new_id
+
+
+_CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
+
+
+def _union_tags(tag_strings: list[str]) -> str:
+    """Comma-separated tags from every string, deduplicated in first-seen order."""
+    out: list[str] = []
+    for tags in tag_strings:
+        for tag in (t.strip() for t in tags.split(",")):
+            if tag and tag not in out:
+                out.append(tag)
+    return ",".join(out)
+
+
+def _cap_confidence(requested: str, source_confidences: list[str]) -> str:
+    """`requested`, lowered to the highest of `source_confidences` if above it."""
+    known = [c for c in source_confidences if c in _CONFIDENCE_RANK]
+    if not known or requested not in _CONFIDENCE_RANK:
+        return requested
+    ceiling = max(known, key=_CONFIDENCE_RANK.__getitem__)
+    return ceiling if _CONFIDENCE_RANK[requested] > _CONFIDENCE_RANK[ceiling] else requested
+
+
+def _agreed(rows: list, cols: tuple[str, ...]) -> tuple:
+    """The value of `cols` shared by every row that has one (any non-NULL column),
+    or all-None when no row has one or two rows disagree."""
+    values = {tuple(r[c] for c in cols) for r in rows if any(r[c] is not None for c in cols)}
+    return values.pop() if len(values) == 1 else (None,) * len(cols)
 
 
 # --- dependency-driven staleness (techne#117) -------------------------------
