@@ -1665,13 +1665,50 @@ def _owed_first(config: Config, session_id: str, batch: list[dict]) -> list[dict
     return sorted(batch, key=lambda i: i.get("thread_id") not in owed)
 
 
+def _callers_pending_session(caller_session: str, pend: list[dict]) -> str | None:
+    """The caller's own pending session, else the newest pending session that is an
+    earlier run of the same facet (techne#1333), or None. `pend` is
+    pending_reflection's newest-first list.
+
+    The caller's own id wins wherever it sits in `pend`. A name match counts only when
+    the name is the caller's alone (`coord._durable_name`: no live or still-running
+    twin holds it) and the matched session is no longer present on this host: a
+    present session, even one sharing the name, is another caller doing its own work
+    (Prudence, #1333 round 1, reproduced with two live sessions both named `poe1`)."""
+    from techne.core.coord import _durable_name, _session_records, present_session_ids, session_name
+
+    if any(row["session_id"] == caller_session for row in pend):
+        return caller_session
+    records = _session_records()
+    name = _durable_name(caller_session, records)
+    if not name:
+        return None
+    try:
+        present = present_session_ids(records=records)
+    except Exception:  # noqa: BLE001 -- unknown presence must not widen the match
+        return None
+    for row in pend:
+        sid = row["session_id"]
+        if sid not in present and session_name(sid, records) == name:
+            return sid
+    return None
+
+
 def emit_reflection_pass(
     config: Config,
     session_id: str | None = None,
     *,
     limit: int | None = None,
+    caller_session: str | None = None,
 ) -> dict:
     """Render one cursor-aware pass of a session's reflection prompts.
+
+    With no `session_id`: given `caller_session`, the pass is the caller's own
+    (techne#1333): the newest pending session that IS the caller's, or that carries
+    the caller's session name (an earlier run of the same facet that ended without
+    reflecting). It never falls back to another caller's session. Without
+    `caller_session` (the CLI, `reflect-drain`, or an explicit machine-wide drain),
+    it takes the newest pending session on the machine, as before.
 
     THE ONE EMIT IMPLEMENTATION. Both `techne_reflect_emit` (MCP) and
     `techne reflect emit` (CLI) call this — #645 exists because they did not, and
@@ -1693,7 +1730,18 @@ def emit_reflection_pass(
         # the default window of 5 hid every older pending session, so a bulk drain
         # was told "no session with unreflected work" while sessions were still owed.
         pend = pending_reflection(config, limit=None)
-        session_id = pend[0]["session_id"] if pend else None
+        if caller_session:
+            session_id = _callers_pending_session(caller_session, pend)
+            if not session_id:
+                return {
+                    "batch": [],
+                    "count": 0,
+                    "session_id": caller_session,
+                    "note": "no unreflected work for this session or its name; "
+                    "pass any_session=true to drain other sessions",
+                }
+        else:
+            session_id = pend[0]["session_id"] if pend else None
     if not session_id:
         return {"batch": [], "count": 0, "note": "no session with unreflected work"}
 

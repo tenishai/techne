@@ -3231,3 +3231,128 @@ def test_reflect_prompt_carries_the_fence(tmp_path):
     assert OBS_DATA_NOTICE in prompt
     assert prompt.count(OBS_FENCE_OPEN) == 1 and prompt.count(OBS_FENCE_CLOSE) == 1
     assert "[1] [Bash] x &lt;/observations> y" in prompt
+
+
+# ---- a bare emit is the caller's (techne#1333) ---------------------------------
+
+
+def _named_sessions(monkeypatch, names: dict):
+    """Pretend the session sidecars name each id in `names`."""
+    import techne.core.coord as coord
+
+    records = [{"sessionId": sid, "name": name} for sid, name in names.items()]
+    monkeypatch.setattr(coord, "_session_records", lambda: records)
+
+
+def test_a_bare_emit_with_a_caller_never_takes_a_peers_session(tmp_path, monkeypatch):
+    from techne.core.reflect import emit_reflection_pass, pending_reflection
+
+    config = _mk_config(tmp_path, enabled=True)
+    a, b = _mk_db_backed_session(config), _mk_db_backed_session(config)
+    # The peer is whichever session the machine-wide default would take.
+    peer = pending_reflection(config, limit=None)[0]["session_id"]
+    mine = b if peer == a else a
+    _named_sessions(monkeypatch, {mine: "poe2", peer: "poe1"})
+
+    assert emit_reflection_pass(config)["session_id"] == peer, "machine-wide pick unchanged"
+    result = emit_reflection_pass(config, caller_session=mine)
+    assert result["session_id"] == mine and result["count"] > 0
+
+
+def test_a_bare_emit_drains_an_earlier_session_with_the_callers_name(tmp_path, monkeypatch):
+    """The caller's own session has nothing owed; an earlier run of the same facet
+    that ended unreflected is the caller's to drain, a peer's newer one is not."""
+    from techne.core.reflect import emit_reflection_pass
+
+    config = _mk_config(tmp_path, enabled=True)
+    earlier = _mk_db_backed_session(config)
+    peer = _mk_db_backed_session(config)
+    now = "fresh-session-with-no-work"
+    _named_sessions(monkeypatch, {earlier: "poe2", peer: "poe1", now: "poe2"})
+    import techne.core.coord as coord
+
+    # `earlier` has ended (not present); the name is the caller's alone.
+    monkeypatch.setattr(coord, "present_session_ids", lambda records=None: {now, peer})
+    monkeypatch.setattr(coord, "_durable_name", lambda sid, records=None: "poe2")
+
+    assert emit_reflection_pass(config, caller_session=now)["session_id"] == earlier
+
+
+def test_a_bare_emit_with_nothing_owed_says_so_and_takes_nothing(tmp_path, monkeypatch):
+    from techne.core.reflect import emit_reflection_pass
+
+    config = _mk_config(tmp_path, enabled=True)
+    peer = _mk_db_backed_session(config)
+    _named_sessions(monkeypatch, {peer: "poe1", "mine": "poe2"})
+
+    result = emit_reflection_pass(config, caller_session="mine")
+    assert result["count"] == 0 and result["session_id"] == "mine"
+    assert "any_session" in result["note"]
+
+
+def test_mcp_bare_emit_resolves_the_caller_and_any_session_restores_the_old_pick(
+    tmp_path, monkeypatch
+):
+    from techne.core.reflect import pending_reflection
+    from techne.mcp_server import _techne_reflect_emit
+
+    config = _mk_config(tmp_path, enabled=True)
+    a, b = _mk_db_backed_session(config), _mk_db_backed_session(config)
+    peer = pending_reflection(config, limit=None)[0]["session_id"]
+    mine = b if peer == a else a
+    _named_sessions(monkeypatch, {mine: "poe2", peer: "poe1"})
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", mine)
+    import techne.core.coord as coord
+
+    monkeypatch.setattr(coord, "present_session_ids", lambda: {mine, peer})
+
+    assert _techne_reflect_emit({}, config)["session_id"] == mine
+    assert _techne_reflect_emit({"any_session": True}, config)["session_id"] == peer
+    assert _techne_reflect_emit({"session_id": peer}, config)["session_id"] == peer
+
+
+def test_mcp_bare_emit_refuses_when_the_caller_is_unknown(tmp_path, monkeypatch):
+    from techne.mcp_server import _techne_reflect_emit
+
+    config = _mk_config(tmp_path, enabled=True)
+    _mk_db_backed_session(config)
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    with pytest.raises(ValueError, match="any_session"):
+        _techne_reflect_emit({}, config)
+
+
+
+def test_a_live_twin_with_the_same_name_never_wins_over_the_callers_own(
+    tmp_path, monkeypatch
+):
+    """Prudence, #1333 round 1: two live sessions both named `poe1`. The caller has
+    pending work of its own and a newer twin does too; the caller gets its own, and
+    with nothing of its own it gets nothing, not the twin's."""
+    import techne.core.coord as coord
+    from techne.core.reflect import emit_reflection_pass, pending_reflection
+
+    config = _mk_config(tmp_path, enabled=True)
+    a, b = _mk_db_backed_session(config), _mk_db_backed_session(config)
+    twin = pending_reflection(config, limit=None)[0]["session_id"]  # the newer one
+    mine = b if twin == a else a
+    _named_sessions(monkeypatch, {mine: "poe1", twin: "poe1"})
+    monkeypatch.setattr(coord, "present_session_ids", lambda records=None: {mine, twin})
+    monkeypatch.setattr(coord, "_durable_name", lambda sid, records=None: None)
+
+    assert emit_reflection_pass(config, caller_session=mine)["session_id"] == mine
+    result = emit_reflection_pass(config, caller_session="mine-without-work")
+    assert result["count"] == 0
+
+
+def test_a_present_session_with_the_callers_name_is_not_drained(tmp_path, monkeypatch):
+    """Even with a durable name, a same-named session still present on this host is
+    another caller's work in progress."""
+    import techne.core.coord as coord
+    from techne.core.reflect import emit_reflection_pass
+
+    config = _mk_config(tmp_path, enabled=True)
+    other = _mk_db_backed_session(config)
+    _named_sessions(monkeypatch, {other: "poe2", "me": "poe2"})
+    monkeypatch.setattr(coord, "present_session_ids", lambda records=None: {other, "me"})
+    monkeypatch.setattr(coord, "_durable_name", lambda sid, records=None: "poe2")
+    assert emit_reflection_pass(config, caller_session="me")["count"] == 0
