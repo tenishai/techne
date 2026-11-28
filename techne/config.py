@@ -517,7 +517,8 @@ class HookConfig:
     #: Total characters PostToolUse puts in one additionalContext (techne#1239).
     #: Claude Code saves a larger value to a file and shows the model about a 2 KB
     #: preview; the cap is reported at 10,000 characters (claude-code issue
-    #: reports; seen in this repo's sessions at 17.5 KB and 22.3 KB). Coord messages,
+    #: reports; issue #1239 saw a 17.5 KB context collapse to a ~2 KB preview, and a
+    #: 22.3 KB one did the same in a 2026-11-28 session). Coord messages,
     #: inbound recall and the edit rail are placed first and never cut; reminders
     #: fill what is left, and the rest collapse to one line.
     context_max_chars: int = 9000

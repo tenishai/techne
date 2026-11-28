@@ -1769,6 +1769,19 @@ class TestCoreRailsAreInstrumented:
         assert verdict.verdict is Verdict.DORMANT
         assert "disabled by config" in verdict.detail
 
+    def test_doctor_counts_every_term_of_the_hooks_own_gate(self, config):
+        """Prudence-flagged pre-pass, #1328: doctor's predicate covered three of the
+        hook's five gate terms, so a config with only startup_directive on read as
+        disabled while the hook ran. It now mirrors the gate."""
+        from techne.core.checks import _user_prompt_submit_enabled
+
+        h = config.hooks
+        h.per_turn_recall = h.per_turn_seed = h.coord_on_prompt = h.startup_directive = False
+        h.inbound_recall = False
+        assert _user_prompt_submit_enabled(config) is False
+        h.startup_directive = True
+        assert _user_prompt_submit_enabled(config) is True
+
     def test_a_degraded_recall_does_not_read_as_a_clean_run(self, config, monkeypatch):
         """The recall block is caught and swallowed by design, so the seed block
         can still emit. Without folding the failure into the marker, a rail whose

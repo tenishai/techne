@@ -505,6 +505,20 @@ _PRODUCER_SILENT_AFTER = timedelta(days=7)
 #: marker forever; reading the marker alone would report it healthy indefinitely.
 #: Config is the durable record of "should this run at all", so the marker must
 #: never be interpreted without its gate.
+def _user_prompt_submit_enabled(c) -> bool:
+    """Mirror of user_prompt_submit.main's early-exit gate (techne#1328)."""
+    from techne.hooks.user_prompt_submit import inbound_recall_armed
+
+    h = c.hooks
+    return bool(
+        h.per_turn_recall
+        or h.per_turn_seed
+        or h.startup_directive
+        or h.coord_on_prompt
+        or inbound_recall_armed(c)
+    )
+
+
 _HOOK_CONFIG_GATE = {
     "codex_grep_assist": ("hooks.codex_grep_assist", lambda c: c.hooks.codex_grep_assist),
     # post_tool_use is deliberately NOT gated. `hooks.post_tool_use` disables
@@ -513,12 +527,13 @@ _HOOK_CONFIG_GATE = {
     # the marker is never read, so if those rails died nothing would say so —
     # config-first would give a WRONG verdict rather than a cheap one. The hook
     # records `noop:capture-disabled` on that path instead. (#479 review 1.)
-    # Two flags, either of which makes the rail live — the hook emits when
-    # EITHER is on, so gating on one alone would report a working rail as
-    # disabled (techne#479).
+    # The SAME five terms as the hook's own early-exit gate (user_prompt_submit.main):
+    # any one makes the rail live, so gating on fewer would report a working rail as
+    # disabled (techne#479, #1328).
     "user_prompt_submit": (
-        "hooks.per_turn_recall / hooks.per_turn_seed / hooks.coord_on_prompt",
-        lambda c: c.hooks.per_turn_recall or c.hooks.per_turn_seed or c.hooks.coord_on_prompt,
+        "hooks.per_turn_recall / per_turn_seed / startup_directive / coord_on_prompt "
+        "/ inbound_recall (armed)",
+        lambda c: _user_prompt_submit_enabled(c),
     ),
     # Armed only with BOTH set (techne#1018 part 4): the flag alone leaves the
     # rail dormant for want of a floor, and that is what this reports.
