@@ -68,12 +68,12 @@ def test_emit_defaults_to_most_recent_session(config):
     conn.execute("UPDATE sessions SET started_at = '2026-06-01 00:00:00' WHERE id = 'newer'")
     conn.commit()
     conn.close()
-    out = _techne_reflect_emit({}, config)  # no session_id → most recent
+    out = _techne_reflect_emit({"any_session": True}, config)  # machine-wide (#1333)
     assert out["session_id"] == "newer"
 
 
 def test_emit_no_session_is_clean(config):
-    out = _techne_reflect_emit({}, config)  # empty db
+    out = _techne_reflect_emit({"any_session": True}, config)  # empty db
     assert out["batch"] == [] and out["count"] == 0
 
 
@@ -88,7 +88,7 @@ def test_emit_default_skips_thin_newest_session(config):
     conn.execute("UPDATE sessions SET started_at = '2026-06-01 00:00:00' WHERE id = 'thin-newer'")
     conn.commit()
     conn.close()
-    out = _techne_reflect_emit({}, config)  # no session_id
+    out = _techne_reflect_emit({"any_session": True}, config)  # machine-wide (#1333)
     assert out["session_id"] == "work"
 
 
@@ -376,7 +376,7 @@ def test_emit_cursor_drains_large_session_across_passes(config, monkeypatch):
     seen: list[str] = []
     passes = 0
     while pending_reflection(config):  # cursor must keep surfacing until drained
-        out = _techne_reflect_emit({}, config)  # no session_id → most-recent pending
+        out = _techne_reflect_emit({"any_session": True}, config)  # machine-wide drain
         assert out["session_id"] == "multi"
         hashes = [item["prompt_hash"] for item in out["batch"]]
         assert not (set(hashes) & set(seen)), "passes must not overlap"
