@@ -2571,8 +2571,9 @@ def _apply_retire(conn, row, db_path: Path) -> int | None:
 
 def _apply_merge(conn, row, db_path: Path) -> int | None:
     """Apply a 'merge' proposal (techne#108 consolidate): collapse N existing rows
-    (target_ids) into one merged row carrying the proposal's explicitly chosen
-    type/confidence/tags. Returns the new knowledge.id."""
+    (target_ids) into one merged row with the proposal's type and content. Tags,
+    confidence, anchor and provenance follow `_merge_in_conn`'s inheritance rules
+    (techne#1244). Returns the new knowledge.id."""
     from techne.core.knowledge import (
         CONFIDENCE_NUMERIC,
         VALID_CONFIDENCE,

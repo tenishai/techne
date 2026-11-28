@@ -549,3 +549,17 @@ def test_dream_ingest_unparseable_writes_no_marker(config):
         conn.close()
     again = dream_ingest(config, [a, b], gh, _CONNECT_VERDICT)
     assert again["written"] == 1 and again["skipped"] == 0
+
+
+def test_dream_prompt_still_cuts_long_rows(config):
+    """techne#1244 renders consolidation rows whole because _CLUSTERABLE bounds
+    them; dream's rows have no such bound, so it keeps its 300-character cut."""
+    from techne.core.sleepdream import DREAM_ENTRY_CHARS
+
+    db = config.db_path
+    long_text = "fact about shared topic " + "z" * 5000
+    a = store(db, long_text, type="fact", confidence="high", tags="topic:shared")
+    b = store(db, "fact beta about shared topic", type="fact", confidence="high", tags="topic:shared")
+    item = next(i for i in dream_emit(config) if set(i["group_ids"]) == {a, b})
+    assert "z" * (DREAM_ENTRY_CHARS + 1) not in item["prompt"]
+    assert long_text[:DREAM_ENTRY_CHARS] + "…" in item["prompt"]

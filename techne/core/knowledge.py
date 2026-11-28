@@ -745,9 +745,11 @@ def merge_into(
 ) -> int:
     """Collapse N live knowledge rows into one merged row (techne#108 consolidate).
 
-    Mints ONE new row carrying the *explicitly chosen* type/confidence/tags (the olds
-    may differ — the proposal decides, we never silently pick), then points every old
-    at it via `superseded_by` (N→1 is a plain per-row FK; legal and indexed). Each old
+    Mints ONE new row with the *explicitly chosen* type and content, plus what its
+    sources carried (techne#1244, see `_merge_in_conn`): the union of the given and
+    the sources' tags, the given confidence capped at the highest source's, the anchor
+    and writer provenance the sources agree on, and the newest source's
+    last_confirmed_at. Then it points every old at it via `superseded_by` (N→1 is a plain per-row FK; legal and indexed). Each old
     runs the #117 cascade (its dependents go `uncertain`).
 
     Reversible: `UPDATE knowledge SET superseded_by=NULL WHERE superseded_by=new_id`

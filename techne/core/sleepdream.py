@@ -280,11 +280,21 @@ Be conservative: when unsure, "keep". Output the JSON object and nothing else.
 """
 
 
-def _render_cluster(rows: list[dict]) -> str:
+#: Dream renders each row cut to this many characters, as before techne#1244. Its rows
+#: come from recombine_groups, not _CLUSTERABLE, so they have no length bound, and a
+#: dream candidate is a new derived row that replaces nothing.
+DREAM_ENTRY_CHARS = 300
+
+
+def _render_cluster(rows: list[dict], *, limit: int = MAX_ENTRY_CHARS) -> str:
+    """One line per row, each cut to *limit* characters. Consolidation passes the
+    default, which `_CLUSTERABLE` already bounds its rows to, so they render whole
+    (techne#1244); dream passes DREAM_ENTRY_CHARS."""
     lines = []
     for r in rows:
         content = (r["content"] or "").replace("\n", " ")
-        # Whole: _CLUSTERABLE admits only rows up to MAX_ENTRY_CHARS (techne#1244).
+        if len(content) > limit:
+            content = content[:limit] + "…"
         lines.append(f"- (#{r['id']}, {r['type']}, {r['confidence']}) {content}")
     return "\n".join(lines)
 
@@ -723,7 +733,8 @@ def dream_emit(config: Config, *, max_groups: int = 10) -> list[dict]:
 
             prompt = render_prompt(
                 config, "dream", DREAM_PROMPT,
-                entries=_render_cluster(g["rows"]), types=", ".join(VALID_TYPES),
+                entries=_render_cluster(g["rows"], limit=DREAM_ENTRY_CHARS),
+                types=", ".join(VALID_TYPES),
             )
             batch.append({"group_hash": gh, "group_ids": g["group_ids"], "prompt": prompt})
     finally:
